@@ -47,8 +47,11 @@ Use `easyeda-agent` typed actions. Do not write raw EasyEDA JavaScript unless a 
 > 功能名零改号)+ `ports`(重绑边界网络)+ `schematic_notes`(落线注意);命中就别手接。ESP32
 > 自动下载(双三极管交叉耦合时序易接反)这类电路尤其照块抄,别凭记忆手连。
 > 块若带 `schematic_layout` 模板,`sch block-apply` 直接按模板相对偏移+朝向落件(否则退回网格);
-> 原点自动避开已有器件真实 bbox(显式 `--at` 优先),落完回读 overlap 写进 manifest——优先用
-> `block-apply` 而不是逐件手放。
+> 原点自动避开已有器件真实 bbox(显式 `--at` 优先)。每次 place 都记录平台返回的
+> `primitiveId`,落完回读真实 bbox + pins 作**布线前硬门**:读取/解析/几何不完整、bbox overlap
+> 或异件引脚重合都会在 autoconnect 前失败。命令只按本次返回的 ID 补偿删除并再次读回;
+> 能证明删净报 `failed-rolled-back`,否则报 `failed-partial` + `PARTIAL STATE`,绝不把独立 autosave
+> 的多次变异伪装成事务。优先用 `block-apply` 而不是逐件手放。
 >
 > 🔢 **多页工程的位号真相(#144):** EasyEDA **页数据懒加载**——`getAll(_, allPages)` 只返回
 > **本会话打开过**的页,没访问过的页对我们隐形,却照样参与平台自己的位号避让。曾因此规划 `C1`
@@ -256,8 +259,9 @@ coordinates that pass `sch layout-lint`.
 # preview proposed coordinates + warnings, mutate nothing (default)
 easyeda sch autolayout --spec p1-layout.json --dry-run
 
-# move parts via schematic.component.modify, then self-check overlaps
-easyeda sch autolayout --spec p1-layout.json --apply
+# pin one page, move parts, read back complete geometry, then save
+# safety gate: zero wires/buses/net markers + proven bbox/pins
+easyeda sch autolayout --spec p1-layout.json --doc P1_MCU_USB_STORAGE --apply
 
 # structured report
 easyeda sch autolayout --spec p1-layout.json --json
@@ -268,6 +272,23 @@ easyeda sch autolayout --spec p1-layout.json --json
 # pages only; refine with `sch align`/`distribute` afterward.
 easyeda sch autolayout --engine official --apply
 ```
+
+Template `--apply` is deliberately **pre-wiring only**. It moves symbols via
+`schematic.component.modify`, which does not carry attached wires or flags with
+the symbol. The command resolves one immutable target page from `--doc` or
+`spec.page` (both must agree when supplied), and verifies every response's
+document UUID. Before planning and again immediately before the first move it
+requires a fail-closed active-page inventory of **zero wires, buses, netflags,
+netports, netlabels, and short-symbol markers**, complete finite anchors/bboxes, and explicitly
+successful pin-array reads. The second snapshot must byte-for-geometry match the
+planning input, otherwise the stale plan is refused. `--apply --all-pages` is
+also refused because the proofs are active-page scoped (`--all-pages` remains
+available for dry-run). There is no force override: `--rewire` is official-engine
+only. After moving, every requested primitive ID/anchor is read back and
+the complete baseline plus sheet/grid/spacing/overlap/pin/title-block rules are
+rechecked before `schematic.save`; only explicit `saved:true` is success.
+Any failure restores captured anchors in reverse order, reads them back (only
+confirmed coordinates count as restored), and saves the rollback.
 
 **Engine priority (iron rule):** block hit → `sch block-apply` template; else a
 `--spec` → `--engine template` (default); only when neither exists → `--engine
@@ -366,8 +387,8 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 
 ### 原理图编辑
 
-- `schematic.components.list` — `--include-bbox` 附带每个元件渲染范围 `{minX,minY,maxX,maxY}`(供布局推理);`--include-pins` 附带每脚 `{pinName,pinNumber,x,y,noConnected}`(布线/连通性判断的数据面,布线前读引脚功能名→坐标用它,**不要**再用 `easyeda call schematic.components.list --payload '{"includePins":true}'` 绕过)。两个 flag 可与 `--all-pages` 叠加(输出会显著变大)。
-- **`easyeda sch layout-lint`** — **布局自检**(治覆盖的机械真值)。拉 `components.list --include-bbox`,Go 侧两两几何检查:**bbox 重叠 = ERROR**(命令非零退出,可当门禁)、**间距 < `--min-gap`(默认 2.54mm)= WARN**。`--all-pages`、`--json`。**默认只检真实器件(`componentType == "part"`)**:图框/标题栏(sheet)铺满整页、netflag/netport/netlabel 等非器件原语都会被自动排除,否则它们会与几乎每个器件误报重叠(见 issue #13)。需要把这些也纳入检查时加 `--include-non-parts`;被排除的数量会在报告里以 `skippedNonParts` 透明列出。摆放后跑它判覆盖/间距,比肉眼/截图可靠(截图可能 stale)。是 place→verify→adjust 闭环的输入。
+- `schematic.components.list` — `--include-bbox` 附带每个元件渲染范围 `{minX,minY,maxX,maxY}`(供布局推理);`--include-pins` 附带每脚 `{pinName,pinNumber,x,y,noConnected}`，并明确返回 `pinsAvailable:true`；SDK 读脚失败会返回 `pinsAvailable:false + pinsError`，不再伪装成 `pins:[]`。内部布局写门还会请求 `includeConnectivitySummary`，得到 active-page 的 wires/buses/netflags/netports/netlabels/shortSymbols fail-closed 计数。两个常规 flag 可与 `--all-pages` 叠加(输出会显著变大)。
+- **`easyeda sch layout-lint`** — **布局自检**(治覆盖的机械真值)。拉 `components.list --include-bbox --include-pins`,Go 侧两两几何检查:**bbox 重叠 / 异件引脚重合 = ERROR**、**间距 < `--min-gap`(默认 2.54mm) / 锚点 off-grid / zone-violation = WARN**。生产过门使用 `--strict`，会把这些 WARN、缺失或畸形 bbox/anchor/pin 几何、旧 connector 无法证明 pin 读取成功的状态，以及“已有 zone claim 但无可读 sheet、无法执行 zone check”的状态一并升级为非零退出，避免 `0 overlap` 冒充布局已完成；无 zone claim 会明确报告 `zoneCheckStatus:not-configured`，但不强迫所有临时页先建分区。`--strict` 必须逐页运行，拒绝与 `--all-pages` 或 `--include-non-parts` 组合：非激活页是浅数据，sheet/marker 也不是器件放置体。`--min-gap` / `--pin-eps` 是毫米参数，CLI 会换算到原理图原生 `0.01inch` 坐标（`2.54mm = 10 raw units`）；JSON schema v2 的距离值带 `measurementUnit: "mm"`，点坐标和 `anchorGridRaw` 使用 `coordinateUnit/anchorGridUnit: "0.01inch"`。注意 v1 曾误把 raw 数值标作 mm，依赖旧实际数值的脚本应按 `schemaVersion` 迁移。诊断模式仍支持 `--all-pages`、`--json`。**默认只检真实器件(`componentType == "part"`)**:图框/标题栏(sheet)铺满整页、netflag/netport/netlabel 等非器件原语都会被自动排除,否则它们会与几乎每个器件误报重叠(见 issue #13)。需要诊断这些 bbox/spacing 时可在非 strict 模式加 `--include-non-parts`;off-grid 与 pin 完整性仍只验真实器件。摆放后跑它判覆盖/间距,比肉眼/截图可靠(截图可能 stale)。是 place→verify→adjust 闭环的输入。
 - **`easyeda sch sheet-geometry`** — **图纸边界 + 标题栏 keep-out**(放置/布线规划器的统一几何源,issue #26)。读 `components.list --include-bbox` 里 `componentType == "sheet"` 的实测 bbox,按**长宽比**匹配已知模板(A 系列横/纵向 ≈ √2),在**右下角**按归一化比例切出标题栏(图框/明细表)子矩形;`schematic.titleblock.get` 的 `showTitleBlock` 隐藏时不输出 keep-out。返回 `{sheet, titleBlock, keepouts[], warnings[]}`,每项带 **provenance**(`known-template-ratio` / `fallback-ratio` / `none`),无法确定时只给 warning、不输出虚假精度。`--json`。规划器消费 `keepouts[]`(`{name,bbox,hard}`)即可,**不要再各处硬编码 A4 坐标**。比例表见 `references/sheet-templates.json`。
 - `schematic.component.place`
 - `schematic.component.modify` — 位置/位号/BOM 标志/自定义属性。`customAttributes` 是 SDK `otherProperty` 的兼容别名(二选一,不能同传);属性补丁与现有值**合并**后写入(不清空其他元数据),未知顶层键**前置拒绝**(SDK 会静默丢弃)。写后用新句柄回读,**分级语义(#151)**:全部生效=ok;**部分生效=ok + `result.{partial,applied,alreadySet,notApplied,addedKeys,propertiesBefore}` + warnings**(已应用子集留画布并照常 autosave;`sch modify` 子命令与 playbook 重放此时**按失败处理**,但裸 `easyeda call` 只有 stderr 警告、退出码仍 0,需自查 `result.partial`)。恢复注意:**重放 `propertiesBefore` 只能恢复被覆盖键的原值,本次新增键(`addedKeys`)merge 语义下删不掉**,要删须编辑器手工操作;`applied` 只计回读可证明的写入,期望值与原值本就相同的键归 `alreadySet`(写入不可证)。纯属性补丁无一可证明写入=报错(画布未变)。回读通道本身失败会降级 `verified:false` + warning 而非报错(报错会让 daemon 跳过 autosave,丢已落画布的变更)。

@@ -87,10 +87,9 @@ NOT matter: the connector sorts each axis to a min/max box, so a reversed pair
 still frames the same rectangle. A zero-area box (a bound repeated, e.g.
 --left == --right) is rejected.
 
-Units are canvas units: schematic 0.01inch, PCB mil. NOTE the schematic canvas
-is y-DOWN — a LARGER stored y renders LOWER on screen (verified on Pro 3.2.121,
-issue #19). The flag names are just "two Y bounds"; you do not need to guess
-which is visually higher.
+Units are canvas units: schematic 0.01inch, PCB mil. Both canvases use y-UP:
+a LARGER stored y renders HIGHER on screen. The flag names are accepted as two
+unordered Y bounds, so you do not need to pre-sort them.
 
 For a partial / zoomed-in screenshot, frame the area here first, then capture
 with "easyeda sch snapshot --no-fit" so the snapshot keeps this viewport. The
@@ -109,7 +108,7 @@ snapshot waits for the canvas to repaint before grabbing the frame (issue #20).`
 		}
 		c.Flags().Float64Var(&left, "left", 0, "first X bound")
 		c.Flags().Float64Var(&right, "right", 0, "second X bound")
-		c.Flags().Float64Var(&top, "top", 0, "first Y bound (canvas is y-DOWN: larger y renders lower)")
+		c.Flags().Float64Var(&top, "top", 0, "first Y bound (canvas is y-UP: larger y renders higher)")
 		c.Flags().Float64Var(&bottom, "bottom", 0, "second Y bound")
 		view.AddCommand(c)
 	}

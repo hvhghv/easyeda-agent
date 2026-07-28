@@ -34,7 +34,7 @@ import (
 // schMarkerTypes are the connector componentType values for net markers.
 func isSchMarker(t string) bool {
 	switch t {
-	case "netflag", "netport", "netlabel":
+	case "netflag", "netport", "netlabel", "short_symbol":
 		return true
 	}
 	return false

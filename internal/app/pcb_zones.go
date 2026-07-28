@@ -50,8 +50,8 @@ var pcbZoneNames = map[string]bool{
 // pcbZoneRect maps a grid zone name to its sub-rectangle of the board rect.
 // Columns: left [0,1/3), center [1/3,2/3), right [2/3,1]. Rows: this codebase's
 // PCB canvas convention is top = MAX Y (see nearestEdge/placeEdgePart in
-// pcb_place_constrained.go), so "top" is the upper-Y half — the OPPOSITE row
-// mapping of the schematic zoneRect (sheet coords are y-down).
+// pcb_place_constrained.go), so "top" is the upper-Y half, matching the y-UP
+// schematic zoneRect.
 func pcbZoneRect(zone string, b cpRect) (cpRect, bool) {
 	if !pcbZoneNames[zone] {
 		return cpRect{}, false

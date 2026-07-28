@@ -58,8 +58,8 @@ type Port struct {
 }
 
 // SchematicLayoutHint is one role's schematic placement relative to the block's
-// apply origin (--at). Offsets are schematic units in the same y-DOWN canvas
-// space the autolayout planner uses (+dy places the part LOWER on the sheet),
+// apply origin (--at). Offsets are schematic units in the y-UP canvas
+// space the autolayout planner uses (+dy places the part HIGHER on the sheet),
 // and must land on the 5-unit placement grid — an off-grid anchor puts every
 // symbol pin off-grid and connect_pin stubs then fail (see schAnchorGrid).
 type SchematicLayoutHint struct {

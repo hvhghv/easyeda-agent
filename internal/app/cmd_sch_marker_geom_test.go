@@ -15,6 +15,12 @@ func findingsOfType(fs []checkFinding, typ string) []checkFinding {
 	return out
 }
 
+func TestShortSymbolIsConnectivityMarker(t *testing.T) {
+	if !isSchMarker("short_symbol") {
+		t.Fatal("short_symbol must participate in marker/title-block geometry checks")
+	}
+}
+
 // ── duplicate-net-marker (issue #146) ───────────────────────────────────────
 
 func TestDuplicateNetMarker_CoincidentAndFloatDrift(t *testing.T) {
@@ -110,10 +116,10 @@ func TestMarkerOverlap_RealH2H4(t *testing.T) {
 	}
 	// Spot-check the issue's exact overlap extents.
 	want := map[[2]string][2]float64{
-		{"H2", "mMICSD"}: {16, 11},
-		{"H4", "mBCLK"}:  {11, 6},
-		{"H4", "mDIN"}:   {11, 11},
-		{"H4", "mSD"}:    {11, 11},
+		{"H2", "mMICSD"}:  {16, 11},
+		{"H4", "mBCLK"}:   {11, 6},
+		{"H4", "mDIN"}:    {11, 11},
+		{"H4", "mSD"}:     {11, 11},
 		{"mBCLK", "mDIN"}: {31, 1}, // the boundary case: min axis 1 > eps 0.5 → reported
 	}
 	for _, f := range got {
@@ -164,9 +170,9 @@ func summarizeOverlaps(fs []checkFinding) []string {
 
 func TestSplitConnResults_Partial(t *testing.T) {
 	conns := []acConnResult{
-		{Pin: "U1:1", Net: "GND"},                       // ok
+		{Pin: "U1:1", Net: "GND"},                        // ok
 		{Pin: "U1:2", Net: "GND", Error: "connect drop"}, // failed
-		{Pin: "U1:3", Net: "VCC"},                       // ok
+		{Pin: "U1:3", Net: "VCC"},                        // ok
 	}
 	ok, failed, partial := splitConnResults(conns, false)
 	if len(ok) != 2 || len(failed) != 1 {

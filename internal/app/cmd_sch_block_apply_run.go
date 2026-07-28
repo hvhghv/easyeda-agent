@@ -8,8 +8,10 @@ package app
 //   2. resolve parts → standard-parts.json (the role-id → deviceUuid bridge)
 //   3. read the page's existing designators so a second instance never collides
 //   4. plan (pure)
-//   5. place each role via schematic.component.place --designator (atomic)
-//   6. wire internal_nets by delegating to the autoconnect planner, which already
+//   5. place each role and retain the returned primitiveId
+//   5b. re-read real bbox/pin geometry; fail closed and compensate by those IDs
+//   6. only after 5b passes, wire internal_nets via the autoconnect planner, which
+//      already
 //      owns the geometry safety (pin → stub wire → flag, never a flag on a bare pin)
 //   7. schematic.check
 //   8. emit the instance manifest
@@ -47,11 +49,38 @@ type bapManifest struct {
 	// LayoutOverlaps is the post-apply real-bbox overlap read-back (the same
 	// geometry `sch layout-lint` checks), restricted to pairs that involve this
 	// instance's parts — the mechanical answer to "did the block land clean".
-	LayoutOverlaps []layoutFinding `json:"layoutOverlaps,omitempty"`
+	// This manifest retains native schematic units; layout-lint schema v2 converts
+	// its user-facing distance fields to mm.
+	LayoutOverlaps        []layoutFinding `json:"layoutOverlaps,omitempty"`
+	LayoutMeasurementUnit string          `json:"layoutMeasurementUnit,omitempty"`
+	LayoutCoordinateUnit  string          `json:"layoutCoordinateUnit,omitempty"`
 	// Renames records PLANNED → ACTUAL designators when EasyEDA re-numbered on
 	// create (issue #144). Non-empty is normal, not a failure; it exists so the
 	// manifest never claims a designator the board does not carry.
 	Renames map[string]string `json:"designatorRenames,omitempty"`
+	// A failed post-place safety gate is still observable state: Failure names
+	// the cause, Rollback records exactly what cleanup was attempted and proven,
+	// and PartialState is true whenever the canvas cannot be proven restored.
+	// This is intentionally not presented as a transaction — EasyEDA mutations
+	// autosave independently.
+	Failure      string             `json:"failure,omitempty"`
+	PartialState bool               `json:"partialState,omitempty"`
+	Rollback     *bapRollbackReport `json:"rollback,omitempty"`
+}
+
+// bapRollbackReport is the audit trail for best-effort cleanup after placement
+// but before wiring. Complete is true only after a fresh components.list proves
+// every tracked primitive ID is absent and every successful placement returned
+// an ID. MissingPrimitiveIDs contains designators whose successful place response
+// could not identify the newly created primitive; those are never guessed at.
+type bapRollbackReport struct {
+	AttemptedPrimitiveIDs []string `json:"attemptedPrimitiveIds,omitempty"`
+	MissingPrimitiveIDs   []string `json:"missingPrimitiveIds,omitempty"`
+	SurvivedPrimitiveIDs  []string `json:"survivedPrimitiveIds,omitempty"`
+	Verified              bool     `json:"verified"`
+	Complete              bool     `json:"complete"`
+	DeleteError           string   `json:"deleteError,omitempty"`
+	VerifyError           string   `json:"verifyError,omitempty"`
 }
 
 // fetchSchObstacles pulls the ACTIVE page's real part bboxes (best-effort) so
@@ -95,10 +124,13 @@ func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *
 	return out, tb, sheet
 }
 
-// verifyBlockLayout re-reads the page's real bboxes after placement and returns
-// the overlap findings that involve the freshly placed designators. Best-effort:
-// a read failure returns nil (the standalone `sch layout-lint` gate still exists).
-func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) []layoutFinding {
+// verifyBlockLayout re-reads the page's real bboxes and pins after placement and
+// returns the hard findings that involve the freshly placed primitive IDs.
+//
+// This is a wiring gate, not telemetry: every read/parse/geometry-completeness
+// failure is returned as an error. A missing bbox or pins array means the page
+// was not actually checked, so it must never collapse into "no findings".
+func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]layoutFinding, error) {
 	// includePins is load-bearing: PIN COINCIDENCE is the failure this check exists
 	// for. Two parts can sit at a clean bbox distance and still land a pin of one
 	// exactly on a pin of the other — an implicit short with no wire to show for it,
@@ -108,27 +140,128 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) []l
 	res, err := requestAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true, "includePins": true})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read components with real bbox/pin geometry: %w", err)
+	}
+	if err := validateBlockLayoutResult(res.Result); err != nil {
+		return nil, err
 	}
 	comps, err := parseLayoutComps(res.Result)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("parse components with real bbox/pin geometry: %w", err)
 	}
 	kept, _ := filterLayoutComps(comps, false)
 	// minGap 0 → true overlaps only (tight spacing is not this gate's business);
 	// pinEps 0 → strict pin equality, the same default `sch layout-lint` uses.
 	rep := analyzeLayout(kept, 0, 0)
-	mine := map[string]bool{}
+	mineIDs := map[string]bool{}
+	mineLabels := map[string]bool{}
 	for _, p := range placed {
-		mine[strings.ToUpper(p.Designator)] = true
+		if strings.TrimSpace(p.PrimitiveID) == "" {
+			return nil, fmt.Errorf("placed component %s has no primitiveId; layout ownership and rollback cannot be proven", p.Designator)
+		}
+		mineIDs[p.PrimitiveID] = true
+		mineLabels[strings.ToUpper(p.Designator)] = true
+	}
+	foundIDs := map[string]bool{}
+	for _, c := range kept {
+		if mineIDs[c.ID] {
+			foundIDs[c.ID] = true
+			// Use the live label as well as the post-place designator. This keeps
+			// filtering correct if the platform normalized case in its read-back.
+			mineLabels[strings.ToUpper(label(c))] = true
+		}
+	}
+	var missing []string
+	for id := range mineIDs {
+		if !foundIDs[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return nil, fmt.Errorf("layout read-back did not contain placed primitiveId(s): %s", strings.Join(missing, ", "))
 	}
 	var out []layoutFinding
 	for _, f := range append(append([]layoutFinding{}, rep.Overlaps...), rep.PinCoincidences...) {
-		if mine[strings.ToUpper(f.A)] || mine[strings.ToUpper(f.B)] {
+		if mineLabels[strings.ToUpper(f.A)] || mineLabels[strings.ToUpper(f.B)] {
 			out = append(out, f)
 		}
 	}
-	return out
+	return out, nil
+}
+
+// validateBlockLayoutResult enforces the data contract needed to prove a clean
+// landing. parseLayoutComps is intentionally permissive for diagnostic callers;
+// block-apply cannot be permissive because it is about to create electrical
+// connections based on this result.
+func validateBlockLayoutResult(result map[string]any) error {
+	raw, ok := result["components"].([]any)
+	if !ok {
+		return fmt.Errorf("parse components with real bbox/pin geometry: missing components array")
+	}
+	for i, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("parse components with real bbox/pin geometry: component[%d] is not an object", i)
+		}
+		componentType := asString(m["componentType"])
+		if componentType != "" && componentType != schLayoutPartType {
+			continue
+		}
+		if strings.TrimSpace(asString(m["primitiveId"])) == "" {
+			return fmt.Errorf("parse components with real bbox/pin geometry: component[%d] has no primitiveId", i)
+		}
+		bbox, ok := m["bbox"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("layout geometry incomplete: component %s has no bbox", blockLayoutComponentLabel(m, i))
+		}
+		minX, okMinX := finiteFloat(bbox["minX"])
+		minY, okMinY := finiteFloat(bbox["minY"])
+		maxX, okMaxX := finiteFloat(bbox["maxX"])
+		maxY, okMaxY := finiteFloat(bbox["maxY"])
+		if !okMinX || !okMinY || !okMaxX || !okMaxY || maxX <= minX || maxY <= minY {
+			return fmt.Errorf("layout geometry malformed: component %s has invalid bbox", blockLayoutComponentLabel(m, i))
+		}
+		pinsAvailable, proofKnown := m["pinsAvailable"].(bool)
+		if !proofKnown || !pinsAvailable {
+			detail := strings.TrimSpace(asString(m["pinsError"]))
+			if detail != "" {
+				detail = ": " + detail
+			}
+			return fmt.Errorf("layout geometry incomplete: component %s pin read was not explicitly proven%s",
+				blockLayoutComponentLabel(m, i), detail)
+		}
+		pins, ok := m["pins"].([]any)
+		if !ok {
+			return fmt.Errorf("layout geometry incomplete: component %s has no pins array", blockLayoutComponentLabel(m, i))
+		}
+		for pinIndex, item := range pins {
+			pin, ok := item.(map[string]any)
+			if !ok {
+				return fmt.Errorf("layout geometry malformed: component %s pin[%d] is not an object",
+					blockLayoutComponentLabel(m, i), pinIndex)
+			}
+			if _, ok := finiteFloat(pin["x"]); !ok {
+				return fmt.Errorf("layout geometry malformed: component %s pin[%d] has no numeric x",
+					blockLayoutComponentLabel(m, i), pinIndex)
+			}
+			if _, ok := finiteFloat(pin["y"]); !ok {
+				return fmt.Errorf("layout geometry malformed: component %s pin[%d] has no numeric y",
+					blockLayoutComponentLabel(m, i), pinIndex)
+			}
+		}
+	}
+	return nil
+}
+
+func blockLayoutComponentLabel(component map[string]any, index int) string {
+	if designator := strings.TrimSpace(asString(component["designator"])); designator != "" {
+		return designator
+	}
+	if id := strings.TrimSpace(asString(component["primitiveId"])); id != "" {
+		return id
+	}
+	return fmt.Sprintf("[%d]", index)
 }
 
 // loadStandardParts reads the parts library into the role-id → device bridge.
@@ -239,6 +372,141 @@ func bapPlacedDesignator(res *actionResult) string {
 		return ""
 	}
 	return strings.TrimSpace(asString(comp["designator"]))
+}
+
+// bapPlacedPrimitiveID returns the only safe rollback handle for a newly placed
+// component. Current connectors expose it at result.primitiveId and also inside
+// the serialized component; accepting both keeps the reader tolerant without
+// ever guessing an ID from a designator.
+func bapPlacedPrimitiveID(res *actionResult) string {
+	if res == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(asString(res.Result["primitiveId"])); id != "" {
+		return id
+	}
+	comp, _ := res.Result["component"].(map[string]any)
+	return strings.TrimSpace(asString(comp["primitiveId"]))
+}
+
+// rollbackBlockPlacements removes only primitives whose IDs came directly from
+// successful place responses, then independently reads the page back. It never
+// falls back to deleting by designator: a stale/duplicate label is not a safe
+// mutation target.
+func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacement, uncertain []string) bapRollbackReport {
+	rep := bapRollbackReport{}
+	for _, p := range placed {
+		if id := strings.TrimSpace(p.PrimitiveID); id != "" {
+			rep.AttemptedPrimitiveIDs = append(rep.AttemptedPrimitiveIDs, id)
+		} else {
+			rep.MissingPrimitiveIDs = append(rep.MissingPrimitiveIDs, p.Designator)
+		}
+	}
+	rep.MissingPrimitiveIDs = append(rep.MissingPrimitiveIDs, uncertain...)
+	sort.Strings(rep.AttemptedPrimitiveIDs)
+	sort.Strings(rep.MissingPrimitiveIDs)
+
+	if len(rep.AttemptedPrimitiveIDs) > 0 {
+		res, err := requestAction(cfg, "schematic.component.delete", window,
+			map[string]any{"primitiveIds": rep.AttemptedPrimitiveIDs})
+		if err != nil {
+			rep.DeleteError = err.Error()
+		} else if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
+			rep.DeleteError = "schematic.component.delete reported deleted=false"
+		}
+	}
+
+	live, err := readBlockComponentIDs(cfg, window)
+	if err != nil {
+		rep.VerifyError = err.Error()
+		return rep
+	}
+	rep.Verified = true
+	for _, id := range rep.AttemptedPrimitiveIDs {
+		if live[id] {
+			rep.SurvivedPrimitiveIDs = append(rep.SurvivedPrimitiveIDs, id)
+		}
+	}
+	sort.Strings(rep.SurvivedPrimitiveIDs)
+	rep.Complete = len(rep.MissingPrimitiveIDs) == 0 && len(rep.SurvivedPrimitiveIDs) == 0
+	return rep
+}
+
+// readBlockComponentIDs is deliberately stricter than the normal diagnostic
+// parser: malformed entries make rollback unverifiable instead of disappearing
+// from the live-ID set and producing a false "restored" claim.
+func readBlockComponentIDs(cfg *appConfig, window string) (map[string]bool, error) {
+	// Verify document-wide. An active-page-only empty result could be a false
+	// success if the foreground page drifted between delete and read-back.
+	// tagPages forces EasyEDA's lazily loaded pages into the allPages scan.
+	res, err := requestAction(cfg, "schematic.components.list", window,
+		map[string]any{"allPages": true, "tagPages": true})
+	if err != nil {
+		return nil, fmt.Errorf("rollback read-back: %w", err)
+	}
+	raw, ok := res.Result["components"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("rollback read-back: missing components array")
+	}
+	out := make(map[string]bool, len(raw))
+	for i, item := range raw {
+		component, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("rollback read-back: component[%d] is not an object", i)
+		}
+		id := strings.TrimSpace(asString(component["primitiveId"]))
+		if id == "" {
+			return nil, fmt.Errorf("rollback read-back: component[%d] has no primitiveId", i)
+		}
+		out[id] = true
+	}
+	return out, nil
+}
+
+// failBlockApplyAfterPlacement is the single pre-wiring abort path. It emits a
+// failure manifest and returns a non-nil error regardless of rollback outcome.
+// A proven cleanup is "failed-rolled-back"; every uncertain/surviving component
+// is "failed-partial" and called out as PARTIAL STATE.
+func failBlockApplyAfterPlacement(cfg *appConfig, window string, man *bapManifest,
+	placed []bapPlacement, uncertain []string, cause error, asJSON bool,
+	stdout, stderr io.Writer) error {
+
+	man.Failure = cause.Error()
+	man.Placed = append([]bapPlacement(nil), placed...)
+	rollback := rollbackBlockPlacements(cfg, window, placed, uncertain)
+	man.Rollback = &rollback
+	man.PartialState = !rollback.Complete
+
+	state := "rollback verified: all newly placed primitive IDs are absent; wiring was not started"
+	if rollback.Complete {
+		man.OK = "failed-rolled-back"
+		fmt.Fprintf(stderr, "rollback ✓ %d/%d newly placed component(s) removed and verified; wiring was not started\n",
+			len(rollback.AttemptedPrimitiveIDs), len(rollback.AttemptedPrimitiveIDs))
+	} else {
+		man.OK = "failed-partial"
+		var details []string
+		if len(rollback.MissingPrimitiveIDs) > 0 {
+			details = append(details, "no reliable primitiveId for "+strings.Join(rollback.MissingPrimitiveIDs, ", "))
+		}
+		if len(rollback.SurvivedPrimitiveIDs) > 0 {
+			details = append(details, "survived delete: "+strings.Join(rollback.SurvivedPrimitiveIDs, ", "))
+		}
+		if rollback.DeleteError != "" {
+			details = append(details, "delete error: "+rollback.DeleteError)
+		}
+		if rollback.VerifyError != "" {
+			details = append(details, "verification error: "+rollback.VerifyError)
+		}
+		if len(details) == 0 {
+			details = append(details, "cleanup could not be proven complete")
+		}
+		state = "PARTIAL STATE: " + strings.Join(details, "; ") + "; wiring was not started"
+		fmt.Fprintf(stderr, "rollback ✗ %s\n", state)
+	}
+	if err := emitBapManifest(*man, asJSON, stdout); err != nil {
+		return fmt.Errorf("block-apply stopped before wiring: %w; %s; emit failure manifest: %v", cause, state, err)
+	}
+	return fmt.Errorf("block-apply stopped before wiring: %w; %s", cause, state)
 }
 
 // runBlockApply is the command core.
@@ -357,7 +625,9 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// carrying "C1" into the wiring stage is what silently connects another page's
 	// part, so the plan is remapped onto reality before anything downstream runs.
 	renames := map[string]string{}
-	for _, p := range plan.Placements {
+	var created []bapPlacement
+	for i := range plan.Placements {
+		p := plan.Placements[i]
 		payload := map[string]any{
 			"libraryUuid": p.LibraryUUID,
 			"uuid":        p.DeviceUUID,
@@ -370,16 +640,34 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		}
 		res, err := requestActionTimed(cfg, "schematic.component.place", window, payload, placeTimeout)
 		if err != nil {
-			return fmt.Errorf("place %s (%s): %w", p.Designator, p.PartKey, err)
+			// A connector-side place can create the primitive and then fail while
+			// assigning its designator, in which case the failed envelope carries
+			// no safe ID. Remove every earlier tracked create, but report the
+			// current one as uncertain rather than pretending atomicity.
+			return failBlockApplyAfterPlacement(cfg, window, &man, created,
+				[]string{p.Designator + " (failed place may have created an untracked component)"},
+				fmt.Errorf("place %s (%s): %w", p.Designator, p.PartKey, err),
+				asJSON, stdout, stderr)
 		}
+		p.PrimitiveID = bapPlacedPrimitiveID(res)
+		plan.Placements[i].PrimitiveID = p.PrimitiveID
 		actual := bapPlacedDesignator(res)
+		createdPlacement := p
 		if actual != "" && !strings.EqualFold(actual, p.Designator) {
 			renames[strings.ToUpper(p.Designator)] = actual
+			createdPlacement.Designator = actual
 			fmt.Fprintf(stderr, "placed %-6s %-18s @ %.0f,%.0f [%s] → platform renumbered to %s\n",
 				p.Designator, p.PartKey, p.X, p.Y, p.Source, actual)
-			continue
+		} else {
+			fmt.Fprintf(stderr, "placed %-6s %-18s @ %.0f,%.0f [%s]\n", p.Designator, p.PartKey, p.X, p.Y, p.Source)
 		}
-		fmt.Fprintf(stderr, "placed %-6s %-18s @ %.0f,%.0f [%s]\n", p.Designator, p.PartKey, p.X, p.Y, p.Source)
+		created = append(created, createdPlacement)
+		if p.PrimitiveID == "" {
+			return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+				fmt.Errorf("place %s (%s) succeeded but returned no primitiveId; refusing to wire an untracked component",
+					createdPlacement.Designator, p.PartKey),
+				asJSON, stdout, stderr)
+		}
 	}
 	if len(renames) > 0 {
 		bapRemapDesignators(&plan, renames)
@@ -396,24 +684,43 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		man.Warnings = append(man.Warnings, w)
 		fmt.Fprintf(stderr, "warn: %s\n", w)
 	}
+	// All creates are now represented by their authoritative IDs/designators.
+	// Use this remapped slice for any subsequent cleanup or failure manifest.
+	created = append(created[:0], plan.Placements...)
+	man.Placed = append([]bapPlacement(nil), plan.Placements...)
 
 	// 5b. real-geometry read-back: the estimated-footprint dodge above is a
 	// heuristic; the rendered bboxes and pin coordinates are the truth. Findings
-	// involving this instance go in the manifest so a dirty landing is never silent.
+	// involving this instance are a hard pre-wiring gate, not a warning.
 	// A pin coincidence reports OvX/OvY 0 (it is a point, not an area) — call it out
 	// by name, because it shorts two nets with no wire to show for it and is far more
 	// dangerous than the bbox overlap it hides behind.
-	if findings := verifyBlockLayout(cfg, window, plan.Placements); len(findings) > 0 {
+	findings, verifyErr := verifyBlockLayout(cfg, window, plan.Placements)
+	if verifyErr != nil {
+		fmt.Fprintf(stderr, "layout ✗ verification unavailable: %v\n", verifyErr)
+		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+			fmt.Errorf("layout verification failed: %w", verifyErr), asJSON, stdout, stderr)
+	}
+	if len(findings) > 0 {
 		man.LayoutOverlaps = findings
+		man.LayoutMeasurementUnit = "0.01inch"
+		man.LayoutCoordinateUnit = "0.01inch"
+		overlaps, coincidences := 0, 0
 		for _, f := range findings {
-			if f.OvX == 0 && f.OvY == 0 {
+			if f.Type == "pin-coincidence" {
+				coincidences++
 				fmt.Fprintf(stderr, "layout ✗ PIN COINCIDENCE %s ↔ %s — two pins share one point = implicit short; "+
-					"move a part (`sch modify`/`sch autoplace-free`) and re-run, then `sch layout-lint`\n", f.A, f.B)
+					"adjust the block origin/template before re-running\n", f.A, f.B)
 				continue
 			}
+			overlaps++
 			fmt.Fprintf(stderr, "layout ✗ overlap %s ↔ %s (%.0f×%.0f) — fix with `sch modify`/`sch autoplace-free`, then `sch layout-lint`\n",
 				f.A, f.B, f.OvX, f.OvY)
 		}
+		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+			fmt.Errorf("layout verification found %d overlap(s) and %d pin coincidence(s)",
+				overlaps, coincidences),
+			asJSON, stdout, stderr)
 	} else {
 		fmt.Fprintf(stderr, "layout ✓ no overlap or pin coincidence involving this instance\n")
 	}
@@ -564,6 +871,17 @@ func emitBapManifest(m bapManifest, asJSON bool, stdout io.Writer) error {
 		fmt.Fprintf(stdout, " rev%d", m.Revision)
 	}
 	fmt.Fprintf(stdout, "  [%s]  instance=%s\n", m.BlockState, m.Instance)
+	if m.Failure != "" {
+		fmt.Fprintf(stdout, "failure: %s\n", m.Failure)
+	}
+	if m.Rollback != nil {
+		fmt.Fprintf(stdout, "rollback: complete=%t verified=%t attempted=%d survived=%d untracked=%d\n",
+			m.Rollback.Complete, m.Rollback.Verified, len(m.Rollback.AttemptedPrimitiveIDs),
+			len(m.Rollback.SurvivedPrimitiveIDs), len(m.Rollback.MissingPrimitiveIDs))
+	}
+	if m.PartialState {
+		fmt.Fprintln(stdout, "PARTIAL STATE: canvas restoration was not proven; inspect rollback details before retrying")
+	}
 	if m.Origin != nil && m.Origin.Relocated {
 		fmt.Fprintf(stdout, "origin relocated: %.0f,%.0f → %.0f,%.0f\n",
 			m.Origin.RequestedX, m.Origin.RequestedY, m.Origin.X, m.Origin.Y)
@@ -581,6 +899,11 @@ func emitBapManifest(m bapManifest, asJSON bool, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "warn: %s\n", w)
 	}
 	for _, f := range m.LayoutOverlaps {
+		if f.Type == "pin-coincidence" {
+			fmt.Fprintf(stdout, "pin-coincidence: %s:%s ↔ %s:%s at %.0f,%.0f\n",
+				f.A, f.APin, f.B, f.BPin, f.X, f.Y)
+			continue
+		}
 		fmt.Fprintf(stdout, "overlap: %s ↔ %s (%.0f×%.0f)\n", f.A, f.B, f.OvX, f.OvY)
 	}
 	fmt.Fprintf(stdout, "\n%-14s %-9s %s\n", "NET", "KIND", "MEMBERS")
@@ -626,8 +949,17 @@ one-time-reviewed geometry); blocks without one fall back to the legacy
 is NOT passed explicitly, the block's estimated footprint spiral-searches the
 nearest free region (existing real bboxes as obstacles); an explicit --at is
 honoured verbatim (with a warning if it collides). After placing, the real
-rendered bboxes are re-read and any overlap involving this instance is reported
-in the manifest (layoutOverlaps) — a dirty landing is never silent.
+rendered bboxes AND pin coordinates are re-read. Read/parse/incomplete-geometry
+failures, bbox overlaps, and pins from different parts sharing one point are hard
+errors BEFORE wiring; a dirty or unverified landing never reaches autoconnect.
+
+FAILURE / CLEANUP: every successful place must return the new primitiveId. When
+the pre-wiring layout gate fails, block-apply deletes exactly those newly placed
+IDs and re-reads the page to prove they are gone. A proven cleanup is reported as
+failed-rolled-back. A missing ID, surviving delete, or unavailable cleanup
+read-back is reported as failed-partial + PARTIAL STATE. EasyEDA mutations
+autosave independently, so this is explicit compensation, never a fake
+transaction claim.
 
 SCOPE (v1): parts / internal_nets / ports only. A block's pcb_layout, placement,
 signals and silk maps are NOT applied — the manifest lists them under
@@ -640,8 +972,10 @@ netlist is keyed by designator.pin document-wide and a cross-page collision
 poisons every net attribution (issue #136). Each instance's PORT-less internal nets are
 named after its own first designator (LED1_N2 vs LED2_N2) so instances never
 merge. Re-running after a partial failure therefore does NOT repair that instance,
-it builds another one; fix a half-built instance with ` + "`sch autoconnect`" + ` on the
-pins that are missing, or delete it and start over.
+it builds another one. If status is failed-rolled-back, fix the origin/template
+and retry. If status is failed-partial, inspect rollback.survivedPrimitiveIds /
+missingPrimitiveIds, delete or repair the residue explicitly, then retry — never
+assume the failed run left a clean page.
 
 Wiring itself is delegated to the ` + "`sch autoconnect`" + ` planner, which IS
 idempotent per pin — an already-connected pin is skipped rather than re-flagged.`,
@@ -706,4 +1040,3 @@ func parseXY(s string) (float64, float64, error) {
 	}
 	return x, y, nil
 }
-

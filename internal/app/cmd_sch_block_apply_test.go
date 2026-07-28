@@ -1,11 +1,43 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 )
+
+func TestEmitBapManifestDeclaresRawLayoutUnits(t *testing.T) {
+	var out bytes.Buffer
+	manifest := bapManifest{
+		OK: "applied", BlockID: "fixture", BlockState: "verified", Instance: "fixture-1",
+		LayoutOverlaps: []layoutFinding{{
+			Type: "pin-coincidence", A: "U1", B: "C1", APin: "1", BPin: "2", X: 0, Y: 10, Dist: 0,
+		}},
+		LayoutMeasurementUnit: "0.01inch",
+		LayoutCoordinateUnit:  "0.01inch",
+	}
+	if err := emitBapManifest(manifest, true, &out); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["layoutMeasurementUnit"] != "0.01inch" || got["layoutCoordinateUnit"] != "0.01inch" {
+		t.Fatalf("layout unit metadata missing from manifest: %s", out.String())
+	}
+	findings, ok := got["layoutOverlaps"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("layout findings missing: %s", out.String())
+	}
+	finding, _ := findings[0].(map[string]any)
+	if _, ok := finding["dist"]; !ok {
+		t.Fatalf("zero pin distance omitted from block manifest: %s", out.String())
+	}
+}
 
 // fixtureDevices is a minimal stand-in for standard-parts.json covering the
 // parts led_indicator_gpio uses.

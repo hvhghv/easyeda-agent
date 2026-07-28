@@ -131,8 +131,7 @@ func matchSheetTemplate(w, h float64) (sheetTemplate, bool) {
 // geometry with provenance + warnings. Kept free of I/O for unit-testing.
 //
 // Coordinate note: EasyEDA's 图框/明细表 sits in the BOTTOM-RIGHT corner of the
-// returned bbox space (larger y is lower), matching sch autoconnect's existing
-// keep-out — so the carved rect is the high-x, high-y corner of the sheet bbox.
+// y-UP bbox space, so the carved rect is the high-x, LOW-y corner of the sheet.
 func deriveSheetGeometry(sheet *layoutBBox, showTitleBlock *bool) sheetGeometry {
 	g := sheetGeometry{Keepouts: []keepout{}, Warnings: []string{}}
 	g.TitleBlock.Visible = showTitleBlock

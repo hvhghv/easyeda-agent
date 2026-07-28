@@ -17,8 +17,8 @@ package app
 //     bbox center sits outside its zone's sub-rectangle of the SHEET bbox.
 //
 // Zone names reuse the shared grid vocabulary (docs/concepts.md): columns
-// left/center/right × rows top/bottom (sheet coords are y-DOWN, so "top" is the
-// smaller-y half — zoneRect in cmd_sch_autolayout.go is the single geometry
+// left/center/right × rows top/bottom (sheet coords are y-UP, so "top" is the
+// larger-y half — zoneRect in cmd_sch_autolayout.go is the single geometry
 // source). The rectangle is resolved from the LIVE sheet bbox at lint time, so
 // claims keep working when the sheet is swapped or moved.
 

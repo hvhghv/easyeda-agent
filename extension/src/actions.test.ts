@@ -11,7 +11,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { normalizeDeviceRef, serializeComponent } from './actions';
+import {
+	connectPinEndpoint,
+	normalizeDeviceRef,
+	schematicComponentsList,
+	serializeComponent,
+	summarizeActivePageConnectivity,
+} from './actions';
+
+test('connect_pin endpoint contract is y-UP and matches Go autoconnect', () => {
+	assert.deepEqual(connectPinEndpoint(100, 100, 30, 'up'), { x: 100, y: 130 });
+	assert.deepEqual(connectPinEndpoint(100, 100, 30, 'down'), { x: 100, y: 70 });
+	assert.deepEqual(connectPinEndpoint(100, 100, 30, 'left'), { x: 70, y: 100 });
+	assert.deepEqual(connectPinEndpoint(100, 100, 30, 'right'), { x: 130, y: 100 });
+	// Both implementations score/place the snapped coordinate, not the raw 18-unit end.
+	assert.deepEqual(connectPinEndpoint(545, 290, 18, 'up'), { x: 545, y: 310 });
+	assert.deepEqual(connectPinEndpoint(545, 290, 18, 'down'), { x: 545, y: 270 });
+});
 
 /** A minimal mock of eda.sch_PrimitiveComponent exposing only the getters
  *  serializeComponent reads. Casts through unknown since the real type is huge. */
@@ -82,6 +98,130 @@ test('normalizeDeviceRef: missing/undefined raw yields empty strings, never thro
 test('normalizeDeviceRef: non-string uuid/libraryUuid coerced to empty', () => {
 	const ref = normalizeDeviceRef({ libraryUuid: 123, uuid: null }, 'X');
 	assert.deepEqual(ref, { libraryUuid: '', uuid: '', name: 'X' });
+});
+
+test('summarizeActivePageConnectivity: counts only connectivity primitives', () => {
+	assert.deepEqual(
+		summarizeActivePageConnectivity(
+			['part', 'netflag', 'netflag', 'netport', 'netlabel', 'sheet', 'short_symbol'],
+			[{}, {}, {}],
+			[{}],
+		),
+		{
+			scope: 'activePage',
+			wires: 3,
+			buses: 1,
+			netflags: 2,
+			netports: 1,
+			netlabels: 1,
+			shortSymbols: 1,
+		},
+	);
+});
+
+test('components.list: connectivitySummary stays scoped to active page with allPages=true', async () => {
+	const activeComponents = [
+		mockComponent({ PrimitiveId: 'active-part', ComponentType: 'part' }),
+		mockComponent({ PrimitiveId: 'active-flag', ComponentType: 'netflag' }),
+		mockComponent({ PrimitiveId: 'active-port', ComponentType: 'netport' }),
+	];
+	const allPageComponents = [
+		...activeComponents,
+		mockComponent({ PrimitiveId: 'other-label', ComponentType: 'netlabel' }),
+		mockComponent({ PrimitiveId: 'other-flag', ComponentType: 'netflag' }),
+	];
+	(globalThis as any).eda = {
+		sch_PrimitiveComponent: {
+			getAll: async (_filter?: unknown, allPages?: boolean) => (
+				allPages ? allPageComponents : activeComponents
+			),
+		},
+		sch_PrimitiveWire: { getAll: async () => [{}, {}] },
+		sch_PrimitiveBus: { getAll: async () => [{}] },
+	};
+	try {
+		const res: any = await schematicComponentsList({
+			allPages: true,
+			includeConnectivitySummary: true,
+		});
+		assert.equal(res.result.count, 5);
+		assert.deepEqual(res.result.connectivitySummary, {
+			scope: 'activePage',
+			wires: 2,
+			buses: 1,
+			netflags: 1,
+			netports: 1,
+			netlabels: 0,
+			shortSymbols: 0,
+		});
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('components.list: includePins distinguishes empty success, unavailable data, and failure', async () => {
+	const components = [
+		mockComponent({ PrimitiveId: 'pins-empty', ComponentType: 'part', Designator: 'U1' }),
+		mockComponent({ PrimitiveId: 'pins-missing', ComponentType: 'part', Designator: 'U2' }),
+		mockComponent({ PrimitiveId: 'pins-failed', ComponentType: 'part', Designator: 'U3' }),
+	];
+	(globalThis as any).eda = {
+		sch_PrimitiveComponent: {
+			getAll: async () => components,
+			getAllPinsByPrimitiveId: async (primitiveId: string) => {
+				if (primitiveId === 'pins-empty') return [];
+				if (primitiveId === 'pins-missing') return undefined;
+				throw new Error('pin channel unavailable');
+			},
+		},
+		sch_ManufactureData: { getNetlistFile: async () => undefined },
+	};
+	try {
+		const res: any = await schematicComponentsList({ includePins: true });
+		const byId = new Map<string, Record<string, unknown>>(
+			res.result.components.map((component: Record<string, unknown>) => [
+				String(component.primitiveId),
+				component,
+			]),
+		);
+
+		assert.equal(byId.get('pins-empty')?.pinsAvailable, true);
+		assert.deepEqual(byId.get('pins-empty')?.pins, []);
+		assert.equal('pinsError' in (byId.get('pins-empty') ?? {}), false);
+
+		assert.equal(byId.get('pins-missing')?.pinsAvailable, false);
+		assert.equal(byId.get('pins-missing')?.pinsError, 'Pin API did not return an array.');
+		assert.equal('pins' in (byId.get('pins-missing') ?? {}), false);
+
+		assert.equal(byId.get('pins-failed')?.pinsAvailable, false);
+		assert.equal(byId.get('pins-failed')?.pinsError, 'pin channel unavailable');
+		assert.equal('pins' in (byId.get('pins-failed') ?? {}), false);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('components.list: connectivitySummary fails closed when an SDK inventory is unavailable', async () => {
+	(globalThis as any).eda = {
+		sch_PrimitiveComponent: { getAll: async () => [] },
+		sch_PrimitiveWire: { getAll: async () => undefined },
+		sch_PrimitiveBus: { getAll: async () => [] },
+	};
+	try {
+		await assert.rejects(
+			() => schematicComponentsList({ includeConnectivitySummary: true }),
+			(err: any) => {
+				assert.equal(err.code, 'EDA_CALL_FAILED');
+				assert.match(err.detail, /wire getAll\(\) did not return an array/);
+				return true;
+			},
+		);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
 });
 
 import { schematicComponentModify, schematicComponentPlace, schematicPinSetNoConnect } from './actions';

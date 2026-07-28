@@ -154,6 +154,73 @@ function serializePin(pin: SchPin): Record<string, unknown> {
 	};
 }
 
+/** Read-only connectivity inventory for the page that was active at request time. */
+export interface SchematicConnectivitySummary {
+	scope: 'activePage';
+	wires: number;
+	buses: number;
+	netflags: number;
+	netports: number;
+	netlabels: number;
+	shortSymbols: number;
+}
+
+/**
+ * Count the page-level primitives used by layout preflight.
+ *
+ * This helper intentionally accepts already-scoped arrays: callers must read
+ * them with the SDK's active-page `getAll()` overload, never the all-pages
+ * component overload.
+ */
+export function summarizeActivePageConnectivity(
+	componentTypes: ReadonlyArray<unknown>,
+	wires: ReadonlyArray<unknown>,
+	buses: ReadonlyArray<unknown>,
+): SchematicConnectivitySummary {
+	const summary: SchematicConnectivitySummary = {
+		scope: 'activePage',
+		wires: wires.length,
+		buses: buses.length,
+		netflags: 0,
+		netports: 0,
+		netlabels: 0,
+		shortSymbols: 0,
+	};
+	for (const rawType of componentTypes) {
+		switch (String(rawType ?? '')) {
+			case 'netflag': summary.netflags++; break;
+			case 'netport': summary.netports++; break;
+			case 'netlabel': summary.netlabels++; break;
+			case 'short_symbol': summary.shortSymbols++; break;
+		}
+	}
+	return summary;
+}
+
+/**
+ * Read a fail-closed connectivity inventory for the currently active page.
+ * An SDK response that is missing its array is unavailable data, not zero
+ * primitives: layout preflight must never mistake a failed read for a clean page.
+ */
+async function readActivePageConnectivitySummary(): Promise<SchematicConnectivitySummary> {
+	try {
+		const components = await eda.sch_PrimitiveComponent.getAll();
+		const wires = await eda.sch_PrimitiveWire.getAll();
+		const buses = await eda.sch_PrimitiveBus.getAll();
+		if (!Array.isArray(components)) throw new Error('component getAll() did not return an array');
+		if (!Array.isArray(wires)) throw new Error('wire getAll() did not return an array');
+		if (!Array.isArray(buses)) throw new Error('bus getAll() did not return an array');
+		return summarizeActivePageConnectivity(
+			components.map(component => component.getState_ComponentType()),
+			wires,
+			buses,
+		);
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to summarize connectivity on the active schematic page.');
+	}
+}
+
 /**
  * Serialize a PCB component primitive to plain JSON via its public getState_*
  * accessors. Unlike a schematic component, a PCB component is layer-bound
@@ -578,9 +645,16 @@ async function tagComponentPages(): Promise<Map<string, { pageUuid: string; page
 	return byId;
 }
 
-const schematicComponentsList: Handler = async (payload) => {
+export const schematicComponentsList: Handler = async (payload) => {
 	const allPages = optionalBoolean(payload, 'allPages') === true;
 	const includePins = optionalBoolean(payload, 'includePins') === true;
+	// A fail-closed, read-only preflight inventory. It is deliberately captured
+	// before tagPages can cycle documents and always describes the page that was
+	// active when the request started, even when allPages=true.
+	const includeConnectivitySummary = optionalBoolean(payload, 'includeConnectivitySummary') === true;
+	const connectivitySummary = includeConnectivitySummary
+		? await readActivePageConnectivitySummary()
+		: null;
 	// includeBBox attaches each component's rendered extent {minX,minY,maxX,maxY}
 	// (via eda.sch_Primitive.getPrimitivesBBox) so the agent / `sch layout-lint`
 	// can reason about size, spacing, and overlap — mirrors pcb.components.list.
@@ -671,11 +745,12 @@ const schematicComponentsList: Handler = async (payload) => {
 				const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(
 					component.getState_PrimitiveId(),
 				);
+				if (!Array.isArray(pins)) throw new Error('Pin API did not return an array.');
 				const designator = String(component.getState_Designator?.() ?? '');
 				const ambiguous = ambiguousDesignators.has(designator);
 				if (ambiguous) record.netAmbiguous = true;
 				const netByNumber = ambiguous ? null : (pinNetsByDesignator?.get(designator) ?? null);
-				record.pins = (pins ?? []).map((pin) => {
+				record.pins = pins.map((pin) => {
 					const rec = serializePin(pin);
 					// null (not '') distinguishes "known floating" from "netlist unavailable"
 					// — and a cross-page-collided designator's nets are FORCED to null
@@ -683,8 +758,12 @@ const schematicComponentsList: Handler = async (payload) => {
 					rec.net = netByNumber ? (netByNumber.get(String(rec.pinNumber ?? '')) ?? '') : null;
 					return rec;
 				});
+				record.pinsAvailable = true;
 			}
-			catch { /* pins are optional */ }
+			catch (err) {
+				record.pinsAvailable = false;
+				record.pinsError = err instanceof Error ? err.message : String(err);
+			}
 		}
 		serialized.push(record);
 	}
@@ -703,7 +782,14 @@ const schematicComponentsList: Handler = async (payload) => {
 		}
 	}
 
-	return { result: { components: serialized, count: serialized.length, wires } };
+	return {
+		result: {
+			components: serialized,
+			count: serialized.length,
+			wires,
+			...(connectivitySummary ? { connectivitySummary } : {}),
+		},
+	};
 };
 
 export const schematicComponentPlace: Handler = async (payload) => {
@@ -3348,6 +3434,35 @@ const schematicRebindSymbol: Handler = makeRebindHandler('symbol');
 type Direction = 'up' | 'down' | 'left' | 'right';
 
 /**
+ * Compute the grid-snapped far endpoint for a connect_pin stub.
+ *
+ * Schematic coordinates are y-UP: visual up increases y and visual down
+ * decreases y. Keep this pure helper in the handler path so the TypeScript
+ * contract test and the Go autoconnect planner lock the same geometry.
+ */
+export function connectPinEndpoint(
+	pinX: number,
+	pinY: number,
+	offset: number,
+	direction: string,
+): { x: number; y: number } {
+	let endX = pinX;
+	let endY = pinY;
+	switch (direction) {
+		case 'up': endY = pinY + offset; break;
+		case 'down': endY = pinY - offset; break;
+		case 'left': endX = pinX - offset; break;
+		case 'right': endX = pinX + offset; break;
+		default:
+			throw new ActionError(
+				ErrorCodes.MISSING_PAYLOAD_FIELD,
+				`Unknown direction "${direction}"; expected up/down/left/right.`,
+			);
+	}
+	return { x: nearestGrid(endX), y: nearestGrid(endY) };
+}
+
+/**
  * Default direction by kind. Power flows up to a + rail, ground falls down
  * to a 0V rail, an IN port comes from the left (the producer), an OUT/BI
  * port goes to the right (the consumer / shared bus). These match the §3.3
@@ -3373,11 +3488,11 @@ function defaultDirection(kind: string): Direction {
  * anchors against live getPrimitivesBBox via calibrate.js
  * after importing a new .eext. See schematic-layout-conventions.md §3.5.
  */
-// 2026-06-29 VERTICAL FIX (y-DOWN build): cycle reversed to up→right→down→left and
-// power/ground anchors swapped, so a flag's up/down body now renders correctly
-// (left/right numbers are unchanged). Verified via getPrimitivesBBox on real settled
-// flags — a --direction down ground had been rendering its bars TOWARD the pin. Keep
-// byte-identical to orientation.json (rotationCycle + bodyAnchorAtRot0) and orient.py.
+// 2026-06-29 VERTICAL ORIENTATION CALIBRATION: the visual body cycle was confirmed
+// as up→right→down→left, with the power/ground rot=0 anchors below. This calibration
+// is independent of endpoint coordinate signs. Verified via getPrimitivesBBox on
+// real settled flags; keep byte-identical to orientation.json
+// (rotationCycle + bodyAnchorAtRot0) and orient.py.
 const ROTATION_CYCLE: Direction[] = ['up', 'right', 'down', 'left'];
 const BODY_ANCHOR_AT_ROT0: Record<'power' | 'ground' | 'port', Direction> = {
 	power: 'down',
@@ -3470,30 +3585,13 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 	const rotation = optionalNumber(payload, 'rotation') ?? rotationFor(kind, direction);
 	const applied = await appliedRotation(rotation);
 
-	// `--direction` is the VISUAL outward direction (what the caller sees on the
-	// canvas), NOT a raw coordinate sign. On EasyEDA Pro (verified 3.2.121, issue
-	// #19) the schematic document coords are y-DOWN: a LARGER stored y renders
-	// LOWER on screen. So 'up' (visually higher) must DECREASE y and 'down'
-	// (visually lower) must INCREASE y. The earlier y-UP assumption pushed top-pin
-	// stubs/netports DOWN into the IC body and vice-versa even when DRC was clean.
-	// (The flag-rotation table below is independent: it is calibrated against real
-	// rendered bbox via calibrate.js and already keyed to visual directions — e.g.
-	// rotationFor('port','up')===90, the exact rotation a reporter had to pass by
-	// hand alongside `--direction down`; fixing the endpoint sign makes the wire and
-	// the flag orientation agree without touching that calibrated table.)
-	let endX = pinX;
-	let endY = pinY;
-	switch (direction) {
-		case 'up': endY = pinY - offset; break;
-		case 'down': endY = pinY + offset; break;
-		case 'left': endX = pinX - offset; break;
-		case 'right': endX = pinX + offset; break;
-		default:
-			throw new ActionError(
-				ErrorCodes.MISSING_PAYLOAD_FIELD,
-				`Unknown direction "${direction}"; expected up/down/left/right.`,
-			);
-	}
+	// `--direction` is the VISUAL outward direction. The schematic canvas is
+	// y-UP (+y renders upward), so 'up' increases y and 'down' decreases it.
+	// Flag-body rotation remains independent: rotationFor() is calibrated in
+	// visual directions and appliedRotation() handles build-specific negation.
+	const endpoint = connectPinEndpoint(pinX, pinY, offset, direction);
+	const endX = endpoint.x;
+	const endY = endpoint.y;
 
 	// Snap the stub endpoint (and thus the flag) to the schematic connection grid
 	// (SCH_GRID=5). EasyEDA snaps a created netflag/netport's connection pin to that
@@ -3505,9 +3603,6 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 	// Snapping the perpendicular axis too is safe because a pin sits ON the grid (this
 	// is why 5 not 10: ESP32 pins at y=-385 stay put under a 5-snap, but a 10-snap
 	// would jog endY to -380 → a diagonal stub EasyEDA refuses to create).
-	endX = nearestGrid(endX);
-	endY = nearestGrid(endY);
-
 	// Snap the pin-side vertex to the exact grid too (issue #143). The pin coord
 	// carries rotation FP residue (e.g. 649.9999999); the stub end is on the grid
 	// (650), so a raw (649.9999999 → 650) vertex makes the stub a 0.0001 diagonal

@@ -95,6 +95,12 @@ type alPlacement struct {
 	Module      string  `json:"module"`
 	PrimitiveID string  `json:"primitiveId,omitempty"`
 	Retries     int     `json:"retries,omitempty"`
+	// OriginalX/Y come from the same live components.list snapshot used to plan.
+	// They stay out of the report JSON and enable reverse rollback + coordinate
+	// readback if a later modify or post-apply validation step fails.
+	OriginalX   float64 `json:"-"`
+	OriginalY   float64 `json:"-"`
+	HasOriginal bool    `json:"-"`
 }
 
 type alWarning struct {
@@ -117,6 +123,11 @@ type alReport struct {
 	Validation            alValidation  `json:"validation"`
 	TitleBlockProvisional bool          `json:"titleBlockProvisional,omitempty"`
 	Note                  string        `json:"note,omitempty"`
+	// Apply-only safety context, captured from the exact live snapshot used by
+	// the planner. These fields never leave the process/report JSON.
+	baselineParts      []layoutComp
+	rules              autolayoutRules
+	targetDocumentUUID string
 }
 
 // ── geometry helpers ────────────────────────────────────────────────────────
@@ -167,8 +178,7 @@ func unionBoxes(parts []alPart) layoutBBox {
 // zoneRect maps a named zone to its sub-rectangle of the usable area. Columns:
 // left [0,1/3], center [1/3,2/3], right [2/3,1]. Rows: the schematic canvas is
 // y-UP (+y renders HIGHER — proven live 2026-07-19 with two probe texts at
-// y=100/y=700 on ceshi; the CLAUDE.md gotcha was right and this function's old
-// "y-DOWN, top = smaller y" comment was the bug), so "top" is the LARGER-y
+// y=100/y=700 on ceshi), so "top" is the LARGER-y
 // half: top [0.5,1], bottom [0,0.5]. Unknown/empty zone → center, full height.
 func zoneRect(zone string, u layoutBBox) layoutBBox {
 	w := u.MaxX - u.MinX
@@ -210,7 +220,7 @@ func zoneRect(zone string, u layoutBBox) layoutBBox {
 	}
 }
 
-// alDir is a unit search direction (y-DOWN: dy=+1 is "below"/down on canvas).
+// alDir is a unit search direction (y-UP: dy=+1 is "above"/up on canvas).
 type alDir struct{ dx, dy float64 }
 
 // Vertical-first / horizontal-first orderings. Cardinals before diagonals so a
@@ -246,9 +256,9 @@ func alOutward(px, py, cx, cy float64) string {
 		return "left"
 	}
 	if dy >= 0 {
-		return "down"
+		return "up"
 	}
-	return "up"
+	return "down"
 }
 
 // coreFanoutLanes builds a thin keep-out rectangle extending outward from each
@@ -260,9 +270,9 @@ func coreFanoutLanes(core alPart, channelLen, halfWidth float64) []layoutBBox {
 	for _, p := range core.Pins {
 		switch alOutward(p.X, p.Y, cx, cy) {
 		case "up":
-			lanes = append(lanes, layoutBBox{MinX: p.X - halfWidth, MinY: p.Y - channelLen, MaxX: p.X + halfWidth, MaxY: p.Y})
-		case "down":
 			lanes = append(lanes, layoutBBox{MinX: p.X - halfWidth, MinY: p.Y, MaxX: p.X + halfWidth, MaxY: p.Y + channelLen})
+		case "down":
+			lanes = append(lanes, layoutBBox{MinX: p.X - halfWidth, MinY: p.Y - channelLen, MaxX: p.X + halfWidth, MaxY: p.Y})
 		case "left":
 			lanes = append(lanes, layoutBBox{MinX: p.X - channelLen, MinY: p.Y - halfWidth, MaxX: p.X, MaxY: p.Y + halfWidth})
 		case "right":
@@ -298,6 +308,26 @@ func makePlacement(p alPart, targetCX, targetCY float64, module string, retries 
 		Module:      module,
 		PrimitiveID: p.PrimitiveID,
 		Retries:     retries,
+		OriginalX:   p.AnchorX,
+		OriginalY:   p.AnchorY,
+		HasOriginal: true,
+	}
+}
+
+// snapPartBox returns the ACTUAL rendered bbox after moving p toward candidate
+// and snapping its anchor to schAnchorGrid. Candidate validation must reason
+// about this box, not the unsnapped ideal: otherwise a position can pass the
+// collision/bounds checks and then move by up to half a grid cell into another
+// part or outside the sheet when makePlacement snaps the anchor.
+func snapPartBox(p alPart, candidate layoutBBox) layoutBBox {
+	cx, cy := bboxCenter(candidate)
+	pl := makePlacement(p, cx, cy, "", 0)
+	dx, dy := pl.X-p.AnchorX, pl.Y-p.AnchorY
+	return layoutBBox{
+		MinX: p.BBox.MinX + dx,
+		MinY: p.BBox.MinY + dy,
+		MaxX: p.BBox.MaxX + dx,
+		MaxY: p.BBox.MaxY + dy,
 	}
 }
 
@@ -306,8 +336,18 @@ func makePlacement(p alPart, targetCX, targetCY float64, module string, retries 
 // candidate; the first survivor wins. Returns the placed box, the retry index
 // (0 = landed at the preferred center), and whether a slot was found.
 func findSlot(box layoutBBox, cx, cy, step float64, preferVertical bool, collides, inBounds, hitsTitle, hitsLane func(layoutBBox) bool) (layoutBBox, int, bool) {
+	return findSlotNormalized(box, cx, cy, step, preferVertical, nil, collides, inBounds, hitsTitle, hitsLane)
+}
+
+// findSlotNormalized is findSlot with an optional geometry normalizer applied
+// before every predicate. Template autolayout uses it to validate the snapped
+// anchor geometry; other callers that do not snap can keep using findSlot.
+func findSlotNormalized(box layoutBBox, cx, cy, step float64, preferVertical bool, normalize func(layoutBBox) layoutBBox, collides, inBounds, hitsTitle, hitsLane func(layoutBBox) bool) (layoutBBox, int, bool) {
 	tryAt := func(tx, ty float64) (layoutBBox, bool) {
 		cand := recenterBox(box, tx, ty)
+		if normalize != nil {
+			cand = normalize(cand)
+		}
 		if inBounds != nil && !inBounds(cand) {
 			return cand, false
 		}
@@ -359,6 +399,19 @@ func planAutolayout(modules []alModuleSpec, parts []alPart, sheet *layoutBBox, r
 	var placedComps []layoutComp // parallel, for the final overlap validation
 	var coreLanes []layoutBBox   // preserved pin-fanout channels from placed cores
 
+	// Parts omitted from the template are fixed obstacles, not empty canvas.
+	// Without this seed a partial spec could legally place U1 on top of a
+	// connector, test point, or hand-positioned support part it did not mention.
+	claimed := make(map[string]bool)
+	for _, m := range modules {
+		if m.Core != "" {
+			claimed[m.Core] = true
+		}
+		for _, d := range m.Parts {
+			claimed[d] = true
+		}
+	}
+
 	collides := func(cand layoutBBox) bool {
 		for _, o := range placed {
 			if boxesOverlap(cand, o) || rectGap(cand, o) < rules.PartGap {
@@ -391,6 +444,15 @@ func planAutolayout(modules []alModuleSpec, parts []alPart, sheet *layoutBBox, r
 		placed = append(placed, box)
 		placedComps = append(placedComps, layoutComp{Designator: p.Designator, ID: p.PrimitiveID, BBox: &box})
 	}
+	for _, p := range parts {
+		if p.HasBBox && !claimed[p.Designator] {
+			// Existing unclaimed parts are fixed obstacles. Keep them out of the
+			// final "new placement overlap" count so a historical overlap between
+			// two untouched parts does not make an otherwise safe partial plan
+			// impossible to apply.
+			placed = append(placed, p.BBox)
+		}
+	}
 
 	for _, m := range modules {
 		zone := zoneRect(m.Zone, usable)
@@ -410,7 +472,11 @@ func planAutolayout(modules []alModuleSpec, parts []alPart, sheet *layoutBBox, r
 		}
 		cw, ch := bboxSize(core.BBox)
 		coreStep := math.Max(cw, ch) + rules.PartGap
-		corePlaced, cRetries, cok := findSlot(core.BBox, zcx, zcy, coreStep, rules.PreferVertical, collides, inBounds, hitsTitle, nil)
+		corePlaced, cRetries, cok := findSlotNormalized(
+			core.BBox, zcx, zcy, coreStep, rules.PreferVertical,
+			func(candidate layoutBBox) layoutBBox { return snapPartBox(core, candidate) },
+			collides, inBounds, hitsTitle, nil,
+		)
 		if !cok {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("module %q: could not place core %q without collision after %d candidate retries", m.Name, m.Core, alMaxRing*len(alDirsVertical)))
 			rep.OK = false
@@ -448,11 +514,12 @@ func planAutolayout(modules []alModuleSpec, parts []alPart, sheet *layoutBBox, r
 			}
 			pw, ph := bboxSize(pt.BBox)
 			step := math.Max(cw, ch)/2 + math.Max(pw, ph)/2 + rules.PartGap
-			box, retries, ok2 := findSlot(pt.BBox, ccx, ccy, step, rules.PreferVertical, collides, inBounds, hitsTitle, hitsLane)
+			normalize := func(candidate layoutBBox) layoutBBox { return snapPartBox(pt, candidate) }
+			box, retries, ok2 := findSlotNormalized(pt.BBox, ccx, ccy, step, rules.PreferVertical, normalize, collides, inBounds, hitsTitle, hitsLane)
 			if !ok2 {
 				// Last resort: relax the fanout-channel preference (still respect
 				// collisions, bounds, and the title block) and warn the human.
-				box, retries, ok2 = findSlot(pt.BBox, ccx, ccy, step, rules.PreferVertical, collides, inBounds, hitsTitle, nil)
+				box, retries, ok2 = findSlotNormalized(pt.BBox, ccx, ccy, step, rules.PreferVertical, normalize, collides, inBounds, hitsTitle, nil)
 				if ok2 {
 					rep.Warnings = append(rep.Warnings, alWarning{Module: m.Name, Message: fmt.Sprintf("%s placed inside a pin-fanout lane (no clear slot otherwise)", d)})
 					rep.Validation.FanoutKeepoutHits++

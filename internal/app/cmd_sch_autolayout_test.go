@@ -214,6 +214,49 @@ func TestZoneRect_Partitions(t *testing.T) {
 	}
 }
 
+func TestAlOutwardUsesYUp(t *testing.T) {
+	cases := []struct {
+		name   string
+		px, py float64
+		want   string
+	}{
+		{name: "above", px: 50, py: 100, want: "up"},
+		{name: "below", px: 50, py: 0, want: "down"},
+		{name: "right", px: 100, py: 50, want: "right"},
+		{name: "left", px: 0, py: 50, want: "left"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := alOutward(tc.px, tc.py, 50, 50); got != tc.want {
+				t.Fatalf("alOutward(%v,%v) = %q, want %q on y-UP canvas", tc.px, tc.py, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCoreFanoutLanesExtendOutwardYUp(t *testing.T) {
+	core := alPart{
+		BBox: layoutBBox{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100},
+		Pins: []alPinPt{
+			{X: 50, Y: 100}, // top pin
+			{X: 50, Y: 0},   // bottom pin
+		},
+	}
+	got := coreFanoutLanes(core, 30, 5)
+	want := []layoutBBox{
+		{MinX: 45, MinY: 100, MaxX: 55, MaxY: 130},
+		{MinX: 45, MinY: -30, MaxX: 55, MaxY: 0},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d fanout lanes, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("lane %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestMakePlacement_AnchorOffsetPreserved(t *testing.T) {
 	// A part whose anchor is NOT at its bbox center: moving must shift the anchor
 	// by the same delta the bbox center moves.
@@ -223,6 +266,10 @@ func TestMakePlacement_AnchorOffsetPreserved(t *testing.T) {
 	pl := makePlacement(p, 120, 220, "M", 0)
 	if pl.X != 100 || pl.Y != 200 {
 		t.Errorf("anchor offset not preserved: got (%.2f,%.2f) want (100,200)", pl.X, pl.Y)
+	}
+	if !pl.HasOriginal || pl.OriginalX != p.AnchorX || pl.OriginalY != p.AnchorY {
+		t.Errorf("rollback anchor not captured: got has=%v (%.2f,%.2f), want (%.2f,%.2f)",
+			pl.HasOriginal, pl.OriginalX, pl.OriginalY, p.AnchorX, p.AnchorY)
 	}
 }
 
@@ -247,5 +294,57 @@ func TestMakePlacementSnapsAnchorToGrid(t *testing.T) {
 	// Still near the requested center (within one grid step per axis).
 	if math.Abs(got.X-195) > schAnchorGrid || math.Abs(got.Y-(600+18.75)) > schAnchorGrid {
 		t.Fatalf("snap moved the part too far: (%v, %v)", got.X, got.Y)
+	}
+}
+
+func TestFindSlotValidatesSnappedGeometry(t *testing.T) {
+	p := alPart{
+		Designator: "U1",
+		AnchorX:    2,
+		AnchorY:    2,
+		BBox:       layoutBBox{MinX: 0, MinY: 0, MaxX: 4, MaxY: 4},
+		HasBBox:    true,
+	}
+	obstacle := layoutBBox{MinX: 11, MinY: 0, MaxX: 15, MaxY: 4}
+	collides := func(candidate layoutBBox) bool { return boxesOverlap(candidate, obstacle) }
+
+	// The ideal first candidate is [5.6,9.6], which is clear. Its anchor snaps
+	// from 7.6 to 10, however, making the actual bbox [8,12] and overlapping the
+	// obstacle. The normalized search must reject that first candidate.
+	got, retries, ok := findSlotNormalized(
+		p.BBox, 7.6, 2, 10, false,
+		func(candidate layoutBBox) layoutBBox { return snapPartBox(p, candidate) },
+		collides, nil, nil, nil,
+	)
+	if !ok {
+		t.Fatal("expected a later clear slot")
+	}
+	if retries == 0 {
+		t.Fatalf("unsnapped first candidate was accepted: %+v", got)
+	}
+	if boxesOverlap(got, obstacle) {
+		t.Fatalf("returned snapped bbox still overlaps obstacle: got=%+v obstacle=%+v", got, obstacle)
+	}
+}
+
+func TestPlanAutolayoutTreatsUnclaimedPartsAsObstacles(t *testing.T) {
+	parts := []alPart{
+		part("U1", 0, 0, 40, 40),
+		// Fixed hand-placed connector occupying the exact center-zone target.
+		part("J1", 560, 390, 630, 450),
+	}
+	modules := []alModuleSpec{{
+		Name: "MCU", Zone: "center", Core: "U1", Parts: []string{"U1"},
+	}}
+	rep := planAutolayout(modules, parts, a4Sheet(), rulesAL())
+	if !rep.OK {
+		t.Fatalf("expected a clear retry around the fixed part, errors=%v", rep.Errors)
+	}
+	if rep.Validation.PartOverlaps != 0 {
+		t.Fatalf("planned placement overlaps the unclaimed obstacle: %+v", rep)
+	}
+	pl, ok := placementOf(rep, "U1")
+	if !ok || pl.Retries == 0 {
+		t.Fatalf("U1 did not retry around the center obstacle: %+v", pl)
 	}
 }

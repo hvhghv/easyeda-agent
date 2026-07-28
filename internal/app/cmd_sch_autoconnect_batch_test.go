@@ -13,7 +13,7 @@ import (
 
 // newFakeBatchDaemon stands up a daemon with TWO parts whose pins sit on the
 // same vertical line, spaced so that their naive kind-default stubs (GND down
-// from y=30 reaching y=48, VCC up from y=62 reaching y=44 at the shortest
+// from y=62 reaching y=44, VCC up from y=30 reaching y=48 at the shortest
 // offset) collinear-overlap on x=10 — the B0512S-class adjacent
 // multi-domain-pin geometry from issue #133/#138. The pins sit 14 apart from
 // each other's stub so the fanout-channel penalty (MinLabelGap 12) does not
@@ -42,16 +42,16 @@ func newFakeBatchDaemon(t *testing.T) (*appConfig, func()) {
 			result = map[string]any{"components": []any{
 				map[string]any{
 					"componentType": "part", "designator": "U1",
-					"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 28.0},
+					"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
 					"pins": []any{
-						map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 30.0, "net": ""},
+						map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 62.0, "net": ""},
 					},
 				},
 				map[string]any{
 					"componentType": "part", "designator": "U2",
-					"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
+					"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 28.0},
 					"pins": []any{
-						map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 62.0, "net": ""},
+						map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 30.0, "net": ""},
 					},
 				},
 			}}
@@ -76,8 +76,8 @@ func newFakeBatchDaemon(t *testing.T) (*appConfig, func()) {
 // TestAutoconnect_BatchStubsAreMutuallyExclusive is the issue #138 regression:
 // two connections planned in ONE batch on different nets must never pick stubs
 // that touch each other. Pre-fix, each candidate was scored against a scene
-// that ignored its batch siblings, so U1:1's GND stub (down, ending at y=48)
-// and U2:1's VCC stub (kind default up, ending at y=40) collinear-overlapped
+// that ignored its batch siblings, so U1:1's GND stub (down, ending at y=45)
+// and U2:1's VCC stub (kind default up, ending at y=50) collinear-overlapped
 // on x=10 — EasyEDA would merge them into one net (a silent GND/VCC short).
 // Post-fix, the first planned stub is registered as a scene wire, so the
 // second connection's "up" candidates are hard-rejected as foreign-wire
@@ -163,16 +163,16 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 				"components": []any{
 					map[string]any{
 						"componentType": "part", "designator": "U1",
-						"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 28.0},
+						"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
 						"pins": []any{
-							map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 30.0, "net": ""},
+							map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 62.0, "net": ""},
 						},
 					},
 					map[string]any{
 						"componentType": "part", "designator": "U2",
-						"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
+						"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 28.0},
 						"pins": []any{
-							map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 62.0, "net": ""},
+							map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 30.0, "net": ""},
 						},
 					},
 				},
@@ -180,9 +180,9 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 				// corridors; only "up" is geometrically clean — until U1:1's
 				// batch stub claims it.
 				"wires": []any{
-					map[string]any{"x0": -2.0, "y0": 50.0, "x1": -2.0, "y1": 74.0, "net": "X"},
-					map[string]any{"x0": 22.0, "y0": 50.0, "x1": 22.0, "y1": 74.0, "net": "X"},
-					map[string]any{"x0": 0.0, "y0": 80.0, "x1": 20.0, "y1": 80.0, "net": "X"},
+					map[string]any{"x0": -2.0, "y0": 18.0, "x1": -2.0, "y1": 42.0, "net": "X"},
+					map[string]any{"x0": 22.0, "y0": 18.0, "x1": 22.0, "y1": 42.0, "net": "X"},
+					map[string]any{"x0": 0.0, "y0": 10.0, "x1": 20.0, "y1": 10.0, "net": "X"},
 				},
 			}
 		case "schematic.power.connect_pin":

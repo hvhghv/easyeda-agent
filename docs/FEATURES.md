@@ -241,8 +241,13 @@ Workspace → Project → **Board** → schematic + PCB. Map to `eda.dmt_Board.*
 - **Go-side CLI planners (pure geometry over real bboxes)** — deterministic,
   unit-testable analysis/placement that runs in the daemon's Go process on a
   single `schematic.components.list` pull, no per-step screenshots:
-  - **`easyeda sch layout-lint`** — pairwise bbox overlap (ERROR) + tight spacing
-    (WARN); non-zero exit gates a workflow.
+  - **`easyeda sch layout-lint`** — pairwise bbox overlap/pin coincidence
+    (ERROR), tight spacing/off-grid/zone violation (WARN), with corrected
+    mm↔0.01-inch conversion and schema-v2 unit metadata. `--strict` also fails
+    warnings, missing/malformed/unproven anchor/bbox/pin geometry, and an
+    unavailable configured zone check, so `0 overlap` can no longer stand in
+    for a proven layout. Strict proof is active-page/real-part only and rejects
+    `--all-pages` or `--include-non-parts`.
   - **`easyeda sch autoconnect`** — pin-aware connect planner: score every
     (direction × offset) candidate against real geometry, pick the lowest cost,
     delegate the mutation to `connect_pin` (issue #24).
@@ -253,9 +258,14 @@ Workspace → Project → **Board** → schematic + PCB. Map to `eda.dmt_Board.*
     collision retry, and preserves each core pin's fanout channel + the A4
     title-block keep-out. Same pure-scorer style as autoconnect: identical spec +
     input → identical coordinates that pass `layout-lint`. `--dry-run` plans
-    without mutating; `--apply` moves parts via `schematic.component.modify` then
-    self-checks overlaps. v1 only **moves already-placed parts** (does not create
-    missing ones).
+    without mutating; template `--apply` pins `--doc`/`spec.page`, refuses any
+    existing wire/bus/net marker（含 `short_symbol`）both before planning and immediately before
+    mutation, rejects `--all-pages`, and requires proven bbox/pin geometry. It
+    validates every moved anchor, grid/spacing/overlap/pin/title-block rule by
+    readback and proves `saved:true`. Any failure triggers reverse-order restoration, verified
+    by another anchor readback, then saves the rollback.
+    There is no template force/rewire override because v1 only **moves
+    already-placed parts** (it neither carries wires nor creates missing parts).
 - **`skills/easyeda-agent/scripts`** — a data-only schematic checker (no screenshots): one
   `getAll` + `wire.getAll` pull returns the full layout, then a geometry/union-find
   pass finds connectivity and orientation problems with exact coordinates (13

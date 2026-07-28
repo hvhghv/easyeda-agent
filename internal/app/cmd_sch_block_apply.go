@@ -166,6 +166,7 @@ type bapPlacement struct {
 	Role        string  `json:"role"`
 	PartKey     string  `json:"part"`
 	Designator  string  `json:"designator"`
+	PrimitiveID string  `json:"primitiveId,omitempty"`
 	LibraryUUID string  `json:"libraryUuid"`
 	DeviceUUID  string  `json:"deviceUuid"`
 	LCSC        string  `json:"lcsc,omitempty"`
@@ -190,10 +191,10 @@ type bapOrigin struct {
 type bapNet struct {
 	Net     string   `json:"net"`
 	Kind    string   `json:"kind"`
-	Port    string   `json:"port,omitempty"`   // set when this net is a block boundary
-	Bound   bool     `json:"bound,omitempty"`  // true when the host supplied --bind
-	Members []string `json:"members"`          // DESIGNATOR:PIN, ready for autoconnect
-	Roles   []string `json:"roles"`            // ROLE.pin, for traceability back to the block
+	Port    string   `json:"port,omitempty"`  // set when this net is a block boundary
+	Bound   bool     `json:"bound,omitempty"` // true when the host supplied --bind
+	Members []string `json:"members"`         // DESIGNATOR:PIN, ready for autoconnect
+	Roles   []string `json:"roles"`           // ROLE.pin, for traceability back to the block
 }
 
 // bapPlan is the full deterministic plan + the instance manifest skeleton.
@@ -215,10 +216,10 @@ type bapPlan struct {
 // bapInput is everything the pure planner needs.
 type bapInput struct {
 	Block    blocks.Block
-	Topology [][]string          // internal_nets, already parsed out of Raw
+	Topology [][]string           // internal_nets, already parsed out of Raw
 	Devices  map[string]bapDevice // part key → device (from standard-parts.json)
-	Existing map[string]bool     // designators already on the page (upper-cased)
-	Instance string              // instance id, e.g. "led1"
+	Existing map[string]bool      // designators already on the page (upper-cased)
+	Instance string               // instance id, e.g. "led1"
 	OriginX  float64
 	OriginY  float64
 	Spacing  float64

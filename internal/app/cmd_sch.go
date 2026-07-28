@@ -1209,18 +1209,20 @@ check for a faster read.`,
 	// eyeballed. Exits non-zero when overlaps exist → usable as a gate.
 	{
 		var minGap, pinEps float64
-		var asJSON, allPages, includeNonParts bool
+		var asJSON, allPages, includeNonParts, strict bool
 		c := &cobra.Command{
 			Use:   "layout-lint",
 			Short: "Check component placement for bbox overlaps and tight spacing",
 			Long: `Check component placement on the schematic for overlaps and tight spacing.
 
 Pulls every component's rendered extent (schematic.components.list --include-bbox)
-and runs two pairwise checks in Go:
+and runs these placement checks in Go:
 
   • overlap          — two component bounding boxes intersect            → ERROR
   • pin-coincidence  — two pins of DIFFERENT parts land on the same point → ERROR
   • spacing          — bbox gap is below --min-gap (default 2.54mm)       → WARN
+  • off-grid         — part anchor is not on the 5-unit connection grid   → WARN
+  • zone-violation   — claimed part is outside its functional zone         → WARN
 
 Pin coincidence is an implicit short: any wire/stub through the shared point ties
 the two nets together, yet the bboxes may never touch (a small 2-pin part tucked
@@ -1236,13 +1238,21 @@ too (e.g. to inspect the sheet bbox).
 
 This is the mechanical ground truth for the place→verify→adjust loop: run it
 after each placement stage, fix every ERROR (move/align/distribute), then re-run.
-Exits non-zero when any overlap is found, so it can gate a workflow.`,
+Exits non-zero when any overlap is found, so it can gate a workflow. Pass
+--strict to also fail on tight spacing, off-grid anchors, zone violations, or
+components whose anchor/bbox/pin geometry was unavailable, malformed, or came
+from a legacy connector that cannot prove the pin read succeeded. When zone
+claims exist, --strict also fails if the active sheet is unavailable and the
+zone check could not be proven. Strict proof is per active page and real parts:
+combine it with neither --all-pages (inactive-page data is shallow) nor
+--include-non-parts (sheet/markers are not placement bodies).`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda sch layout-lint
+  easyeda sch layout-lint --strict
   easyeda sch layout-lint --min-gap 5.08
   easyeda sch layout-lint --all-pages --json`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return runLayoutLint(cfg, window, minGap, pinEps, allPages, asJSON, includeNonParts, stdout, stderr)
+				return runLayoutLint(cfg, window, minGap, pinEps, allPages, asJSON, includeNonParts, strict, stdout, stderr)
 			},
 		}
 		c.Flags().Float64Var(&minGap, "min-gap", 2.54, "minimum gap between component bboxes in mm (closer = WARN)")
@@ -1250,6 +1260,7 @@ Exits non-zero when any overlap is found, so it can gate a workflow.`,
 		c.Flags().BoolVar(&asJSON, "json", false, "emit the report as JSON")
 		c.Flags().BoolVar(&allPages, "all-pages", false, "lint components across all schematic pages (WARNING: non-active pages return shallow data — components with no bbox are SKIPPED from overlap checks, not confirmed clear; use `doc switch` to that page for accurate linting)")
 		c.Flags().BoolVar(&includeNonParts, "include-non-parts", false, "also lint non-part primitives (sheet/title-frame, netflag/netport/…); excluded by default")
+		c.Flags().BoolVar(&strict, "strict", false, "per-active-page proof: also fail on tight/off-grid/zone, invalid or unproven geometry, or unavailable configured zones (incompatible with --all-pages/--include-non-parts)")
 		sch.AddCommand(c)
 	}
 

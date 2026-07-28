@@ -161,13 +161,13 @@ const (
 	// (endpoint sits ≥18 from the pin; 12 < 18) and over-reject valid placements.
 	acLabelHalfW = 12.0
 	acLabelHalfH = 5.5
-	acCoordEps        = 0.01 // coordinate-equality tolerance
-	acOverlapEps      = 1e-6 // positive-length threshold for interval/area overlap
+	acCoordEps   = 0.01 // coordinate-equality tolerance
+	acOverlapEps = 1e-6 // positive-length threshold for interval/area overlap
 )
 
 // endpointFor computes where connect_pin will land the stub end for a given
 // direction/offset. MUST match the connector's switch (extension/src/actions.ts,
-// schematicPowerConnectPin): y-DOWN coords — 'up' decreases y, 'down' increases
+// schematicPowerConnectPin): y-UP coords — 'up' increases y, 'down' decreases
 // y — so the planned geometry equals the geometry connect_pin actually creates.
 // acSchGrid mirrors the connector's SCH_GRID: EasyEDA Pro snaps a created
 // netflag/netport's connection pin to a 5-unit grid, and connect_pin aligns the
@@ -188,9 +188,9 @@ func acSnapGrid(v float64) float64 { return math.Round(v/acSchGrid) * acSchGrid 
 func endpointFor(pinX, pinY, offset float64, dir string) (x, y float64) {
 	switch dir {
 	case "up":
-		return pinX, acSnapGrid(pinY - offset)
-	case "down":
 		return pinX, acSnapGrid(pinY + offset)
+	case "down":
+		return pinX, acSnapGrid(pinY - offset)
 	case "left":
 		return acSnapGrid(pinX - offset), pinY
 	case "right":
@@ -231,11 +231,11 @@ func outwardDirection(pin acPin) string {
 		}
 		return "left"
 	}
-	// y-DOWN: a pin BELOW center (larger y) routes outward as 'down' (y+offset).
+	// y-UP: a pin ABOVE center (larger y) routes outward as 'up' (y+offset).
 	if dy >= 0 {
-		return "down"
+		return "up"
 	}
-	return "up"
+	return "down"
 }
 
 // labelBox is the nominal extent of the flag/label that will sit at the endpoint

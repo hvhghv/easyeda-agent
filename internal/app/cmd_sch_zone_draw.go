@@ -32,6 +32,23 @@ import (
 // on the exact same boundary line (schematic units).
 const schZoneFrameInset = 4
 
+// writeZoneRectangleCreateJS emits the one rectangle-create call shared by the
+// fixed-grid and data-driven partition draw paths. EasyEDA anchors schematic
+// rectangles at the visual TOP-LEFT corner: (MinX, MaxY) on the y-UP canvas,
+// then extends toward -y by height. Keeping that conversion here prevents one
+// mode from accidentally passing MinY and dropping the rendered frame one full
+// height below its planned bbox.
+func writeZoneRectangleCreateJS(b *strings.Builder, r layoutBBox, colorJS []byte) bool {
+	w := r.MaxX - r.MinX
+	h := r.MaxY - r.MinY
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	fmt.Fprintf(b, "{ const rc = await eda.sch_PrimitiveRectangle.create(%g, %g, %g, %g, 0, 0, %s, null, 1, 1);\n",
+		r.MinX, r.MaxY, w, h, colorJS)
+	return true
+}
+
 // buildZoneDrawJS renders the one-shot exec_js script: create every frame
 // rect + label, return their ids. Pure (unit-testable).
 func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, color string) string {
@@ -48,24 +65,20 @@ func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, color str
 			continue
 		}
 		r := zoneRect(zc.Zone, sheet)
-		x := r.MinX + schZoneFrameInset
-		y := r.MinY + schZoneFrameInset
-		w := (r.MaxX - r.MinX) - 2*schZoneFrameInset
-		h := (r.MaxY - r.MinY) - 2*schZoneFrameInset
-		if w <= 0 || h <= 0 {
-			continue
+		frame := layoutBBox{
+			MinX: r.MinX + schZoneFrameInset,
+			MinY: r.MinY + schZoneFrameInset,
+			MaxX: r.MaxX - schZoneFrameInset,
+			MaxY: r.MaxY - schZoneFrameInset,
 		}
 		label, _ := json.Marshal(fmt.Sprintf("%s (%s)", name, zc.Zone))
 		colorJS, _ := json.Marshal(color)
-		// The canvas is y-UP, so the frame's visual TOP edge is MaxY; the label
-		// sits just inside the top-left corner. The rectangle API's topLeftY is
-		// document-space y of the anchor corner — passing MinY with the height
-		// spans MinY..MaxY either way. lineType 1 = DASHED (ESCH_PrimitiveLineType).
-		fmt.Fprintf(&b, "{ const rc = await eda.sch_PrimitiveRectangle.create(%g, %g, %g, %g, 0, 0, %s, null, 1, 1);\n",
-			x, y, w, h, colorJS)
+		if !writeZoneRectangleCreateJS(&b, frame, colorJS) {
+			continue
+		}
 		fmt.Fprintf(&b, "  if (rc) rects.push(rc.getState_PrimitiveId());\n")
 		fmt.Fprintf(&b, "  const tx = await eda.sch_PrimitiveText.create(%g, %g, %s, 0, %s, null, 9);\n",
-			x+4, y+h-6, label, colorJS)
+			frame.MinX+4, frame.MaxY-6, label, colorJS)
 		fmt.Fprintf(&b, "  if (tx) texts.push(tx.getState_PrimitiveId()); }\n")
 	}
 	b.WriteString("return {rects, texts};")

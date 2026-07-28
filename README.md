@@ -153,6 +153,8 @@ clawhub install easyeda-agent
 
 两版都能用、都还有少量重叠(模板版当前还会碰标题栏右下角,官方版散件间距不均),**放置的正确性由机械门禁保证**:`sch layout-lint`(真实 bbox 查重叠)+ `sch check`/`bridge-check`(查断线/短路)。多页工程/长操作用 `--doc <page>` flag **机制性地钉住目标页**,不再靠人工切页(避免长命令落错页)。
 
+> 官方引擎在真正调用 `autoLayout()` 前会二次核对同一页的部件姿态、sheet 与全部 connectivity（wire/bus/net marker），并在启动变异的同一个 JS action 内再锁一次 document/input；`--rewire` 还核对完整网表，输入漂移立即拒绝。bus 目前无法可靠重建，即使 `--rewire` 也拒绝。后续 snap/重连/save 继续钉在同一 UUID；几何回读、`sch check`、重连或持久化任何一步不可用，或残留 overlap / pin 重合 / dangling 等结构性问题，都会非零退出。官方 API 没有事务回滚，因此 post-check 失败表示“页面已变但未过门”，必须先修复或撤销。
+
 > **优先级铁律**:命中电路块 → `sch block-apply` 模板;有 S0 分区 spec → `--engine template`;都没有才 `--engine official` 兜底。功能分组的模板版是首选,官方引擎只作未建模页面的起点。**下版优化**:放置避让标题栏 keep-out、分区区域线 + 文本注释(`sch zone-draw` 已提供,待接入自动放置流程)。
 
 ## 能力清单(已支持)

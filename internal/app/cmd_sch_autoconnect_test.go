@@ -12,15 +12,15 @@ func clearScene() acScene { return acScene{} }
 
 func rulesFor() autoconnectRules { return defaultAutoconnectRules() }
 
-func TestEndpointFor_MatchesConnectorYDown(t *testing.T) {
+func TestEndpointFor_MatchesConnectorYUp(t *testing.T) {
 	cases := []struct {
 		dir   string
 		wantX float64
 		wantY float64
 	}{
-		{"up", 100, 70},    // y decreases
-		{"down", 100, 130}, // y increases
-		{"left", 70, 100},  // x decreases
+		{"up", 100, 130},  // y increases
+		{"down", 100, 70}, // y decreases
+		{"left", 70, 100}, // x decreases
 		{"right", 130, 100},
 	}
 	for _, c := range cases {
@@ -34,7 +34,7 @@ func TestEndpointFor_MatchesConnectorYDown(t *testing.T) {
 func TestPlanConnection_GroundPrefersDownShortest(t *testing.T) {
 	// A pin below its owner center → outward = down; kind gnd default = down.
 	// Both bonuses stack on 'down', and the shortest offset wins ties.
-	pin := acPin{X: 100, Y: 200, OwnerBBox: bb(80, 150, 120, 190)}
+	pin := acPin{X: 100, Y: 140, OwnerBBox: bb(80, 150, 120, 190)}
 	all := planConnection(pin, "ground", "GND", clearScene(), rulesFor())
 	sel := all[0]
 	if sel.Direction != "down" {
@@ -54,7 +54,7 @@ func TestPlanConnection_GroundPrefersDownShortest(t *testing.T) {
 func TestScoreCandidate_PartOverlapDominates(t *testing.T) {
 	// A part bbox sits right where the 'down' endpoint would land → +10000.
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Parts: []layoutBBox{bb(90, 115, 110, 135).deref()}}
+	scene := acScene{Parts: []layoutBBox{bb(90, 65, 110, 85).deref()}}
 	c := scoreCandidate(pin, "down", 24, "ground", "GND", scene, rulesFor())
 	if c.Score < costPartOverlap {
 		t.Fatalf("expected part-overlap penalty (>=%d), got %.2f", costPartOverlap, c.Score)
@@ -63,8 +63,8 @@ func TestScoreCandidate_PartOverlapDominates(t *testing.T) {
 
 func TestScoreCandidate_StubCrossesPin(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	// Another pin sits on the downward stub path (x=100, between y=100 and 130).
-	scene := acScene{Pins: []acPin{{X: 100, Y: 115, Designator: "U2", PinNumber: "1"}}}
+	// Another pin sits on the downward stub path (x=100, between y=70 and 100).
+	scene := acScene{Pins: []acPin{{X: 100, Y: 85, Designator: "U2", PinNumber: "1"}}}
 	c := scoreCandidate(pin, "down", 30, "ground", "GND", scene, rulesFor())
 	hasCross := false
 	for _, r := range c.Reasons {
@@ -140,7 +140,7 @@ func TestPlanConnection_StaggersAwayFromRegisteredMarker(t *testing.T) {
 // be a HARD reject (issue #64), not a soft penalty a long offset could out-vote.
 func TestScoreCandidate_PinCrossIsHardReject(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Pins: []acPin{{X: 100, Y: 115, Designator: "U2", PinNumber: "1"}}}
+	scene := acScene{Pins: []acPin{{X: 100, Y: 85, Designator: "U2", PinNumber: "1"}}}
 	c := scoreCandidate(pin, "down", 30, "ground", "GND", scene, rulesFor())
 	if !candidateHardRejected(c) {
 		t.Fatalf("pin-cross should hard-reject, score=%.2f reasons=%+v", c.Score, c.Reasons)
@@ -152,9 +152,9 @@ func TestScoreCandidate_PinCrossIsHardReject(t *testing.T) {
 // hard-reject (issue #64).
 func TestScoreCandidate_StubTouchesForeignWireHardRejects(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	// A +5V wire runs horizontally across y=130; the downward stub endpoint (100,130)
+	// A +5V wire runs horizontally across y=70; the downward stub endpoint (100,70)
 	// lands on it → foreign-net junction.
-	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 130, X1: 200, Y1: 130, Net: "+5V"}}}
+	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 70, X1: 200, Y1: 70, Net: "+5V"}}}
 	c := scoreCandidate(pin, "down", 30, "ground", "GND", scene, rulesFor())
 	if !candidateHardRejected(c) {
 		t.Fatalf("stub touching a foreign-net wire should hard-reject, reasons=%+v", c.Reasons)
@@ -165,7 +165,7 @@ func TestScoreCandidate_StubTouchesForeignWireHardRejects(t *testing.T) {
 // target net is the whole point of connecting — it must NOT hard-reject.
 func TestScoreCandidate_SameNetWireNotRejected(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 130, X1: 200, Y1: 130, Net: "GND"}}}
+	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 70, X1: 200, Y1: 70, Net: "GND"}}}
 	c := scoreCandidate(pin, "down", 30, "ground", "GND", scene, rulesFor())
 	if candidateHardRejected(c) {
 		t.Fatalf("same-net wire touch must NOT hard-reject, reasons=%+v", c.Reasons)
@@ -176,7 +176,7 @@ func TestScoreCandidate_SameNetWireNotRejected(t *testing.T) {
 // treated conservatively as foreign — touching it hard-rejects.
 func TestScoreCandidate_UnnamedWireIsForeign(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 130, X1: 200, Y1: 130, Net: ""}}}
+	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 70, X1: 200, Y1: 70, Net: ""}}}
 	c := scoreCandidate(pin, "down", 30, "ground", "GND", scene, rulesFor())
 	if !candidateHardRejected(c) {
 		t.Fatalf("unnamed (foreign) wire touch should hard-reject, reasons=%+v", c.Reasons)
@@ -188,7 +188,7 @@ func TestScoreCandidate_UnnamedWireIsForeign(t *testing.T) {
 // non-rejected direction.
 func TestPlanConnection_AvoidsForeignWireDirection(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 130, X1: 200, Y1: 130, Net: "+5V"}}}
+	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 70, X1: 200, Y1: 70, Net: "+5V"}}}
 	all := planConnection(pin, "ground", "GND", scene, rulesFor())
 	if candidateHardRejected(all[0]) {
 		t.Fatalf("planner picked a hard-rejected candidate: %+v", all[0])
@@ -220,7 +220,7 @@ func TestBuildScene_ParsesWires(t *testing.T) {
 func TestPlanConnection_AvoidsOverlappingDirection(t *testing.T) {
 	// A wall of parts blocks 'down'; 'up' is clear. Planner must not pick down.
 	pin := acPin{X: 100, Y: 100}
-	scene := acScene{Parts: []layoutBBox{bb(80, 110, 120, 200).deref()}}
+	scene := acScene{Parts: []layoutBBox{bb(80, 0, 120, 90).deref()}}
 	all := planConnection(pin, "ground", "GND", scene, rulesFor())
 	if all[0].Direction == "down" {
 		t.Fatalf("planner chose blocked direction down; scene=%+v score=%.2f", scene, all[0].Score)
@@ -591,13 +591,13 @@ func TestEndpointForSnapsToGrid(t *testing.T) {
 		px, py, offset float64
 		wantX, wantY   float64
 	}{
-		// 290-18 = 272 → snaps to 270; x stays exactly on the pin.
-		{"up", 545, 290, 18, 545, 270},
-		{"down", 545, 290, 18, 545, 310},
+		// 290+18 = 308 → snaps to 310; x stays exactly on the pin.
+		{"up", 545, 290, 18, 545, 310},
+		{"down", 545, 290, 18, 545, 270},
 		{"left", 560, 270, 18, 540, 270},
 		{"right", 560, 270, 18, 580, 270},
 		// Already on-grid endpoints are untouched.
-		{"up", 500, 300, 20, 500, 280},
+		{"up", 500, 300, 20, 500, 320},
 		// A pin on the ODD 5-grid keeps its perpendicular coordinate: snapping it
 		// would pull the stub off the pin axis into a diagonal that fails to create.
 		{"left", 600, 385, 18, 580, 385},
@@ -618,9 +618,9 @@ func TestEndpointForSnapsToGrid(t *testing.T) {
 // With the snap in place, a candidate whose SNAPPED endpoint lands on a
 // foreign-net wire must be hard-rejected — the check that silently passed before.
 func TestForeignWireRejectUsesSnappedEndpoint(t *testing.T) {
-	// The J1:CC1 wire from the real failure: y=270, x 540→560, net D1_N3.
-	wires := []wireSegment{{X0: 540, Y0: 270, X1: 560, Y1: 270, Net: "D1_N3"}}
-	// D2:4 sits at (545,290); "up" with offset 18 snaps to (545,270) — on that wire.
+	// A foreign wire at y=310, x 540→560, net D1_N3.
+	wires := []wireSegment{{X0: 540, Y0: 310, X1: 560, Y1: 310, Net: "D1_N3"}}
+	// D2:4 sits at (545,290); y-UP "up" with offset 18 snaps to (545,310).
 	ex, ey := endpointFor(545, 290, 18, "up")
 	if !stubTouchesForeignWire(545, 290, ex, ey, "USB_HOST_DP", wires) {
 		t.Fatalf("snapped endpoint (%v,%v) lies on a foreign-net wire but was not rejected", ex, ey)
@@ -634,14 +634,14 @@ func TestForeignWireRejectUsesSnappedEndpoint(t *testing.T) {
 func TestScoreCandidate_StubEndingOnNeighbourPinHardRejects(t *testing.T) {
 	// U3 pins 2/3/4 stacked vertically at x=645, 20 apart.
 	scene := acScene{Pins: []acPin{
-		{X: 645, Y: 410, Designator: "U3", PinNumber: "2"},
+		{X: 645, Y: 370, Designator: "U3", PinNumber: "2"},
 		{X: 645, Y: 390, Designator: "U3", PinNumber: "3"},
-		{X: 645, Y: 370, Designator: "U3", PinNumber: "4"},
+		{X: 645, Y: 410, Designator: "U3", PinNumber: "4"},
 	}}
 	rules := defaultAutoconnectRules()
-	pin := acPin{X: 645, Y: 410, Designator: "U3", PinNumber: "2"}
+	pin := acPin{X: 645, Y: 370, Designator: "U3", PinNumber: "2"}
 
-	// "up" with offset 18 snaps to (645,390) — exactly pin 3.
+	// y-UP "up" with offset 18 snaps to (645,390) — exactly pin 3.
 	up := scoreCandidate(pin, "up", 18, "netport", "C11_N3", scene, rules)
 	if up.Score < costPinCross {
 		t.Fatalf("stub ending on pin 3 must be hard-rejected, got score %v (%v)", up.Score, up.Reasons)

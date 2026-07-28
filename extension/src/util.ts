@@ -276,8 +276,8 @@ export interface NormalizedRegion {
  *
  * `eda.dmt_EditorControl.zoomToRegion(left, right, top, bottom)` expects two X
  * bounds and two Y bounds, but it does NOT defensively order them — passing a
- * reversed pair (e.g. `right < left`, or `top`/`bottom` in the wrong order for
- * the y-DOWN schematic coords, issue #19/#20) yields a zero/negative-area box
+ * reversed pair (e.g. `right < left`, or the two Y bounds in reverse order,
+ * issue #19/#20) yields a zero/negative-area box
  * that the canvas resolves to a tiny sliver in a mostly-blank frame. We sort
  * each axis here so the rectangle is the same regardless of which corner the
  * caller passed first, and reject a fully degenerate (zero-area) request up

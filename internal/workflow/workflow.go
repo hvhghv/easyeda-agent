@@ -175,7 +175,7 @@ type State struct {
 	Zones map[string]*ZoneClaim `json:"zones,omitempty"`
 	// SchZones are the SCHEMATIC-side functional-zone claims: the same S0
 	// modules[].zone contract, but resolved against the page's sheet bbox
-	// (y-down) by `sch zones` / `sch layout-lint`'s zone-violation rule instead
+	// (y-up) by `sch zones` / `sch layout-lint`'s zone-violation rule instead
 	// of the board outline. Kept separate from Zones because the same module
 	// legitimately claims different zones on sheet vs board.
 	SchZones map[string]*SchZoneClaim `json:"schZones,omitempty"`
@@ -188,7 +188,7 @@ type State struct {
 	// schematic).
 	SchZoneFrameIdsByPage map[string]*SchZoneFrames `json:"schZoneFrameIdsByPage,omitempty"`
 	History               []Event                   `json:"history,omitempty"`
-	UpdatedAt       string         `json:"updatedAt"`
+	UpdatedAt             string                    `json:"updatedAt"`
 }
 
 // SchZoneClaim is one module's schematic zone claim. Page records which
@@ -673,6 +673,7 @@ type Gate struct {
 //     not re-run yet, outline pending while placement is signed off.
 //   - forceUnsafe (--force-unsafe <reason>) bypasses everything, including a
 //     zero-confirmation board — the deliberate, higher-friction escape hatch.
+//
 // Every bypass is recorded in the state history (action "force" /
 // "force-unsafe"); a refused --force is recorded too ("force-refused"), so the
 // attempt is auditable even though nothing ran. Authorization is for THIS run

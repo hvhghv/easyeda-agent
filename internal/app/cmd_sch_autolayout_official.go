@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,64 @@ const officialAutolayoutTimeout = 300 * time.Second
 // officialMutateTimeout bounds the per-primitive snap/delete exec_js loops
 // (16 parts + up to ~120 wires/flags = a few hundred API calls).
 const officialMutateTimeout = 90 * time.Second
+
+// officialPartInput is the subset of a part's live state that feeds the
+// platform autoLayout call. Capturing it twice gives the long-running command an
+// optimistic-concurrency token: if a user/agent moved, replaced, added, or
+// removed a part while we were preparing the run, we refuse instead of applying
+// a device-type map and pre-layout netlist to a different scene.
+type officialPartInput struct {
+	PrimitiveID string  `json:"primitiveId"`
+	Designator  string  `json:"designator"`
+	X           float64 `json:"x"`
+	Y           float64 `json:"y"`
+	Rotation    float64 `json:"rotation"`
+}
+
+type officialInputSnapshot struct {
+	DocumentUUID     string
+	WireCount        int
+	BusCount         int
+	NetflagCount     int
+	NetportCount     int
+	NetlabelCount    int
+	ShortSymbolCount int
+	SheetCount       int
+	Parts            []officialPartInput
+}
+
+func (s officialInputSnapshot) connectivity() alConnectivitySummary {
+	return alConnectivitySummary{
+		Scope: "activePage", Wires: s.WireCount, Buses: s.BusCount,
+		Netflags: s.NetflagCount, Netports: s.NetportCount,
+		Netlabels: s.NetlabelCount, ShortSymbols: s.ShortSymbolCount,
+	}
+}
+
+// officialInputSnapshotJS deliberately reads parts and wires in one connector
+// action. That makes the second guard as close to atomic as the public editor API
+// allows and leaves no independent components.list call between the final wire
+// check and autoLayout.
+const officialInputSnapshotJS = `// official-autolayout-input-snapshot
+const parts=[];
+let netflagCount=0,netportCount=0,netlabelCount=0,shortSymbolCount=0,sheetCount=0;
+const components=await eda.sch_PrimitiveComponent.getAll();
+if(!Array.isArray(components)) throw new Error('official autolayout snapshot: component inventory unavailable');
+for(const c of components){
+  const t=c.getState_ComponentType?String(c.getState_ComponentType()):'';
+  if(t==='part'||t===''){
+    parts.push({primitiveId:String(c.getState_PrimitiveId()),designator:String(c.getState_Designator?.()??''),x:c.getState_X(),y:c.getState_Y(),rotation:c.getState_Rotation()});
+  }
+  if(t==='netflag') netflagCount++;
+  else if(t==='netport') netportCount++;
+  else if(t==='netlabel') netlabelCount++;
+  else if(t==='short_symbol') shortSymbolCount++;
+  else if(t==='sheet') sheetCount++;
+}
+const wires=await eda.sch_PrimitiveWire.getAll();
+const buses=await eda.sch_PrimitiveBus.getAll();
+if(!Array.isArray(wires)||!Array.isArray(buses)) throw new Error('official autolayout snapshot: wire/bus inventory unavailable');
+return {wireCount:wires.length,busCount:buses.length,netflagCount,netportCount,netlabelCount,shortSymbolCount,sheetCount,parts};`
 
 // runOfficialAutolayout runs eda.sch_Document.autoLayout() on the ACTIVE
 // schematic page inside a safety pipeline. apply gates the real call; rewire
@@ -70,23 +129,43 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 		}
 		return fmt.Errorf("active document is %q, not a schematic — `easyeda doc switch <page>` to the target schematic page first (the platform lays out whatever page is foreground)", dt)
 	}
-
-	before := fetchSchObstacles(cfg, win) // real part bboxes on the active page
-	wireCount, werr := countSchWires(cfg, win)
-	if werr != nil {
-		return fmt.Errorf("read existing wire count: %w", werr)
+	docUUID := cur.Context.DocumentUUID
+	if docUUID == "" {
+		return fmt.Errorf("active schematic response has no document UUID — refusing an unpinned platform autoLayout")
 	}
-	fmt.Fprintf(stderr, "official autolayout: %d part(s), %d wire(s) on the active page\n", len(before), wireCount)
+	// Pin every later mutation (autoLayout, snap, delete, rewire, save) to the
+	// exact UUID observed above, even when the caller selected the foreground
+	// page instead of passing --doc. The in-action autoLayout guard remains the
+	// last-race defense; this shared guard also protects all follow-up mutations.
+	pinnedCfg := *cfg
+	pinnedCfg.doc = docUUID
+	cfg = &pinnedCfg
+
+	before, berr := readOfficialInputSnapshot(cfg, win, docUUID)
+	if berr != nil {
+		return fmt.Errorf("capture official autolayout input: %w", berr)
+	}
+	connectivity := before.connectivity()
+	fmt.Fprintf(stderr, "official autolayout: %d part(s), connectivity=%d (wires=%d buses=%d markers=%d) on the pinned page\n",
+		len(before.Parts), connectivity.total(), connectivity.Wires, connectivity.Buses,
+		connectivity.Netflags+connectivity.Netports+connectivity.Netlabels+connectivity.ShortSymbols)
+	if before.SheetCount != 1 {
+		return fmt.Errorf("official autolayout requires exactly one readable sheet/title-block primitive on the target page; found %d", before.SheetCount)
+	}
+	if connectivity.Buses > 0 {
+		return fmt.Errorf("this page has %d bus primitive(s); official --rewire cannot capture/rebuild bus topology, so autoLayout is refused even with --rewire", connectivity.Buses)
+	}
 
 	// Pre-guard: autoLayout destroys existing wiring. Refuse a wired page unless
 	// the caller opted into the destroy-and-rebuild path.
-	if wireCount > 0 && !rewire {
-		return fmt.Errorf("this page already has %d wire(s) — the platform autoLayout MOVES parts without their wires and would leave them ALL dangling. "+
-			"Run it BEFORE wiring, or pass --rewire to delete + rebuild the wiring from the current netlist afterward (best-effort: a scattered layout can leave residual shorts)", wireCount)
+	if connectivity.total() > 0 && !rewire {
+		return fmt.Errorf("this page already has connectivity (wires=%d netflags=%d netports=%d netlabels=%d shortSymbols=%d) — the platform autoLayout MOVES parts without attached connectivity. "+
+			"Run it BEFORE wiring, or pass --rewire to delete + rebuild the wiring from the current netlist afterward (best-effort: a scattered layout can leave residual shorts)",
+			connectivity.Wires, connectivity.Netflags, connectivity.Netports, connectivity.Netlabels, connectivity.ShortSymbols)
 	}
 
 	if !apply {
-		fmt.Fprintf(stdout, "dry-run: would run the platform eda.sch_Document.autoLayout() over %d part(s) on this page\n", len(before))
+		fmt.Fprintf(stdout, "dry-run: would run the platform eda.sch_Document.autoLayout() over %d part(s) on this page\n", len(before.Parts))
 		if rewire {
 			fmt.Fprintln(stdout, "(--rewire: would then snap-to-grid, delete the current wiring, and rebuild it from the live netlist)")
 		}
@@ -98,11 +177,13 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 	// live net's pins become an autoconnect connection at the post-layout
 	// positions. Done up front because autoLayout obliterates the wiring.
 	var conns []acConnSpec
+	var capturedNets map[string]map[string]bool
 	if rewire {
-		liveNets, _, rerr := readLiveNets(cfg, win)
+		liveNets, rerr := readOfficialLiveNets(cfg, win, docUUID)
 		if rerr != nil {
 			return fmt.Errorf("--rewire needs the pre-layout netlist but reading it failed: %w", rerr)
 		}
+		capturedNets = liveNets
 		conns = connsFromLiveNets(liveNets)
 		fmt.Fprintf(stderr, "captured %d net(s) → %d pin connection(s) to rebuild after layout\n", countNets(liveNets), len(conns))
 	}
@@ -112,17 +193,48 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 	// otherDevice) and clusters far smarter with it than the bare call. Built from
 	// the page's real designators; an empty map degrades to the bare call. Passing
 	// an extra props object is harmless on builds that ignore it (JS).
-	dtMap := buildDeviceTypeMap(fetchSchPartDesignators(cfg, win))
-	code := "await eda.sch_Document.autoLayout(); return {done:true};"
+	designators := make([]string, 0, len(before.Parts))
+	for _, p := range before.Parts {
+		designators = append(designators, p.Designator)
+	}
+	dtMap := buildDeviceTypeMap(designators)
 	if len(dtMap) > 0 {
-		mapJSON, _ := json.Marshal(dtMap)
-		code = fmt.Sprintf("await eda.sch_Document.autoLayout({designatorDeviceTypeMap: %s}); return {done:true};", mapJSON)
 		fmt.Fprintf(stderr, "feeding designatorDeviceTypeMap for %d part(s) (role-aware layout)\n", len(dtMap))
 	}
+
+	// Final pre-mutation guard. For --rewire, compare the canonical netlist too:
+	// an equal wire count does NOT prove equal topology (one wire can be replaced
+	// by another while preserving N). Read the netlist first, then make the
+	// combined parts+wire snapshot the very last read before autoLayout.
+	if rewire {
+		nowNets, nerr := readOfficialLiveNets(cfg, win, docUUID)
+		if nerr != nil {
+			return fmt.Errorf("re-read pre-layout netlist immediately before autoLayout: %w", nerr)
+		}
+		if beforeNet, nowNet := canonicalOfficialNets(capturedNets), canonicalOfficialNets(nowNets); beforeNet != nowNet {
+			return fmt.Errorf("official autolayout input drifted before mutation: schematic net topology changed after capture — refusing to delete/rebuild from a stale netlist")
+		}
+	}
+	immediate, ierr := readOfficialInputSnapshot(cfg, win, docUUID)
+	if ierr != nil {
+		return fmt.Errorf("re-read official autolayout input immediately before autoLayout: %w", ierr)
+	}
+	if derr := compareOfficialInputSnapshots(before, immediate); derr != nil {
+		return fmt.Errorf("official autolayout input drifted before mutation: %w", derr)
+	}
+	code, codeErr := buildGuardedOfficialAutolayoutJS(before, dtMap)
+	if codeErr != nil {
+		return fmt.Errorf("build guarded platform autoLayout call: %w", codeErr)
+	}
+
 	fmt.Fprintln(stderr, "running platform autoLayout — this is a LONG operation (~2min); the editor shows a progress bar…")
-	if _, err := requestActionTimed(cfg, "debug.exec_js", win,
-		map[string]any{"code": code}, officialAutolayoutTimeout); err != nil {
+	layoutRes, err := requestActionTimed(cfg, "debug.exec_js", win,
+		map[string]any{"code": code}, officialAutolayoutTimeout)
+	if err != nil {
 		return fmt.Errorf("platform autoLayout failed (it needs the schematic foreground; a background page can hang): %w", err)
+	}
+	if err := validateOfficialResponseDocument(layoutRes, docUUID); err != nil {
+		return fmt.Errorf("platform autoLayout document verification failed after mutation: %w", err)
 	}
 	fmt.Fprintln(stderr, "platform autoLayout finished")
 
@@ -136,6 +248,7 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 
 	// Re-wire: the autoLayout left every wire dangling; delete them + the flags
 	// and rebuild from the captured netlist.
+	var rewireErr error
 	if rewire {
 		dw, df, derr := deleteSchWiresAndFlags(cfg, win)
 		if derr != nil {
@@ -147,52 +260,419 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 			// layout can make stubs collide). Report it but continue to the check —
 			// the honest post-state is what matters.
 			fmt.Fprintf(stderr, "rewire: %v (some pins may be unconnected — see the check below)\n", err)
+			rewireErr = err
 		}
 	}
 
-	// Self-check: overlap (layout-lint) AND wiring (sch check) — the bare overlap
-	// check is exactly what missed the destroyed wiring before.
-	res, err := requestAction(cfg, "schematic.components.list", win, map[string]any{"includeBBox": true})
+	// Self-check: real bbox + pin geometry AND wiring. Every unavailable proof is
+	// a hard failure; this command has already mutated the page, so returning zero
+	// on a skipped read/check would falsely certify an unknown state.
+	res, err := requestAction(cfg, "schematic.components.list", win, map[string]any{
+		"includeBBox": true, "includePins": true, "includeConnectivitySummary": true,
+	})
 	if err != nil {
-		return fmt.Errorf("read back positions: %w", err)
+		return fmt.Errorf("official autolayout post-check could not read back geometry: %w", err)
+	}
+	if err := validateOfficialResponseDocument(res, docUUID); err != nil {
+		return fmt.Errorf("official autolayout post-check read the wrong document: %w", err)
 	}
 	comps, perr := parseLayoutComps(res.Result)
 	if perr != nil {
-		return perr
+		return fmt.Errorf("official autolayout post-check could not parse geometry: %w", perr)
+	}
+	postConnectivity, connErr := parseAutolayoutConnectivity(res.Result)
+	if connErr != nil {
+		return fmt.Errorf("official autolayout post-check could not prove connectivity inventory: %w", connErr)
 	}
 	kept, _ := filterLayoutComps(comps, false)
-	overlaps := len(analyzeLayout(kept, 0, -1).Overlaps)
+	lrep := analyzeLayout(kept, 0, acCoordEps)
+	overlaps := len(lrep.Overlaps)
+	pinCoincidences := len(lrep.PinCoincidences)
+	offGrid := detectOffGridAnchors(kept, schAnchorGrid, acCoordEps)
+	expectedPartIDs := make(map[string]bool, len(before.Parts))
+	for _, p := range before.Parts {
+		expectedPartIDs[p.PrimitiveID] = true
+	}
+	postPartIDs := make(map[string]bool, len(kept))
+	uncheckedPinSets := 0
+	invalidPartGeometry := 0
+	for _, c := range kept {
+		postPartIDs[c.ID] = true
+		if !c.PinsAvailable || !c.PinsProofKnown {
+			uncheckedPinSets++
+		}
+		invalidPartGeometry += len(c.GeometryErrors)
+	}
+	partSetChanged := len(expectedPartIDs) != len(postPartIDs)
+	if !partSetChanged {
+		for id := range expectedPartIDs {
+			if !postPartIDs[id] {
+				partSetChanged = true
+				break
+			}
+		}
+	}
+	var markerNoBBox int
+	for _, c := range comps {
+		if isSchMarker(c.ComponentType) && c.BBox == nil {
+			markerNoBBox++
+		}
+	}
+	var titleBlock *layoutBBox
+	postSheet := sheetBBoxOf(comps)
+	if postSheet != nil {
+		sheet := postSheet
+		titleBlock, _ = titleBlockKeepout(sheet)
+	}
+	markerFindings := analyzeMarkerGeometry(comps, titleBlock, 0.5)
 
-	sum, cerr := schCheckSummary(cfg, win)
-	wiringLine := "wiring check unavailable"
-	if cerr == nil {
-		wiringLine = fmt.Sprintf("%d dangling wire(s), %d floating pin(s)", sum.DanglingWires, sum.FloatingPins)
+	checkRep, cerr := schCheckReport(cfg, win, docUUID)
+	if cerr != nil {
+		return fmt.Errorf("official autolayout post-check could not run/parse schematic.check: %w", cerr)
+	}
+	sum := checkRep.Summary
+	wiringLine := fmt.Sprintf("%d dangling wire(s), %d floating pin(s)", sum.DanglingWires, sum.FloatingPins)
+
+	var failures []string
+	if rewireErr != nil {
+		failures = append(failures, "rewire reported one or more failed connections")
+	}
+	if len(lrep.NoBBox) > 0 {
+		failures = append(failures, fmt.Sprintf("%d part(s) had no readable bbox", len(lrep.NoBBox)))
+	}
+	if partSetChanged {
+		failures = append(failures, "post-layout part identity set differs from the guarded input")
+	}
+	if uncheckedPinSets > 0 {
+		failures = append(failures, fmt.Sprintf("%d part(s) had no readable/proven pin set", uncheckedPinSets))
+	}
+	if invalidPartGeometry > 0 {
+		failures = append(failures, fmt.Sprintf("%d invalid part geometry value(s)", invalidPartGeometry))
+	}
+	if len(offGrid) > 0 {
+		failures = append(failures, fmt.Sprintf("%d part anchor(s) remained off the %d-unit grid", len(offGrid), schAnchorGrid))
+	}
+	if markerNoBBox > 0 {
+		failures = append(failures, fmt.Sprintf("%d net marker(s) had no readable bbox", markerNoBBox))
+	}
+	if postSheet == nil {
+		failures = append(failures, "sheet/title-block bbox was unavailable after layout")
+	}
+	if postConnectivity.Buses > 0 {
+		failures = append(failures, fmt.Sprintf("%d unsupported bus primitive(s) present after layout", postConnectivity.Buses))
+	}
+	if !rewire && postConnectivity.total() > 0 {
+		failures = append(failures, fmt.Sprintf("unwired-mode autoLayout unexpectedly left/created %d connectivity primitive(s)", postConnectivity.total()))
+	}
+	if overlaps > 0 {
+		failures = append(failures, fmt.Sprintf("%d part overlap(s)", overlaps))
+	}
+	if pinCoincidences > 0 {
+		failures = append(failures, fmt.Sprintf("%d cross-part pin coincidence(s)", pinCoincidences))
+	}
+	if len(markerFindings) > 0 {
+		failures = append(failures, fmt.Sprintf("%d blocking marker/title-block geometry finding(s)", len(markerFindings)))
+	}
+	if blocking := officialBlockingCheckFindings(checkRep); blocking > 0 {
+		failures = append(failures, fmt.Sprintf("%d blocking schematic.check finding(s)", blocking))
 	}
 
-	clean := overlaps == 0 && (cerr != nil || sum.DanglingWires == 0)
-	mark := "⚠"
+	mark := "✗"
+	clean := len(failures) == 0
 	if clean {
 		mark = "✓"
 	}
-	fmt.Fprintf(stdout, "%s official autolayout applied — %d part(s), %d overlap(s), %s\n", mark, len(kept), overlaps, wiringLine)
+	fmt.Fprintf(stdout, "%s official autolayout applied — %d part(s), %d overlap(s), %d pin-coincidence(s), %s\n",
+		mark, len(kept), overlaps, pinCoincidences, wiringLine)
 	if !rewire {
 		fmt.Fprintln(stdout, "note: wiring was NOT rebuilt (page was unwired, or --rewire not passed) — wire it now with `sch autoconnect`")
 	} else if cerr == nil && sum.DanglingWires == 0 && sum.FloatingPins > 40 {
 		fmt.Fprintln(stdout, "note: high floating-pin count may include unused IC pins (normal) plus stubs the scattered layout could not route — verify with `sch bridge-check`")
 	}
 	fmt.Fprintln(stdout, "note: the platform engine is connectivity-clustered (radial) and off-grid; it is messier than `--engine template` and a scattered layout can leave stub-collision shorts. Prefer template for a known block.")
+	if !clean {
+		return fmt.Errorf("official autolayout post-check failed: %s — the page was mutated; fix/revert it before continuing", strings.Join(failures, "; "))
+	}
+	if err := saveAutolayoutDocument(cfg, win, docUUID, "save verified official autolayout"); err != nil {
+		return fmt.Errorf("official autolayout passed checks but save was not proven: %w", err)
+	}
 	return nil
 }
 
-// countSchWires returns the number of wires on the active page.
-func countSchWires(cfg *appConfig, win string) (int, error) {
-	res, err := requestActionTimed(cfg, "debug.exec_js", win,
-		map[string]any{"code": "return {n:(await eda.sch_PrimitiveWire.getAll()).length}"}, defaultActionTimeout)
+// buildGuardedOfficialAutolayoutJS closes the last request-to-request race:
+// debug.exec_js checks the active document plus the exact guarded part input and
+// wire count in the SAME handler invocation that starts autoLayout. The earlier
+// Go-side second snapshot produces a useful diff; this in-action guard prevents
+// a page switch or edit in the short gap after that snapshot from mutating a
+// different scene.
+func buildGuardedOfficialAutolayoutJS(expected officialInputSnapshot, dtMap map[string]string) (string, error) {
+	docJSON, err := json.Marshal(expected.DocumentUUID)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	v, _ := res.Result["value"].(map[string]any)
-	return int(asFloat(v["n"])), nil
+	partsJSON, err := json.Marshal(expected.Parts)
+	if err != nil {
+		return "", err
+	}
+	mapJSON, err := json.Marshal(dtMap)
+	if err != nil {
+		return "", err
+	}
+	autoCall := "await eda.sch_Document.autoLayout();"
+	if len(dtMap) > 0 {
+		autoCall = fmt.Sprintf("await eda.sch_Document.autoLayout({designatorDeviceTypeMap:%s});", mapJSON)
+	}
+	return fmt.Sprintf(`// official-autolayout-guarded-mutate
+const expectedDoc=%s;
+const activeDoc=await eda.dmt_SelectControl.getCurrentDocumentInfo();
+if(!activeDoc||String(activeDoc.uuid)!==expectedDoc){
+  throw new Error('official autolayout guard: active document changed before mutation');
+}
+const expectedParts=%s;
+const actualParts=[];
+let netflagCount=0,netportCount=0,netlabelCount=0,shortSymbolCount=0,sheetCount=0;
+const components=await eda.sch_PrimitiveComponent.getAll();
+if(!Array.isArray(components)) throw new Error('official autolayout guard: component inventory unavailable');
+for(const c of components){
+  const t=c.getState_ComponentType?String(c.getState_ComponentType()):'';
+  if(t==='part'||t===''){
+    actualParts.push({primitiveId:String(c.getState_PrimitiveId()),designator:String(c.getState_Designator?.()??''),x:c.getState_X(),y:c.getState_Y(),rotation:c.getState_Rotation()});
+  }
+  if(t==='netflag') netflagCount++;
+  else if(t==='netport') netportCount++;
+  else if(t==='netlabel') netlabelCount++;
+  else if(t==='short_symbol') shortSymbolCount++;
+  else if(t==='sheet') sheetCount++;
+}
+actualParts.sort((a,b)=>a.primitiveId.localeCompare(b.primitiveId));
+if(actualParts.length!==expectedParts.length){
+  throw new Error('official autolayout guard: part count changed before mutation');
+}
+for(let i=0;i<expectedParts.length;i++){
+  const a=actualParts[i], e=expectedParts[i];
+  if(a.primitiveId!==e.primitiveId||a.designator!==e.designator||a.x!==e.x||a.y!==e.y||a.rotation!==e.rotation){
+    throw new Error('official autolayout guard: part input changed before mutation');
+  }
+}
+const wires=await eda.sch_PrimitiveWire.getAll();
+const buses=await eda.sch_PrimitiveBus.getAll();
+if(!Array.isArray(wires)||!Array.isArray(buses)){
+  throw new Error('official autolayout guard: wire/bus inventory unavailable');
+}
+if(wires.length!==%d||buses.length!==%d||netflagCount!==%d||netportCount!==%d||netlabelCount!==%d||shortSymbolCount!==%d||sheetCount!==%d){
+  throw new Error('official autolayout guard: connectivity or sheet input changed before mutation');
+}
+%s
+return {done:true,guardedDocumentUuid:expectedDoc};`,
+		docJSON, partsJSON,
+		expected.WireCount, expected.BusCount,
+		expected.NetflagCount, expected.NetportCount, expected.NetlabelCount,
+		expected.ShortSymbolCount, expected.SheetCount,
+		autoCall), nil
+}
+
+func validateOfficialResponseDocument(res *actionResult, expectedUUID string) error {
+	if res == nil || res.Context == nil {
+		return fmt.Errorf("response has no live document context")
+	}
+	if res.Context.DocumentUUID != expectedUUID {
+		return fmt.Errorf("expected document %s, response came from %s", expectedUUID, res.Context.DocumentUUID)
+	}
+	if res.Context.DocumentType != "" && res.Context.DocumentType != "schematic" {
+		return fmt.Errorf("expected schematic document %s, response type is %q", expectedUUID, res.Context.DocumentType)
+	}
+	return nil
+}
+
+func readOfficialInputSnapshot(cfg *appConfig, win, expectedUUID string) (officialInputSnapshot, error) {
+	res, err := requestActionTimed(cfg, "debug.exec_js", win,
+		map[string]any{"code": officialInputSnapshotJS}, defaultActionTimeout)
+	if err != nil {
+		return officialInputSnapshot{}, err
+	}
+	if err := validateOfficialResponseDocument(res, expectedUUID); err != nil {
+		return officialInputSnapshot{}, err
+	}
+	v, ok := res.Result["value"].(map[string]any)
+	if !ok {
+		return officialInputSnapshot{}, fmt.Errorf("snapshot response has no value object")
+	}
+	readCount := func(name string) (int, error) {
+		n, ok := finiteFloat(v[name])
+		if !ok || n < 0 || n != math.Trunc(n) {
+			return 0, fmt.Errorf("snapshot response has invalid %s=%v", name, v[name])
+		}
+		return int(n), nil
+	}
+	counts := make(map[string]int)
+	for _, name := range []string{
+		"wireCount", "busCount", "netflagCount", "netportCount",
+		"netlabelCount", "shortSymbolCount", "sheetCount",
+	} {
+		count, countErr := readCount(name)
+		if countErr != nil {
+			return officialInputSnapshot{}, countErr
+		}
+		counts[name] = count
+	}
+	rawParts, ok := v["parts"].([]any)
+	if !ok {
+		return officialInputSnapshot{}, fmt.Errorf("snapshot response has no parts array")
+	}
+	snap := officialInputSnapshot{
+		DocumentUUID:     expectedUUID,
+		WireCount:        counts["wireCount"],
+		BusCount:         counts["busCount"],
+		NetflagCount:     counts["netflagCount"],
+		NetportCount:     counts["netportCount"],
+		NetlabelCount:    counts["netlabelCount"],
+		ShortSymbolCount: counts["shortSymbolCount"],
+		SheetCount:       counts["sheetCount"],
+		Parts:            make([]officialPartInput, 0, len(rawParts)),
+	}
+	for i, raw := range rawParts {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			return officialInputSnapshot{}, fmt.Errorf("snapshot parts[%d] is not an object", i)
+		}
+		p := officialPartInput{
+			PrimitiveID: asString(m["primitiveId"]),
+			Designator:  asString(m["designator"]),
+		}
+		if p.PrimitiveID == "" {
+			return officialInputSnapshot{}, fmt.Errorf("snapshot parts[%d] has no primitiveId", i)
+		}
+		var numberOK bool
+		if p.X, numberOK = asFloatOK(m["x"]); !numberOK || math.IsNaN(p.X) || math.IsInf(p.X, 0) {
+			return officialInputSnapshot{}, fmt.Errorf("snapshot part %s has invalid x=%v", p.PrimitiveID, m["x"])
+		}
+		if p.Y, numberOK = asFloatOK(m["y"]); !numberOK || math.IsNaN(p.Y) || math.IsInf(p.Y, 0) {
+			return officialInputSnapshot{}, fmt.Errorf("snapshot part %s has invalid y=%v", p.PrimitiveID, m["y"])
+		}
+		if p.Rotation, numberOK = asFloatOK(m["rotation"]); !numberOK || math.IsNaN(p.Rotation) || math.IsInf(p.Rotation, 0) {
+			return officialInputSnapshot{}, fmt.Errorf("snapshot part %s has invalid rotation=%v", p.PrimitiveID, m["rotation"])
+		}
+		snap.Parts = append(snap.Parts, p)
+	}
+	sort.Slice(snap.Parts, func(i, j int) bool {
+		return snap.Parts[i].PrimitiveID < snap.Parts[j].PrimitiveID
+	})
+	return snap, nil
+}
+
+func compareOfficialInputSnapshots(before, now officialInputSnapshot) error {
+	if before.DocumentUUID != now.DocumentUUID {
+		return fmt.Errorf("document changed from %s to %s", before.DocumentUUID, now.DocumentUUID)
+	}
+	if before.WireCount != now.WireCount {
+		return fmt.Errorf("wire count changed from %d to %d", before.WireCount, now.WireCount)
+	}
+	if before.connectivity() != now.connectivity() {
+		return fmt.Errorf("connectivity inventory changed from %+v to %+v", before.connectivity(), now.connectivity())
+	}
+	if before.SheetCount != now.SheetCount {
+		return fmt.Errorf("sheet count changed from %d to %d", before.SheetCount, now.SheetCount)
+	}
+	if len(before.Parts) != len(now.Parts) {
+		return fmt.Errorf("part count changed from %d to %d", len(before.Parts), len(now.Parts))
+	}
+	for i := range before.Parts {
+		if before.Parts[i] != now.Parts[i] {
+			return fmt.Errorf("part input changed: before=%+v now=%+v", before.Parts[i], now.Parts[i])
+		}
+	}
+	return nil
+}
+
+// readOfficialLiveNets is the fail-closed netlist reader for the destructive
+// --rewire path. The shared block-apply reader intentionally tolerates partial
+// result shapes; official autoLayout cannot, because an empty/partial capture
+// would be followed by deleting the original wiring.
+func readOfficialLiveNets(cfg *appConfig, win, expectedUUID string) (map[string]map[string]bool, error) {
+	res, err := requestAction(cfg, "schematic.read", win, map[string]any{"includeCheck": false})
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOfficialResponseDocument(res, expectedUUID); err != nil {
+		return nil, err
+	}
+	rawNets, ok := res.Result["nets"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("schematic.read result has no nets array")
+	}
+	out := map[string]map[string]bool{}
+	for i, raw := range rawNets {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("nets[%d] is not an object", i)
+		}
+		name := asString(m["net"])
+		if name == "" {
+			return nil, fmt.Errorf("nets[%d] has no net name", i)
+		}
+		rawPins, ok := m["pins"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("net %q has no pins array", name)
+		}
+		members := out[name]
+		if members == nil {
+			members = map[string]bool{}
+			out[name] = members
+		}
+		for j, rawPin := range rawPins {
+			pin := asString(rawPin)
+			if pin == "" {
+				return nil, fmt.Errorf("net %q pins[%d] is not a non-empty string", name, j)
+			}
+			members[pin] = true
+		}
+	}
+	return out, nil
+}
+
+func canonicalOfficialNets(nets map[string]map[string]bool) string {
+	lines := make([]string, 0, len(nets))
+	for net, members := range nets {
+		pins := make([]string, 0, len(members))
+		for pin := range members {
+			pins = append(pins, pin)
+		}
+		sort.Strings(pins)
+		lines = append(lines, net+"="+strings.Join(pins, ","))
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+func officialBlockingCheckFindings(rep checkReport) int {
+	fromSummary := rep.Summary.GeomNetMismatches +
+		rep.Summary.NetMarkerMismatches +
+		rep.Summary.MultiNetWires +
+		rep.Summary.WireCrossings +
+		rep.Summary.WireOverPins +
+		rep.Summary.ZeroLengthWires +
+		rep.Summary.DanglingWires +
+		rep.Summary.DuplicateNetMarkers +
+		rep.Summary.TitleblockOverlaps +
+		rep.Summary.MarkerOverlaps
+	fromFindings := 0
+	for _, finding := range rep.Findings {
+		// Floating pins include intentionally unused IC pins and remain
+		// diagnostic here. Every other (including a future unknown) check type is
+		// structural and fail-closed.
+		if strings.EqualFold(finding.Type, "floating-pin") {
+			continue
+		}
+		count := finding.Count
+		if count < 1 {
+			count = 1
+		}
+		fromFindings += count
+	}
+	if fromFindings > fromSummary {
+		return fromFindings
+	}
+	return fromSummary
 }
 
 // snapSchPartsToGrid moves every off-grid part anchor to the nearest multiple of
@@ -346,16 +826,55 @@ func buildDeviceTypeMap(desigs []string) map[string]string {
 	return m
 }
 
-// schCheckSummary runs schematic.check and returns its summary (floating pins,
-// dangling wires, …).
-func schCheckSummary(cfg *appConfig, win string) (checkSummary, error) {
+// schCheckReport runs schematic.check and validates the result as a complete
+// proof, rather than letting missing fields decode to false-clean zero values.
+func schCheckReport(cfg *appConfig, win, expectedUUID string) (checkReport, error) {
 	res, err := requestAction(cfg, "schematic.check", win, map[string]any{})
 	if err != nil {
-		return checkSummary{}, err
+		return checkReport{}, err
+	}
+	if err := validateOfficialResponseDocument(res, expectedUUID); err != nil {
+		return checkReport{}, err
+	}
+	rawSummary, ok := res.Result["summary"].(map[string]any)
+	if !ok {
+		return checkReport{}, fmt.Errorf("schematic.check result has no summary object")
+	}
+	requiredCounts := []string{
+		"floatingPins",
+		"componentsWithFloating",
+		"geomNetMismatches",
+		"netMarkerMismatches",
+		"multiNetWires",
+		"wireCrossings",
+		"wireOverPins",
+		"zeroLengthWires",
+		"danglingWires",
+		"total",
+	}
+	for _, field := range requiredCounts {
+		n, ok := asFloatOK(rawSummary[field])
+		if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n != math.Trunc(n) {
+			return checkReport{}, fmt.Errorf("schematic.check summary has invalid or missing %s=%v", field, rawSummary[field])
+		}
+	}
+	rawFindings, ok := res.Result["findings"].([]any)
+	if !ok {
+		return checkReport{}, fmt.Errorf("schematic.check result has no findings array")
+	}
+	passed, ok := res.Result["passed"].(bool)
+	if !ok {
+		return checkReport{}, fmt.Errorf("schematic.check result has no boolean passed field")
 	}
 	rep, perr := parseCheckReport(res.Result)
 	if perr != nil {
-		return checkSummary{}, perr
+		return checkReport{}, perr
 	}
-	return rep.Summary, nil
+	if rep.Summary.Total != len(rawFindings) {
+		return checkReport{}, fmt.Errorf("schematic.check summary total=%d but findings has %d item(s)", rep.Summary.Total, len(rawFindings))
+	}
+	if passed != (rep.Summary.Total == 0) {
+		return checkReport{}, fmt.Errorf("schematic.check passed=%t disagrees with total=%d", passed, rep.Summary.Total)
+	}
+	return rep, nil
 }
