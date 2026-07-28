@@ -490,7 +490,9 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 		// Stagger: register the just-placed label so later connections in this
 		// batch avoid stacking on it (clustered-pin staggering).
 		if rules.StaggerLabels {
-			scene.Flags = append(scene.Flags, labelBox(selected.EndPoint.X, selected.EndPoint.Y))
+			scene.Flags = append(scene.Flags, predictedMarkerBBox(
+				selected.EndPoint.X, selected.EndPoint.Y, canonicalKind, selected.Direction,
+			))
 		}
 		// Batch mutual exclusion (issue #138): register the just-planned stub as a
 		// scene wire so later connections treat it exactly like existing copper —

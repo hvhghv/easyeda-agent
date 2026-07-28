@@ -6,6 +6,8 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-28
+
 ### Added
 - **电路块库吸收 M5Stack StickS3(K150)—— 11 个新块 + 2 个新类目**:从官方公开原理图
   (V0.6)对标提取,填补库里完全缺失的品类。新增 `audio`(`es8311_codec_i2s` /
@@ -24,6 +26,15 @@ follow [SemVer](https://semver.org/).
   多域电源架构参考)。
 
 ### Fixed
+- **autoconnect 改用方向感知的真实 marker 外形，消除“规划通过、落图重叠”**:旧规划器把
+  netport/netflag 一律近似成端点居中的 `24×11` 方框，既低估 31-unit 长端口，又虚构端点
+  后方占位，导致密集引脚处错判。现在按 netport/ground/power 家族和四个方向使用真机标定
+  bbox，打分与批内占位共用同一预测器；StickS3 外设页实测 marker overlap `17→0`，
+  45-pin canonical topology 修复前后哈希完全一致。
+- **模板布局链路 fail-closed，不再把“散件摊开”误报成已完成**:`components.list` 提供
+  页级 connectivity summary 与 pins 证明；模板引擎遇到活动连接或缺失几何即拒绝运行，
+  应用过程支持事务回滚、回读与保存校验，并以 strict layout/check 门收尾。本次 StickS3
+  外设页按 LCD / IMU / 按键三块重排后，器件、图签、引脚、分区冲突均为 0。
 - **`sch block-apply` 位号前缀映射缺 `mosfet`/`sensor`/`mic` 命名空间**:StickS3 吸收引入
   这三类新料后,block-apply 因 `bapPrefixes` 无对应前缀而硬报错拒放(设计上不猜前缀免误配)。
   补 `mosfet→Q` / `sensor→U` / `mic→MK`(IEEE-315 类),受影响的 6 个块(BMI270/IR/音频/

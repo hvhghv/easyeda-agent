@@ -101,13 +101,67 @@ func TestScoreCandidate_TitleBlockClearNotRejected(t *testing.T) {
 	}
 }
 
+func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		direction string
+		want      layoutBBox
+	}{
+		// netport: live body is 31×11 horizontally / 11×31 vertically,
+		// starting 9.5 units beyond the endpoint and extending to 40.5.
+		{"netport-left", "net_port_bi", "left", layoutBBox{59.5, 194.5, 90.5, 205.5}},
+		{"netport-right", "net_port_bi", "right", layoutBBox{109.5, 194.5, 140.5, 205.5}},
+		{"netport-up", "net_port_bi", "up", layoutBBox{94.5, 159.5, 105.5, 190.5}},
+		{"netport-down", "net_port_bi", "down", layoutBBox{94.5, 209.5, 105.5, 240.5}},
+
+		// ground: 10×21 horizontally / 21×10 vertically, 9.5..19.5 outward.
+		{"ground-left", "ground", "left", layoutBBox{80.5, 189.5, 90.5, 210.5}},
+		{"ground-right", "ground", "right", layoutBBox{109.5, 189.5, 119.5, 210.5}},
+		{"ground-up", "ground", "up", layoutBBox{89.5, 180.5, 110.5, 190.5}},
+		{"ground-down", "ground", "down", layoutBBox{89.5, 209.5, 110.5, 219.5}},
+
+		// power: 6×11 horizontally / 11×6 vertically, 4.5..10.5 outward.
+		{"power-left", "power", "left", layoutBBox{89.5, 194.5, 95.5, 205.5}},
+		{"power-right", "power", "right", layoutBBox{104.5, 194.5, 110.5, 205.5}},
+		{"power-up", "power", "up", layoutBBox{94.5, 189.5, 105.5, 195.5}},
+		{"power-down", "power", "down", layoutBBox{94.5, 204.5, 105.5, 210.5}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := predictedMarkerBBox(100, 200, tt.kind, tt.direction)
+			if got != tt.want {
+				t.Fatalf("predictedMarkerBBox = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The endpoint-centered 24×11 predictor missed a real netport body that starts
+// away from the endpoint. Lock the scorer to the direction-shifted live bbox:
+// right@(100,100) occupies x=109.5..140.5, so a part at x=120..130 must collide.
+func TestScoreCandidate_UsesDirectionShiftedNetportBBox(t *testing.T) {
+	pin := acPin{X: 80, Y: 100}
+	scene := acScene{Parts: []layoutBBox{{MinX: 120, MinY: 96, MaxX: 130, MaxY: 104}}}
+	c := scoreCandidate(pin, "right", 20, "net_port_bi", "SIG", scene, rulesFor())
+	hasPartOverlap := false
+	for _, r := range c.Reasons {
+		if r.Cost == costPartOverlap {
+			hasPartOverlap = true
+		}
+	}
+	if !hasPartOverlap {
+		t.Fatalf("direction-shifted netport body must overlap the part, reasons=%+v", c.Reasons)
+	}
+}
+
 // TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch (issue #148 Phase-2):
 // the real ~11-tall marker box must overlap a neighbour's box at 10-unit pitch so
 // the scorer's flag-collision penalty fires and drives auto-stagger. The old 8×8
 // box never overlapped at 10 pitch, so parallel markers stacked silently.
 func TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch(t *testing.T) {
 	// A marker already placed to the left of pin1 (endpoint 82,200), registered.
-	scene := acScene{Flags: []layoutBBox{labelBox(82, 200)}}
+	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left")}}
 	// pin2 sits 10 above pin1; its left marker at the SAME offset lands at (82,210).
 	pin2 := acPin{X: 100, Y: 210}
 	c := scoreCandidate(pin2, "left", 18, "ground", "N2", scene, rulesFor())
@@ -126,7 +180,7 @@ func TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch(t *testing.T) {
 // the planner's best candidate must avoid overlapping it (stagger to another
 // offset/direction), not stack on top with only a soft penalty.
 func TestPlanConnection_StaggersAwayFromRegisteredMarker(t *testing.T) {
-	scene := acScene{Flags: []layoutBBox{labelBox(82, 200)}}
+	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left")}}
 	pin2 := acPin{X: 100, Y: 210}
 	sel := planConnection(pin2, "ground", "N2", scene, rulesFor())[0]
 	for _, r := range sel.Reasons {

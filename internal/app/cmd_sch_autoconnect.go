@@ -152,18 +152,41 @@ const (
 	costOffsetPerUnit = 0.1  // +offset * 0.1 — prefer shorter stubs
 	bonusOutwardSide  = -20  // direction matches the pin's outward side
 	bonusKindDefault  = -10  // direction matches the kind default (GND down / power up / port outward)
-	// Nominal marker box half-extents (issue #148 Phase-2): a placed netflag/netport
-	// is ~11 units TALL and ~24 wide (real getPrimitivesBBox readback: netport 11×31,
-	// netflag 10×21), NOT the old 8×8 square. The height is what makes the scorer
-	// auto-stagger markers on tight (10-unit-pitch) parallel pins — an 8×8 box never
-	// overlapped its neighbour at 10 pitch, so stagger never fired. Kept a shade
-	// under the real width so the box doesn't reach back to a marker's OWN owner part
-	// (endpoint sits ≥18 from the pin; 12 < 18) and over-reject valid placements.
-	acLabelHalfW = 12.0
-	acLabelHalfH = 5.5
-	acCoordEps   = 0.01 // coordinate-equality tolerance
-	acOverlapEps = 1e-6 // positive-length threshold for interval/area overlap
+	acCoordEps        = 0.01 // coordinate-equality tolerance
+	acOverlapEps      = 1e-6 // positive-length threshold for interval/area overlap
 )
+
+// acMarkerBBoxProfile is the measured rendered-body envelope of one marker
+// family relative to its connection endpoint. Near/Far are positive distances
+// along the body's outward axis; Cross is the half-extent across that axis.
+//
+// These are deliberately NOT centered on the endpoint. Live getPrimitivesBBox
+// calibration (EasyEDA Pro 3.2.148) showed that the marker body starts several
+// units beyond the connection pin:
+//
+//	netport: parallel 9.5..40.5, cross ±5.5  (31×11 / 11×31)
+//	ground:  parallel 9.5..19.5, cross ±10.5 (10×21 / 21×10)
+//	power:   parallel 4.5..10.5, cross ±5.5  (6×11 / 11×6)
+//
+// Using the old endpoint-centered 24×11 box both under-estimated long netports
+// and invented body area behind the endpoint. That made the scorer miss real
+// marker/part collisions while penalizing clear fanout space on the circuit side.
+type acMarkerBBoxProfile struct {
+	Near  float64
+	Far   float64
+	Cross float64
+}
+
+func markerBBoxProfile(canonicalKind string) acMarkerBBoxProfile {
+	switch canonicalKind {
+	case "net_port_in", "net_port_out", "net_port_bi", "netport":
+		return acMarkerBBoxProfile{Near: 9.5, Far: 40.5, Cross: 5.5}
+	case "ground", "analog_ground", "protective_ground", "protect_ground", "gnd", "agnd", "pgnd":
+		return acMarkerBBoxProfile{Near: 9.5, Far: 19.5, Cross: 10.5}
+	default: // power and any future netflag family: conservative power envelope
+		return acMarkerBBoxProfile{Near: 4.5, Far: 10.5, Cross: 5.5}
+	}
+}
 
 // endpointFor computes where connect_pin will land the stub end for a given
 // direction/offset. MUST match the connector's switch (extension/src/actions.ts,
@@ -238,13 +261,46 @@ func outwardDirection(pin acPin) string {
 	return "down"
 }
 
-// labelBox is the nominal extent of the flag/label that will sit at the endpoint
-// (issue #148 Phase-2: a real marker box, ~24×11, so the scorer staggers markers
-// on tight parallel pins instead of stacking them).
-func labelBox(x, y float64) layoutBBox {
-	return layoutBBox{
-		MinX: x - acLabelHalfW, MinY: y - acLabelHalfH,
-		MaxX: x + acLabelHalfW, MaxY: y + acLabelHalfH,
+// predictedMarkerBBox returns the conservative rendered body bbox for a marker
+// placed at endpoint (x,y), keyed by its family and visual stub direction.
+//
+// Horizontal bbox coordinates follow direction literally. Live native bbox
+// coordinates on the calibrated build report the vertical body on the opposite
+// numeric side of the visual direction: "up" occupies y-Far..y-Near, while
+// "down" occupies y+Near..y+Far. Keep this measured mapping separate from
+// endpointFor's y-UP wire geometry; changing it to the semantic sign recreates
+// the marker-overlap misses this predictor exists to prevent.
+func predictedMarkerBBox(x, y float64, canonicalKind, direction string) layoutBBox {
+	p := markerBBoxProfile(canonicalKind)
+	switch direction {
+	case "left":
+		return layoutBBox{
+			MinX: x - p.Far, MinY: y - p.Cross,
+			MaxX: x - p.Near, MaxY: y + p.Cross,
+		}
+	case "right":
+		return layoutBBox{
+			MinX: x + p.Near, MinY: y - p.Cross,
+			MaxX: x + p.Far, MaxY: y + p.Cross,
+		}
+	case "up":
+		return layoutBBox{
+			MinX: x - p.Cross, MinY: y - p.Far,
+			MaxX: x + p.Cross, MaxY: y - p.Near,
+		}
+	case "down":
+		return layoutBBox{
+			MinX: x - p.Cross, MinY: y + p.Near,
+			MaxX: x + p.Cross, MaxY: y + p.Far,
+		}
+	default:
+		// planConnection only supplies the four directions above. Keep a safe
+		// centered fallback for direct pure-function callers instead of emitting
+		// an inverted/zero bbox for malformed input.
+		return layoutBBox{
+			MinX: x - p.Far, MinY: y - p.Far,
+			MaxX: x + p.Far, MaxY: y + p.Far,
+		}
 	}
 }
 
@@ -381,7 +437,7 @@ func stubTouchesForeignWire(pinX, pinY, endX, endY float64, targetNet string, wi
 // reason this is unit-testable.
 func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, targetNet string, scene acScene, rules autoconnectRules) acCandidate {
 	endX, endY := endpointFor(pin.X, pin.Y, offset, dir)
-	lbl := labelBox(endX, endY)
+	lbl := predictedMarkerBBox(endX, endY, canonicalKind, dir)
 	var reasons []acReason
 
 	// +10000 endpoint/label overlaps a real part bbox.

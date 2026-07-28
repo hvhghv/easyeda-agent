@@ -165,10 +165,12 @@ kind-default bonuses), picks the lowest-cost one, and delegates the mutation to
 (隔离 DC-DC 的 B0512S 类四域脚)不再出现短桩共线相触被 EasyEDA 合并成隐性
 短路;规划器会自动换方向/offset 错开,四向全堵时按 #64 语义响亮报
 "no safe candidate" 拒绝落笔。多域脚器件仍建议 power 上/gnd 下方向分治,给
-规划器留出错开空间。**标签 stagger 用真实 marker 尺寸(#148 Phase-2):** 打分
-用的 label 框按实测 netflag/netport 尺寸(~11 高 × ~24 宽,非旧 8×8),所以
-**10-unit pitch 平行脚上相邻 marker 的 11-高框会相交 → 触发 stagger,自动挑
-不同 offset 错开**(实测 J1 相邻 GND 脚 offset 18/36 交替,而非都 18 叠一起)。
+规划器留出错开空间。**标签 stagger 用真实 marker bbox 预测(#148 Phase-2):**
+预测框按 family + direction 使用活体 `getPrimitivesBBox` 标定值,并相对连接端点朝
+body 所在一侧偏移,不再用旧的端点居中 24×11 框:netport 横/竖为
+31×11/11×31、ground 为 10×21/21×10、power 为 6×11/11×6。故
+**10-unit pitch 平行脚上相邻 marker 会触发 stagger,自动挑不同 offset 错开**;
+候选打分与同批后续连接注册回 scene 使用同一预测函数。
 残留不可避免的密集重叠由 `sch check` 的 marker-overlap 门捕获(见 Actions)。
 
 **Hard rejects (issue #64):** two hazards are never soft penalties — they make a

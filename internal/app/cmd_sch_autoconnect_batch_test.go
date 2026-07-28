@@ -42,7 +42,11 @@ func newFakeBatchDaemon(t *testing.T) (*appConfig, func()) {
 			result = map[string]any{"components": []any{
 				map[string]any{
 					"componentType": "part", "designator": "U1",
-					"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
+					// Leave the live-calibrated ground body (down@18 → bbox
+					// y=54.5..64.5) clear of its owner. The old fixture's minY=64
+					// overlapped it by 0.5 and changed the test from "batch stub
+					// mutual exclusion" into a marker/part-overlap test.
+					"bbox": map[string]any{"minX": 0.0, "minY": 65.0, "maxX": 20.0, "maxY": 93.0},
 					"pins": []any{
 						map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 62.0, "net": ""},
 					},
@@ -139,6 +143,87 @@ func TestAutoconnect_BatchStubsAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
+// TestAutoconnect_BatchRegistersPredictedMarkerBBox locks the I/O orchestration
+// to the same family+direction bbox predictor scoreCandidate uses. Two 10-pitch
+// same-net port pins prefer right@18. After the first marker is registered, the
+// second must move far enough for two measured 31×11 port bodies to stop
+// overlapping. Same-net stubs do not hard-reject each other, so this isolates
+// marker staggering from the batch wire-exclusion rule.
+func TestAutoconnect_BatchRegistersPredictedMarkerBBox(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"service":"easyeda-agent","windows":[]}`))
+			return
+		}
+		var req struct {
+			Action string `json:"action"`
+		}
+		body, _ := readAllBody(r)
+		_ = json.Unmarshal(body, &req)
+		var result map[string]any
+		switch req.Action {
+		case "schematic.components.list":
+			result = map[string]any{"components": []any{
+				map[string]any{
+					"componentType": "part", "designator": "U1",
+					"bbox": map[string]any{"minX": 80.0, "minY": 190.0, "maxX": 95.0, "maxY": 200.0},
+					"pins": []any{
+						map[string]any{"pinNumber": "1", "pinName": "SIG", "x": 100.0, "y": 200.0, "net": ""},
+					},
+				},
+				map[string]any{
+					"componentType": "part", "designator": "U2",
+					"bbox": map[string]any{"minX": 80.0, "minY": 210.0, "maxX": 95.0, "maxY": 220.0},
+					"pins": []any{
+						map[string]any{"pinNumber": "1", "pinName": "SIG", "x": 100.0, "y": 210.0, "net": ""},
+					},
+				},
+			}}
+		case "schematic.power.connect_pin":
+			result = map[string]any{"wirePrimitiveId": "w", "flagPrimitiveId": "f"}
+		default:
+			result = map[string]any{}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
+	}))
+	defer srv.Close()
+
+	hostPort := strings.TrimPrefix(srv.URL, "http://")
+	host, portStr, _ := strings.Cut(hostPort, ":")
+	port, _ := strconv.Atoi(portStr)
+	cfg := &appConfig{host: host, ports: fmt.Sprintf("%d-%d", port, port)}
+
+	rules := defaultAutoconnectRules()
+	rules.AvoidPinFanout = false
+	conns := []acConnSpec{
+		{PinRef: "U1:1", Kind: "netport", Net: "SIG"},
+		{PinRef: "U2:1", Kind: "netport", Net: "SIG"},
+	}
+	var out bytes.Buffer
+	if err := runAutoconnect(cfg, "", conns, rules, false, false, false, true, &out, &out); err != nil {
+		t.Fatalf("run failed: %v\n%s", err, out.String())
+	}
+	var report acReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("parse report: %v\n%s", err, out.String())
+	}
+	if len(report.Connections) != 2 || report.Connections[0].Selected == nil || report.Connections[1].Selected == nil {
+		t.Fatalf("want two planned connections, got %+v", report.Connections)
+	}
+	first, second := report.Connections[0].Selected, report.Connections[1].Selected
+	if first.Direction != "right" || first.Offset != 18 {
+		t.Fatalf("first port should take right@18, got %s@%.0f", first.Direction, first.Offset)
+	}
+	if second.Direction != "right" || second.Offset != 54 {
+		t.Fatalf("second port should clear the first measured body at right@54, got %s@%.0f", second.Direction, second.Offset)
+	}
+	a := predictedMarkerBBox(first.EndPoint.X, first.EndPoint.Y, "net_port_bi", first.Direction)
+	b := predictedMarkerBBox(second.EndPoint.X, second.EndPoint.Y, "net_port_bi", second.Direction)
+	if boxesOverlap(a, b) {
+		t.Fatalf("batch-selected marker bodies still overlap: first=%+v second=%+v", a, b)
+	}
+}
+
 // TestAutoconnect_BatchStubAllBlockedFailsLoud is the other half of issue #138:
 // when a batch sibling's stub blocks the LAST clean direction (existing
 // foreign-net wires already box in left/right/down), the connection must fail
@@ -163,7 +248,7 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 				"components": []any{
 					map[string]any{
 						"componentType": "part", "designator": "U1",
-						"bbox": map[string]any{"minX": 0.0, "minY": 64.0, "maxX": 20.0, "maxY": 92.0},
+						"bbox": map[string]any{"minX": 0.0, "minY": 65.0, "maxX": 20.0, "maxY": 93.0},
 						"pins": []any{
 							map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 62.0, "net": ""},
 						},
