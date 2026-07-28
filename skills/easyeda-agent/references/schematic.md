@@ -14,7 +14,9 @@ Use `easyeda-agent` typed actions. Do not write raw EasyEDA JavaScript unless a 
 3. Inspect before mutating.
 4. Prefer small additive operations.
 5. Verify each mutation by readback, snapshot, or DRC.
-6. Ask before destructive operations, multi-step mutation plans, or saving.
+6. Ask before destructive operations or a multi-step mutation plan. A save at an already-defined
+   passed stage is mandatory and does not need separate confirmation unless the user explicitly
+   requested step-by-step approval.
 7. Summarize changed primitives, warnings, and artifacts.
 8. If an official EasyEDA API is missing, undocumented, or differs from runtime behavior, record the evidence and workaround; when it affects correctness or maintainability, prepare a minimal repro and file an issue with the relevant official EasyEDA repository.
 
@@ -96,24 +98,27 @@ near-equivalent, first).
    coordinates before wiring.
 4. **Wire** (reference-validated — see **画线 / flag / 去耦(CLI 级硬规则)** in
    [`auto-layout-sop.md`](./auto-layout-sop.md);
-   the 嘉立创 ESP32-S3 standard project is **flags only on power/ground rails, every
-   signal a real local wire**):
-   - **Signals = real local orthogonal wires** (pin→wire→pin). Endpoint on a pin coord
-     = connected; non-aligned pins → L-route `[x1,y1, x2,y1, x2,y2]`.
+   the 嘉立创 ESP32-S3 standard project is **flags only on power/ground rails; module-local
+   signals use real wires and long/cross-module signals use named netports**):
+   - **Module-local signals = real orthogonal wires** (pin→wire→pin). Endpoint on a pin coord
+     = connected; non-aligned pins → L-route `[x1,y1, x2,y1, x2,y2]`. Use named netport
+     stubs for long, cross-module, or cross-page signals.
    - ⚠️ **Never run a wire through another pin** — EasyEDA trims+connects it there.
      Route in pin-free channels.
    - ⚠️ **Multi-pin nets: chain pin→pin** (each segment anchored on a pin), NOT a star
      to a free junction (EasyEDA drops the un-anchored junction on merge).
    - **Flags ONLY for power/ground rails** (`connect_pin direction=`, never blanket rot 0).
-5. **Verify** with `easyeda sch layout-lint`(布局:覆盖/间距)+ `schematic.drc.check`(电气)
-   + the data linter (`scripts/lint.sh <project>`). ⚠️ After API edits the **EasyEDA canvas may not
+5. **Verify each page** with `easyeda sch layout-lint --strict --doc <page>`,
+   `easyeda sch drc --doc <page>`, `easyeda sch check --strict --doc <page>`,
+   `easyeda sch bridge-check --doc <page>`, and a `sch read` comparison against the design
+   spec or saved pin→net golden map. The data linter (`scripts/lint.sh <project>`) is an
+   additional check, not a replacement. ⚠️ After API edits the **EasyEDA canvas may not
    auto-redraw** → `schematic.snapshot` / `getCurrentRenderedAreaImage` return a STALE
    frame (even `view fit` framing is stale). **Judge STATE by data (`sch list`/`getAll`),
    use the screenshot for visual layout only**, and touch the page in EasyEDA (scroll/
-   click) to force a redraw before trusting a snapshot. `schematic.snapshot` now returns
-   `primitiveCount` + `capturedAt` alongside the artifact — **compare `primitiveCount`
-   across two adjacent snapshots: if it changed but the image bytes/sha did not, the
-   frame is stale** and must not be trusted for verification.
+   click) to force a redraw before trusting a snapshot. Pass the previous frame's `sha256`
+   back through `sch snapshot --previous-sha256 <sha>`; a remaining `stale:true` frame
+   must not be trusted for verification.
 
 ## Bulk realization from a netlist (automated)
 
@@ -137,9 +142,10 @@ above doesn't scale. Pipeline (proven on box-v2/110 parts):
 > the same change (so the next board doesn't re-search non-deterministically).
 >
 > **Churn-resilience for >~50 mutations** (essential, see the SOP): route by
-> `--project`; batch many primitives per `debug.exec_js`; chunk each batch to <~20s
-> (long calls die to the heartbeat); heavy-retry + incremental `sch save` per chunk;
-> re-pull fresh pids each chunk.
+> `--project` + `--doc`; batch with typed actions, `easyeda apply`,
+> `scripts/bulk-place.py`, or `scripts/bulk-connect.py`; incrementally `sch save`;
+> re-pull fresh primitive IDs each chunk. `debug.exec_js` remains a user-approved
+> temporary fallback only when no typed action exists.
 >
 > ⚠ **exec_js 建线勿走 create+modify 两步**(#133 Bug 2 实录,Windows 桌面端):批量
 > `sch_PrimitiveWire.create()` 后再 `modify(id,{line,net})`、紧跟 `sch save`,触发过**不可逆
@@ -326,8 +332,8 @@ placed), and a `validation` summary (`partOverlaps` / `titleBlockHits` /
 - When the **sheet bbox isn't exposed**, the title-block keep-out is reported as
   **provisional** and not geometrically enforced.
 - `autolayout` solves **module placement, not routing** — follow it with
-  `sch autoconnect` (power/ground/netport) + wiring, then `sch layout-lint` /
-  `sch drc` to gate.
+  `sch autoconnect` (power/ground/netport) + wiring, then the full per-page S5
+  `layout-lint --strict` / DRC / check / bridge-check / topology gate.
 
 ### Functional frames + text labels (multi-page safe)
 
@@ -335,14 +341,19 @@ placed), and a `validation` summary (`partOverlaps` / `titleBlockHits` /
 by resolved schematic **document UUID**. Then draw one page at a time:
 
 ```bash
-easyeda sch zone-draw --mode zones --font-size 14 --doc P1_MCU
-easyeda sch zone-draw --mode zones --font-size 14 --doc P2_POWER
-easyeda sch zone-draw --mode zones --font-size 14 --doc P3_PERIPHERAL
+easyeda sch zone-plan --json --doc P1_MCU
+easyeda sch zone-draw --mode partition --font-size 22 --doc P1_MCU
+easyeda sch zone-plan --json --doc P2_POWER
+easyeda sch zone-draw --mode partition --font-size 22 --doc P2_POWER
+easyeda sch zone-plan --json --doc P3_PERIPHERAL
+easyeda sch zone-draw --mode partition --font-size 22 --doc P3_PERIPHERAL
 ```
 
-`zones` mode draws the fixed zone rectangles used by `layout-lint`; `partition`
-mode derives whole-sheet partitions from live module bboxes and defaults to 22pt
-titles. Both modes share one page-scoped frame record, so changing mode replaces
+Before drawing a partition, require all five `zone-plan` validation counters
+(`sheetOverflow`, `partitionOverlap`, `titleBlockHits`, `moduleOutsideZone`,
+`labelCollisions`) to be zero. `zones` mode draws the fixed zone rectangles used
+by `layout-lint`; `partition` mode derives whole-sheet partitions from live module
+bboxes and defaults to 22pt titles. Both modes share one page-scoped frame record, so changing mode replaces
 that page's prior annotations without touching another page. Redraw/clear is
 fail-closed: exact rectangle/text IDs are re-read after delete, survivors retain
 their recovery record, draw counts must match 1:1, and partial creation is
@@ -458,7 +469,8 @@ move/rotate/align/distribute/grid_snap/cluster-arrange）在独立的 operationa
 ## Guardrails
 
 - Confirm before deleting primitives.
-- Confirm before saving unless the user explicitly asked to save.
+- Save automatically at an already-defined passed stage and verify `saved:true`; pause first
+  only when the user explicitly requested step-by-step approval.
 - **幂等性**:`sch autoconnect` 幂等(重跑同 spec 安全,已连脚 skip,改网加 `--replace`);`sch connect`
   **非幂等** —— 重发前先 `sch read` 核对,否则在同一脚叠加 flag。
 - **持久化:`place`/`wire`/`modify` 只改 EasyEDA 内存,不 `schematic.save` 就不落盘** —— 窗口重载 / daemon 重启 / EasyEDA 崩溃会丢掉未保存的改动(实测踩过)。daemon 默认开**防抖 autosave(3s)** 兜底(`daemon start --autosave-debounce`,`0` 关),但防抖窗口内进程挂掉仍会丢最后几笔,所以多步改动仍**分批显式 `sch save`**,别只靠 autosave。整板流程的存盘节奏见 [`design-flow.md`](./design-flow.md) 的 💾 检查点。

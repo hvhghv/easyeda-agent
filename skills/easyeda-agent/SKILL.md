@@ -1,6 +1,6 @@
 ---
 name: easyeda-agent
-description: "Community EasyEDA Agent automation skill for EasyEDA Pro schematic and PCB work through the local easyeda-agent CLI/daemon/connector. Use when designing a board from scratch, editing or inspecting schematics, placing/wiring real LCSC/JLC library parts, syncing schematic changes into PCB, laying out PCB components, running EasyEDA DRC/check/layout-lint, exporting BOM/netlists/artifacts, querying the embedded circuit-block library (电路块库, `easyeda blocks ls/show/search`) for proven peripheral subcircuits (CH340/USB-serial, ESP32 auto-download, buck/buck-boost/LDO/charger, RS-485, RF 433M/GNSS, USB-hub, microSD), or using the bundled EasyEDA scripts and design conventions. 覆盖嘉立创EDA专业版原理图/PCB、布线、铺铜、板框、DRC/check。This is the merged public skill replacing easyeda-schematic, easyeda-pcb, easyeda-design-flow, and easyeda-conventions."
+description: "Community EasyEDA Agent automation skill for EasyEDA Pro schematic and PCB work through the local easyeda-agent CLI/daemon/connector. Use when designing a board from scratch; inspecting, cleaning up, or safely refactoring an existing wired schematic; arranging multi-page functional modules; drawing page-scoped module frames and text labels; preserving and reconciling pin-to-net topology; placing/wiring real LCSC/JLC library parts; syncing schematic changes into PCB; laying out PCB components; running EasyEDA DRC/check/bridge-check/layout-lint; exporting BOM/netlists/artifacts; querying the embedded circuit-block library (`easyeda blocks ls/show/search`); or applying the bundled EasyEDA design workflows and conventions. 覆盖嘉立创EDA专业版原理图/PCB、混乱原理图整理、多页功能分区、框选文字标注、布线、铺铜、板框与机械门禁。"
 ---
 
 # EasyEDA Agent
@@ -47,7 +47,7 @@ EasyEDA tooling.
 | 停点 | 触发 | 要点 |
 |---|---|---|
 | ① S0 方案书 | 进 S1 前 | 架构/叠层/地策略/接口取向每条摊选项+坑+推荐让用户拍板;**必须落成磁盘文件**才算过门,不能停在对话里 |
-| ② sch→PCB 前 | 原理图完成 | 网表逐条对齐 + **`sch drc` 与 `sch check` 都跑且都清零**(两引擎规则不重叠,只跑一个必漏规则)→ design-flow S5 |
+| ② sch→PCB 前 | 原理图完成 | 逐页 `layout-lint --strict` + `sch drc` fatal/error=0 + `sch check --strict` + `sch bridge-check` + pin→net 黄金表对齐；DRC 聚合 WARN 必须审阅并报告 → design-flow S5 |
 | ③ 发板/交付前 | 导出制造 | 交付摘要说清偏差(降级决策/遗留 WARN) |
 | P2 摆放前 | 布局起手 | 先问单/双面布局 + 焊接工艺;立即用 `pcb stage set-assembly` 落盘,手焊默认 `min-gap=40mil`/大焊盘通道 `60mil` |
 | P2 边缘接口件 | 端子/USB/SD/排针/按键/IPEX | 朝向 + 边序 = 装配体验,agent 猜不了,**必须用户确认**;先 `blocks show` 读块 placement 摊给用户 |
@@ -120,6 +120,10 @@ EasyEDA tooling.
 - 架构权衡坑(真选择,非唯一答案——叠层、地策略、接口取向、成本档、单/双面、焊接工艺):读
   `references/design-decisions.md`;S0 从中产出方案书让用户确认。(RF/天线 keepout 是 guardrail 铁律 10,不进这张决策表。)
 - **Schematic work**:读 `references/schematic.md`。
+- **混乱/已连线原理图整理、多页高质量布局、功能框和文字标注**:同时读
+  `references/design-flow.md` 的 S1–S6、`references/auto-layout-sop.md` 的
+  “已连线页安全整理”，以及 `references/schematic.md` 的 “Functional frames +
+  text labels”。先保存 pin→net/NC 黄金表，任何布局重构后必须逐页对账。
 - **PCB work**:读 `references/pcb.md`(顶部有「块的 PCB 约束(先查)」+ 命令目录)。
 - 查任一 typed action 签名、或 >5 步批量操作要用 playbook(`easyeda apply`):读 `references/actions.md`。
 - **DRC / 制造规则地板与 fallback**:读 `references/fab-rules-jlcpcb.json`(live `pcb.drc.rules` 优先,此表作 fallback seed + clamp floors,**永不发出低于 manufacturingMin 的 track/via/gap**)。

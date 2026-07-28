@@ -118,28 +118,30 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
 ### S4 — 通道布线(留距离,别压元件)
 - **做什么**:在组**摆放并通过 layout-lint 之后**再布线——信号走元件间的**空通道**,不要让导线压在元件或外围上。
-- **怎么做**:布线/flag/去耦规则见 conventions 的 `auto-layout-sop.md`(信号=本地正交线、flag 仅电源地、绝不穿引脚)。
+- **怎么做**:布线/flag/去耦规则见 conventions 的 `auto-layout-sop.md`(模块内信号=短正交线，跨模块/跨页或长距离=命名 netport 短桩，flag 仅电源地，绝不穿引脚)。
 - **电源/地/netport stub 用 `easyeda sch autoconnect`**(别再手猜 `connect --direction/--offset`):它按真实 bbox/引脚/已有 flag 几何打分,确定性选 direction+offset 再委托 `connect_pin` 落地,批量 `--spec` 还会自动错开标签。先 `--dry-run` 看计划,满意再落地。
 - **💾 过门后**:`easyeda sch save` 存盘,再进入 S5。
 
 ### S5 — 校验门(机械真值,不是肉眼)
-**两个门必须都过**,否则回 S3/S4:
-1. **布局门** `easyeda sch layout-lint`(可加 `--min-gap`、`--all-pages`)
-   - **任何 `overlap` ERROR = 必须修**(命令非零退出,可直接当 gate)。
-   - `spacing` WARN = 评估是否太挤,外围贴芯片可接受、模块间过近要拉开。
-   - `zone-violation` WARN = 被 `sch zones set` 认领的件跑出了它的功能分区(需先在 S2 落认领 + 页面有 sheet bbox;这是"分区计划落实没落实"的门,不是物理缺陷,不翻 ERROR)。
-   - **默认只检真实器件**:图框/标题栏(sheet)与 netflag/netport 等非器件原语已自动排除,不会再误报"器件压图框"(issue #13);要连这些一起检查才加 `--include-non-parts`。
-2. **电气门** `easyeda sch drc` + `easyeda sch check`(+ `scripts/lint.sh <project>` 数据 lint)
-   - `sch drc` 调 EasyEDA SDK 的 `sch_Drc.check`;当前 EasyEDA build 可能只返回聚合/布尔结果,**不等于 UI DRC 面板的全部 warning**。
-   - `sch check` 是对 UI 面板缺失项的重建式补强:悬空脚、导线交叉/穿脚、网络标识与导线名不一致、同一导线多网络名等。**生产门禁必须同时跑 `sch drc` 和 `sch check`——两引擎规则集不重叠,谁也不是谁的超集**(实证:「引脚端点重叠且未连接」是 DRC 独有;孤儿旗端点压 pin 会给 check 制造"已连接"假象,check 三页全绿时 DRC 仍报 6 致命)。更险的镜像形态:重合端点**有线**相连时两网真短路,DRC 反而不报——大修后建议加跑端点重合扫描(getAllPinsByPrimitiveId 读元件+flag 全端点→坐标聚类→跨 owner 重合点按有无 wire 分级)。
-   - **`sch check` 现在还含三条 Go 侧几何 marker 规则(#146/#147/#148)——电气引擎的盲区**:`duplicate-net-marker`(同类同网同锚点的重合 netflag/netport;批量 autoconnect 中断重试会叠出重复 GND/电源标识,电气全绿但页面叠着一对——finding 直接给 `suggestKeepId`/`suggestDeleteIds` 喂 `sch prim-delete`)、`titleblock-overlap`(marker/part 侵入 A4 标题栏图签)、`marker-overlap`(marker body 压住 part 或另一 marker,不可读)。**批量 autoconnect / official `--rewire` 之后必须立刻跑一次 `sch check`**:它是抓「重复标识」的唯一门(#146),`layout-lint` 只检 part 看不见 marker。marker 几何是 WARN(默认不阻断,`--strict` 才 gate);`--overlap-eps` 调重叠噪声下限。
-   - fatal/error 必须修;`net-marker-mismatch` / 不同网络名同线属于必须修;悬空 IO 只有明确设计为 NC/备用并记录后才可接受;供应商编号/标准化 warning 属 BOM 门禁,交付前修。
+**每个目标页逐页过五道门**，否则回 S3/S4；生产门不要用 `--all-pages` 的浅数据冒充逐页证明:
+1. **布局门** `easyeda sch layout-lint --strict --doc <page>`
+   - `overlap` / `pin-coincidence` ERROR 必须修；strict 下 spacing、off-grid、zone-violation、缺失/畸形几何同样阻断。
+   - `--strict` 与 `--all-pages`、`--include-non-parts` 不兼容；多页循环 `--doc <page>`。
+2. **SDK DRC 门** `easyeda sch drc --doc <page>`
+   - fatal/error 必须为 0。当前 EasyEDA build 可能只返回聚合/布尔结果，不等于 UI DRC 面板的全部 warning；聚合 WARN 必须审阅并在交付摘要中报告，不能声称“全部清零”。
+3. **结构门** `easyeda sch check --strict --doc <page>`
+   - 补查悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线，以及 `duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`。`--json` 的 findings 位于 `result.findings`。
+4. **线树门** `easyeda sch bridge-check --doc <page>`
+   - 一棵 wire tree 带多个网名是 `wire-bridge` 真短路；orphan stub/flag 也必须解释或清理。它是 `sch check` 逐 wire 视角的必要补充。
+5. **设计意图门** `easyeda sch read --doc <page>`
+   - 新设计逐项对照 spec；整理已连线页面时对照修改前保存的 `DESIGNATOR.pin → net` 黄金表与显式 NC 集合。任何差异都先修复，不能把“布局变化”变成静默改网。
+   - 可再跑 `scripts/lint.sh <project>` 做数据 lint，但它不替代以上四个活体门。
 - ⚠️ **判状态看数据(`sch list` / layout-lint / drc),不看截图**(API 改动后画布可能不重绘 → 截图 stale)。
 
 ### S6 — 调整闭环(立刻调,再验)
-- layout-lint 报覆盖 → `sch modify`(单件)/`sch align`/`sch distribute`(成排)/`sch autoplace-free`(自动找空位)把冲突元件挪开 → **重跑 layout-lint**。
-- DRC 报错 → 补线/补 flag → **重跑 drc**。
-- **💾 循环直到两个门都干净,再 `easyeda sch save` 收尾**。这就是「DRC 后立刻调整」要的闭环。
+- layout-lint 报错 → `sch modify`(单件)/`sch align`/`sch distribute`(成排)/`sch autoplace-free`(自动找空位)把冲突元件挪开 → **重跑逐页 strict lint**。
+- DRC/check/bridge-check 报错 → 补线、拆桥、清孤儿或补 NC → **重跑对应门并重新 `sch read` 对账**。
+- **💾 循环直到五道门都通过，再 `easyeda sch save --doc <page>` 收尾并确认 `saved:true`**。这就是“调整后立刻验证”的闭环。
 - **收尾回流(块库共建)**:本板若含手工搭建且已 `sch check` + 网表核实通过的标准外围(库里没有的),按 [`standard-blocks-contributing.md`](./standard-blocks-contributing.md) 顺手回流一个块(署名 + `validated`)——验证刚过正是入库时机。
 
 ## 录制 / 演示模式(Recording / Demo Mode)

@@ -471,7 +471,8 @@ Operational order:
 ## Guardrails
 
 - Confirm before `pcb.component.delete`, `pcb.import_changes`, or a bulk `arrange`/auto-layout plan.
-- Confirm before saving unless the user asked to save.
+- Save automatically at an already-defined passed stage and verify `saved:true`; pause first
+  only when the user explicitly requested step-by-step approval.
 - Do not claim completion after a mutation until readback / DRC verifies it (or state the remaining risk).
 - No undo — record before/after into the audit log so a move can be reversed by re-applying the old coordinates.
 - Treat `File`/`Blob` outputs (gerber/pick-and-place/3D) as artifacts.

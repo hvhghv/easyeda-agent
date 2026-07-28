@@ -21,11 +21,11 @@ spec 形状:
   排布时长线极易与同行引脚/其他线共线，EasyEDA 把共线相触导线合并成一条 →
   大面积隐性短路（实测两次全页短接，见 issue #64）。
 - 验证只信数据：`sch read` 把每个 spec 组（rail/port 同名成员）读回真实 net，
-  不一致逐条列出；`sch check --json` 是**裸对象输出**（无 result 信封，issue #66），
-  且 doc switch 后有竞态要 settle + 重试（issue #67）。
+  不一致逐条列出；`sch check --json` 使用统一信封，findings 位于
+  `result.findings`。所有 sch 命令都用 `--doc <page>` 固定目标页。
 - `--repair-floaters`: 从 sch check 的 floating-pin(pinDetails 带坐标) 出发，按
-  spec 决定 kind/net，方向×偏移在 occupancy（引脚+线顶点+flag 锚点）里搜第一个
-  干净落点，`sch connect` 显式落笔。循环直到无悬空或不再收敛。
+  spec 决定 kind/net，交给 typed `sch autoconnect` 的活体几何评分器选择方向和偏移。
+  循环直到无悬空或不再收敛。
 """
 import json
 import os
@@ -34,14 +34,16 @@ import sys
 import time
 
 PROJECT = os.environ.get("EASYEDA_PROJECT", "")
+PAGE = ""
 
 
 def run(args, timeout=120, retries=3):
     proj = ["--project", PROJECT] if PROJECT else []
+    doc = ["--doc", PAGE] if PAGE and args and args[0] == "sch" else []
     for attempt in range(retries):
         # encoding 固定 utf-8:easyeda CLI 输出恒为 UTF-8,text=True 在 Windows
         # 中文环境会用系统 GBK 解码而崩溃(issue #133 Bug 4)
-        p = subprocess.run(["easyeda"] + proj + args, capture_output=True,
+        p = subprocess.run(["easyeda"] + proj + doc + args, capture_output=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
         if p.returncode == 0 or attempt == retries - 1:
             return p.returncode, p.stdout, p.stderr
@@ -58,6 +60,16 @@ def jparse(out):
             return json.JSONDecoder().raw_decode(out[i:])[0]
         except Exception:
             return {}
+
+
+def result_payload(data):
+    """Return the current CLI envelope payload; tolerate pre-v0.10 bare fixtures."""
+    result = data.get("result")
+    if isinstance(result, dict):
+        return result
+    if data.get("summary") is not None or data.get("findings") is not None:
+        return data
+    return {}
 
 
 def settle(page, timeout_s=15):
@@ -77,51 +89,14 @@ def settle(page, timeout_s=15):
 
 
 def check_findings(max_tries=5):
-    """sch check --json: 顶层裸对象(issue #66) + 就绪竞态重试(issue #67)。"""
+    """Read result.findings from the CLI envelope, retrying page-settle races."""
     for _ in range(max_tries):
         rc, out, _ = run(["sch", "check", "--json"])
-        d = jparse(out)
+        d = result_payload(jparse(out))
         if d.get("summary") is not None:
             return d
         time.sleep(2.5)
     return {}
-
-
-def occupancy():
-    """引脚 + 线顶点 + flag 锚点的占用集，供落笔方向搜索。"""
-    occ = set()
-    rc, out, _ = run(["sch", "list", "--include-pins"])
-    for c in (jparse(out).get("result") or {}).get("components", []):
-        for p in c.get("pins", []):
-            if p.get("x") is not None:
-                occ.add((round(p["x"]), round(p["y"])))
-    code = ("const pts=[];for(const w of await eda.sch_PrimitiveWire.getAll()){const l=w.getState_Line();"
-            "const f=Array.isArray(l[0])?l.flat():l;for(let i=0;i<f.length;i+=2)pts.push([f[i],f[i+1]]);}"
-            "for(const c of await eda.sch_PrimitiveComponent.getAll()){const t=c.getState_ComponentType();"
-            "if(t!=='part'&&t!=='sheet')pts.push([c.getState_X(),c.getState_Y()]);}return pts;")
-    rc, out, _ = run(["call", "debug.exec_js", "--payload", json.dumps({"code": code})])
-    for pt in ((jparse(out).get("result") or {}).get("value") or []):
-        occ.add((round(pt[0]), round(pt[1])))
-    return occ
-
-
-def connect_free(occ, x, y, kind, net):
-    """在占用集里找第一个干净的方向×偏移并落笔。"""
-    for d0, dx, dy in [("down", 0, 1), ("up", 0, -1), ("left", -1, 0), ("right", 1, 0)]:
-        for off in (20, 30, 40, 50):
-            ex, ey = x + dx * off, y + dy * off
-            if (round(ex), round(ey)) in occ:
-                continue
-            if any((round(x + dx * t), round(y + dy * t)) in occ for t in range(5, off, 5)):
-                continue
-            rc, _, _ = run(["sch", "connect", "--x", str(x), "--y", str(y),
-                            "--kind", kind, "--net", net,
-                            "--direction", d0, "--offset", str(off)])
-            if rc == 0:
-                occ.add((round(ex), round(ey)))
-                return f"{d0}{off}"
-            return None
-    return None
 
 
 def verify(spec):
@@ -166,16 +141,20 @@ def repair_floaters(spec):
         print(f"repair round{rnd}: floating={len(fl)}")
         if not fl:
             return True
-        occ = occupancy()
         progressed = False
-        for ref, x, y in fl:
+        for ref, _, _ in fl:
             if ref not in pin_net:
                 print("  no-spec:", ref)
                 continue
             kind, net = pin_net[ref]
-            r = connect_free(occ, x, y, kind, net)
-            print(f"  {ref} -> {net}: {r or 'FAIL'}")
-            progressed = progressed or bool(r)
+            rc, out, err = run(["sch", "autoconnect", "--pin", ref,
+                                "--kind", kind, "--net", net, "--json"])
+            state = (jparse(out).get("result") or {}).get("state")
+            ok = rc == 0
+            print(f"  {ref} -> {net}: {state or ('ok' if ok else 'FAIL')}")
+            if not ok and err:
+                print("   ", err.strip())
+            progressed = progressed or ok
         run(["sch", "save"])
         if not progressed:
             return False
@@ -184,9 +163,11 @@ def repair_floaters(spec):
 
 
 def main():
+    global PAGE
     spec = json.load(open(sys.argv[1]))
+    PAGE = spec["page"]
     mode = sys.argv[2] if len(sys.argv) > 2 else ""
-    settle(spec["page"])
+    settle(PAGE)
 
     if mode == "--repair-floaters":
         ok = repair_floaters(spec)

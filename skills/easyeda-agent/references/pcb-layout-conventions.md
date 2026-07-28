@@ -33,7 +33,10 @@
 
 ### 0.2 agent **没有**的数据（规则必须优雅降级）
 
-- ❌ **板框/outline 读取动作**（当前 actions.go 无 `pcb.outline.*`）。所有"贴边/边缘 keep-out/角落"规则**在拿不到 outline 时降级为 advisory**，或先用 `debug.exec_js` 探一次板框多边形再算。
+- ✅ **板框/outline 可读**：先用 `easyeda pcb outline-get` 读取 segment/arc 数量与
+  bbox；需要完整几何时再查 `references/pcb.md` 中的 outline typed actions。只有活体
+  outline 确实不可用时，"贴边/边缘 keep-out/角落"规则才降级为 advisory；不要为读板框
+  默认转向 `debug.exec_js`。
 - ❌ **元件高度 Z**：靠 designator（J/X/Y/电解 C）+ bbox 尺寸**代理**，不是真高度。
 - ❌ **铜箔/铺铜/平面分割几何**：靠 net 成员关系 + 块几何**推断**，不是真平面。涉及"平面分割/回流连续性"的检查一律标 advisory。
 - ❌ **元件电气值/容值/封装代码**（`pcb.components.list` 不返回 value）：按容值排序之类的规则**不可检测**，除非接 BOM；默认跳过。

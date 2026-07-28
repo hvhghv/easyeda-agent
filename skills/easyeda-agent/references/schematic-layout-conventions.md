@@ -92,7 +92,10 @@ buffer:
 
 ### 3.1 短桩 (pin lead-out)
 
-每个 pin **必须有非零长度 wire** 引出（EasyEDA DRC 不认重叠点为连接，见 [easyeda-agent SKILL.md](.././schematic.md#easyeda-electrical-rules)）。
+每个**需要接入 wire/netflag/netport/netlabel 的 pin** 都必须经非零长度 wire 引出
+（EasyEDA DRC 不认标识与 pin 坐标重叠为连接，见
+[`schematic.md` 的 EasyEDA Electrical Rules](./schematic.md#easyeda-electrical-rules-load-bearing)）。
+故意未使用的 pin 应显式 `sch no-connect`，不应为了满足短桩规则制造假连接。
 
 > **重要**：自动生成时严禁产出**零长度 wire 占位记录**（如 `{line:[620,60,620,60]}`）——实测 ESP32 reference 中 204 个 wire 里 149 个是这种零长占位，DRC 会逐个报错。Agent 在 emit wire 前必须 assert `(x1,y1) != (x2,y2)`。
 
@@ -293,7 +296,8 @@ LED 也可用 `LED1` 这种语义化命名（兼容 `D1`），EasyEDA 不强制 
 3. **下笔**：从区中心格点开始，按 §2 间距规则放邻居。优先填 x 方向，超过区宽就换 y。
 4. **布线**：每个 pin 用 §3 短桩规则引出。电源 pin → netflag (power, 朝上)，地 pin → netflag (ground, 朝下)。**禁止 emit 零长 wire**。
 5. **去耦**：每个 IC 的 VCC pin 按 §6 分级阈值 place 0.1 μF——高速 / RF / ADC 走 SHOULD ≤30，一般数字电源走 SHOULD ≤60 / MUST ≤120。
-6. **验证**：跑 `schematic.drc.check`，违规返回参考区/间距规则定位修复。
+6. **验证**：逐页跑 `sch layout-lint --strict`、`sch drc`、`sch check --strict`、
+   `sch bridge-check`，再用 `sch read` 对照设计 spec 或改动前 pin→net 黄金表；任何一门失败都回到对应步骤修复。
 
 ## 10. 边界与开放问题
 
