@@ -329,6 +329,26 @@ placed), and a `validation` summary (`partOverlaps` / `titleBlockHits` /
   `sch autoconnect` (power/ground/netport) + wiring, then `sch layout-lint` /
   `sch drc` to gate.
 
+### Functional frames + text labels (multi-page safe)
+
+`easyeda sch zones set --spec <spec.json>` persists `modules[].zone/parts/page`
+by resolved schematic **document UUID**. Then draw one page at a time:
+
+```bash
+easyeda sch zone-draw --mode zones --font-size 14 --doc P1_MCU
+easyeda sch zone-draw --mode zones --font-size 14 --doc P2_POWER
+easyeda sch zone-draw --mode zones --font-size 14 --doc P3_PERIPHERAL
+```
+
+`zones` mode draws the fixed zone rectangles used by `layout-lint`; `partition`
+mode derives whole-sheet partitions from live module bboxes and defaults to 22pt
+titles. Both modes share one page-scoped frame record, so changing mode replaces
+that page's prior annotations without touching another page. Redraw/clear is
+fail-closed: exact rectangle/text IDs are re-read after delete, survivors retain
+their recovery record, draw counts must match 1:1, and partial creation is
+compensated. Every successful draw or clear explicitly requires
+`schematic.save` → `saved:true`.
+
 ## Zone-less packing — `sch autoplace-free`
 
 Where `autolayout` needs you to name zones, **`sch autoplace-free` finds the sheet's

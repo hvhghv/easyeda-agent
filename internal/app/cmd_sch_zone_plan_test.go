@@ -1,6 +1,11 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
+)
 
 // The issue #149 real 6-module A4 page: the planner must carve it into
 // non-overlapping, in-sheet partitions that each fully contain their module and
@@ -64,6 +69,41 @@ func TestPlanPartitions_EmptyIsNoop(t *testing.T) {
 	plan := planPartitions(layoutBBox{0, 0, 1170, 825}, nil, nil, defaultPartitionOpts())
 	if len(plan.Partitions) != 0 || !plan.Validation.clean() {
 		t.Errorf("empty input → empty clean plan, got %+v", plan)
+	}
+}
+
+func TestComputePartitionPlanRejectsGeometryFromAnotherPage(t *testing.T) {
+	t.Setenv(workflow.EnvDir, t.TempDir())
+	st := &workflow.State{Project: "zone-project"}
+	st.SetSchZonesForPage("page-a", map[string]*workflow.SchZoneClaim{
+		"MCU": {Zone: "center", Parts: []string{"U1"}},
+	})
+	if err := workflow.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, cleanup := newAutolayoutTestDaemon(t, func(_ int, call autolayoutTestCall) string {
+		switch call.Action {
+		case "document.current":
+			return autolayoutOK("page-a", `{"uuid":"page-a"}`)
+		case "schematic.pages.list":
+			return autolayoutOK("page-a", `{"pages":[{"uuid":"page-a","name":"Page A"}]}`)
+		case "pcb.documents.list":
+			return autolayoutOK("page-a", `{"pcbs":[]}`)
+		case "project.current":
+			return autolayoutOK("page-a", `{"friendlyName":"zone-project"}`)
+		case "schematic.components.list":
+			return autolayoutOK("page-b", `{"components":[],"count":0}`)
+		default:
+			return autolayoutOK("page-a", `{}`)
+		}
+	})
+	defer cleanup()
+	cfg.doc = "page-a"
+
+	_, _, err := computePartitionPlan(cfg, "", "page-a", defaultPartitionOpts())
+	if err == nil || !strings.Contains(err.Error(), "page drift") {
+		t.Fatalf("cross-page geometry was not rejected: %v", err)
 	}
 }
 

@@ -491,11 +491,26 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 	if strict && includeNonParts {
 		return fmt.Errorf("layout-lint: --strict cannot be combined with --include-non-parts: sheet frames and net markers are not placement bodies and would create false geometry failures")
 	}
+	readCfg, readWindow, docUUID := cfg, window, ""
+	if !allPages {
+		pinnedCfg, win, pinnedUUID, err := pinZonePage(cfg, window)
+		if err != nil {
+			return err
+		}
+		readCfg, readWindow, docUUID = pinnedCfg, win, pinnedUUID
+	}
 	payload := map[string]any{"includeBBox": true, "includePins": true}
 	if allPages {
 		payload["allPages"] = true
 	}
-	res, err := requestAction(cfg, "schematic.components.list", window, payload)
+	var res *actionResult
+	var err error
+	if allPages {
+		res, err = requestAction(readCfg, "schematic.components.list", readWindow, payload)
+	} else {
+		res, err = requestAutolayoutAction(readCfg, "schematic.components.list", readWindow,
+			payload, docUUID, "read layout-lint geometry")
+	}
 	if err != nil {
 		return err
 	}
@@ -526,9 +541,16 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 	// Zone checks are explicit in schema v2. No configured claims is a valid
 	// "not-configured" state; an unreadable state or configured claims without a
 	// live sheet is "unavailable" and fails --strict instead of silently passing.
-	zones, _, zerr := loadSchZoneClaims(cfg, window)
+	var zones map[string]*schZoneClaim
+	var zerr error
+	if !allPages {
+		zones, _, zerr = loadSchZoneClaimsForPage(readCfg, readWindow, docUUID)
+	}
 	sheet := sheetBBoxOf(comps)
 	switch {
+	case allPages:
+		rep.ZoneCheckStatus = "unavailable"
+		rep.ZoneCheckError = "all-pages geometry cannot be matched authoritatively to page-scoped schematic zone claims; lint each page separately"
 	case zerr != nil:
 		rep.ZoneCheckStatus = "unavailable"
 		rep.ZoneCheckError = zerr.Error()

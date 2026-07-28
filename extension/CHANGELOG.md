@@ -6,6 +6,13 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **多页原理图功能框/标题不再串页或只留内存**:`sch zones` 认领与 fixed/partition/
+  autolayout 三条绘框路径统一按 documentUuid 持久化（旧 `schZones`/单 frame 记录仍可读）；
+  fixed 模式开放 `--font-size`（默认 14pt）。重画/清除会回读 rectangle/text ID，任何 survivor
+  都失败并保留恢复记录；创建数量须 1:1，部分创建自清理；成功画/清均显式校验
+  `schematic.save(saved:true)`，避免孤儿文本和跨页误删。
+
 ## [0.18.1] - 2026-07-28
 
 ### Added

@@ -19,10 +19,8 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 // partitionModule is one functional module: a name + the union bbox of its parts.
@@ -329,14 +327,17 @@ func maxF(a, b float64) float64 {
 // big-font title, returning their ids. Pure (unit-testable).
 func buildPartitionDrawJS(plan partitionPlan, fontSize float64, color string) string {
 	var b strings.Builder
-	b.WriteString("const rects=[], texts=[];\n")
+	writeZoneDrawPrelude(&b)
 	colorJS, _ := json.Marshal(color)
 	for _, p := range plan.Partitions {
 		if !writeZoneRectangleCreateJS(&b, p.BBox, colorJS) {
 			continue
 		}
 		title, _ := json.Marshal(strings.Join(p.Modules, " / "))
-		b.WriteString("  if (rc) rects.push(rc.getState_PrimitiveId());\n")
+		titleText := strings.Join(p.Modules, " / ")
+		fmt.Fprintf(&b, "  if (!rc) throw new Error(%q);\n", "rectangle create returned undefined for "+titleText)
+		fmt.Fprintf(&b, "  const rid = rc.getState_PrimitiveId(); if (!rid) { await eda.sch_PrimitiveRectangle.delete(rc); throw new Error(%q); } rects.push(rid);\n",
+			"rectangle id missing for "+titleText)
 		// Title baseline sits fontSize below the band top (larger y = higher on the
 		// y-up canvas) so the rendered glyph box stays inside the frame (issue #149:
 		// a 22pt title anchored at the very top spilled ~6 units over the edge).
@@ -344,19 +345,12 @@ func buildPartitionDrawJS(plan partitionPlan, fontSize float64, color string) st
 		ty := p.TitleBBox.MaxY - fontSize
 		fmt.Fprintf(&b, "  const tt = await eda.sch_PrimitiveText.create(%g, %g, %s, 0, %s, null, %g);\n",
 			tx, ty, title, colorJS, fontSize)
-		b.WriteString("  if (tt) texts.push(tt.getState_PrimitiveId()); }\n")
+		fmt.Fprintf(&b, "  if (!tt) throw new Error(%q);\n", "text create returned undefined for "+titleText)
+		fmt.Fprintf(&b, "  const tid = tt.getState_PrimitiveId(); if (!tid) { await eda.sch_PrimitiveText.delete(tt); throw new Error(%q); } texts.push(tid); }\n",
+			"text id missing for "+titleText)
 	}
-	b.WriteString("return {rects, texts};")
+	writeZoneDrawEpilogue(&b)
 	return b.String()
-}
-
-// currentDocumentUUID returns the active document's uuid (for per-page frame keying).
-func currentDocumentUUID(cfg *appConfig, window string) string {
-	cur, err := requestAction(cfg, "document.current", window, nil)
-	if err != nil || cur.Context == nil {
-		return ""
-	}
-	return cur.Context.DocumentUUID
 }
 
 // newSchZonePlanCmd builds `sch zone-plan` — compute + print the partition plan
@@ -378,7 +372,12 @@ labelCollisions, all should be 0). Draw it with ` + "`sch zone-draw --mode parti
 		Example: `  easyeda sch zones set --spec s0.json --project ceshi
   easyeda sch zone-plan --project ceshi --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			plan, _, err := computePartitionPlan(cfg, *window, partitionOptsFrom(margin, gutter, titleBand, maxCols, maxRows))
+			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
+			if err != nil {
+				return err
+			}
+			plan, _, err := computePartitionPlan(pinnedCfg, win, docUUID,
+				partitionOptsFrom(margin, gutter, titleBand, maxCols, maxRows))
 			if err != nil {
 				return err
 			}
@@ -423,16 +422,22 @@ func partitionOptsFrom(margin, gutter, titleBand float64, maxCols, maxRows int) 
 	return o
 }
 
-// computePartitionPlan pulls claims + live geometry and runs the planner.
-func computePartitionPlan(cfg *appConfig, window string, opts partitionOpts) (partitionPlan, map[string]*schZoneClaim, error) {
-	zones, project, err := loadSchZoneClaims(cfg, window)
+// computePartitionPlan pulls claims + live geometry for one pinned page and runs
+// the planner. The claims lookup never consults the mutable foreground tab, and
+// the geometry response must prove it came from the same document UUID.
+func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partitionOpts) (partitionPlan, map[string]*schZoneClaim, error) {
+	zones, project, err := loadSchZoneClaimsForPage(cfg, window, docUUID)
 	if err != nil {
 		return partitionPlan{}, nil, err
 	}
 	if len(zones) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no schematic zone claims for %q — run `sch zones set --spec <s0-spec.json>` first", project)
 	}
-	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
+	if err := ensureActiveDoc(cfg, window); err != nil {
+		return partitionPlan{}, nil, fmt.Errorf("zone-plan: restore pinned page %s: %w", docUUID, err)
+	}
+	res, err := requestAutolayoutAction(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true}, docUUID, "read partition geometry")
 	if err != nil {
 		return partitionPlan{}, nil, err
 	}
@@ -471,7 +476,11 @@ func renderPartitionPlan(plan partitionPlan, w io.Writer) {
 
 // runPartitionDraw draws (or clears) the partition frames, persisted per-page.
 func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSize float64, color string, clear bool, stdout, stderr io.Writer) error {
-	project, err := resolveStageProject(cfg, window)
+	pinnedCfg, win, docUUID, err := pinZonePage(cfg, window)
+	if err != nil {
+		return err
+	}
+	project, err := resolveStageProject(pinnedCfg, win)
 	if err != nil {
 		return err
 	}
@@ -479,47 +488,60 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	if err != nil {
 		return err
 	}
-	docUUID := currentDocumentUUID(cfg, window)
-	if st.SchZoneFrameIdsByPage == nil {
-		st.SchZoneFrameIdsByPage = map[string]*workflow.SchZoneFrames{}
+	exec := func(phase, code string) (map[string]any, error) {
+		return execAutolayoutZoneJS(pinnedCfg, win, docUUID, phase, code)
 	}
-	// Clear this page's previous partition frames first (for --clear and redraw).
-	if prev := st.SchZoneFrameIdsByPage[docUUID]; prev != nil && (len(prev.Rects) > 0 || len(prev.Texts) > 0) {
-		if v, derr := execZoneJS(cfg, window, buildZoneClearJS(prev)); derr != nil {
-			fmt.Fprintf(stderr, "warn: clearing previous partition frames failed (%v)\n", derr)
-		} else {
-			fmt.Fprintf(stderr, "cleared %v previous partition frame primitive(s)\n", v["deleted"])
+
+	if clear {
+		hadPrevious, cerr := clearPriorZoneFrames(st, docUUID, exec, stderr)
+		if cerr != nil {
+			return cerr
 		}
-		delete(st.SchZoneFrameIdsByPage, docUUID)
-		if err := savePcbStageState(st); err != nil {
+		if !hadPrevious {
+			fmt.Fprintln(stdout, "no zone frames recorded for this page — nothing to clear")
+			return nil
+		}
+		if err := saveZoneDocument(pinnedCfg, win, docUUID, "save cleared partition frames"); err != nil {
 			return err
 		}
-	} else if clear {
-		fmt.Fprintln(stdout, "no partition frames recorded for this page — nothing to clear")
-		return nil
-	}
-	if clear {
-		fmt.Fprintln(stdout, "partition frames cleared for this page")
+		if err := savePcbStageState(st); err != nil {
+			return fmt.Errorf("persist cleared partition-frame state: %w", err)
+		}
+		fmt.Fprintln(stdout, "partition frames cleared and schematic saved for this page")
 		return nil
 	}
 
-	plan, _, err := computePartitionPlan(cfg, window, opts)
+	// Finish all read-only planning/validation before deleting a prior good frame.
+	plan, _, err := computePartitionPlan(pinnedCfg, win, docUUID, opts)
 	if err != nil {
 		return err
 	}
 	if !plan.Validation.clean() {
-		fmt.Fprintf(stderr, "warn: partition plan has violations %+v — drawing anyway; fix claims/margins\n", plan.Validation)
+		return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations", plan.Validation)
 	}
-	v, err := execZoneJS(cfg, window, buildPartitionDrawJS(plan, fontSize, color))
+	if fontSize <= 0 {
+		fontSize = defaultPartitionZoneFontSize
+	}
+	if _, err := clearPriorZoneFrames(st, docUUID, exec, stderr); err != nil {
+		return err
+	}
+	v, err := exec("draw partition frames", buildPartitionDrawJS(plan, fontSize, color))
 	if err != nil {
 		return err
 	}
-	frames := &workflow.SchZoneFrames{Rects: asStringSlice(v["rects"]), Texts: asStringSlice(v["texts"]), At: time.Now().Format(time.RFC3339)}
-	st.SchZoneFrameIdsByPage[docUUID] = frames
+	frames, verr := validateZoneDrawResult(v, len(plan.Partitions))
+	if verr != nil {
+		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames, verr)
+	}
+	setRecordedZoneFrames(st, docUUID, "partition", frames)
 	if err := savePcbStageState(st); err != nil {
+		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames,
+			fmt.Errorf("persist partition-frame ids: %w", err))
+	}
+	if err := saveZoneDocument(pinnedCfg, win, docUUID, "save partition zone frames"); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "drew %d partition frame(s) + %d title(s) — annotation only; `sch zone-draw --mode partition --clear` removes them (this page)\n",
-		len(frames.Rects), len(frames.Texts))
+	fmt.Fprintf(stdout, "drew %d partition frame(s) + %d title(s) on page %s; schematic saved\n",
+		len(frames.Rects), len(frames.Texts), docUUID)
 	return nil
 }

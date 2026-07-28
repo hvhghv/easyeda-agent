@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 // ── autolayout orchestration (I/O side; the planner in cmd_sch_autolayout.go is pure) ──
@@ -632,30 +631,28 @@ func drawAutolayoutZones(cfg *appConfig, window, targetUUID string, claims map[s
 		return err
 	}
 	// Persist the partition so `sch zones status` and layout-lint see the same claims.
-	st.SetSchZones(claims)
-	// Clear previously drawn frames first so a redraw never orphans graphics.
-	if st.SchZoneFrameIds != nil && (len(st.SchZoneFrameIds.Rects) > 0 || len(st.SchZoneFrameIds.Texts) > 0) {
-		if _, derr := execAutolayoutZoneJS(cfg, window, targetUUID, "clear previous zone frames", buildZoneClearJS(st.SchZoneFrameIds)); derr != nil {
-			return fmt.Errorf("clear previous zone frames: %w", derr)
-		}
-		st.SchZoneFrameIds = nil
+	st.SetSchZonesForPage(targetUUID, claims)
+	st.SchZones = nil
+	exec := func(phase, code string) (map[string]any, error) {
+		return execAutolayoutZoneJS(cfg, window, targetUUID, phase, code)
 	}
-	v, err := execAutolayoutZoneJS(cfg, window, targetUUID, "draw zone frames", buildZoneDrawJS(claims, *sheet, "#AA00AA"))
+	// Clear only this page's previously recorded frames, and keep their state if
+	// the SDK cannot prove every id is gone.
+	if _, err := clearPriorZoneFrames(st, targetUUID, exec, io.Discard); err != nil {
+		return err
+	}
+	v, err := exec("draw zone frames", buildZoneDrawJS(claims, *sheet, "#AA00AA", defaultFixedZoneFontSize))
 	if err != nil {
 		return err
 	}
-	frames := &workflow.SchZoneFrames{
-		Rects: asStringSlice(v["rects"]),
-		Texts: asStringSlice(v["texts"]),
-		At:    nowRFC3339(),
+	frames, verr := validateZoneDrawResult(v, drawableZoneClaimCount(claims))
+	if verr != nil {
+		return compensateZoneDraw(cfg, window, targetUUID, st, "zones", exec, frames, verr)
 	}
-	if len(frames.Rects) != len(claims) || len(frames.Texts) != len(claims) {
-		return fmt.Errorf("draw returned %d rectangle id(s) and %d text id(s), want %d each",
-			len(frames.Rects), len(frames.Texts), len(claims))
-	}
-	st.SchZoneFrameIds = frames
+	setRecordedZoneFrames(st, targetUUID, "zones", frames)
 	if err := savePcbStageState(st); err != nil {
-		return fmt.Errorf("save zone state: %w", err)
+		return compensateZoneDraw(cfg, window, targetUUID, st, "zones", exec, frames,
+			fmt.Errorf("save zone state: %w", err))
 	}
 	if err := saveAutolayoutDocument(cfg, window, targetUUID, "save zone frames"); err != nil {
 		return err

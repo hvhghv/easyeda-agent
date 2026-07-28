@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+	"io"
 	"math"
 	"regexp"
 	"strconv"
@@ -19,7 +21,7 @@ func TestBuildZoneDrawJS(t *testing.T) {
 		"MCU":   {Zone: "center", Parts: []string{"U1"}},
 		"BAD":   {Zone: "nope", Parts: []string{"X1"}}, // unknown zone → skipped
 	}
-	js := buildZoneDrawJS(zones, sheet, "#AA00AA")
+	js := buildZoneDrawJS(zones, sheet, "#AA00AA", 14)
 	if !strings.Contains(js, `"MCU (center)"`) || !strings.Contains(js, `"POWER (left-top)"`) {
 		t.Errorf("labels missing:\n%s", js)
 	}
@@ -35,8 +37,14 @@ func TestBuildZoneDrawJS(t *testing.T) {
 	if strings.Index(js, "MCU") > strings.Index(js, "POWER") {
 		t.Error("modules not emitted in sorted order")
 	}
-	if !strings.Contains(js, "return {rects, texts};") {
+	if !strings.Contains(js, "return {ok:true, rects, texts};") {
 		t.Error("script must return the created ids")
+	}
+	if !strings.Contains(js, `null, 14)`) {
+		t.Errorf("fixed mode did not honor requested font size:\n%s", js)
+	}
+	if !strings.Contains(js, "cleanupCreated") {
+		t.Error("partial draw must carry a self-cleanup path")
 	}
 }
 
@@ -84,7 +92,7 @@ func TestZoneDrawRectangleSemanticsSharedByFixedAndPartition(t *testing.T) {
 	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 900, MaxY: 600}
 	fixedJS := buildZoneDrawJS(map[string]*schZoneClaim{
 		"IO": {Zone: "right-bottom", Parts: []string{"J1"}},
-	}, sheet, "#AA00AA")
+	}, sheet, "#AA00AA", 14)
 	fixedBoxes := renderedZoneRectangleBBoxes(t, fixedJS)
 	if len(fixedBoxes) != 1 {
 		t.Fatalf("fixed mode emitted %d rectangles, want 1\n%s", len(fixedBoxes), fixedJS)
@@ -141,5 +149,142 @@ func TestBuildZoneClearJS(t *testing.T) {
 	js := buildZoneClearJS(&workflow.SchZoneFrames{Rects: []string{"r1"}, Texts: []string{"t1", "t2"}})
 	if !strings.Contains(js, `["r1"]`) || !strings.Contains(js, `["t1","t2"]`) {
 		t.Errorf("ids not embedded:\n%s", js)
+	}
+	for _, want := range []string{"getAllPrimitiveId", "survived", "ok:survived.length===0"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("clear script missing verification %q:\n%s", want, js)
+		}
+	}
+}
+
+func TestValidateZoneDrawResultRequiresExactUniqueIds(t *testing.T) {
+	ok := map[string]any{
+		"ok":    true,
+		"rects": []string{"r1", "r2"},
+		"texts": []string{"t1", "t2"},
+	}
+	if _, err := validateZoneDrawResult(ok, 2); err != nil {
+		t.Fatalf("exact ids rejected: %v", err)
+	}
+	if _, err := validateZoneDrawResult(map[string]any{
+		"ok": true, "rects": []string{"r1", "r2"}, "texts": []string{"t1"},
+	}, 2); err == nil {
+		t.Fatal("missing text id accepted")
+	}
+	if _, err := validateZoneDrawResult(map[string]any{
+		"ok": true, "rects": []string{"same"}, "texts": []string{"same"},
+	}, 1); err == nil {
+		t.Fatal("duplicate rectangle/text id accepted")
+	}
+}
+
+func TestClearPriorZoneFramesFailsClosedAndKeepsState(t *testing.T) {
+	st := &pcbStageState{
+		SchZoneFrameIdsByPage: map[string]*workflow.SchZoneFrames{
+			"page-a": {DocumentUUID: "page-a", Rects: []string{"r1"}, Texts: []string{"t1"}},
+		},
+	}
+	exec := func(_, _ string) (map[string]any, error) {
+		return map[string]any{
+			"ok": false, "found": float64(2), "survived": []string{"t1"},
+		}, nil
+	}
+	if _, err := clearPriorZoneFrames(st, "page-a", exec, io.Discard); err == nil {
+		t.Fatal("surviving text did not fail clear")
+	}
+	if st.SchZoneFrameIdsByPage["page-a"] == nil {
+		t.Fatal("failed clear discarded the only recovery ids")
+	}
+}
+
+func TestCompensateZoneDrawRetainsRecoveryIdsWhenCleanupSurvives(t *testing.T) {
+	t.Setenv(workflow.EnvDir, t.TempDir())
+	st := &workflow.State{Project: "zone-project"}
+	frames := &workflow.SchZoneFrames{Rects: []string{"r1"}, Texts: []string{"t1"}}
+	exec := func(_, _ string) (map[string]any, error) {
+		return map[string]any{
+			"ok": false, "found": float64(2), "survived": []string{"t1"},
+		}, nil
+	}
+	err := compensateZoneDraw(nil, "", "page-a", st, "partition", exec, frames, errors.New("draw count mismatch"))
+	if err == nil || !strings.Contains(err.Error(), "recovery ids retained") {
+		t.Fatalf("compensation did not report retained recovery ids: %v", err)
+	}
+	got, loadErr := workflow.Load("zone-project")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	recovery := got.SchZoneFrameIdsByPage["page-a"]
+	if recovery == nil || recovery.Mode != "partition" ||
+		len(recovery.Rects) != 1 || recovery.Rects[0] != "r1" ||
+		len(recovery.Texts) != 1 || recovery.Texts[0] != "t1" {
+		t.Fatalf("survivor recovery record was lost: %+v", recovery)
+	}
+}
+
+func TestRecordedZoneFramesArePageScoped(t *testing.T) {
+	st := &pcbStageState{}
+	setRecordedZoneFrames(st, "page-a", "zones", &workflow.SchZoneFrames{Rects: []string{"ra"}, Texts: []string{"ta"}})
+	setRecordedZoneFrames(st, "page-b", "partition", &workflow.SchZoneFrames{Rects: []string{"rb"}, Texts: []string{"tb"}})
+	a, source := recordedZoneFrames(st, "page-a")
+	if source != "page" || a.Rects[0] != "ra" || a.Mode != "zones" {
+		t.Fatalf("page-a record wrong: source=%q frame=%+v", source, a)
+	}
+	b, source := recordedZoneFrames(st, "page-b")
+	if source != "page" || b.Rects[0] != "rb" || b.Mode != "partition" {
+		t.Fatalf("page-b record wrong: source=%q frame=%+v", source, b)
+	}
+}
+
+func TestRunFixedZoneDrawPersistsIdsAndExplicitlySaves(t *testing.T) {
+	t.Setenv(workflow.EnvDir, t.TempDir())
+	st := &workflow.State{Project: "zone-project"}
+	st.SetSchZonesForPage("page-a", map[string]*workflow.SchZoneClaim{
+		"MCU": {Zone: "center", Parts: []string{"U1"}},
+	})
+	if err := workflow.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, daemon, cleanup := newAutolayoutTestDaemon(t, func(_ int, call autolayoutTestCall) string {
+		switch call.Action {
+		case "document.current":
+			return autolayoutOK("page-a", `{"uuid":"page-a"}`)
+		case "project.current":
+			return autolayoutOK("page-a", `{"friendlyName":"zone-project"}`)
+		case "schematic.pages.list":
+			return autolayoutOK("page-a", `{"pages":[{"uuid":"page-a","name":"Page A"}]}`)
+		case "pcb.documents.list":
+			return autolayoutOK("page-a", `{"pcbs":[]}`)
+		case "schematic.components.list":
+			return autolayoutOK("page-a", `{"components":[
+				{"componentType":"sheet","bbox":{"minX":0,"minY":0,"maxX":900,"maxY":600}}
+			],"count":1}`)
+		case "debug.exec_js":
+			return autolayoutOK("page-a", `{"value":{"ok":true,"rects":["r1"],"texts":["t1"]}}`)
+		case "schematic.save":
+			return autolayoutOK("page-a", `{"saved":true}`)
+		default:
+			return autolayoutOK("page-a", `{}`)
+		}
+	})
+	defer cleanup()
+
+	if err := runFixedZoneDraw(cfg, "", 18, "#AA00AA", false, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	got, err := workflow.Load("zone-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := got.SchZoneFrameIdsByPage["page-a"]
+	if frames == nil || frames.DocumentUUID != "page-a" || frames.Mode != "zones" ||
+		len(frames.Rects) != 1 || frames.Rects[0] != "r1" ||
+		len(frames.Texts) != 1 || frames.Texts[0] != "t1" {
+		t.Fatalf("page-scoped frames not persisted: %+v", frames)
+	}
+	calls := daemon.snapshot()
+	if len(calls) == 0 || calls[len(calls)-1].Action != "schematic.save" {
+		t.Fatalf("zone draw did not end with explicit schematic.save: %+v", calls)
 	}
 }

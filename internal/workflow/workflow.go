@@ -173,28 +173,27 @@ type State struct {
 	// {grid zone, designators}. Consumed by `pcb place-constrained` (parts placed
 	// into their zone's board sub-rect) and `pcb check`'s zone-violation rule.
 	Zones map[string]*ZoneClaim `json:"zones,omitempty"`
-	// SchZones are the SCHEMATIC-side functional-zone claims: the same S0
-	// modules[].zone contract, but resolved against the page's sheet bbox
-	// (y-up) by `sch zones` / `sch layout-lint`'s zone-violation rule instead
-	// of the board outline. Kept separate from Zones because the same module
-	// legitimately claims different zones on sheet vs board.
+	// SchZones is the pre-page-scoped schematic zone table. It remains readable
+	// for workflow files written before SchZonesByPage existed; new writes go to
+	// SchZonesByPage so a multi-page project cannot apply page A's claims to page B.
 	SchZones map[string]*SchZoneClaim `json:"schZones,omitempty"`
-	// SchZoneFrameIds are the primitives the last `sch zone-draw` created (legacy
-	// zones-grid mode — project-level single record).
+	// SchZonesByPage keys module claims by schematic documentUuid. A missing page
+	// does not fall back to SchZones once this map has any entries: mixing the
+	// legacy project-wide table with page-scoped writes would reintroduce crosstalk.
+	SchZonesByPage map[string]map[string]*SchZoneClaim `json:"schZonesByPage,omitempty"`
+	// SchZoneFrameIds is the pre-page-scoped frame record. New fixed-grid,
+	// partition, and autolayout draws all use SchZoneFrameIdsByPage.
 	SchZoneFrameIds *SchZoneFrames `json:"schZoneFrameIds,omitempty"`
-	// SchZoneFrameIdsByPage keys the partition-planner frames (`zone-draw --mode
-	// partition`) by documentUuid so per-page redraw/clear never wipes another
-	// page's frames (issue #149 — the legacy single record串页 across a 4-page
-	// schematic).
+	// SchZoneFrameIdsByPage keys every zone-draw mode by documentUuid so redraw /
+	// clear on one schematic page never wipes another page's annotations.
 	SchZoneFrameIdsByPage map[string]*SchZoneFrames `json:"schZoneFrameIdsByPage,omitempty"`
 	History               []Event                   `json:"history,omitempty"`
 	UpdatedAt             string                    `json:"updatedAt"`
 }
 
-// SchZoneClaim is one module's schematic zone claim. Page records which
-// schematic page the module lives on (from S0 modules[].page); violation checks
-// only see parts present on the ACTIVE page, so Page is documentation + future
-// --all-pages routing, not a hard filter.
+// SchZoneClaim is one module's schematic zone claim. Page preserves the source
+// selector from S0 modules[].page; `sch zones set` resolves it to the owning key
+// in SchZonesByPage, while checks consume only the active page's table.
 type SchZoneClaim struct {
 	Zone  string   `json:"zone"`
 	Page  string   `json:"page,omitempty"`
@@ -203,7 +202,8 @@ type SchZoneClaim struct {
 	Note  string   `json:"note,omitempty"`
 }
 
-// SetSchZones replaces the schematic zone claim table (module name → claim).
+// SetSchZones writes the legacy project-wide table. Kept for JSON/backward API
+// compatibility; new schematic callers should use SetSchZonesForPage.
 func (s *State) SetSchZones(z map[string]*SchZoneClaim) {
 	s.SchZones = z
 	s.History = append(s.History, Event{
@@ -212,13 +212,57 @@ func (s *State) SetSchZones(z map[string]*SchZoneClaim) {
 	})
 }
 
+// SchZonesForPage returns claims for one schematic document. A legacy SchZones
+// table is used only while no page-scoped table exists at all.
+func (s *State) SchZonesForPage(documentUUID string) map[string]*SchZoneClaim {
+	if s == nil {
+		return nil
+	}
+	if len(s.SchZonesByPage) > 0 {
+		return s.SchZonesByPage[documentUUID]
+	}
+	return s.SchZones
+}
+
+// SetSchZonesForPage replaces one page's claims without disturbing other pages.
+func (s *State) SetSchZonesForPage(documentUUID string, z map[string]*SchZoneClaim) {
+	if strings.TrimSpace(documentUUID) == "" {
+		s.SetSchZones(z)
+		return
+	}
+	if s.SchZonesByPage == nil {
+		s.SchZonesByPage = map[string]map[string]*SchZoneClaim{}
+	}
+	if len(z) == 0 {
+		delete(s.SchZonesByPage, documentUUID)
+	} else {
+		s.SchZonesByPage[documentUUID] = z
+	}
+	s.History = append(s.History, Event{
+		Stage: "sch-zones", At: time.Now().Format(time.RFC3339), Action: "confirm",
+		Note: fmt.Sprintf("%d module schematic zone claim(s) on page %s", len(z), documentUUID),
+	})
+}
+
+// ReplaceSchZonesByPage atomically replaces the page-scoped claim table. This is
+// used by a multi-page S0 spec, where modules[].page resolves to document UUIDs.
+func (s *State) ReplaceSchZonesByPage(z map[string]map[string]*SchZoneClaim) {
+	s.SchZonesByPage = z
+	s.History = append(s.History, Event{
+		Stage: "sch-zones", At: time.Now().Format(time.RFC3339), Action: "confirm",
+		Note: fmt.Sprintf("%d schematic page zone table(s)", len(z)),
+	})
+}
+
 // SchZoneFrames tracks the visual zone-frame primitives `sch zone-draw` put on
 // the page (dashed rectangles + labels), so redraw/clear can remove exactly
 // what the tool created and never touch user graphics.
 type SchZoneFrames struct {
-	Rects []string `json:"rects,omitempty"`
-	Texts []string `json:"texts,omitempty"`
-	At    string   `json:"at,omitempty"`
+	DocumentUUID string   `json:"documentUuid,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	Rects        []string `json:"rects,omitempty"`
+	Texts        []string `json:"texts,omitempty"`
+	At           string   `json:"at,omitempty"`
 }
 
 // ZoneClaim is one functional zone's part claim (issue #126): the S0 spec's

@@ -10,7 +10,7 @@ package app
 //
 //   - `sch zones set --spec <s0-spec.json>` (or --module NAME=ZONE:D1,D2 …)
 //     persists module → {page, grid zone, designators} into the same project
-//     workflow state the PCB claims live in (State.SchZones — separate from
+//     workflow state the PCB claims live in (State.SchZonesByPage — separate from
 //     State.Zones because a module legitimately claims different zones on the
 //     sheet vs the board);
 //   - `sch layout-lint` gains a zone-violation rule (WARN): a claimed part whose
@@ -63,6 +63,9 @@ func parseSchZoneSpec(raw []byte) (map[string]*schZoneClaim, error) {
 		name := strings.TrimSpace(m.Name)
 		if name == "" {
 			name = fmt.Sprintf("module%d", i+1)
+		}
+		if prior := out[name]; prior != nil {
+			return nil, fmt.Errorf("modules[%d] %q duplicates an earlier module name (module names must be unique across pages)", i, name)
 		}
 		out[name] = &schZoneClaim{
 			Zone: zone, Page: strings.TrimSpace(m.Page),
@@ -141,8 +144,66 @@ func findSchZoneViolations(zones map[string]*schZoneClaim, sheet layoutBBox, com
 	return out
 }
 
-// loadSchZoneClaims loads the project's schematic zone table (nil when none set).
-func loadSchZoneClaims(cfg *appConfig, window string) (map[string]*schZoneClaim, string, error) {
+// currentSchematicDocumentUUID returns the active schematic page identity. Zone
+// claims and visual annotations are page-scoped; accepting an empty UUID would
+// collapse unrelated pages into the same workflow-state key.
+func currentSchematicDocumentUUID(cfg *appConfig, window string) (string, error) {
+	cur, err := requestAction(cfg, "document.current", window, nil)
+	if err != nil {
+		return "", err
+	}
+	if cur.Context == nil || cur.Context.DocumentType != "schematic" {
+		dt := "unknown"
+		if cur.Context != nil && cur.Context.DocumentType != "" {
+			dt = cur.Context.DocumentType
+		}
+		return "", fmt.Errorf("active document is %q, not a schematic", dt)
+	}
+	if cur.Context.DocumentUUID == "" {
+		return "", fmt.Errorf("active schematic response omitted documentUuid")
+	}
+	return cur.Context.DocumentUUID, nil
+}
+
+// groupSchZoneClaimsByPage resolves each claim's optional Page selector into a
+// document UUID. Claims without Page belong to the active page. The resolver is
+// injected to keep the grouping/multi-page overwrite rules unit-testable.
+func groupSchZoneClaimsByPage(
+	claims map[string]*schZoneClaim,
+	activeUUID string,
+	resolve func(string) (string, error),
+) (map[string]map[string]*schZoneClaim, error) {
+	out := map[string]map[string]*schZoneClaim{}
+	for name, claim := range claims {
+		if claim == nil {
+			continue
+		}
+		docUUID := activeUUID
+		if selector := strings.TrimSpace(claim.Page); selector != "" {
+			var err error
+			docUUID, err = resolve(selector)
+			if err != nil {
+				return nil, fmt.Errorf("module %q page %q: %w", name, selector, err)
+			}
+		}
+		if strings.TrimSpace(docUUID) == "" {
+			return nil, fmt.Errorf("module %q has no page and the active schematic document UUID is unavailable", name)
+		}
+		if out[docUUID] == nil {
+			out[docUUID] = map[string]*schZoneClaim{}
+		}
+		if prior := out[docUUID][name]; prior != nil {
+			return nil, fmt.Errorf("page %s has duplicate module name %q", docUUID, name)
+		}
+		out[docUUID][name] = claim
+	}
+	return out, nil
+}
+
+// loadSchZoneClaimsForPage loads one pinned page's schematic zone table without
+// consulting the mutable foreground document. Legacy project-wide SchZones
+// remains readable until the first page-scoped write.
+func loadSchZoneClaimsForPage(cfg *appConfig, window, docUUID string) (map[string]*schZoneClaim, string, error) {
 	project, err := resolveStageProject(cfg, window)
 	if err != nil {
 		return nil, "", err
@@ -151,7 +212,13 @@ func loadSchZoneClaims(cfg *appConfig, window string) (map[string]*schZoneClaim,
 	if err != nil {
 		return nil, project, err
 	}
-	return st.SchZones, project, nil
+	if len(st.SchZonesByPage) == 0 {
+		return st.SchZones, project, nil
+	}
+	if strings.TrimSpace(docUUID) == "" {
+		return nil, project, fmt.Errorf("select page-scoped schematic zones: pinned document UUID is empty")
+	}
+	return st.SchZonesForPage(docUUID), project, nil
 }
 
 // sheetBBoxOf pulls the sheet primitive's bbox out of a components.list parse
@@ -181,10 +248,12 @@ Zone names are the shared grid vocabulary (same as autolayout + pcb zones):
 left / center / right × top / bottom (e.g. right-top), or full-height/width
 left / right / top / bottom / center. The canvas is y-UP, and "top" means the
 VISUALLY upper half (larger y — zoneRect owns the mapping). The rectangle is
-resolved from the LIVE sheet bbox at lint time. Claims live
-in the project workflow state (~/.easyeda-agent/workflow/<project>.json),
-separate from the PCB zone claims — the same module may claim different zones
-on sheet vs board.`,
+resolved from the LIVE sheet bbox at lint time. Claims live by schematic
+document UUID in the project workflow state
+(~/.easyeda-agent/workflow/<project>.json); modules[].page in a spec is resolved
+to its page UUID, while manual --module claims apply to the active/--doc page.
+This is separate from PCB zone claims — the same module may claim different
+zones on sheet vs board.`,
 	}
 	zones.AddCommand(newSchZonesSetCmd(cfg, window, stdout, stderr))
 	zones.AddCommand(newSchZonesStatusCmd(cfg, window, stdout))
@@ -197,12 +266,15 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 	var modules []string
 	c := &cobra.Command{
 		Use:   "set",
-		Short: "Set schematic zone claims from an S0 spec file (--spec) or manually (--module)",
+		Short: "Set page-scoped schematic zone claims from an S0 spec file (--spec) or manually (--module)",
 		Example: `  easyeda sch zones set --spec s0-esp32mini.json --project ceshi
   easyeda sch zones set --module "POWER=left-top:U3,C5,C6" --module "MCU=center:U1" --project ceshi`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			pinnedCfg, win, activeUUID, err := pinZonePage(cfg, *window)
+			if err != nil {
+				return err
+			}
 			var claims map[string]*schZoneClaim
-			var err error
 			switch {
 			case specPath != "" && len(modules) > 0:
 				return fmt.Errorf("--spec and --module are mutually exclusive")
@@ -220,7 +292,7 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 			if err != nil {
 				return err
 			}
-			project, perr := resolveStageProject(cfg, *window)
+			project, perr := resolveStageProject(pinnedCfg, win)
 			if perr != nil {
 				return perr
 			}
@@ -231,7 +303,32 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 			for _, zc := range claims {
 				zc.At = nowRFC3339()
 			}
-			st.SetSchZones(claims)
+
+			if specPath != "" {
+				docs, _, _, derr := discoverDocs(pinnedCfg, win)
+				if derr != nil {
+					return fmt.Errorf("resolve modules[].page: %w", derr)
+				}
+				byPage, gerr := groupSchZoneClaimsByPage(claims, activeUUID, func(selector string) (string, error) {
+					doc, rerr := resolveDoc(docs, selector)
+					if rerr != nil {
+						return "", rerr
+					}
+					if doc.Type != "schematic" {
+						return "", fmt.Errorf("%q resolves to a %s document, want schematic", selector, doc.Type)
+					}
+					return doc.UUID, nil
+				})
+				if gerr != nil {
+					return gerr
+				}
+				st.ReplaceSchZonesByPage(byPage)
+			} else {
+				st.SetSchZonesForPage(activeUUID, claims)
+			}
+			// A page-scoped write is authoritative. Keeping the legacy table in the
+			// JSON would be ambiguous to older tools and confusing during audits.
+			st.SchZones = nil
 			if err := savePcbStageState(st); err != nil {
 				return err
 			}
@@ -244,7 +341,7 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 				}
 				fmt.Fprintf(stderr, "✓ %s → %s%s (%d part(s): %s)\n", name, zc.Zone, page, len(zc.Parts), strings.Join(zc.Parts, ","))
 			}
-			fmt.Fprintf(stderr, "schematic zone claims persisted for %q — %d module(s), %d part(s); consumed by `sch layout-lint` (zone-violation WARN)\n",
+			fmt.Fprintf(stderr, "schematic zone claims persisted for %q — %d module(s), %d part(s), page-scoped by document UUID; consumed by `sch layout-lint` (zone-violation WARN)\n",
 				project, len(claims), total)
 			return nil
 		},
@@ -260,20 +357,31 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 		Use:   "status",
 		Short: "Show the persisted schematic zone claims (and live violations when a window is connected)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			zones, project, err := loadSchZoneClaims(cfg, *window)
+			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
+			if err != nil {
+				return err
+			}
+			zones, project, err := loadSchZoneClaimsForPage(pinnedCfg, win, docUUID)
 			if err != nil {
 				return err
 			}
 			if asJSON {
+				st, serr := loadPcbStageState(project)
+				if serr != nil {
+					return serr
+				}
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(map[string]any{"project": project, "schZones": zones})
+				return enc.Encode(map[string]any{
+					"project": project, "documentUuid": docUUID, "schZones": zones,
+					"schZonesByPage": st.SchZonesByPage, "legacySchZones": st.SchZones,
+				})
 			}
 			if len(zones) == 0 {
-				fmt.Fprintf(stdout, "no schematic zone claims for %q — `sch zones set --spec <s0-spec.json>`\n", project)
+				fmt.Fprintf(stdout, "no schematic zone claims for %q on page %s — `sch zones set --spec <s0-spec.json>`\n", project, docUUID)
 				return nil
 			}
-			fmt.Fprintf(stdout, "schematic zone claims — project %q\n", project)
+			fmt.Fprintf(stdout, "schematic zone claims — project %q, page %s\n", project, docUUID)
 			var names []string
 			for n := range zones {
 				names = append(names, n)
@@ -288,7 +396,8 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 				fmt.Fprintf(stdout, "  %-12s %-13s page=%-16s %d part(s): %s\n", n, zc.Zone, page, len(zc.Parts), strings.Join(zc.Parts, ","))
 			}
 			// Live violation quick-look (best-effort: needs window + sheet bbox).
-			res, aerr := requestAction(cfg, "schematic.components.list", *window, map[string]any{"includeBBox": true})
+			res, aerr := requestAutolayoutAction(pinnedCfg, "schematic.components.list", win,
+				map[string]any{"includeBBox": true}, docUUID, "read zone status geometry")
 			if aerr == nil {
 				if comps, perr := parseLayoutComps(res.Result); perr == nil {
 					if sheet := sheetBBoxOf(comps); sheet != nil {
@@ -327,7 +436,15 @@ func newSchZonesClearCmd(cfg *appConfig, window *string, stdout io.Writer) *cobr
 				return err
 			}
 			n := len(st.SchZones)
-			st.SetSchZones(nil)
+			for _, pageClaims := range st.SchZonesByPage {
+				n += len(pageClaims)
+			}
+			st.SchZones = nil
+			st.SchZonesByPage = nil
+			st.History = append(st.History, workflow.Event{
+				Stage: "sch-zones", At: nowRFC3339(), Action: "confirm",
+				Note: "cleared all schematic page zone claims",
+			})
 			if err := savePcbStageState(st); err != nil {
 				return err
 			}

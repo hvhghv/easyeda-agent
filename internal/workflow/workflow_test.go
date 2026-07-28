@@ -389,3 +389,39 @@ func TestPlanePouredNetsInvalidationSemantics(t *testing.T) {
 		})
 	}
 }
+
+func TestSchZonesForPageLegacyAndScopedIsolation(t *testing.T) {
+	legacy := map[string]*SchZoneClaim{
+		"LEGACY": {Zone: "left", Parts: []string{"U1"}},
+	}
+	s := &State{SchZones: legacy}
+	if got := s.SchZonesForPage("page-a"); got["LEGACY"] == nil {
+		t.Fatalf("legacy SchZones was not readable before page-scoped migration: %v", got)
+	}
+
+	pageA := map[string]*SchZoneClaim{
+		"MCU": {Zone: "center", Parts: []string{"U2"}},
+	}
+	s.SetSchZonesForPage("page-a", pageA)
+	if got := s.SchZonesForPage("page-a"); got["MCU"] == nil {
+		t.Fatalf("page-a claims missing: %v", got)
+	}
+	if got := s.SchZonesForPage("page-b"); len(got) != 0 {
+		t.Fatalf("page-b leaked project-wide/page-a claims: %v", got)
+	}
+}
+
+func TestReplaceSchZonesByPageKeepsThreePagesIndependent(t *testing.T) {
+	s := &State{}
+	s.ReplaceSchZonesByPage(map[string]map[string]*SchZoneClaim{
+		"page-mcu":        {"MCU": {Zone: "left-top", Parts: []string{"U1"}}},
+		"page-power":      {"POWER": {Zone: "left", Parts: []string{"U2"}}},
+		"page-peripheral": {"IO": {Zone: "right", Parts: []string{"J1"}}},
+	})
+	if len(s.SchZonesByPage) != 3 {
+		t.Fatalf("got %d page claim tables, want 3", len(s.SchZonesByPage))
+	}
+	if got := s.SchZonesForPage("page-power"); got["POWER"] == nil || got["MCU"] != nil {
+		t.Fatalf("page-power claims crossed pages: %v", got)
+	}
+}
