@@ -6,7 +6,15 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-07-29
+
 ### Fixed
+- **安装脚本更新 skill 不再产生 `.bak` 备份、污染 skills 目录**:`install.sh` 的
+  `install_skill_to` 从「先 `mv` 成 `easyeda-agent.bak.<时间戳>` 再拷新版本」改为
+  **干净替换**——检测到本地 skill 与 release 不一致时直接 `rm -rf` 旧目录再 `cp` 新版本，
+  不再在 `~/.claude/skills` / `~/.codex/skills` 下留一堆过期备份副本（备份目录会被 skill
+  加载器扫到、误加载旧内容）。需要保留本地改动的用户仍可用 `EASYEDA_SKILL_PRESERVE=1`
+  跳过覆盖。
 - **多页原理图功能框/标题不再串页或只留内存**:`sch zones` 认领与 fixed/partition/
   autolayout 三条绘框路径统一按 documentUuid 持久化（旧 `schZones`/单 frame 记录仍可读）；
   fixed 模式开放 `--font-size`（默认 14pt）。重画/清除会回读 rectangle/text ID，任何 survivor
