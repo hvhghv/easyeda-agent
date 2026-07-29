@@ -100,7 +100,7 @@ client_base_dir() {
 }
 
 # install_skill_to <client> <src_skill_dir>
-# Cleanly replaces <base>/easyeda-agent from the release, backing up local edits.
+# Cleanly replaces <base>/easyeda-agent from the release (no backup to avoid polluting the skills dir).
 install_skill_to() {
   _client="$1"; _src="$2"
   _base=$(client_base_dir "$_client") || { warn "Unknown skill target: ${_client} (skipped)"; return 0; }
@@ -125,17 +125,16 @@ install_skill_to() {
     return 0
   fi
 
-  # Detect local modifications vs the release; back up before replacing.
+  # Detect local modifications vs the release; clean-replace if different.
   if diff -r "$_src" "$_dest" >/dev/null 2>&1; then
     _write_marker
     ok "${_client} skill already up to date → ${_dest}"
     return 0
   fi
-  _bak="${_dest}.bak.$(date +%Y%m%d%H%M%S)"
-  mv "$_dest" "$_bak"
+  rm -rf "$_dest"
   cp -r "$_src" "$_dest"
   _write_marker
-  ok "${_client} skill updated → ${_dest} (old backed up → ${_bak})"
+  ok "${_client} skill updated → ${_dest}"
 }
 
 TMP=$(mktemp -d)
