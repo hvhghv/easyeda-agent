@@ -47,7 +47,7 @@ EasyEDA tooling.
 | 停点 | 触发 | 要点 |
 |---|---|---|
 | ① S0 方案书 | 进 S1 前 | 架构/叠层/地策略/接口取向每条摊选项+坑+推荐让用户拍板;**必须落成磁盘文件**才算过门,不能停在对话里 |
-| ② sch→PCB 前 | 原理图完成 | 逐页 `layout-lint --strict` + `sch drc` fatal/error=0 + `sch check --strict` + `sch bridge-check` + pin→net 黄金表对齐；DRC 聚合 WARN 必须审阅并报告 → design-flow S5 |
+| ② sch→PCB 前 | 原理图完成 | 逐页 `layout-lint --strict` + `sch drc` fatal/error=0 + `sch check --strict` + `sch bridge-check` + pin→net 黄金表对齐；DRC 聚合 WARN 必须审阅并报告；**多页/多模块板还需确认分区框+区名标注已画**(`sch zones status` 看认领、`sch zone-draw` 补画——手工摆放路径不会像 `autolayout --apply` 那样自动画,容易漏) → design-flow S5 |
 | ③ 发板/交付前 | 导出制造 | 交付摘要说清偏差(降级决策/遗留 WARN) |
 | P2 摆放前 | 布局起手 | 先问单/双面布局 + 焊接工艺;立即用 `pcb stage set-assembly` 落盘,手焊默认 `min-gap=40mil`/大焊盘通道 `60mil` |
 | P2 边缘接口件 | 端子/USB/SD/排针/按键/IPEX | 朝向 + 边序 = 装配体验,agent 猜不了,**必须用户确认**;先 `blocks show` 读块 placement 摊给用户 |
