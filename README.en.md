@@ -110,7 +110,22 @@ Control skill install with env vars:
 EASYEDA_INSTALL_SKILLS=codex,claude curl -fsSL .../install.sh | sh  # force targets
 EASYEDA_INSTALL_SKILLS=none          curl -fsSL .../install.sh | sh  # skip skills
 EASYEDA_SKILL_PRESERVE=1             curl -fsSL .../install.sh | sh  # keep local edits
+EASYEDA_VERSION=v0.18.2              curl -fsSL .../install.sh | sh  # pin a release (skips the API)
 ```
+
+**Hitting `403` / GitHub API rate limit?** The script calls `api.github.com` once to
+resolve the latest release, and unauthenticated calls are capped at 60 requests/hour
+per IP — a shared office / NAT / CI address runs out fast. Two ways out (the error
+message prints them too):
+
+```bash
+export GITHUB_TOKEN=<token>   # GH_TOKEN works too
+gh auth login                 # an authenticated gh CLI is picked up automatically (5000/hour)
+
+EASYEDA_VERSION=v0.18.2 curl -fsSL .../install.sh | sh   # or pin a tag and skip the API
+```
+
+Available tags: [Releases](https://github.com/zhoushoujianwork/easyeda-agent/releases).
 
 The published skill slug is `easyeda-agent` (suffix intentional: it distinguishes this
 community automation layer from official EasyEDA tooling). To install only the skill

@@ -100,7 +100,21 @@ curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main
 EASYEDA_INSTALL_SKILLS=codex,claude curl -fsSL .../install.sh | sh  # 指定目标
 EASYEDA_INSTALL_SKILLS=none          curl -fsSL .../install.sh | sh  # 跳过 skill
 EASYEDA_SKILL_PRESERVE=1             curl -fsSL .../install.sh | sh  # 保留本地改动
+EASYEDA_VERSION=v0.18.2              curl -fsSL .../install.sh | sh  # 指定版本(跳过 API 查询)
 ```
+
+**遇到 `403` / GitHub API 限流**:脚本默认要调一次 `api.github.com` 解析 latest
+release,匿名调用每个 IP 每小时只有 60 次 —— 公司出口 / NAT / CI 很容易撞满。两条
+出路(脚本报错时也会打印):
+
+```bash
+export GITHUB_TOKEN=<token>   # 或 GH_TOKEN;已登录 gh CLI 时会自动取 `gh auth token`
+gh auth login                 # 等价做法,额度提升到 5000/小时
+
+EASYEDA_VERSION=v0.18.2 curl -fsSL .../install.sh | sh   # 或者直接锁版本,完全不碰 API
+```
+
+可用 tag 见 [Releases](https://github.com/zhoushoujianwork/easyeda-agent/releases)。
 
 Skill slug 为 `easyeda-agent`(后缀有意为之,区分于官方 EasyEDA 工具)。只从 registry 装 skill:
 

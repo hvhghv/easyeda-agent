@@ -6,6 +6,16 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **安装脚本撞上 GitHub API 限流时不再只丢一句 `Could not determine latest release
+  version`**:`install.sh` 解析 latest release 走匿名 `api.github.com`(每 IP 每小时 60 次),
+  公司出口 / NAT / CI 很容易撞满并拿到 `403`。现在(1)有 token 就带上 —— 依次取
+  `GITHUB_TOKEN` / `GH_TOKEN`,都没有则回落到已登录的 `gh auth token`;(2)新增
+  `EASYEDA_VERSION=<tag>` 直接锁版本、完全跳过 API 查询(裸 `0.18.2` 会自动补 `v`);
+  (3)失败信息可执行 —— 403/429 明确说是限流并给出「设 token / `gh auth login`」与
+  「`EASYEDA_VERSION=<tag>`」两条出路,401(token 失效)、404(无 latest release)、
+  网络不可达也各有独立提示。README(中/英)与 `docs/quick-start.md` 同步补充。
+
 ## [0.18.2] - 2026-07-29
 
 ### Fixed

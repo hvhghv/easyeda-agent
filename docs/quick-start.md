@@ -33,7 +33,13 @@ curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main
 EASYEDA_INSTALL_SKILLS=codex,claude  ... | sh   # 指定目标
 EASYEDA_INSTALL_SKILLS=none          ... | sh   # 跳过 skill(只装 CLI)
 EASYEDA_SKILL_PRESERVE=1             ... | sh   # 升级时保留本地改动
+EASYEDA_VERSION=v0.18.2              ... | sh   # 锁定版本,跳过 GitHub API 查询
 ```
+
+> 装不上、报 `403`?脚本要调一次 `api.github.com` 查 latest release,匿名额度是每
+> IP 每小时 60 次,公司出口 / NAT / CI 很容易撞满。要么 `export GITHUB_TOKEN=<token>`
+> (或 `GH_TOKEN`;已 `gh auth login` 的话脚本会自动取 `gh auth token`),要么用
+> `EASYEDA_VERSION=<tag>` 直接锁版本绕开 API。
 
 ### 2. 启动 daemon
 

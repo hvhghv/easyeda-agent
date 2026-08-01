@@ -9,6 +9,8 @@ SKILL_NAME="easyeda-agent"
 INSTALL_SKILLS="${EASYEDA_INSTALL_SKILLS:-}"
 # EASYEDA_SKILL_PRESERVE=1 keeps existing files instead of clean-replacing
 SKILL_PRESERVE="${EASYEDA_SKILL_PRESERVE:-0}"
+# EASYEDA_VERSION=v0.18.2 pins the release and skips the GitHub API lookup entirely
+VERSION="${EASYEDA_VERSION:-}"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 info()  { printf '\033[34m[easyeda-agent]\033[0m %s\n' "$*"; }
@@ -17,11 +19,72 @@ warn()  { printf '\033[33m⚠\033[0m %s\n' "$*"; }
 fatal() { printf '\033[31m✘\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── resolve latest release ───────────────────────────────────────────────────
-info "Fetching latest release..."
-VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-[ -n "$VERSION" ] || fatal "Could not determine latest release version"
-info "Latest: ${VERSION}"
+# api.github.com allows only 60 requests/hour per IP unauthenticated, so a shared
+# office / NAT / CI address can hand back 403 instead of the release JSON. Send a
+# token when we can find one (GITHUB_TOKEN / GH_TOKEN / the gh CLI), and let
+# EASYEDA_VERSION bypass the API completely.
+github_token() {
+  _tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -z "$_tok" ] && command -v gh >/dev/null 2>&1; then
+    _tok=$(gh auth token 2>/dev/null || true)
+  fi
+  printf '%s' "$_tok"
+}
+
+rate_limit_fatal() {
+  printf '\033[31m✘\033[0m %s\n' \
+    "GitHub API rate limit (HTTP ${1}) — could not resolve the latest release." >&2
+  printf '    Unauthenticated api.github.com allows 60 requests/hour per IP;\n' >&2
+  printf '    a shared office / NAT / CI address burns through that fast.\n' >&2
+  if [ -n "$2" ]; then
+    printf '    A token was sent but still rejected — it may be expired or invalid.\n' >&2
+  fi
+  printf '    Fix it either way:\n' >&2
+  printf '      1) authenticate (5000 requests/hour):\n' >&2
+  printf '           export GITHUB_TOKEN=<token>    # GH_TOKEN works too\n' >&2
+  printf '           gh auth login                 # gh CLI is picked up automatically\n' >&2
+  printf '      2) skip the API by pinning a release tag:\n' >&2
+  printf '           EASYEDA_VERSION=<tag> sh install.sh\n' >&2
+  printf '           tags: https://github.com/%s/releases\n' "$REPO" >&2
+  exit 1
+}
+
+if [ -n "$VERSION" ]; then
+  # Tags are v-prefixed; accept "0.18.2" as well as "v0.18.2".
+  case "$VERSION" in
+    [0-9]*) VERSION="v${VERSION}" ;;
+  esac
+  info "Pinned release: ${VERSION} (EASYEDA_VERSION)"
+else
+  info "Fetching latest release..."
+  API_TOKEN=$(github_token)
+  API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+  # No -f here: we want the body *and* the status code so the failure can explain itself.
+  if [ -n "$API_TOKEN" ]; then
+    API_RESP=$(curl -sSL -w '\n%{http_code}' \
+      -H 'Accept: application/vnd.github+json' \
+      -H "Authorization: Bearer ${API_TOKEN}" "$API_URL") || API_RESP=""
+  else
+    API_RESP=$(curl -sSL -w '\n%{http_code}' \
+      -H 'Accept: application/vnd.github+json' "$API_URL") || API_RESP=""
+  fi
+  API_CODE=$(printf '%s\n' "$API_RESP" | tail -n 1)
+  API_BODY=$(printf '%s\n' "$API_RESP" | sed '$d')
+
+  case "$API_CODE" in
+    200) ;;
+    401) fatal "GitHub API rejected the token (HTTP 401). Unset GITHUB_TOKEN/GH_TOKEN or run 'gh auth login', or pass EASYEDA_VERSION=<tag>." ;;
+    403|429) rate_limit_fatal "$API_CODE" "$API_TOKEN" ;;
+    404) fatal "No 'latest' release for ${REPO} (HTTP 404). Pick a tag from https://github.com/${REPO}/releases and pass EASYEDA_VERSION=<tag>." ;;
+    '' | 000) fatal "Could not reach api.github.com (network or proxy issue). Retry, or pass EASYEDA_VERSION=<tag> to skip the API." ;;
+    *) fatal "GitHub API returned HTTP ${API_CODE} while resolving the latest release. Pass EASYEDA_VERSION=<tag> to skip the API." ;;
+  esac
+
+  VERSION=$(printf '%s\n' "$API_BODY" \
+    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+  [ -n "$VERSION" ] || fatal "Could not parse a tag_name out of the GitHub API response. Pass EASYEDA_VERSION=<tag> to skip the API."
+  info "Latest: ${VERSION}"
+fi
 
 BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
