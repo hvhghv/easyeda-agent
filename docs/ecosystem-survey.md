@@ -1,4 +1,4 @@
-# 官方扩展生态调研 & 可吸收能力清单 — 2026-06-28
+# 官方扩展生态调研 & 可吸收能力清单 — 2026-06-28（§9 KiCad 横向对比补于 2026-08-01）
 
 > **目的**：本项目是 skill 驱动、agent **全自主**操作 EasyEDA Pro 的自动化层。
 > 嘉立创官方在 `github.com/easyeda` 开源了一大批扩展(eext-*),它们调用的是和我们
@@ -367,9 +367,126 @@ OrthoRoute(GPU/FPGA 小众)、Quilter.ai(商业 RL 云,非库)。
 
 ---
 
+## 9. KiCad 作为独立生态：竞品定位 + 离线校验路径（2026-08-01，本机实跑）
+
+前面 §4.1 / §7 只把 KiCad 当成**布线引擎**提了一嘴（官方 `eext-kirouting-integration`
+把 PCB 导出成 KiCad 格式 → 喂 Rust A* → 回写）。那是把它当零件看。这一节把它当**独立生态**
+重新定位——因为它恰好补上了我们架构里最硬的那个约束。
+
+**仓库说明**：`github.com/KiCad/kicad-source-mirror` 是**只读镜像**，随 GitLab 开发分支自动同步、
+**不收 PR**。真正上游在 `gitlab.com/kicad/code/kicad`。2.9k star 具有迷惑性，别在镜像上提 issue。
+
+### 9.1 架构差异：这才是重点
+
+| | EasyEDA Pro（我们） | KiCad 10 |
+|---|---|---|
+| 设计数据 | 闭源云端工程，只能过 `eda.*` JS API | 本地文本文件（S-expression `.kicad_sch` / `.kicad_pcb`） |
+| Agent 接入 | 必须**开着 EasyEDA 窗口** + 连接器 + 「允许外部交互」 | `pcbnew` Python + `kicad-cli`，**纯 CLI 零 GUI** |
+| 器件/供应链 | LCSC C 号直通、嘉立创下单打样 | 通用库，**无 C 号**，供应链自己接 |
+| 失败模式 | WS 断连 / 连接器版本漂移 / 窗口被关 | C++ SWIG 的内存陷阱（见 9.4） |
+
+**那个硬约束**：我们整条链路（skill → daemon → connector → `eda.*`）**离不开一个活着的 GUI 窗口**。
+CI 里跑不了、批量回归跑不了、无人值守跑不了。KiCad 这边不存在这个问题。
+
+### 9.2 实跑对比：拿 box-v2 rev-a §1 主降压重建一遍
+
+用 `motobox/hardware/box-v2/rev-a/NETLIST.md` §1「输入保护 + 主降压 TPS54360」
+（U2 + L1/D2/D3/F1/Q3/D_QG + R1–R5/R_C2 + C1/C1b/C2/C3/C4/C5/C6 + J_VEH，
+共 **24 器件 / 14 网络 / 57 连接点**）在 KiCad 侧离线重建，**全程没开过 GUI**：
+
+```python
+board = pcbnew.BOARD()
+fp = pcbnew.FootprintLoad(lib, "SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm")
+fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+board.Add(fp)
+fp.FindPadByNumber("2").SetNet(net)     # 直接赋网，不用画线
+pcbnew.SaveBoard(out, board)
+```
+
+→ `kicad-cli pcb drc --format json` 结果（布局坐标是**故意随手摆的**，用来看 DRC 抓不抓得住）：
+
+| 类型 | 数量 | easyeda-agent 侧对应 |
+|---|---|---|
+| `shorting_items` | 1 | **❌ 没有**——报出 D2.2[SW1_NODE] 与 C2.1[VBAT_RAW] 重叠**导致两网短路** |
+| `courtyards_overlap` | 7 | ✅ `pcb layout-lint` 的 overlap（但见 9.3） |
+| `solder_mask_bridge` | 1 | ❌ 没有 |
+| `silk_overlap` / `silk_over_copper` | 17 / 18 | ❌ 没有 |
+| `unconnected_items` | 43 | ✅ 鼠线（我只赋网没布线，符合预期） |
+
+**最扎眼的一条是短路**：我们的 `layout-lint` 是**纯几何**的，只知道两个 bbox 相交；
+KiCad 知道相交的这两个焊盘**属于不同网络**，于是直接定性成短路。同样一次重叠，
+一个报「靠太近」，一个报「这板子废了」。
+
+### 9.3 层感知：KiCad 赢在这里，而这正是 box-v2 踩过的坑
+
+`box-v2/rev-a/README.md` 里有一段专门的警告：
+
+> ⚠️ `pcb layout-lint` 是**层盲**的——它把「顶层器件与底层器件在同一 XY」也算成重叠。
+> 本板双面贴片，那 100+ 条「重叠」里绝大多数是顶底对穿，物理上完全合法。
+
+做了对照实验：两个 `C_0805` 放**完全相同的 XY**，一个 F.Cu 一个 B.Cu：
+
+```
+C_TOP  位置=(10,10)  层=F.Cu
+C_BOT  位置=(10,10)  层=B.Cu
+→ violations: 0    courtyard 重叠数: 0
+```
+
+KiCad **0 误报**。它比的是 `F.CrtYd` / `B.CrtYd` 两个分层的 courtyard（正式机械禁布区），
+天生按层分组；我们比的是不分层的渲染 bbox。**这是 `pcb layout-lint` 的真实缺陷，不是配置问题**——
+双面板上它的 overlap 数字目前不可信，rev-a 只能靠人工写「自写的层感知检查」绕过去。
+→ **待办：`pcb layout-lint` 按层分组两两比，并引入 courtyard 概念**（见 `docs/concepts.md` 布局分档）。
+
+### 9.4 但反向也成立：我们有 KiCad 没有的东西
+
+对比不是单向的，别过度倾斜：
+
+| 能力 | 我们 | KiCad |
+|---|---|---|
+| **可布性预测**（ratsnest MST + 跨网交叉数 + 0–100 分 + easy/hard 判定） | ✅ `pcb layout-lint` | ❌ 完全没有 |
+| **DFM 审查**（酸角 / 悬空铜桩 / 堆叠过孔 / 无效单层过孔 / neck-down） | ✅ `pcb check` | ❌ DRC 不覆盖 |
+| LCSC C 号 / 立创库直取 | ✅ `standard-parts.json` + `bom-enrich.py` | ❌ 得自己贴 |
+| 电路块库（CH340 / ESP32 自动下载 / buck / RS-485…） | ✅ `easyeda blocks` | ❌ |
+
+**gate 语义还有个反直觉的坑**：`kicad-cli pcb drc` 报了 44 条违规，**退出码仍是 0**。
+必须显式加 `--exit-code-violations` 才拿到非零（实测退出码 5）。我们的 lint 是**默认非零**——
+这个默认更适合 agent，KiCad 的默认会让 CI 静默放行。
+
+**封装库覆盖**：国内件比预期好（`JST_XH_S3B-XH-SM4-TB` SMD 卧贴 3P 直接命中 J_VEH），
+但 rev-a 的 13.8×12.3mm 大功率电感只能拿 `L_12x12mm_H8mm` 近似，量产件得自建。
+另注：JST XH 真实间距是 **2.50mm**，国内俗称的「XH2.54」是误称。
+
+**pcbnew Python API 的内存陷阱**（踩到了）：footprint **没 `board.Add()` 就调 `Flip()` 直接 SIGSEGV**，
+退出码 139，**没有 traceback，连 print 缓冲都一起丢**。C++ SWIG 绑定几乎没有生命周期保护，
+agent 写脚本时排障成本比 JS API 的异常高得多。另外 KiCad 10 的 `Flip()` 第二参已从 bool
+改成 `FLIP_DIRECTION` 枚举，旧脚本会静默行为漂移。
+
+### 9.5 结论：不转向，但吸收两样
+
+**技术路线不变。** 选 EasyEDA 的核心理由（LCSC C 号 + 嘉立创直接下单打样 + 电路块库）在 KiCad 上是
+缺失的，而那正是 box-v2 这类真实项目从原理图直接走到委外 Layout 的关键。为了 CLI 友好去换生态，
+等于拿供应链换 CI——不划算。
+
+**但要吸收两条**：
+
+1. **`pcb layout-lint` 补层感知 + 网络感知**（P0）。层盲是**已确认的误报源**，双面板上数字不可信；
+   网络感知能把「几何靠太近」升级成「这两网短路」，是定性差异。两条都不需要新 API，
+   现有 `pcb.components.list --include-pads` 的数据就够算。
+2. **KiCad 作为离线回归的候选后端**（P2，探索）。我们的 CI 跑不了端到端，根子是必须有活 GUI。
+   `.kicad_pcb` 是公开文本格式 + `kicad-cli` 纯 CLI，理论上可以把设计导出成 KiCad 格式，
+   在无人值守环境跑 DRC 回归。**注意这是单向验证管线，不是双向同步**——双向同步的代价远超收益。
+
+> **复现**：需 KiCad 10（`brew install --cask kicad`，本机是 10.0.1 手动装的，`kicad-cli` 在
+> `/Applications/KiCad/KiCad.app/Contents/MacOS/`，不在 PATH；Python 走 bundle 里的 3.9）。
+> 实验脚本见会话 scratchpad `kicad-cmp/{build_power,layer_test}.py`，未入库——避免给仓库引入
+> KiCad 依赖。`kipy`（KiCad 9+ 的 IPC API 客户端）本机未装，本次没测。
+
+---
+
 ## 来源
 
 - [EasyEDA 官方 GitHub 组织](https://github.com/easyeda) — 全部 eext-* 扩展开源
 - [eext-run-api-gateway](https://github.com/easyeda/eext-run-api-gateway) · [pro-api-sdk](https://github.com/easyeda/pro-api-sdk) · [eext-kirouting-integration](https://github.com/easyeda/eext-kirouting-integration) · [eext-balance-copper](https://github.com/easyeda/eext-balance-copper) · [eext-ai-device-standardization](https://github.com/easyeda/eext-ai-device-standardization) · [eext-netlist-explorer](https://github.com/easyeda/eext-netlist-explorer) · [eext-export-design-report](https://github.com/easyeda/eext-export-design-report)
 - [EasyEDA Pro API 文档](https://prodocs.easyeda.com/en/api/guide/index.html) · 权威类型定义 `@jlceda/pro-api-types@0.2.63`
 - [嘉立创EDA扩展广场](https://extensions.oshwhub.com/)
+- **KiCad**（§9）：[kicad-source-mirror](https://github.com/KiCad/kicad-source-mirror)（只读镜像，不收 PR）· 上游 [gitlab.com/kicad/code/kicad](https://gitlab.com/kicad/code/kicad) · 本机实跑 KiCad 10.0.1（`pcbnew` Python + `kicad-cli`），对照用例 `motobox/hardware/box-v2/rev-a` §1
