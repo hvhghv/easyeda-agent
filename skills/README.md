@@ -30,6 +30,11 @@ Claude Code (`~/.claude/skills/easyeda-agent`). Set
 `EASYEDA_INSTALL_SKILLS=codex,claude` to force targets, `none` to skip, or
 `EASYEDA_SKILL_PRESERVE=1` to keep local edits during an update.
 
+If the installer stops at `GitHub API rate limit`, either authenticate
+(`export GITHUB_TOKEN=<token>`, or `gh auth login` — the gh CLI is picked up
+automatically) or pin a release with `EASYEDA_VERSION=<tag>` to skip the API
+lookup entirely.
+
 To install only the skill from a registry:
 
 ```bash
