@@ -6,7 +6,30 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-08-01
+
+### Added
+- **`pcb layout-lint` 新增跨网短路检测(`short` ERROR)—— 从「靠太近」升级到「这两网短路」**:
+  两器件 bbox 相交时进一步比**焊盘铜皮矩形**,若两块铜在**共享层**上真的压在一起且**分属不同
+  网络**,报 `ERROR short  C2.1[VBAT_RAW] ↔ D2.2[SW1_NODE]` —— 与 KiCad 的 `shorting_items`
+  对齐(此前同一份数据上 KiCad 定性成短路,我们只报几何重叠)。short 与 overlap 同级致命
+  (`ok=false`、score 归零、verdict `short`、`--gate` 直接失败)。**短路按焊盘层判而不是装配面**:
+  两个异面 SMD 焊盘永不短路,但**通孔焊盘(层 12=multi)贯穿所有层**,能跟对面焊盘真短 ——
+  这是唯一不吃「同面才比」规则的地方。焊盘取不到尺寸(多边形焊盘)或无网络时**跳过而不猜**。
+  与下面的层感知一样**没有用到新 API**,现有 `pcb.components.list --include-pads` 的数据就够算。
+
 ### Fixed
+- **`pcb layout-lint` 的 overlap 判定不再「层盲」,双面贴片板上的数字终于可信**:它比的是
+  **不分层**的渲染 bbox 两两相交,于是**顶层器件与底层器件落在同一 XY 也被判成 overlap**,
+  而那在物理上是完全合法的顶底对穿。真实案例:box-v2 rev-a(166 器件 / 642 焊盘,85×45mm
+  四层双面贴片)跑出 **116 条 overlap**,人工按层分组重算的真值是 **0**,该项目 README 只能
+  专门写一段警告绕开这个数字。对照实验(本机 KiCad 10.0.1 实跑):两个 `C_0805` 放完全相同的
+  XY、一个 F.Cu 一个 B.Cu,`kicad-cli pcb drc` 报 0 violations —— KiCad 比的是**分层**的
+  courtyard(`F.CrtYd`/`B.CrtYd`),天生按层分组。现在器件按**装配面**(`pcb.components.list`
+  本就返回的 `layer`,1=顶 2=底)分组后才两两比,**overlap / tight spacing / 手焊烙铁通道**
+  三项同改(底面邻居堵不住顶面的烙铁);未知面(`layer` 缺失)保守地与两面都比,缺字段永远
+  不会**掩盖**真重叠。每条 finding 带 `side`,报告头带 `sides` 分布(如 `[bottom 134 / top 32]`)。
+  同板复跑:**overlap 116 → 0、tight 7 → 3**,与人工重算真值一致。
 - **安装脚本撞上 GitHub API 限流时不再只丢一句 `Could not determine latest release
   version`**:`install.sh` 解析 latest release 走匿名 `api.github.com`(每 IP 每小时 60 次),
   公司出口 / NAT / CI 很容易撞满并拿到 `403`。现在(1)有 token 就带上 —— 依次取
