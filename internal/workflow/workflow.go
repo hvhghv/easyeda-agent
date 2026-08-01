@@ -82,9 +82,12 @@ type Event struct {
 // GateSummary is the machine-readable layout-lint gate snapshot stored when a
 // pre_route gate passes (so route commands can show WHAT it passed on).
 type GateSummary struct {
-	Score         int     `json:"score"`
-	Verdict       string  `json:"verdict"`
-	Overlaps      int     `json:"overlaps"`
+	Score    int    `json:"score"`
+	Verdict  string `json:"verdict"`
+	Overlaps int    `json:"overlaps"`
+	// Shorts counts cross-net pad copper contact — a strictly worse finding
+	// than a geometric overlap (the board is electrically wrong, not tight).
+	Shorts        int     `json:"shorts,omitempty"`
 	OffBoard      int     `json:"offBoard"`
 	CrossingCount int     `json:"crossingCount"`
 	MinGapMil     float64 `json:"minGapMil"`

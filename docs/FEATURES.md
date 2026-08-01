@@ -15,6 +15,22 @@ All but `system.health` are dispatched to the connector; `system.health` is
 answered by the daemon itself (daemon/connector liveness, no window required).
 (Run `make actions` for the authoritative list — this prose count can lag.)
 
+> **2026-08-01 — `pcb layout-lint` 层感知 + 网络感知 (issue #141).** The overlap check
+> compared **unlayered** rendered bboxes, so a top part and a bottom part sharing an XY —
+> a legal top/bottom pass-through — counted as a collision; on the 166-part double-sided
+> box-v2 rev-a that meant **116 "overlaps" whose real same-side count was 0**. Overlap,
+> tight-spacing and the hand-solder iron-access corridor are now judged **per assembly
+> side** (`pcb.components.list` already returned each footprint's `layer`; unknown side
+> compares against both, so a missing field can never hide a real overlap). Measured on
+> that same board: **overlap 116 → 0, tight 7 → 3**, matching the hand-recomputed truth
+> and KiCad's per-side courtyard semantics. Net awareness landed with it: intersecting
+> bboxes now compare **pad copper rects**, and a shared-layer contact between two
+> **different nets** is a new fatal **`short` ERROR** (`C2.1[VBAT_RAW] ↔ D2.2[SW1_NODE]`)
+> instead of a mere "too close" — KiCad's `shorting_items`, on our data. Shorts are judged
+> per **pad** layer, not assembly side: opposite-side SMD pads never short, but a
+> through-hole barrel (layer 12) conducts everywhere and genuinely can. Findings carry a
+> `side`, the report a `sides` breakdown. No new API. `internal/app/pcb_layoutlint.go`.
+
 > **2026-07-20 — SVG 丝印导入 (issue #139).** New typed action **`pcb.silk.import_svg`**
 > (`pcb silk-import-svg`): import an SVG logo / brand mark / artwork as a **FILLED**
 > silkscreen primitive via `eda.pcb_PrimitiveImage.create` — the typed path, no

@@ -416,6 +416,7 @@ pcbnew.SaveBoard(out, board)
 **最扎眼的一条是短路**：我们的 `layout-lint` 是**纯几何**的，只知道两个 bbox 相交；
 KiCad 知道相交的这两个焊盘**属于不同网络**，于是直接定性成短路。同样一次重叠，
 一个报「靠太近」，一个报「这板子废了」。
+（→ **已补上**：`layout-lint` 现在也报 `short` ERROR，见 §9.3 的「已修复」小节。）
 
 ### 9.3 层感知：KiCad 赢在这里，而这正是 box-v2 踩过的坑
 
@@ -434,8 +435,33 @@ C_BOT  位置=(10,10)  层=B.Cu
 
 KiCad **0 误报**。它比的是 `F.CrtYd` / `B.CrtYd` 两个分层的 courtyard（正式机械禁布区），
 天生按层分组；我们比的是不分层的渲染 bbox。**这是 `pcb layout-lint` 的真实缺陷，不是配置问题**——
-双面板上它的 overlap 数字目前不可信，rev-a 只能靠人工写「自写的层感知检查」绕过去。
-→ **待办：`pcb layout-lint` 按层分组两两比，并引入 courtyard 概念**（见 `docs/concepts.md` 布局分档）。
+双面板上它的 overlap 数字当时不可信，rev-a 只能靠人工写「自写的层感知检查」绕过去。
+
+#### ✅ 已修复（#141，2026-08-01）
+
+`pcb layout-lint` 现在**按装配面分组后才两两比**：器件的 `layer`（1=顶 / 2=底，
+`pcb.components.list` 本来就返回，不需要新 API）决定分组，顶底对穿不再算 overlap，
+tight spacing 与手焊烙铁通道检查同样按面判（底面邻居堵不住顶面的烙铁）。
+未知面（`layer` 缺失）保守地与两面都比，缺字段永远不会**掩盖**真重叠。
+
+**在同一块板上实测（166 器件 / 642 焊盘，双面贴片）**：
+
+```
+旧: overlaps 116 | tight 7   ← 层盲
+新: overlaps   0 | tight 3   sides {bottom:134, top:32}
+```
+
+与人工按层重算的真值完全一致（同层重叠 0）。独立复算脚本同样得 0。
+
+**网络感知一并落地**：两器件 bbox 相交时进一步比**焊盘铜皮矩形**，共享层 + 不同网络 + 铜皮相交
+⇒ 报 `short` ERROR（`C2.1[VBAT_RAW] ↔ D2.2[SW1_NODE]`），与 KiCad 的 `shorting_items` 对齐；
+short 与 overlap 同级致命。**短路按焊盘层判而非装配面** —— 异面 SMD 焊盘永不短路，但通孔焊盘
+（层 12=multi）贯穿全部层，能与对面焊盘真短，这是唯一不吃「同面才比」规则的地方。
+取不到尺寸的多边形焊盘、无网络的焊盘一律跳过而不猜。核心 + 单测在
+`internal/app/pcb_layoutlint.go` / `pcb_layoutlint_layer_test.go`。
+
+（仍未引入正式 courtyard 概念——我们用的是渲染 bbox，比 courtyard 保守；见
+`docs/concepts.md` 布局分档。）
 
 ### 9.4 但反向也成立：我们有 KiCad 没有的东西
 
@@ -469,9 +495,11 @@ agent 写脚本时排障成本比 JS API 的异常高得多。另外 KiCad 10 �
 
 **但要吸收两条**：
 
-1. **`pcb layout-lint` 补层感知 + 网络感知**（P0）。层盲是**已确认的误报源**，双面板上数字不可信；
-   网络感知能把「几何靠太近」升级成「这两网短路」，是定性差异。两条都不需要新 API，
-   现有 `pcb.components.list --include-pads` 的数据就够算。
+1. ~~**`pcb layout-lint` 补层感知 + 网络感知**（P0）~~ → **✅ 已完成（#141，2026-08-01）**。
+   层感知：按装配面分组后两两比，box-v2 rev-a 的 overlap **116 → 0**（= 人工重算真值）；
+   网络感知：新增 `short` ERROR，把「几何靠太近」升级成「这两网短路」。如当初判断的，
+   两条都没用到新 API——`pcb.components.list --include-pads` 现有数据（器件 `layer`、
+   焊盘 `layer`/`width`/`height`/`net`）就够算。详见 §9.3。
 2. **KiCad 作为离线回归的候选后端**（P2，探索）。我们的 CI 跑不了端到端，根子是必须有活 GUI。
    `.kicad_pcb` 是公开文本格式 + `kicad-cli` 纯 CLI，理论上可以把设计导出成 KiCad 格式，
    在无人值守环境跑 DRC 回归。**注意这是单向验证管线，不是双向同步**——双向同步的代价远超收益。

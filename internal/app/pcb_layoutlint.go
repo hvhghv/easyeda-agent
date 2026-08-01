@@ -25,17 +25,47 @@ import (
 	"time"
 )
 
-// pcbLPad is a placed pad with its net and center (mil).
+// pcbLPad is a placed pad with its net and center (mil). Layer is the pad's
+// copper layer id (1=top, 2=bottom, 12=multi ⇒ a through-hole barrel that
+// conducts on EVERY layer); W/H are the real copper extent when the connector
+// could derive it from the pad shape (0 = unknown, e.g. a polygon pad).
 type pcbLPad struct {
 	Designator string
+	Number     string
 	Net        string
+	Layer      int
 	X, Y       float64
+	W, H       float64
 }
 
-// pcbLComp is a placed footprint's identity + rendered extent.
+// pcbLComp is a placed footprint's identity + rendered extent. Layer is the
+// board SIDE the footprint is assembled on (1=top, 2=bottom, 0=unknown) — the
+// axis overlap is judged along, because a top part and a bottom part sharing an
+// XY is a legal top/bottom pass-through, not a collision.
 type pcbLComp struct {
 	Designator string
+	Layer      int
 	BBox       *layoutBBox
+}
+
+// sameAssemblySide reports whether two footprints sit on the same physical side
+// of the board. Layer 0 means "the API did not report a side" (older connector);
+// an unknown side compares against BOTH sides so a missing field can never
+// silently suppress a real same-side overlap.
+func sameAssemblySide(a, b int) bool { return a == 0 || b == 0 || a == b }
+
+// sideName renders a component layer id for human/JSON output.
+func sideName(layer int) string {
+	switch layer {
+	case pcbSideTop:
+		return "top"
+	case pcbSideBottom:
+		return "bottom"
+	case 0:
+		return "unknown"
+	default:
+		return fmt.Sprintf("layer-%d", layer)
+	}
 }
 
 // ratLink is one ratsnest (unrouted) link between two same-net pads.
@@ -46,14 +76,31 @@ type ratLink struct {
 	Len    float64
 }
 
-// pcbLFinding is one mechanical placement issue.
+// pcbLFinding is one mechanical placement issue. Side names the board side the
+// pair was judged on ("top"/"bottom"/"unknown") — overlap and spacing are
+// per-side, so the side is part of the finding's meaning.
 type pcbLFinding struct {
 	Type string  `json:"type"` // "overlap" | "outside-outline" | "spacing"
 	A    string  `json:"a"`
 	B    string  `json:"b,omitempty"`
+	Side string  `json:"side,omitempty"`
 	OvX  float64 `json:"overlapX,omitempty"`
 	OvY  float64 `json:"overlapY,omitempty"`
 	Gap  float64 `json:"gap,omitempty"`
+}
+
+// pcbLShort is copper from two DIFFERENT nets physically overlapping: two pads
+// whose real copper rects intersect on a shared layer. That is not "too close",
+// it is a short — the qualitative jump KiCad makes and we used to miss
+// (docs/ecosystem-survey.md §9.2).
+type pcbLShort struct {
+	A     string  `json:"a"` // "U1.3"
+	NetA  string  `json:"netA"`
+	B     string  `json:"b"` // "C2.1"
+	NetB  string  `json:"netB"`
+	Layer string  `json:"layer"` // "top" | "bottom" | "multi" | …
+	OvX   float64 `json:"overlapX"`
+	OvY   float64 `json:"overlapY"`
 }
 
 // crossFinding is a cross-net ratline crossing (a routability hotspot).
@@ -77,12 +124,18 @@ type pcbLAccessFinding struct {
 type pcbLayoutReport struct {
 	OK             bool          `json:"ok"`
 	Score          int           `json:"score"`   // 0-100 routability
-	Verdict        string        `json:"verdict"` // easy | moderate | hard | very-hard | overlap
+	Verdict        string        `json:"verdict"` // easy | moderate | hard | very-hard | overlap | short
 	ComponentCount int           `json:"componentCount"`
 	MinGapMil      float64       `json:"minGapMil"`
 	Overlaps       []pcbLFinding `json:"overlaps"`
 	OutsideOutline []pcbLFinding `json:"outsideOutline"`
 	TightPairs     []pcbLFinding `json:"tightSpacing"`
+	// Shorts is cross-net copper contact (pad↔pad), a strictly worse finding
+	// than a geometric overlap: the board is electrically wrong, not just tight.
+	Shorts []pcbLShort `json:"shorts,omitempty"`
+	// Sides counts components per board side — the evidence that overlap was
+	// judged PER SIDE (a double-sided board shows both entries).
+	Sides map[string]int `json:"sides,omitempty"`
 	// AccessMil / AccessBlocked: hand-solder iron-access check (issue #99),
 	// populated only when the gate runs with a hand-solder assembly profile.
 	AccessMil     float64             `json:"accessMil,omitempty"`
@@ -104,6 +157,9 @@ type pcbLayoutReport struct {
 // edge never blocks (open air is reachable). Pad-size-aware "large pad"
 // classification needs pad width/height the connector does not expose yet, so
 // v1 applies the corridor rule to every component uniformly.
+//
+// Blockers are SAME-SIDE only: the iron comes in from the side the part is
+// assembled on, so a part on the opposite side of the board never obstructs it.
 func analyzeSolderAccess(comps []pcbLComp, accessMil float64) []pcbLAccessFinding {
 	withBBox := make([]pcbLComp, 0, len(comps))
 	for _, c := range comps {
@@ -118,7 +174,7 @@ func analyzeSolderAccess(comps []pcbLComp, accessMil float64) []pcbLAccessFindin
 		a := *c.BBox
 		sides := map[string]float64{"left": openGap, "right": openGap, "top": openGap, "bottom": openGap}
 		for j, o := range withBBox {
-			if i == j {
+			if i == j || !sameAssemblySide(c.Layer, o.Layer) {
 				continue
 			}
 			b := *o.BBox
@@ -163,6 +219,86 @@ func analyzeSolderAccess(comps []pcbLComp, accessMil float64) []pcbLAccessFindin
 	return out
 }
 
+// padCopperRect is a pad's axis-aligned copper extent. Reported false when the
+// connector could not derive width/height from the pad shape (polygon pads) —
+// a sizeless pad is skipped rather than guessed at, so the short check never
+// invents contact it cannot measure.
+func padCopperRect(p pcbLPad) (layoutBBox, bool) {
+	if p.W <= 0 || p.H <= 0 {
+		return layoutBBox{}, false
+	}
+	return layoutBBox{
+		MinX: p.X - p.W/2, MaxX: p.X + p.W/2,
+		MinY: p.Y - p.H/2, MaxY: p.Y + p.H/2,
+	}, true
+}
+
+// padsShareCopperLayer reports whether two pads have copper on a common layer.
+// A multi-layer pad (12) is a plated through-hole barrel — it conducts on every
+// layer, so it shares with anything. Layer 0 = unknown → assume shared (a
+// missing field must not hide a short).
+func padsShareCopperLayer(a, b pcbLPad) bool {
+	if a.Layer == 0 || b.Layer == 0 || a.Layer == pcbLayerMulti || b.Layer == pcbLayerMulti {
+		return true
+	}
+	return a.Layer == b.Layer
+}
+
+// padShortLayer names the layer a contact happens on for the finding.
+func padShortLayer(a, b pcbLPad) string {
+	if a.Layer == pcbLayerMulti || b.Layer == pcbLayerMulti {
+		return "multi"
+	}
+	if a.Layer != 0 {
+		return sideName(a.Layer)
+	}
+	return sideName(b.Layer)
+}
+
+// padShorts finds cross-net copper contact between two footprints' pads: pads
+// on a shared layer, from two DIFFERENT named nets, whose copper rects
+// intersect. Unnamed pads (no net) are skipped — an unconnected pad touching
+// something is a footprint/placement problem the overlap finding already
+// covers, and treating "" as a net would short every mounting hole together.
+func padShorts(as, bs []pcbLPad) []pcbLShort {
+	var out []pcbLShort
+	for _, pa := range as {
+		ra, ok := padCopperRect(pa)
+		if !ok || pa.Net == "" {
+			continue
+		}
+		for _, pb := range bs {
+			if pb.Net == "" || pb.Net == pa.Net || !padsShareCopperLayer(pa, pb) {
+				continue
+			}
+			rb, ok := padCopperRect(pb)
+			if !ok {
+				continue
+			}
+			ox, oy, ov := overlapExtent(ra, rb)
+			if !ov {
+				continue
+			}
+			out = append(out, pcbLShort{
+				A: padLabel(pa), NetA: pa.Net,
+				B: padLabel(pb), NetB: pb.Net,
+				Layer: padShortLayer(pa, pb),
+				OvX:   round2(ox), OvY: round2(oy),
+			})
+		}
+	}
+	return out
+}
+
+// padLabel renders "U1.3" (designator.padNumber), falling back to the bare
+// designator when the pad number is unknown.
+func padLabel(p pcbLPad) string {
+	if p.Number == "" {
+		return p.Designator
+	}
+	return p.Designator + "." + p.Number
+}
+
 // analyzePcbLayout is the pure core. minGapMil flags too-tight pairs; outline (may
 // be nil) drives the outside-outline check.
 func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, minGapMil float64) pcbLayoutReport {
@@ -174,8 +310,28 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 			withBBox = append(withBBox, c)
 		}
 	}
+	rep.Sides = map[string]int{}
+	for _, c := range comps {
+		rep.Sides[sideName(c.Layer)]++
+	}
 
-	// 1. Overlap + tight spacing (pairwise).
+	padsByRef := map[string][]pcbLPad{}
+	for _, p := range pads {
+		padsByRef[p.Designator] = append(padsByRef[p.Designator], p)
+	}
+
+	// 1. Overlap + tight spacing (pairwise) — LAYER-AWARE. Bodies only collide
+	//    when they are assembled on the SAME side; a top part and a bottom part
+	//    sharing an XY is an ordinary top/bottom pass-through and used to be the
+	//    dominant false positive on double-sided boards (box-v2 rev-a: 100+
+	//    "overlaps", real same-side count 0 — docs/ecosystem-survey.md §9.3).
+	//    KiCad gets this for free by comparing per-side courtyards (F.CrtYd /
+	//    B.CrtYd); we group by the footprint's layer instead.
+	//
+	//    The SHORT check deliberately does NOT take the same-side shortcut: a
+	//    through-hole barrel (pad layer 12 = multi) conducts on every layer, so
+	//    it can genuinely short against a pad on the opposite side. Copper
+	//    contact is judged per PAD layer, not per assembly side.
 	for i := 0; i < len(withBBox); i++ {
 		for j := i + 1; j < len(withBBox); j++ {
 			a, b := withBBox[i], withBBox[j]
@@ -183,15 +339,40 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 			if lb < la {
 				la, lb = lb, la
 			}
-			if ox, oy, ov := overlapExtent(*a.BBox, *b.BBox); ov {
-				rep.Overlaps = append(rep.Overlaps, pcbLFinding{Type: "overlap", A: la, B: lb, OvX: round2(ox), OvY: round2(oy)})
+			// The pair's side: whichever of the two the API actually reported.
+			side := a.Layer
+			if side == 0 {
+				side = b.Layer
+			}
+			ox, oy, ov := overlapExtent(*a.BBox, *b.BBox)
+			// Copper contact is the electrical truth and outranks the geometric
+			// one — check it regardless of assembly side. Pads are looked up by
+			// designator, so two parts sharing one (or both unnamed) are skipped
+			// rather than compared against their own pads.
+			if ov && la != lb && la != "" && lb != "" {
+				rep.Shorts = append(rep.Shorts, padShorts(padsByRef[la], padsByRef[lb])...)
+			}
+			if !sameAssemblySide(a.Layer, b.Layer) {
+				continue // opposite sides: bodies pass through each other legally
+			}
+			if ov {
+				rep.Overlaps = append(rep.Overlaps, pcbLFinding{
+					Type: "overlap", A: la, B: lb, Side: sideName(side),
+					OvX: round2(ox), OvY: round2(oy)})
 				continue
 			}
 			if gap := rectGap(*a.BBox, *b.BBox); gap < minGapMil {
-				rep.TightPairs = append(rep.TightPairs, pcbLFinding{Type: "spacing", A: la, B: lb, Gap: round2(gap)})
+				rep.TightPairs = append(rep.TightPairs, pcbLFinding{
+					Type: "spacing", A: la, B: lb, Side: sideName(side), Gap: round2(gap)})
 			}
 		}
 	}
+	sort.Slice(rep.Shorts, func(i, j int) bool {
+		if rep.Shorts[i].A != rep.Shorts[j].A {
+			return rep.Shorts[i].A < rep.Shorts[j].A
+		}
+		return rep.Shorts[i].B < rep.Shorts[j].B
+	})
 
 	// 2. Outside board outline. A part is off-board only when one of its PADS lands
 	//    outside the outline — a connector whose body/courtyard protrudes past the
@@ -200,10 +381,6 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 	//    misplacement. Fall back to the bbox for parts with no pads (mechanical /
 	//    graphic). Pad centers are used (pad-edge-to-outline clearance is DRC's job).
 	if outline != nil {
-		padsByRef := map[string][]pcbLPad{}
-		for _, p := range pads {
-			padsByRef[p.Designator] = append(padsByRef[p.Designator], p)
-		}
 		for _, c := range withBBox {
 			var outside bool
 			if cps := padsByRef[c.Designator]; len(cps) > 0 {
@@ -276,9 +453,11 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 	})
 	rep.CrossingCount = len(rep.Crossings)
 
-	// 4. Score + verdict. Overlaps are fatal; crossings/outside dominate routability.
-	rep.OK = len(rep.Overlaps) == 0 && len(rep.OutsideOutline) == 0
+	// 4. Score + verdict. Shorts and overlaps are fatal; crossings/outside
+	//    dominate routability.
+	rep.OK = len(rep.Overlaps) == 0 && len(rep.OutsideOutline) == 0 && len(rep.Shorts) == 0
 	score := 100
+	score -= 100 * len(rep.Shorts)        // cross-net copper contact ⇒ 0
 	score -= 100 * len(rep.Overlaps)      // any overlap ⇒ 0
 	score -= 20 * len(rep.OutsideOutline) // off-board is nearly as bad
 	score -= 4 * rep.CrossingCount        // each cross-net crossing = a via/detour
@@ -291,6 +470,8 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 	}
 	rep.Score = score
 	switch {
+	case len(rep.Shorts) > 0:
+		rep.Verdict = "short"
 	case len(rep.Overlaps) > 0:
 		rep.Verdict = "overlap"
 	case score >= 85:
@@ -303,10 +484,30 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 		rep.Verdict = "very-hard"
 	}
 
-	rep.Summary = fmt.Sprintf("score %d/100 (%s): %d comps, %d overlap, %d off-board, %d tight; %d signal nets, ratsnest %.0fmil, %d crossings",
-		rep.Score, rep.Verdict, rep.ComponentCount, len(rep.Overlaps), len(rep.OutsideOutline),
+	rep.Summary = fmt.Sprintf("score %d/100 (%s): %d comps%s, %d short, %d overlap, %d off-board, %d tight; %d signal nets, ratsnest %.0fmil, %d crossings",
+		rep.Score, rep.Verdict, rep.ComponentCount, sidesSuffix(rep.Sides), len(rep.Shorts),
+		len(rep.Overlaps), len(rep.OutsideOutline),
 		len(rep.TightPairs), rep.SignalNets, rep.RatsnestLenMil, rep.CrossingCount)
 	return rep
+}
+
+// sidesSuffix spells out the per-side split on a double-sided board (" [top 90
+// / bottom 76]") so the overlap count is read as per-side by construction. A
+// single-sided board (or a board with no side data) gets no suffix.
+func sidesSuffix(sides map[string]int) string {
+	if len(sides) < 2 {
+		return ""
+	}
+	keys := make([]string, 0, len(sides))
+	for k := range sides {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", k, sides[k]))
+	}
+	return " [" + strings.Join(parts, " / ") + "]"
 }
 
 // dedupPadPoints collapses pads sharing a coordinate (a multi-pad net can have
@@ -438,6 +639,10 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 		}
 		desig, _ := cm["designator"].(string)
 		lc := pcbLComp{Designator: desig}
+		// Assembly side (1=top, 2=bottom) — overlap is judged per side.
+		if lv, ok := asFloatOK(cm["layer"]); ok {
+			lc.Layer = int(lv)
+		}
 		if bb, ok := cm["bbox"].(map[string]any); ok {
 			minX, _ := asFloatOK(bb["minX"])
 			minY, _ := asFloatOK(bb["minY"])
@@ -455,7 +660,15 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 				net, _ := pm["net"].(string)
 				x, _ := asFloatOK(pm["x"])
 				y, _ := asFloatOK(pm["y"])
-				pads = append(pads, pcbLPad{Designator: desig, Net: net, X: x, Y: y})
+				p := pcbLPad{Designator: desig, Number: asString(pm["padNumber"]), Net: net, X: x, Y: y}
+				// Layer + real copper extent feed the cross-net short check;
+				// both are best-effort (0 ⇒ unknown, handled downstream).
+				if lv, ok := asFloatOK(pm["layer"]); ok {
+					p.Layer = int(lv)
+				}
+				p.W, _ = asFloatOK(pm["width"])
+				p.H, _ = asFloatOK(pm["height"])
+				pads = append(pads, p)
 			}
 		}
 	}
@@ -519,7 +732,8 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 		}
 	}
 	if !rep.OK {
-		return fmt.Errorf("layout not routable-ready: %d overlap, %d off-board", len(rep.Overlaps), len(rep.OutsideOutline))
+		return fmt.Errorf("layout not routable-ready: %d cross-net short, %d overlap, %d off-board",
+			len(rep.Shorts), len(rep.Overlaps), len(rep.OutsideOutline))
 	}
 	if gateVerdict != nil && !gateVerdict.Pass {
 		return fmt.Errorf("routability gate FAILED: %s", strings.Join(gateVerdict.Reasons, "; "))
@@ -543,6 +757,9 @@ func evalLayoutGate(rep pcbLayoutReport, opt pcbLayoutGateOpts) routeGateVerdict
 	v := routeGateVerdict{
 		Score: rep.Score, MinScore: opt.minScore,
 		CrossingCount: rep.CrossingCount, MaxCrossings: opt.maxCrossings,
+	}
+	if len(rep.Shorts) > 0 {
+		v.Reasons = append(v.Reasons, fmt.Sprintf("%d cross-net pad short", len(rep.Shorts)))
 	}
 	if len(rep.Overlaps) > 0 {
 		v.Reasons = append(v.Reasons, fmt.Sprintf("%d overlap", len(rep.Overlaps)))
@@ -578,7 +795,7 @@ func recordLayoutGatePass(project string, rep pcbLayoutReport, assembly *pcbAsse
 	}
 	st.Layout = &pcbLayoutGateSummary{
 		Score: rep.Score, Verdict: rep.Verdict,
-		Overlaps: len(rep.Overlaps), OffBoard: len(rep.OutsideOutline),
+		Overlaps: len(rep.Overlaps), Shorts: len(rep.Shorts), OffBoard: len(rep.OutsideOutline),
 		CrossingCount: rep.CrossingCount, MinGapMil: rep.MinGapMil,
 		TightPairs: len(rep.TightPairs),
 		AccessMil:  rep.AccessMil, AccessBlocked: len(rep.AccessBlocked),
@@ -601,8 +818,12 @@ func renderLayoutGate(v routeGateVerdict, w io.Writer) {
 
 func renderPcbLayoutReport(rep pcbLayoutReport, w io.Writer) {
 	fmt.Fprintf(w, "PCB layout-lint: %s\n", rep.Summary)
+	for _, s := range rep.Shorts {
+		fmt.Fprintf(w, "  ERROR short      %s[%s] ↔ %s[%s] on %s  (copper overlap %.1f×%.1f mil)\n",
+			s.A, s.NetA, s.B, s.NetB, s.Layer, s.OvX, s.OvY)
+	}
 	for _, o := range rep.Overlaps {
-		fmt.Fprintf(w, "  ERROR overlap    %s ↔ %s  (%.1f×%.1f mil)\n", o.A, o.B, o.OvX, o.OvY)
+		fmt.Fprintf(w, "  ERROR overlap    %s ↔ %s  (%s side, %.1f×%.1f mil)\n", o.A, o.B, o.Side, o.OvX, o.OvY)
 	}
 	for _, o := range rep.OutsideOutline {
 		fmt.Fprintf(w, "  ERROR off-board  %s extends outside the board outline\n", o.A)
@@ -611,7 +832,7 @@ func renderPcbLayoutReport(rep pcbLayoutReport, w io.Writer) {
 		fmt.Fprintf(w, "  WARN  crossing   %s × %s @ (%.0f, %.0f)\n", c.NetA, c.NetB, c.X, c.Y)
 	}
 	for _, t := range rep.TightPairs {
-		fmt.Fprintf(w, "  WARN  tight      %s ↔ %s  gap %.1f mil (< %.1f)\n", t.A, t.B, t.Gap, rep.MinGapMil)
+		fmt.Fprintf(w, "  WARN  tight      %s ↔ %s  (%s side) gap %.1f mil (< %.1f)\n", t.A, t.B, t.Side, t.Gap, rep.MinGapMil)
 	}
 	for _, a := range rep.AccessBlocked {
 		fmt.Fprintf(w, "  WARN  no-access  %s boxed in on all sides (best %.1f mil < %.1f iron corridor: L%.0f R%.0f T%.0f B%.0f)\n",
