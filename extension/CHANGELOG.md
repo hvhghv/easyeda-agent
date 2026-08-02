@@ -6,6 +6,19 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **新增本地 stdio MCP 适配层**:`mcp/` 将现有 `easyeda` CLI/daemon 的连接健康、action
+  发现、7 个安全 action domain、电路块和 guarded workflow 暴露为 `easyeda_*` tools。
+  MCP 不直连 EasyEDA、不绕过 typed action/审计/workflow gate,并明确不暴露任意
+  JavaScript 的 `debug.exec_js`;mutation 仍要求同时提供 project 与 doc。
+
+### Fixed
+- **修复 EasyEDA Pro 3.2.175 重复激活同一扩展时的永久重连风暴**:旧连接器的所有激活
+  实例共用固定 host WebSocket id,会互相 close/register 同一 socket,表现为交错 heartbeat、
+  windowId 持续变化、`AMBIGUOUS_PROJECT` 和 action response 丢失。现在每次激活生成独立
+  socket id;daemon 仅在 project/document/type/tab 四项完整且完全相同时把连接视为 transport
+  duplicate,并路由到最新连接。真实不同 tab 或身份不完整仍保持 ambiguous,不会静默误路由。
+
 ## [0.18.3] - 2026-08-01
 
 ### Added

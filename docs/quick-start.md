@@ -68,6 +68,22 @@ daemon 会在端口段 `60832-60841`(`0xEDA0`-`0xEDA9`)监听,连接器会自动
 /easyeda-agent          # 原理图 + PCB 全流程
 ```
 
+支持 MCP 的客户端还可以选择注册仓库内的 stdio 适配层。MCP 是**可选调用入口**,
+不是替代 CLI/daemon 或 Skill 的第五套状态;它仍经过同一套 typed action、审计和
+workflow gate。
+
+```bash
+git clone https://github.com/zhoushoujianwork/easyeda-agent.git
+cd easyeda-agent
+npm --prefix mcp ci --ignore-scripts
+codex mcp add easyeda-agent \
+  --env EASYEDA_BIN="$(command -v easyeda)" \
+  -- node "$(pwd)/mcp/src/server.mjs"
+```
+
+注册后重启 AI 客户端。可用工具包括连接健康、action 发现、7 个安全 action domain、
+电路块和 guarded workflow;MCP 不暴露任意 JavaScript 的 `debug.exec_js`。
+
 ---
 
 ## 验证四件套是否对齐

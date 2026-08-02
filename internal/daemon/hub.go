@@ -224,11 +224,15 @@ func (h *hub) target(windowID string) (*conn, bool) {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if len(h.windows) != 1 {
-		return nil, false
-	}
+	var matches []Window
 	for _, c := range h.windows {
-		return c, true
+		matches = append(matches, c.snapshot())
+	}
+	if len(matches) == 1 {
+		return h.windows[matches[0].WindowID], true
+	}
+	if newest, ok := newestExactDocumentDuplicate(matches); ok {
+		return h.windows[newest.WindowID], true
 	}
 	return nil, false
 }
@@ -259,7 +263,7 @@ func (h *hub) windowForProject(project, preferDoc string) (id string, found bool
 	case 1:
 		return matches[0].WindowID, true, false
 	}
-	// Multiple windows for this project — narrow to the one whose active
+	// Multiple windows for this project — narrow to the ones whose active
 	// document matches the action's domain.
 	if preferDoc != "" {
 		var narrowed []Window
@@ -271,8 +275,45 @@ func (h *hub) windowForProject(project, preferDoc string) (id string, found bool
 		if len(narrowed) == 1 {
 			return narrowed[0].WindowID, true, false
 		}
+		if len(narrowed) > 1 {
+			matches = narrowed
+		}
+	}
+
+	// A connector reconnect briefly leaves the old and new registrations alive
+	// together. EasyEDA 3.2.175 can also activate one extension twice. If every
+	// candidate points at the exact same document tab, they are transport
+	// duplicates rather than distinct user windows; route to the newest one.
+	if newest, ok := newestExactDocumentDuplicate(matches); ok {
+		return newest.WindowID, true, false
 	}
 	return "", false, true
+}
+
+func newestExactDocumentDuplicate(matches []Window) (Window, bool) {
+	if len(matches) < 2 {
+		return Window{}, false
+	}
+	first := matches[0]
+	if first.Context.ProjectUUID == "" ||
+		first.Context.DocumentUUID == "" ||
+		first.Context.DocumentType == "" ||
+		first.Context.TabID == "" {
+		return Window{}, false
+	}
+	newest := first
+	for _, w := range matches[1:] {
+		if w.Context.ProjectUUID != first.Context.ProjectUUID ||
+			w.Context.DocumentUUID != first.Context.DocumentUUID ||
+			w.Context.DocumentType != first.Context.DocumentType ||
+			w.Context.TabID != first.Context.TabID {
+			return Window{}, false
+		}
+		if w.ConnectedAt.After(newest.ConnectedAt) {
+			newest = w
+		}
+	}
+	return newest, true
 }
 
 // listAnnotated returns the window list with each window's ConnectorVersionOK

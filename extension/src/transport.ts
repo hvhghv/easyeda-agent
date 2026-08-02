@@ -19,6 +19,7 @@
 
 import { buildContextFrame, readEasyEdaVersion } from './eda-context';
 import { runAction } from './actions';
+import { createWebSocketId } from './transport-identity';
 import {
 	ActionError,
 	CAPABILITIES,
@@ -35,7 +36,12 @@ import {
 
 // ─── Configuration ───────────────────────────────────────────────────
 
-const WS_ID = 'easyeda-agent';
+// EasyEDA 3.2.175 can activate the same extension more than once in one app
+// window. eda.sys_WebSocket is shared across those activations, so a fixed id
+// makes each activation close/re-register the other's socket forever. Give each
+// activation its own host-managed socket; the daemon coalesces registrations
+// that report the same project/document/tab when routing an action.
+const WS_ID = createWebSocketId();
 const PORT_START = 0xeda0; // 60832 — "EDA0" in hex; own range, no official-gateway conflict
 const PORT_END = 0xeda9; // 60841
 const RETRY_DELAY_MS = 3000;
@@ -52,9 +58,8 @@ const MAX_RETRIES = 5;
 const HEARTBEAT_INTERVAL_MS = 3000;
 // Liveness is consecutive-miss based, NOT a single round-trip deadline. The
 // daemon never idle-closes, and EasyEDA's webview can lag pong delivery under
-// load (canvas redraw, GC). Tearing the socket down on ONE missed pong tore down
-// perfectly healthy connections every ~5s — the reconnect storm. Only give up
-// after this many pings go unanswered in a row (~9s of true silence).
+// load (canvas redraw, GC). Only give up after this many pings go unanswered in
+// a row (~9s of true silence).
 const MAX_MISSED_PONGS = 3;
 const CONNECTION_TIMEOUT_MS = 1500;
 // A full 10-port scan (each up to CONNECTION_TIMEOUT_MS + REGISTER_DELAY_MS) settles
@@ -228,7 +233,7 @@ async function scanAndConnect(): Promise<void> {
 			if (found) {
 				currentPort = port;
 				retryCount = 0;
-				startHeartbeat(sessionId);
+				startHeartbeat();
 				return;
 			}
 		}
@@ -442,11 +447,7 @@ function diag(msg: string): void {
 
 // ─── Heartbeat ────────────────────────────────────────────────────────
 
-// startHeartbeat just (re)arms the liveness state on a fresh connection — the
-// actual pinging is driven by the watchdog ticker (see startWatchdog), which is
-// worker-backed so it keeps firing even when EasyEDA's window is backgrounded and
-// the main thread's setInterval is frozen (the old nudge-to-reconnect bug).
-function startHeartbeat(_sessionId: number): void {
+function startHeartbeat(): void {
 	heartbeatPending = false;
 	missedPongs = 0;
 }
@@ -456,9 +457,9 @@ function stopHeartbeat(): void {
 	missedPongs = 0;
 }
 
-// heartbeatTick runs one liveness round on the live connection: count a miss if
-// the previous ping is still unanswered, reconnect after MAX_MISSED_PONGS, else
-// send the next ping (+ piggyback a context refresh). Called by the watchdog.
+// heartbeatTick runs one liveness round on this activation's socket: count a
+// miss if the previous ping is still unanswered, reconnect after
+// MAX_MISSED_PONGS, else send the next ping (+ context refresh).
 function heartbeatTick(): void {
 	if (!handshakeVerified) {
 		return;
@@ -469,8 +470,6 @@ function heartbeatTick(): void {
 		void scanAndConnect();
 	};
 
-	// Liveness check BEFORE sending the next ping: a still-pending ping is a miss.
-	// Only reconnect after MAX_MISSED_PONGS in a row — one lagged pong isn't death.
 	if (heartbeatPending) {
 		missedPongs += 1;
 		if (missedPongs >= MAX_MISSED_PONGS) {

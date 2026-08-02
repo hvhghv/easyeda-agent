@@ -1,4 +1,4 @@
-.PHONY: help test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test release publish-skill replay demo-replay replay-sch replay-pcb
+.PHONY: help test mcp-test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test release publish-skill replay demo-replay replay-sch replay-pcb
 
 DIST := dist
 
@@ -17,6 +17,10 @@ help: ## show this cheatsheet
 
 test: ## go test ./...
 	go test ./...
+
+mcp-test: build ## install MCP deps and run unit + stdio protocol tests
+	npm --prefix mcp ci --ignore-scripts
+	EASYEDA_BIN="$(CURDIR)/bin/easyeda" npm --prefix mcp test
 
 # Rule-trust harness for the schematic linter: orientation-table consistency
 # (orientation.json derives to its frozenTable; matches the connector) +

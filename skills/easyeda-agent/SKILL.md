@@ -13,6 +13,10 @@ EasyEDA tooling.
 > **Source & docs:** https://github.com/zhoushoujianwork/easyeda-agent · Connector
 > 已上架[立创EDA官方插件市场](https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector)(一键装、平台可原地自动更新,但市场版本可能**滞后** CLI 若干 minor —— 四件套严格同版仍以 **GitHub Release 的 `.eext`** 为准)。Install the CLI + connector per the repo README.
 
+> **MCP 可选入口:**若当前 agent 暴露 `easyeda_*` MCP tools,可优先用它们完成 health、
+> action discovery、typed calls、blocks 和 workflow 操作。MCP 只是同一 CLI/daemon 的
+> stdio 适配层;下方全部铁律、inspect-before-mutate、阶段门和存盘要求保持不变。
+
 > **本 SKILL.md 顶部是「抗遗忘扫读区」——执行任何板级任务前先扫这几屏,别凭记忆走。**
 > 顺序:① **铁律**(不可违反)→ ② **流程停点 / 档位默认 / 块地图** 三张速查 → ③ **顺序硬约束**。
 > 具体细节**不堆在这里**——按下方 **What To Read** 的加载触发表按需读 reference(渐进式披露)。

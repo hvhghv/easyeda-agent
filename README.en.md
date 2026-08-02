@@ -145,6 +145,25 @@ clawhub install easyeda-agent
 The old split skills (`easyeda-schematic`, `easyeda-pcb`, `easyeda-design-flow`,
 `easyeda-conventions`) have been merged and removed from the repository.
 
+### Optional: MCP integration
+
+The repository's [`mcp/`](mcp) directory provides a local stdio MCP adapter for
+agents such as Codex. It reuses the existing `easyeda` CLI/daemon and does not
+bypass typed actions, auditing, workflow gates, or the official `eda.*` API. The
+arbitrary-JavaScript `debug.exec_js` domain is intentionally not exposed through
+MCP.
+
+```bash
+npm --prefix mcp ci --ignore-scripts
+codex mcp add easyeda-agent \
+  --env EASYEDA_BIN="$(command -v easyeda)" \
+  -- node "$(pwd)/mcp/src/server.mjs"
+```
+
+Restart the agent client after registration. Other MCP clients can use the same
+stdio command and environment configuration. See [`mcp/README.md`](mcp/README.md)
+for the tool inventory and development checks.
+
 ## Demo Example
 
 A board driven end-to-end through the typed-action + Skill workflow — placed

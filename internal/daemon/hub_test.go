@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/protocol"
 )
@@ -47,6 +48,94 @@ func TestWindowForProject(t *testing.T) {
 					tc.project, tc.preferDoc, id, found, ambig, tc.wantID, tc.wantFound, tc.wantAmbig)
 			}
 		})
+	}
+}
+
+func TestWindowForProjectReconnectDuplicateUsesNewest(t *testing.T) {
+	old := connWith("old", "motobox", "pcb")
+	old.connectedAt = time.Unix(10, 0)
+	old.ctx.ProjectUUID = "project-1"
+	old.ctx.DocumentUUID = "pcb-1"
+	old.ctx.TabID = "tab-1"
+
+	newer := connWith("new", "motobox", "pcb")
+	newer.connectedAt = time.Unix(20, 0)
+	newer.ctx.ProjectUUID = "project-1"
+	newer.ctx.DocumentUUID = "pcb-1"
+	newer.ctx.TabID = "tab-1"
+
+	h := &hub{windows: map[string]*conn{"old": old, "new": newer}}
+	id, found, ambiguous := h.windowForProject("motobox", "pcb")
+	if id != "new" || !found || ambiguous {
+		t.Fatalf("windowForProject duplicate reconnect = (%q,%v,%v), want (new,true,false)", id, found, ambiguous)
+	}
+}
+
+func TestWindowForProjectDistinctTabsRemainAmbiguous(t *testing.T) {
+	first := connWith("w1", "motobox", "pcb")
+	first.ctx.ProjectUUID = "project-1"
+	first.ctx.DocumentUUID = "pcb-1"
+	first.ctx.TabID = "tab-1"
+	second := connWith("w2", "motobox", "pcb")
+	second.ctx.ProjectUUID = "project-1"
+	second.ctx.DocumentUUID = "pcb-1"
+	second.ctx.TabID = "tab-2"
+
+	h := &hub{windows: map[string]*conn{"w1": first, "w2": second}}
+	id, found, ambiguous := h.windowForProject("motobox", "pcb")
+	if id != "" || found || !ambiguous {
+		t.Fatalf("windowForProject distinct tabs = (%q,%v,%v), want (\"\",false,true)", id, found, ambiguous)
+	}
+}
+
+func TestWindowForProjectIncompleteDuplicateIdentityRemainsAmbiguous(t *testing.T) {
+	first := connWith("w1", "motobox", "pcb")
+	first.ctx.DocumentUUID = "pcb-1"
+	first.ctx.TabID = "tab-1"
+	second := connWith("w2", "motobox", "pcb")
+	second.ctx.DocumentUUID = "pcb-1"
+	second.ctx.TabID = "tab-1"
+
+	h := &hub{windows: map[string]*conn{"w1": first, "w2": second}}
+	id, found, ambiguous := h.windowForProject("motobox", "pcb")
+	if id != "" || found || !ambiguous {
+		t.Fatalf("windowForProject incomplete identity = (%q,%v,%v), want (\"\",false,true)", id, found, ambiguous)
+	}
+}
+
+func TestWindowForProjectDistinctDocumentsRemainAmbiguous(t *testing.T) {
+	first := connWith("w1", "motobox", "pcb")
+	first.ctx.ProjectUUID = "project-1"
+	first.ctx.DocumentUUID = "pcb-1"
+	first.ctx.TabID = "tab-1"
+	second := connWith("w2", "motobox", "pcb")
+	second.ctx.ProjectUUID = "project-1"
+	second.ctx.DocumentUUID = "pcb-2"
+	second.ctx.TabID = "tab-1"
+
+	h := &hub{windows: map[string]*conn{"w1": first, "w2": second}}
+	id, found, ambiguous := h.windowForProject("motobox", "pcb")
+	if id != "" || found || !ambiguous {
+		t.Fatalf("windowForProject distinct documents = (%q,%v,%v), want (\"\",false,true)", id, found, ambiguous)
+	}
+}
+
+func TestTargetReconnectDuplicateUsesNewest(t *testing.T) {
+	old := connWith("old", "motobox", "pcb")
+	old.connectedAt = time.Unix(10, 0)
+	old.ctx.ProjectUUID = "project-1"
+	old.ctx.DocumentUUID = "pcb-1"
+	old.ctx.TabID = "tab-1"
+	newer := connWith("new", "motobox", "pcb")
+	newer.connectedAt = time.Unix(20, 0)
+	newer.ctx.ProjectUUID = "project-1"
+	newer.ctx.DocumentUUID = "pcb-1"
+	newer.ctx.TabID = "tab-1"
+
+	h := &hub{windows: map[string]*conn{"old": old, "new": newer}}
+	got, ok := h.target("")
+	if !ok || got != newer {
+		t.Fatalf("target duplicate reconnect = (%p,%v), want (%p,true)", got, ok, newer)
 	}
 }
 
