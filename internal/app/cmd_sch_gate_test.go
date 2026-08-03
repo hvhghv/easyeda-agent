@@ -147,7 +147,8 @@ func TestGradeGateReportErrorStageContributesNoWarnings(t *testing.T) {
 
 func TestRenderGateReportShowsVerdictStagesAndPrescribedNextStep(t *testing.T) {
 	rep := gateReport{Stages: []gateStage{
-		{Name: "layout-lint", Status: gateStatusFail, Errors: 2, Summary: "2 overlap, 0 pin-coincidence"},
+		{Name: "layout-lint", Status: gateStatusFail, Errors: 2, Summary: "2 overlap, 0 pin-coincidence",
+			BlockingReasons: []string{"2 overlap"}},
 		{Name: "check", Status: gateStatusPass, Summary: "0 finding(s)"},
 		{Name: "drc", Status: gateStatusSkipped, Summary: "被 --only/--skip 排除"},
 	}}
@@ -187,12 +188,105 @@ func TestRenderGateReportBlockedExplainsItIsNotTheBoard(t *testing.T) {
 	}
 }
 
-func TestGateAdviceCoversEveryStage(t *testing.T) {
-	// Every stage must have a prescribed next action, or the gate reintroduces
-	// the "agent invents its own next step" problem for that stage.
-	for _, spec := range gateStages {
-		if gateAdviceFor(spec.Name) == "" {
-			t.Fatalf("stage %q has no prescribed next step", spec.Name)
+// ── advice must follow the REASON, never the stage name ──────────────────
+//
+// Real-machine regression (2026-08-04, 示例工程_快速入门 under --strict): the
+// stage-keyed advice table told the agent to "拆掉真短路" on a page with 0
+// bridges (it failed on --strict orphan stubs) and to "重排几何" with 0
+// overlaps. Advice pointing at a problem the board does not have is worse than
+// none — it is the phantom-chasing this gate exists to prevent.
+
+func TestGateAdviceFollowsTheBlockingReasonNotTheStageName(t *testing.T) {
+	st := gateStage{
+		Name:            "bridge-check",
+		Status:          gateStatusFail,
+		BlockingReasons: []string{"11 orphan-stub (--strict)"},
+	}
+	advice := strings.Join(gateAdviceFor(st), " | ")
+	if strings.Contains(advice, "真短路") {
+		t.Fatalf("0 bridges must never yield short-circuit advice:\n%s", advice)
+	}
+	if !strings.Contains(advice, "孤儿桩") {
+		t.Fatalf("orphan-stub advice missing:\n%s", advice)
+	}
+}
+
+func TestGateAdviceForUnprovenPinsBlamesTheConnectorNotTheCircuit(t *testing.T) {
+	// The real failure on a clean official example board: 34 unproven pins
+	// because connector 0.17.3 does not send the pinsAvailable contract. Telling
+	// the agent to move parts around here would be actively harmful.
+	st := gateStage{
+		Name:            "layout-lint",
+		Status:          gateStatusFail,
+		BlockingReasons: []string{"34 unproven pin geometry (--strict;连接器未给 pinsAvailable 契约)"},
+	}
+	advice := strings.Join(gateAdviceFor(st), " | ")
+	if strings.Contains(advice, "重排") || strings.Contains(advice, "挪位") {
+		t.Fatalf("a provenance failure must not be treated as a placement defect:\n%s", advice)
+	}
+	if !strings.Contains(advice, "升级连接器") {
+		t.Fatalf("advice must point at the connector:\n%s", advice)
+	}
+}
+
+func TestGateAdviceIsEmptyWhenNothingBlocked(t *testing.T) {
+	if a := gateAdviceFor(gateStage{Name: "drc", Status: gateStatusPass}); len(a) != 0 {
+		t.Fatalf("a passing stage must prescribe nothing, got %v", a)
+	}
+}
+
+func TestGateAdviceRulesCoverEveryReasonTheStagesCanEmit(t *testing.T) {
+	// Every phrase a stage builder can put into BlockingReasons must match a
+	// rule, or that failure silently ships with no prescribed next step.
+	emitted := []string{
+		"3 overlap", "1 pin-coincidence",
+		"2 tight-spacing (--strict)", "4 off-grid anchor (--strict)",
+		"1 zone-violation (--strict)", "2 component without bbox (--strict)",
+		"5 unchecked pin geometry (--strict)",
+		"34 unproven pin geometry (--strict;连接器未给 pinsAvailable 契约)",
+		"1 invalid geometry value (--strict)",
+		"zone-check unavailable (--strict): no sheet",
+		"7 个 error/fatal finding: floating-pin×7",
+		"23 个 warn/info finding (--strict): floating-pin×23",
+		"2 wire-bridge(真短路)", "11 orphan-stub (--strict)", "1 orphan-flag (--strict)",
+		"3 fatal DRC violation",
+	}
+	for _, reason := range emitted {
+		st := gateStage{Status: gateStatusFail, BlockingReasons: []string{reason}}
+		if len(gateAdviceFor(st)) == 0 {
+			t.Fatalf("blocking reason %q has no prescribed next step", reason)
 		}
+	}
+}
+
+func TestGateBlockersNameWhatBlockedNotASeverityTally(t *testing.T) {
+	// The 2026-08-04 run printed "layout-lint: 0 个阻塞项" next to FAIL, because
+	// blockers were built from the error tally while --strict failed on
+	// promoted advisories. The blocker line must state the actual cause.
+	rep := gateReport{Stages: []gateStage{{
+		Name:            "layout-lint",
+		Status:          gateStatusFail,
+		Errors:          0,
+		Warnings:        0,
+		Summary:         "0 overlap, 0 pin-coincidence, …",
+		BlockingReasons: []string{"34 unproven pin geometry (--strict;连接器未给 pinsAvailable 契约)"},
+	}}}
+	gradeGateReport(&rep)
+	if len(rep.Blockers) != 1 {
+		t.Fatalf("expected one blocker, got %v", rep.Blockers)
+	}
+	if strings.Contains(rep.Blockers[0], "0 个阻塞项") {
+		t.Fatalf("blocker must not report a zero tally next to FAIL: %q", rep.Blockers[0])
+	}
+	if !strings.Contains(rep.Blockers[0], "unproven pin geometry") {
+		t.Fatalf("blocker must name the actual cause: %q", rep.Blockers[0])
+	}
+}
+
+func TestFormatTypeTallyIsDeterministicAndMostFrequentFirst(t *testing.T) {
+	got := formatTypeTally(map[string]int{"floating-pin": 3, "wire-crossing": 9, "zero-length-wire": 3})
+	want := "wire-crossing×9, floating-pin×3, zero-length-wire×3"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }

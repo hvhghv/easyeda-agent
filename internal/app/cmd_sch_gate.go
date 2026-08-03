@@ -50,11 +50,19 @@ type gateStage struct {
 	//   error   — could NOT run (connector down, page not open, bad shape).
 	//             The board is not implicated; retrying other checkers is futile.
 	//   skipped — excluded via --only/--skip, or not reached after a hard stop
-	Status   string `json:"status"`
-	Errors   int    `json:"errors"`
-	Warnings int    `json:"warnings"`
-	Summary  string `json:"summary"`
-	Error    string `json:"error,omitempty"`
+	Status string `json:"status"`
+	// Errors/Warnings are severity tallies for display. They are NOT the gate
+	// decision — BlockingReasons is. Keeping them separate matters: under
+	// --strict a stage can fail on promoted advisories while its error tally is
+	// 0, and reporting "0 个阻塞项" next to FAIL is a self-contradiction that
+	// tells the agent nothing (real-machine run 2026-08-04 hit exactly this).
+	Errors   int `json:"errors"`
+	Warnings int `json:"warnings"`
+	// BlockingReasons names precisely what made this stage fail, in the same
+	// vocabulary the underlying checker uses. Empty ⇔ the stage passed.
+	BlockingReasons []string `json:"blockingReasons,omitempty"`
+	Summary         string   `json:"summary"`
+	Error           string   `json:"error,omitempty"`
 	// Detail carries the stage's own full report under --json, so `sch gate --json`
 	// is a superset of the four single commands' JSON and nothing needs a re-run.
 	Detail any `json:"detail,omitempty"`
@@ -146,14 +154,45 @@ func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allP
 	st.Detail = rep
 	st.Errors = len(rep.Overlaps) + len(rep.PinCoincidences)
 	st.Warnings = len(rep.TightPairs) + len(rep.GridViolations) + len(rep.ZoneViolations)
-	st.Summary = fmt.Sprintf("%d overlap, %d pin-coincidence, %d tight, %d off-grid, %d zone-violation (zone-check=%s)",
+	// The summary MUST mention the geometry-provenance counts, not just the
+	// pairwise ones: under --strict those are what usually fails, and a summary
+	// reading "0 overlap, 0 pin-coincidence…" beside a FAIL is unreadable.
+	st.Summary = fmt.Sprintf("%d overlap, %d pin-coincidence, %d tight, %d off-grid, %d zone-violation, %d no-bbox, %d unchecked-pin, %d unproven-pin, %d invalid-geometry (zone-check=%s)",
 		len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-		len(rep.GridViolations), len(rep.ZoneViolations), rep.ZoneCheckStatus)
-	// rep.OK already folds in the strict gate and the geometry-provenance checks
-	// (unchecked/unproven pins, invalid values) — trust it rather than
-	// re-deriving a second, subtly different verdict here.
+		len(rep.GridViolations), len(rep.ZoneViolations), len(rep.NoBBox),
+		len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
+		rep.ZoneCheckStatus)
+
+	add := func(n int, label string) {
+		if n > 0 {
+			st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d %s", n, label))
+		}
+	}
+	add(len(rep.Overlaps), "overlap")
+	add(len(rep.PinCoincidences), "pin-coincidence")
+	if strict {
+		add(len(rep.TightPairs), "tight-spacing (--strict)")
+		add(len(rep.GridViolations), "off-grid anchor (--strict)")
+		add(len(rep.ZoneViolations), "zone-violation (--strict)")
+		add(len(rep.NoBBox), "component without bbox (--strict)")
+		add(len(rep.UncheckedPins), "unchecked pin geometry (--strict)")
+		add(len(rep.UnprovenPins), "unproven pin geometry (--strict;连接器未给 pinsAvailable 契约)")
+		add(len(rep.InvalidGeometry), "invalid geometry value (--strict)")
+		if rep.ZoneCheckStatus == "unavailable" {
+			st.BlockingReasons = append(st.BlockingReasons,
+				"zone-check unavailable (--strict): "+rep.ZoneCheckError)
+		}
+	}
+	// rep.OK is the authority (it folds in the strict gate). If it says false but
+	// we could not name a reason, say so plainly — a FAIL with no explanation is
+	// worse than a crude one.
+	if !rep.OK && len(st.BlockingReasons) == 0 {
+		st.BlockingReasons = append(st.BlockingReasons,
+			"layout-lint 判定不通过但未能归因,详见 `sch layout-lint --json` 的 ok/summary")
+	}
 	if rep.OK {
 		st.Status = gateStatusPass
+		st.BlockingReasons = nil
 	} else {
 		st.Status = gateStatusFail
 	}
@@ -190,16 +229,58 @@ func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overla
 			st.Warnings++
 		}
 	}
+	// Name the finding TYPES that block, not just a count — "3 个 error" sends
+	// the agent back to re-run the checker; "3 个 error: duplicate-net-marker,
+	// floating-pin" is already the fix list.
+	blockingTypes := map[string]int{}
+	for _, f := range rep.Findings {
+		lvl := strings.ToLower(f.Level)
+		if lvl == "fatal" || lvl == "error" || strict {
+			blockingTypes[f.Type]++
+		}
+	}
 	st.Summary = fmt.Sprintf("%d finding(s): %d error/fatal, %d warn/info", rep.Summary.Total, st.Errors, st.Warnings)
-	switch {
-	case st.Errors > 0:
+	if st.Errors > 0 {
+		st.BlockingReasons = append(st.BlockingReasons,
+			fmt.Sprintf("%d 个 error/fatal finding: %s", st.Errors, formatTypeTally(blockingTypes)))
+	} else if strict && st.Warnings > 0 {
+		st.BlockingReasons = append(st.BlockingReasons,
+			fmt.Sprintf("%d 个 warn/info finding (--strict): %s", st.Warnings, formatTypeTally(blockingTypes)))
+	}
+	if len(st.BlockingReasons) > 0 {
 		st.Status = gateStatusFail
-	case strict && st.Warnings > 0:
-		st.Status = gateStatusFail
-	default:
+	} else {
 		st.Status = gateStatusPass
 	}
 	return st
+}
+
+// formatTypeTally renders a rule-type histogram as a stable, compact string.
+func formatTypeTally(tally map[string]int) string {
+	if len(tally) == 0 {
+		return "(无类型信息)"
+	}
+	types := make([]string, 0, len(tally))
+	for t := range tally {
+		types = append(types, t)
+	}
+	// Most-frequent first, name as tiebreak, so the same board always renders
+	// the same string.
+	sort.Slice(types, func(i, j int) bool {
+		if tally[types[i]] != tally[types[j]] {
+			return tally[types[i]] > tally[types[j]]
+		}
+		return types[i] < types[j]
+	})
+	parts := make([]string, 0, len(types))
+	for _, t := range types {
+		name := t
+		if name == "" {
+			name = "(未命名规则)"
+		}
+		parts = append(parts, fmt.Sprintf("%s×%d", name, tally[t]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // gateBridgeStage runs bridge-check. A BRIDGE is a real short and blocks; an
@@ -227,12 +308,23 @@ func gateBridgeStage(cfg *appConfig, window string, allPages, strict bool) gateS
 	st.Warnings = rep.Summary.Orphans + rep.Summary.OrphanFlags
 	st.Summary = fmt.Sprintf("%d bridge(short), %d orphan-stub, %d orphan-flag (%d wire tree(s))",
 		rep.Summary.Bridges, rep.Summary.Orphans, rep.Summary.OrphanFlags, rep.Summary.WireTreesTotal)
-	switch {
-	case st.Errors > 0:
+	if rep.Summary.Bridges > 0 {
+		st.BlockingReasons = append(st.BlockingReasons,
+			fmt.Sprintf("%d wire-bridge(真短路)", rep.Summary.Bridges))
+	}
+	if strict {
+		if rep.Summary.Orphans > 0 {
+			st.BlockingReasons = append(st.BlockingReasons,
+				fmt.Sprintf("%d orphan-stub (--strict)", rep.Summary.Orphans))
+		}
+		if rep.Summary.OrphanFlags > 0 {
+			st.BlockingReasons = append(st.BlockingReasons,
+				fmt.Sprintf("%d orphan-flag (--strict)", rep.Summary.OrphanFlags))
+		}
+	}
+	if len(st.BlockingReasons) > 0 {
 		st.Status = gateStatusFail
-	case strict && st.Warnings > 0:
-		st.Status = gateStatusFail
-	default:
+	} else {
 		st.Status = gateStatusPass
 	}
 	return st
@@ -263,7 +355,10 @@ func gateDrcStage(cfg *appConfig, window string, strict bool) gateStage {
 	st.Warnings = rep.Summary.Error + rep.Summary.Warn
 	st.Summary = fmt.Sprintf("%d fatal, %d error, %d warn, %d info (total %d)",
 		rep.Summary.Fatal, rep.Summary.Error, rep.Summary.Warn, rep.Summary.Info, rep.Summary.Total)
-	if st.Errors > 0 {
+	if rep.Fatal > 0 {
+		st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d fatal DRC violation", rep.Fatal))
+	}
+	if len(st.BlockingReasons) > 0 {
 		st.Status = gateStatusFail
 	} else {
 		st.Status = gateStatusPass
@@ -271,22 +366,46 @@ func gateDrcStage(cfg *appConfig, window string, strict bool) gateStage {
 	return st
 }
 
-// gateAdviceFor maps a stage name to the one next action worth taking. Kept
-// here (not in the skill prose) so the fix path travels with the failure —
-// the audit log showed agents inventing four different next steps for the
-// same failure because nothing prescribed one.
-func gateAdviceFor(name string) string {
-	switch name {
-	case "layout-lint":
-		return "先治几何:overlap/pin-coincidence 用 `sch autolayout` 重排或 `sch modify` 单件挪位,别急着改电气"
-	case "check":
-		return "看 finding 的 type:duplicate-net-marker 喂 `sch prim-delete`,floating-pin 用 `sch no-connect`,wire-* 用 `sch disconnect` 后重连"
-	case "bridge-check":
-		return "bridge = 真短路,按 tree 的 primitiveIds 定位后 `sch prim-delete` 拆掉压线,再 `sch connect` 重连"
-	case "drc":
-		return "跑 `sch drc --verbose` 看逐条明细(gate 只汇总);DRC 需要 EasyEDA 窗口在前台"
+// gateAdviceRule maps a substring of a blocking reason to the prescribed fix.
+// Keyed on the REASON, never on the stage name: a stage-keyed table told the
+// 2026-08-04 real-machine run to "拆掉真短路" on a page with 0 bridges (it
+// failed on --strict orphan stubs) and to "重排几何" with 0 overlaps. Advice
+// that points at a problem the board does not have is worse than no advice —
+// it is exactly the "agent chases a phantom" failure this gate exists to stop.
+var gateAdviceRules = []struct{ match, advice string }{
+	{"overlap", "几何重叠:`sch autolayout` 重排,或 `sch modify` 单件挪位。几何先修 —— 重叠会连锁出一堆电气误报"},
+	{"pin-coincidence", "异件引脚重合 = 隐式短路:`sch modify` 把其中一件挪开(哪怕只挪一格)"},
+	{"unproven pin geometry", "引脚几何未经证明:连接器太旧没给 pinsAvailable 契约 —— 升级连接器,或本轮去掉 `--strict`(不是电路问题)"},
+	{"unchecked pin geometry", "引脚几何读不到:确认目标页在前台且已加载完(`doc switch`),再重跑"},
+	{"component without bbox", "有器件读不到 bbox:多半是非激活页的浅数据 —— `doc switch` 到该页后重跑,别用 `--all-pages` 当证明"},
+	{"invalid geometry", "几何值非法(NaN/Inf):该器件多半没落好,`sch list` 查坐标后 `sch modify` 重置"},
+	{"tight-spacing", "间距偏紧(仅 --strict 阻塞):`sch distribute` 拉开,或确认 `--min-gap` 是否符合本板工艺"},
+	{"off-grid anchor", "锚点不在网格上:`sch modify` 把坐标吸附到 5 网格 —— 离格会让 netflag 连不上"},
+	{"zone-violation", "器件跑出认领分区:`sch zones status` 看认领,`sch autolayout` 按分区重排"},
+	{"zone-check unavailable", "分区检查跑不了:先 `sch zones status` 确认认领与图纸可读,再重跑"},
+	{"wire-bridge", "真短路:按 tree 的 primitiveIds 定位后 `sch prim-delete` 拆掉压线,再 `sch connect` 重连"},
+	{"orphan-stub", "孤儿桩(仅 --strict 阻塞):要么 `sch connect` 补上网络标识,要么 `sch prim-delete` 清掉"},
+	{"orphan-flag", "孤儿标识(仅 --strict 阻塞):flag 不挨任何导线,`sch prim-delete` 清掉 —— 新线穿过会静默继承其网名"},
+	{"finding", "按 finding 类型分治:duplicate-net-marker 喂 `sch prim-delete`(带 suggestDeleteIds),floating-pin 用 `sch no-connect`,wire-* 用 `sch disconnect` 后重连"},
+	{"fatal DRC", "跑 `sch drc --verbose` 看逐条明细(gate 只汇总);DRC 需要 EasyEDA 窗口在前台"},
+}
+
+// gateAdviceFor returns the prescribed next steps for one failed stage, derived
+// from its actual blocking reasons. Deduped and order-stable.
+func gateAdviceFor(st gateStage) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, reason := range st.BlockingReasons {
+		lower := strings.ToLower(reason)
+		for _, rule := range gateAdviceRules {
+			if !strings.Contains(lower, strings.ToLower(rule.match)) || seen[rule.advice] {
+				continue
+			}
+			seen[rule.advice] = true
+			out = append(out, rule.advice)
+		}
 	}
-	return ""
+	return out
 }
 
 // runSchGate executes the fixed S5 gate pipeline and renders one report.
@@ -384,8 +503,14 @@ func gradeGateReport(rep *gateReport) {
 			rep.Blockers = append(rep.Blockers, fmt.Sprintf("%s 没能跑起来: %s", st.Name, st.Error))
 		case gateStatusFail:
 			anyFail = true
-			rep.Blockers = append(rep.Blockers,
-				fmt.Sprintf("%s: %d 个阻塞项 — %s", st.Name, st.Errors, st.Summary))
+			// Report WHAT blocked, not a severity tally that can read 0 next to
+			// a FAIL. Falls back to the summary only if a stage somehow failed
+			// without naming a reason.
+			why := strings.Join(st.BlockingReasons, "; ")
+			if why == "" {
+				why = st.Summary
+			}
+			rep.Blockers = append(rep.Blockers, fmt.Sprintf("%s: %s", st.Name, why))
 		}
 		if st.Status != gateStatusError && st.Warnings > 0 {
 			rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: %d 条告警", st.Name, st.Warnings))
@@ -429,21 +554,27 @@ func renderGateReport(rep gateReport, w io.Writer) {
 		for _, b := range rep.Blockers {
 			fmt.Fprintf(w, "  • %s\n", b)
 		}
-		// One prescribed next action per failing stage — see gateAdviceFor.
-		advice := make([]string, 0, len(rep.Stages))
+		// Prescribed next steps, derived from what actually blocked — see
+		// gateAdviceRules. Pipeline order is preserved (geometry first), which
+		// is also the order they should be fixed in.
+		var advice []string
+		seen := map[string]bool{}
 		for _, st := range rep.Stages {
 			if st.Status != gateStatusFail {
 				continue
 			}
-			if a := gateAdviceFor(st.Name); a != "" {
-				advice = append(advice, fmt.Sprintf("  → %s", a))
+			for _, a := range gateAdviceFor(st) {
+				if seen[a] {
+					continue
+				}
+				seen[a] = true
+				advice = append(advice, a)
 			}
 		}
 		if len(advice) > 0 {
-			sort.Strings(advice)
 			fmt.Fprintln(w, "\n下一步:")
 			for _, a := range advice {
-				fmt.Fprintln(w, a)
+				fmt.Fprintf(w, "  → %s\n", a)
 			}
 		}
 		if rep.Verdict == "blocked" {

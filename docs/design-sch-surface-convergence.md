@@ -175,7 +175,34 @@ top1 的 146 次是 **agent 在连接器根本没连上时瞎试别的命令**,�
 - Skill 同步:`SKILL.md` 停点表 ②、`design-flow.md` S5/S6、`schematic.md`、
   `auto-layout-sop.md` 最终验证门 —— 主干路径全部改走 gate。
 
-**待验**:真机跑一次确认四个 stage 在活窗口上的实际表现(尤其 DRC 前台要求)。
+**✅ 真机已验(2026-08-04,web 编辑器 `pro.lceda.cn` + 官方「示例工程_快速入门」,只读)**:
+默认档 **0.86s 四关全过**;DRC **没有**卡后台(窗口前台时正常返回),此前担心的
+「DRC 前台要求会让 gate 默认 blocked」未发生。
+
+**但 `--strict` 档当场暴露 3 个会误导 agent 的缺陷,已修并回归**:
+
+| # | 缺陷 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | layout-lint 的 summary 不含 strict 判据字段 | 报告写「0 overlap, 0 pin-coincidence, 0 tight…」却 FAIL,**自相矛盾** | summary 补 no-bbox / unchecked-pin / unproven-pin / invalid-geometry |
+| 2 | `Errors` 计数与 `Status` 判据脱节 | blocker 行写「**0 个阻塞项**」却判失败(strict 失败在被提升的告警上,不在 error 计数里) | 新增 `BlockingReasons[]`,status 与 blocker 都由它决定;Errors/Warnings 降为纯展示用的严重度统计 |
+| 3 | 建议按 **stage 名**给,不看实际失败项 | 0 bridge 却教「拆掉真短路」,0 overlap 却教「重排几何」 | 建议表改为按 **reason 关键词**匹配(`gateAdviceRules`) |
+
+第 3 个最恶劣 —— **把 agent 引向不存在的问题**,正是本文档要根治的病;它在单测里没被抓到,
+因为我构造的 stage 都是 `Errors>0` 才 fail,没覆盖「strict 提升告警致 fail 但 Errors=0」这个组合。
+**真机验证的价值就在这里**:纯几何/纯逻辑的单测证明不了「报告读起来对不对」。
+
+修复后同一块板:
+```
+• layout-lint: 34 unproven pin geometry (--strict;连接器未给 pinsAvailable 契约)
+• check: 23 个 warn/info finding (--strict): wire-crossing×13, dangling-wire×8, zero-length-wire×2
+• bridge-check: 11 orphan-stub (--strict)
+→ 引脚几何未经证明:连接器太旧没给 pinsAvailable 契约 —— 升级连接器,或本轮去掉 `--strict`(不是电路问题)
+```
+新增 8 个回归测试钉住(含两条「建议不得指向板子没有的问题」的负向断言)。
+
+**副产物**:34 个 unproven-pin 的真因是**市场版连接器 0.17.3 滞后 CLI 0.18.3**,不发
+`pinsAvailable` 契约 —— 印证了 CLAUDE.md 记的市场版滞后问题,且现在 gate 会**直接说出来**
+而不是让 agent 去挪器件。
 
 ### 下一刀(未开始)
 
