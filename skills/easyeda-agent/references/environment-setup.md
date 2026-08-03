@@ -65,6 +65,23 @@ profile 里持久化)。
 一键装(平台可原地自动更新,但市场版本可能滞后 CLI);并开了 **允许外部交互**、
 登录过嘉立创账号。之后每次自举都无人工步骤。
 
+### 两个必踩的启动坑(2026-08-04 实测)
+
+1. **`browser is already running for …/chrome-profile`** —— chrome-devtools MCP 的
+   profile 被上次留下的孤儿实例占着(带 `--enable-automation` + `about:blank`,
+   **不是**用户的主 Chrome,后者用默认 profile 不带 `--user-data-dir`)。修法:
+   `pkill -f "chrome-devtools-mcp/chrome-profile"`,再调 `list_pages` 让 MCP 重开。
+
+2. **页面显示「登录/注册」但账号数据其实还在 → 点一下「登录」即恢复,不用真的重登。**
+   全新启动时页面可能先渲染成未登录态(`localStorage.isLogin` 里仍有
+   `{username,uuid}`,IndexedDB 里 `User_<uuid>_v6` 扩展库也在)。**此时连接器不加载**
+   ——扩展库按账号分,未登录就不挂载,`health` 的 windows 一直空。
+   点击顶栏「登录」链接会触发 session 恢复,顶栏随即显示用户名,连接器几秒内附着并
+   在页面上弹 `Connected to easyeda-agent (port …)`。
+   判据:`evaluate_script` 读 `localStorage.getItem('isLogin')` —— 有 uuid 就说明只是
+   渲染态没跟上,**别急着让用户重新扫码登录**。
+   (开源工程未登录也能打开,所以「工程打开成功」不代表连接器会附着,别用它当判据。)
+
 ## 2. 热重载连接器(改了 extension/ 之后)
 
 不卸载、不重导入、不弹文件对话框——直接覆写 IndexedDB 里的执行文件。
