@@ -123,25 +123,45 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 - **💾 过门后**:`easyeda sch save` 存盘,再进入 S5。
 
 ### S5 — 校验门(机械真值,不是肉眼)
-**每个目标页逐页过五道门**，否则回 S3/S4；生产门不要用 `--all-pages` 的浅数据冒充逐页证明:
-1. **布局门** `easyeda sch layout-lint --strict --doc <page>`
-   - `overlap` / `pin-coincidence` ERROR 必须修；strict 下 spacing、off-grid、zone-violation、缺失/畸形几何同样阻断。
-   - `--strict` 与 `--all-pages`、`--include-non-parts` 不兼容；多页循环 `--doc <page>`。
-2. **SDK DRC 门** `easyeda sch drc --doc <page>`
-   - fatal/error 必须为 0。当前 EasyEDA build 可能只返回聚合/布尔结果，不等于 UI DRC 面板的全部 warning；聚合 WARN 必须审阅并在交付摘要中报告，不能声称“全部清零”。
-3. **结构门** `easyeda sch check --strict --doc <page>`
-   - 补查悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线，以及 `duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`。`--json` 的 findings 位于 `result.findings`。
-4. **线树门** `easyeda sch bridge-check --doc <page>`
-   - 一棵 wire tree 带多个网名是 `wire-bridge` 真短路；orphan stub/flag 也必须解释或清理。它是 `sch check` 逐 wire 视角的必要补充。
-5. **设计意图门** `easyeda sch read --doc <page>`
+
+**逐页跑 `easyeda sch gate --strict --doc <page>`,再做一次设计意图对账。** 不要用
+`--all-pages` 的浅数据冒充逐页证明(`--strict` 与 `--all-pages` 不兼容,多页就循环 `--doc`)。
+
+1. **机械门(一条命令)** `easyeda sch gate --strict --doc <page>`
+
+   gate 把四个检查器按**固定顺序**跑完并出一张报告 —— 顺序、阻塞判据、退出码都写在代码里,
+   不再每次现场决定(此前四个命令各跑各的,agent 每次都要自己拼,拼法不一致就是不稳定):
+
+   | # | stage | 阻塞判据 |
+   |---|---|---|
+   | 1 | `layout-lint` | `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、缺失/畸形几何同样阻断 |
+   | 2 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
+   | 3 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag 是告警,strict 下阻塞 |
+   | 4 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
+
+   **verdict 三态,`blocked` ≠ `fail`**:
+   - `pass` — 全过
+   - `fail` — **板子有阻塞问题**,照报告「下一步」修,回 S3/S4
+   - `blocked` — **检查器没跑起来**(连接器断、页没打开、返回结构异常),原理图**从未被完整判定**。
+     此时后续 stage 会被跳过而不是继续撞同一堵墙。先 `easyeda health`、`easyeda doc ls` /
+     `doc switch <page>` 修环境,再重跑 gate。**别把它当成板子的问题去改电路。**
+
+   `--json` 带每个 stage 的完整原生报告(`stages[].detail`),是四个单命令 JSON 的超集,不用重跑。
+   局部复查仍可直接用 `sch layout-lint` / `sch check` / `sch bridge-check` / `sch drc` 单命令
+   (它们原样保留),但**交付门走 gate**。窗口不在前台时 `--skip drc` 先过前三关。
+
+2. **设计意图门** `easyeda sch read --doc <page>`
    - 新设计逐项对照 spec；整理已连线页面时对照修改前保存的 `DESIGNATOR.pin → net` 黄金表与显式 NC 集合。任何差异都先修复，不能把“布局变化”变成静默改网。
-   - 可再跑 `scripts/lint.sh <project>` 做数据 lint，但它不替代以上四个活体门。
-- ⚠️ **判状态看数据(`sch list` / layout-lint / drc),不看截图**(API 改动后画布可能不重绘 → 截图 stale)。
+   - 这道门 gate **不管** —— 它是语义对账,机器判不了「接对了没有」,只能判「接得合不合法」。
+   - 可再跑 `scripts/lint.sh <project>` 做数据 lint，但它不替代上面的活体门。
+- ⚠️ **判状态看数据(`sch list` / `sch gate`),不看截图**(API 改动后画布可能不重绘 → 截图 stale)。
 
 ### S6 — 调整闭环(立刻调,再验)
-- layout-lint 报错 → `sch modify`(单件)/`sch align`/`sch distribute`(成排)/`sch autoplace-free`(自动找空位)把冲突元件挪开 → **重跑逐页 strict lint**。
-- DRC/check/bridge-check 报错 → 补线、拆桥、清孤儿或补 NC → **重跑对应门并重新 `sch read` 对账**。
-- **💾 循环直到五道门都通过，再 `easyeda sch save --doc <page>` 收尾并确认 `saved:true`**。这就是“调整后立刻验证”的闭环。
+- **先看 gate 报告的「下一步」** —— 每个失败 stage 自带规定的修法,别自己另发明一套。
+- `layout-lint` 失败 → `sch modify`(单件)/`sch align`/`sch distribute`(成排)/`sch autoplace-free`(自动找空位)把冲突元件挪开。**几何先修**:重叠会连锁出一堆电气误报,先治几何再看电气,能省掉大半来回。
+- `check` / `bridge-check` / `drc` 失败 → 补线、拆桥、清孤儿或补 NC → **重跑 gate 并重新 `sch read` 对账**。
+- `blocked` 不是修电路的信号 → 按 S5 的三态说明先修环境(health / doc switch),再重跑。
+- **💾 循环直到 `sch gate` verdict=pass 且设计意图对账无差异，再 `easyeda sch save --doc <page>` 收尾并确认 `saved:true`**。这就是“调整后立刻验证”的闭环。
 - **收尾回流(块库共建)**:本板若含手工搭建且已 `sch check` + 网表核实通过的标准外围(库里没有的),按 [`standard-blocks-contributing.md`](./standard-blocks-contributing.md) 顺手回流一个块(署名 + `validated`)——验证刚过正是入库时机。
 
 ## 录制 / 演示模式(Recording / Demo Mode)

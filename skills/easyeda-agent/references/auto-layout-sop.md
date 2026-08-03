@@ -105,13 +105,16 @@ easyeda sch zone-draw --mode partition --font-size 22 --doc <page> --project <pr
 
 ## 最终验证门（每页）
 
-1. `easyeda sch layout-lint --strict --doc <page>`：0 overlap、0 pin-coincidence、
-   0 strict WARN，且几何/zone 可证明。
-2. `easyeda sch drc --doc <page>`：fatal/error 为 0；聚合 WARN 审阅并报告。
-3. `easyeda sch check --strict --doc <page>`：结构与 marker findings 为 0。
-4. `easyeda sch bridge-check --doc <page>`：0 bridge；orphan stub/flag 也必须解释或清理。
-5. `easyeda sch read --doc <page>`：与设计 spec 或整理前黄金
-   `DESIGNATOR.pin → net`、显式 NC 集合逐项一致。
-6. `easyeda sch save --doc <page>` 明确返回 `saved:true`。
+1. `easyeda sch gate --strict --doc <page>`：**`verdict` 必须是 `pass`**。一条命令按固定顺序
+   跑完四关(layout-lint 0 overlap/0 pin-coincidence + check 结构与 marker findings 0 +
+   bridge-check 0 bridge、orphan 解释或清理 + drc fatal/error 0),报告里带每关的计数;
+   DRC 聚合 WARN 仍需审阅并报告。
+   - `verdict=blocked` **不是板子的问题**——检查器没跑起来(连接器断/页没打开),
+     先 `easyeda health` + `doc switch <page>` 修环境再重跑,别去改电路。
+   - 窗口不在前台时先 `--skip drc` 过前三关,DRC 单独补跑。
+2. `easyeda sch read --doc <page>`：与设计 spec 或整理前黄金
+   `DESIGNATOR.pin → net`、显式 NC 集合逐项一致。**gate 判「合不合法」,这步判「对不对」**,
+   两者都要。
+3. `easyeda sch save --doc <page>` 明确返回 `saved:true`。
 
 任何一门失败都回到布局/布线阶段修复，不用截图“看起来正常”替代门禁。

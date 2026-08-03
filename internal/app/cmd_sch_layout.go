@@ -491,11 +491,42 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 	if strict && includeNonParts {
 		return fmt.Errorf("layout-lint: --strict cannot be combined with --include-non-parts: sheet frames and net markers are not placement bodies and would create false geometry failures")
 	}
+	rep, err := collectLayoutLint(cfg, window, minGap, pinEps, allPages, includeNonParts, strict)
+	if err != nil {
+		return err
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(rep); err != nil {
+			return err
+		}
+	} else {
+		renderLayoutReport(rep, stdout)
+	}
+
+	if !rep.OK {
+		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s",
+			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
+			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.NoBBox),
+			len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
+			rep.ZoneCheckStatus)
+	}
+	return nil
+}
+
+// collectLayoutLint gathers the geometry and produces the normalized report
+// WITHOUT rendering or gating. Split out of runLayoutLint so `sch gate` can run
+// layout-lint as one stage of an aggregate report (the flag-validation and the
+// exit-code contract stay in runLayoutLint — a stage decides its own verdict).
+func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPages, includeNonParts, strict bool) (layoutReport, error) {
+	var zero layoutReport
 	readCfg, readWindow, docUUID := cfg, window, ""
 	if !allPages {
 		pinnedCfg, win, pinnedUUID, err := pinZonePage(cfg, window)
 		if err != nil {
-			return err
+			return zero, err
 		}
 		readCfg, readWindow, docUUID = pinnedCfg, win, pinnedUUID
 	}
@@ -512,12 +543,12 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 			payload, docUUID, "read layout-lint geometry")
 	}
 	if err != nil {
-		return err
+		return zero, err
 	}
 
 	comps, perr := parseLayoutComps(res.Result)
 	if perr != nil {
-		return perr
+		return zero, perr
 	}
 	realParts, _ := filterLayoutComps(comps, false)
 	parts, skipped := filterLayoutComps(comps, includeNonParts)
@@ -564,26 +595,7 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 		rep.ZoneViolations = findSchZoneViolations(zones, *sheet, realParts)
 	}
 	applyLayoutStrictGate(&rep, strict)
-	rep = layoutReportInMM(rep)
-
-	if asJSON {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(rep); err != nil {
-			return err
-		}
-	} else {
-		renderLayoutReport(rep, stdout)
-	}
-
-	if !rep.OK {
-		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s",
-			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.NoBBox),
-			len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
-			rep.ZoneCheckStatus)
-	}
-	return nil
+	return layoutReportInMM(rep), nil
 }
 
 // parseLayoutComps extracts the minimal layoutComp slice from a components.list

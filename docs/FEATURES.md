@@ -262,6 +262,25 @@ Workspace → Project → **Board** → schematic + PCB. Map to `eda.dmt_Board.*
 - **Go-side CLI planners (pure geometry over real bboxes)** — deterministic,
   unit-testable analysis/placement that runs in the daemon's Go process on a
   single `schematic.components.list` pull, no per-step screenshots:
+  - **`easyeda sch gate`** — **the S5 verification gate, one command**: runs
+    `layout-lint → check → bridge-check → drc` in a fixed order and returns one
+    report. Motivated by the surface-convergence audit
+    ([`design-sch-surface-convergence.md`](./design-sch-surface-convergence.md)):
+    with four separate checkers, *which ones, in what order, whose exit code
+    counts* was re-decided every run with no data to decide it on — the audit log
+    shows agents answering it four different ways for the same failure. Order,
+    blocking rules and exit code now live in code. Blocking: layout-lint
+    overlap/pin-coincidence · check fatal+error · bridge-check `wire-bridge` ·
+    drc fatal (tight spacing, orphan stubs and non-fatal DRC are advisory;
+    `--strict` promotes them). **Three-state verdict** — `pass` / `fail` (the
+    board has blocking problems) / **`blocked`** (a checker could not RUN, so the
+    schematic was never judged; remaining stages are skipped instead of running
+    into the same wall, and the report points at `health`/`doc switch` rather
+    than at the circuit). Each failing stage carries its prescribed next step.
+    `--json` nests every stage's full native report under `stages[].detail` (a
+    superset of the four single commands' JSON); `--only`/`--skip` select a
+    subset and reject misspelled stage names rather than silently gating on
+    fewer checks; `--fail-fast`. The four single commands stay for spot checks.
   - **`easyeda sch layout-lint`** — pairwise bbox overlap/pin coincidence
     (ERROR), tight spacing/off-grid/zone violation (WARN), with corrected
     mm↔0.01-inch conversion and schema-v2 unit metadata. `--strict` also fails

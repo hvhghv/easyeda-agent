@@ -153,7 +153,36 @@ top1 的 146 次是 **agent 在连接器根本没连上时瞎试别的命令**,�
 - Tier 1 命令 100% 有测试覆盖 + 三态返回契约
 - `sch --help` 顶层条目 ≤12
 
-## 6. 不做什么
+## 6. 进展
+
+### ✅ 第一刀:`sch gate`(2026-08-03 落地)
+
+选它先行是因为**它零破坏**:纯新增聚合命令,四个单命令原样保留,却直接消灭了
+「跑哪个检查、什么顺序、谁的退出码算数」这个每次都要重做且没有判据的决策。
+
+- `internal/app/cmd_sch_gate.go` — 固定流水线 `layout-lint → check → bridge-check → drc`
+  (顺序理由写在代码注释里:几何最便宜且解释力最强,DRC 最慢且需前台故垫底)
+- **`blocked` verdict 是本刀的核心设计**:把「检查器没跑起来」和「板子有问题」分开。
+  §1.4 里 146 次 `components.list [NO_CONNECTOR] → snapshot` 的盲试,根因就是二者混同 ——
+  agent 把 infra 失败当板子失败,于是去试别的命令。现在第一个 stage 报 `error` 就停,
+  后续 stage 标 `skipped` 而不是继续撞同一堵墙,报告直接指向 `health` / `doc switch`。
+- **每个失败 stage 自带规定的下一步**(`gateAdviceFor`)—— 修法跟着失败走,不靠 skill 散文。
+- `--only`/`--skip` 拼错 stage 名**直接报错**,绝不静默少跑一关(少跑一关的绿灯比红灯更危险)。
+- 复用现有 `parseCheckReport`/`parseBridgeReport`/`parseDrcReport`,只从 `runLayoutLint`
+  提取了 `collectLayoutLint`(纯提取,行为不变)——**没有重写任何检查器逻辑**,回归面最小。
+- 13 个单测钉住:流水线顺序、`--only` 按流水线序而非参数序、未知 stage 报错、
+  三态判定(含 `blocked` 优先于 `fail`)、error stage 不产出告警、渲染带「下一步」。
+- Skill 同步:`SKILL.md` 停点表 ②、`design-flow.md` S5/S6、`schematic.md`、
+  `auto-layout-sop.md` 最终验证门 —— 主干路径全部改走 gate。
+
+**待验**:真机跑一次确认四个 stage 在活窗口上的实际表现(尤其 DRC 前台要求)。
+
+### 下一刀(未开始)
+
+摆放那 6 条路(`autolayout` 两引擎 / `autoplace-free` / `align` / `distribute` /
+`block-apply` 自带 layout)—— **这刀真会破坏兼容**,需要先定「谁吸收谁」。
+
+## 7. 不做什么
 
 - **不在本轮加新功能**,也不给 Tier 2/3 补测试 —— 先砍再建,否则等于给冗余配基建。
 - 「离线回归基准(真机快照 fixture 重放)」是下一轮,**必须在收敛之后**,否则 fixture
