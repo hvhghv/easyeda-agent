@@ -143,6 +143,14 @@ make lint-test    # = python3 skills/easyeda-agent/scripts/tests/run.py
 # verified 却静默错接(ch340c 的 USB 口根本没供电)。离线判定,非零退出可 gate。
 skills/easyeda-agent/scripts/blocks-pin-audit.py            # 审全库(离线,用引脚表快照)
 skills/easyeda-agent/scripts/blocks-pin-audit.py --probe    # 刷新快照(需连编辑器)
+
+# 暴露面健康度体检 —— 读 ~/.easyeda-agent/audit/*.jsonl,离线,不需要连编辑器。
+# 出「调用分布+失败率 / 错路回退 / 逐日多样性」三张表。判读法:长尾失败率显著
+# 高于头部 = 有「用得少所以坏了没人知道」的角落;失败率 100% 的行 = 从未工作过
+# 的命令(首测抓到 titleblock.modify 32 次调用 0 次成功)。收敛验收基线见
+# docs/design-sch-surface-convergence.md。
+skills/easyeda-agent/scripts/audit-baseline.py              # 全部历史
+skills/easyeda-agent/scripts/audit-baseline.py 2026-08      # 只看某月/某天
 ```
 
 `skills/easyeda-agent/references/standard-parts.json` — 标准器件库（libraryUuid + deviceUuid + LCSC C 号）。放置前先查这里；新选型后写回。
