@@ -149,7 +149,21 @@ func newSchCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 		c := &cobra.Command{
 			Use:   "titleblock",
 			Short: "Adjust the focused page's 明细表 (title block): visibility and/or fields",
-			Args:  cobra.NoArgs,
+			Long: `Adjust the FOCUSED page's 明细表 (title block): visibility and/or field values.
+
+Only the focused page — the official API takes no pageUuid (titleblock-get does,
+the two are asymmetric). Switch pages first if you mean another one.
+
+The platform reports success for fields it silently dropped ("无法识别的明细项将被
+忽略" yet still returns true), so this command reads the title block back and
+compares item by item. Items that did not land come back in result.notApplied and
+exit non-zero; items that are not title-block fields at all are named separately
+in result.unknownKeys — for those, fix the key, do not retry.
+
+The title block CANNOT set paper size. EasyEDA Pro exposes no set-paper-size API,
+and Size / Width / Height / "Page Size" are not title-block items. Run
+` + "`easyeda sch titleblock-get`" + ` first to see the keys this page actually has.`,
+			Args: cobra.NoArgs,
 			Example: `  easyeda sch titleblock --show
   easyeda sch titleblock --hide
   easyeda sch titleblock --data '{"Title":{"value":"电源模块"},"Designer":{"value":"Mika"}}'`,
@@ -174,7 +188,34 @@ func newSchCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 				if len(payload) == 0 {
 					return fmt.Errorf("pass at least one of --show / --hide / --data")
 				}
-				return dispatch(cfg, "schematic.titleblock.modify", window, payload, stdout, stderr)
+				res, err := dispatchCapture(cfg, "schematic.titleblock.modify", window, payload, stdout)
+				if err != nil {
+					return err
+				}
+				// 部分应用退出码约定与 `sch modify` 对齐(#151)。明细表这条另有
+				// unknownKeys:平台对不认识的明细项静默忽略并回 true,单独点名
+				// 让调用方知道该换 key 而不是重试。
+				na, _ := res.Result["notApplied"].([]any)
+				visOK, hasVis := res.Result["visibilityApplied"].(bool)
+				if len(na) > 0 || (hasVis && !visOK) {
+					keys := make([]string, 0, len(na)+1)
+					for _, k := range na {
+						keys = append(keys, fmt.Sprint(k))
+					}
+					if hasVis && !visOK {
+						keys = append(keys, "showTitleBlock")
+					}
+					msg := fmt.Sprintf("partial apply: title-block items not applied: %s", strings.Join(keys, ", "))
+					if uk, _ := res.Result["unknownKeys"].([]any); len(uk) > 0 {
+						names := make([]string, 0, len(uk))
+						for _, k := range uk {
+							names = append(names, fmt.Sprint(k))
+						}
+						msg += fmt.Sprintf(" — %s are not title-block items on this page (the title block cannot set paper size; run `easyeda sch titleblock-get` for the available keys)", strings.Join(names, ", "))
+					}
+					return fmt.Errorf("%s", msg)
+				}
+				return nil
 			},
 		}
 		c.Flags().BoolVar(&show, "show", false, "show the title block")

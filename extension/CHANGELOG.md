@@ -6,6 +6,25 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
+  audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,
+  **成功 0 次**,却一直挂在 skill 文档里。根因不在我们的调用姿势,而在旧实现**直接透传平台的
+  `ok`**:官方 @beta remarks 原文写着「任何无法识别的明细项将被忽略」且「如若存在无法识别的
+  明细项但程序并未出错,将返回 `true` 的结果」——**这个 API 对写不进去的字段报成功**,与
+  「删除 API 撒谎」同族。于是「改了个根本不存在的明细项」会被报成功,而真正抛错的那 20 次
+  (payload 是拿 `Size`/`Width`/`Height`/`Page Size` 当纸张属性写)既无法证伪也说不出原因。
+  现在走 #151 的三态契约:**改前快照 → 写 → 回读逐项比对**,产出 `applied` / `alreadySet` /
+  `notApplied` / `unknownKeys`。全部落空 ⇒ ERROR(附「先跑 titleblock-get 看可用 key」的指路);
+  部分落空 ⇒ `partial:true` + warnings + CLI 非零退出(已写进画布的子集是既成事实,`ok:true`
+  让 autosave 照常落盘);回读不可用 ⇒ `verified:false` 而**绝不**降级成 `ok:false`。
+  `alreadySet`(改前就等于期望值)不计入 `applied`、**也不豁免全失败硬门**。
+  `unknownKeys` 是本 action 特有的诊断:那些根本不是明细项,**修法是换 key 而不是重试**——
+  明细表改不了纸张尺寸。SDK 显式返回 `false` 也不再被吞。9 个单测覆盖上述每一条。
+- **audit log 记录 `errorDetail`** —— 协议 `Error.Detail`(连接器捕获的平台原始报错)此前
+  被丢弃,日志里只剩我们自己的包装文案(如 "Failed to modify schematic page title block."),
+  事后定位根因无从谈起:上面那条 titleblock 的调查只能从 payload 反推。现在原始错误一并落盘。
+
 ## [0.18.3] - 2026-08-01
 
 ### Added

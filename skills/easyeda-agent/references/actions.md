@@ -48,7 +48,10 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 均映射 `eda.dmt_Schematic.*`。**注意：EasyEDA Pro 无设置纸张尺寸(A4/A3)的公开 API**；可编辑的「图纸」属性就是明细表(title block)。CLI：`easyeda sch …`。
 
 - `schematic.titleblock.get` — 读当前（或指定 `pageUuid`）图页的明细表：`showTitleBlock` + 各字段 `titleBlockData`。**改前先 get 拿到字段 key** → `easyeda sch titleblock-get`
-- `schematic.titleblock.modify` — 调整明细表：显隐 + 字段值（只传要改的项，未知 key 被忽略）→ `easyeda sch titleblock --show` / `--data '{"Title":{"value":"电源模块"}}'`
+- `schematic.titleblock.modify` — 调整明细表：显隐 + 字段值（只传要改的项）→ `easyeda sch titleblock --show` / `--data '{"Title":{"value":"电源模块"}}'`
+  - **平台会对写不进去的字段返回成功**（官方 remarks 原文：「无法识别的明细项将被忽略」且「仍将返回 `true`」，与「删除 API 撒谎」同族）。handler 因此**改前快照 → 写 → 回读逐项比对**，产出 `applied`/`alreadySet`/`notApplied`/`unknownKeys`；全部落空即 ERROR，部分落空回 `partial:true` + warnings，CLI 非零退出（#151 三态约定）。
+  - **`unknownKeys` = 这些根本不是本页的明细项**，修法是换 key 而不是重试 —— 先 `sch titleblock-get` 看可用 key。**明细表改不了纸张尺寸**：曾有 20 次调用拿 `Size`/`Width`/`Height`/`Page Size` 当纸张属性写，全部失败（audit 实测该 action 一度 32 次调用 0 次成功）。
+  - **只能改当前聚焦页** —— 官方签名无 `pageUuid` 参数（`titleblock.get` 反而支持，两者不对称）。改之前先确认聚焦页就是目标页。
 - `schematic.page.create` — 新建图页（`schematicUuid`）→ `easyeda sch page-new --schematic <uuid>`
 - `schematic.page.rename` — 重命名图页 → `easyeda sch page-rename --page <uuid> --name ...`
 - `schematic.page.delete` — 删除图页（**需确认**，无 undo）→ `easyeda sch page-delete --page <uuid>`

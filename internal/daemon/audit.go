@@ -29,6 +29,13 @@ type auditEntry struct {
 	Result     map[string]any `json:"result,omitempty"`
 	ErrorCode  string         `json:"errorCode,omitempty"`
 	ErrorMsg   string         `json:"errorMsg,omitempty"`
+	// ErrorDetail carries the connector's raw platform error (protocol
+	// Error.Detail — e.g. what eda.* actually threw), which our handlers wrap
+	// behind a generic message. Without it the log only ever shows our own
+	// wrapper ("Failed to modify schematic page title block.") and post-hoc
+	// root-causing is impossible: the titleblock.modify 0/32 investigation had
+	// to reconstruct the cause from the payload alone.
+	ErrorDetail string `json:"errorDetail,omitempty"`
 }
 
 // auditWriter serializes appends to one JSONL file per UTC day so log files
@@ -97,6 +104,7 @@ func fromResponse(started time.Time, req *protocol.Request, resp *protocol.Respo
 		if resp.Error != nil {
 			e.ErrorCode = resp.Error.Code
 			e.ErrorMsg = resp.Error.Message
+			e.ErrorDetail = resp.Error.Detail
 		}
 	}
 	return e

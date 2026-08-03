@@ -447,31 +447,167 @@ const schematicTitleBlockGet: Handler = async (payload) => {
 	};
 };
 
+/** 明细表单项的可写子字段 —— 与官方 modifySchematicPageTitleBlock 入参结构一致。 */
+type TitleBlockPatch = { showTitle?: boolean; showValue?: boolean; value?: unknown };
+
+/**
+ * 逐子字段判定一个明细项是否已落到位。未请求的子字段不参与判定。
+ *
+ * `value` 比对经 String() 归一化:平台会把数字回读成字符串(反之亦然),
+ * 那是格式归一化而非丢弃,不能算 notApplied(同 #151 的 number→string 教训)。
+ */
+function titleBlockFieldApplied(actual: TitleBlockPatch | undefined, want: TitleBlockPatch): boolean {
+	if (!actual || typeof actual !== 'object') return false;
+	if (want.value !== undefined && String(actual.value ?? '') !== String(want.value)) return false;
+	if (want.showTitle !== undefined && actual.showTitle !== want.showTitle) return false;
+	if (want.showValue !== undefined && actual.showValue !== want.showValue) return false;
+	return true;
+}
+
+/** 读当前聚焦页的明细表状态;读不到返回 undefined(调用方降级为 verified:false)。 */
+async function readFocusedTitleBlock(): Promise<
+	{ showTitleBlock?: boolean; titleBlockData: Record<string, TitleBlockPatch> } | undefined
+> {
+	try {
+		const info = await eda.dmt_Schematic.getCurrentSchematicPageInfo();
+		if (!info) return undefined;
+		return {
+			showTitleBlock: info.showTitleBlock,
+			titleBlockData: (info.titleBlockData ?? {}) as Record<string, TitleBlockPatch>,
+		};
+	}
+	catch {
+		return undefined;
+	}
+}
+
 /**
  * Modify the focused page's 明细表 (title block): toggle visibility and/or patch
- * fields. `titleBlockData` carries only the items to change; unknown keys are
- * ignored by EasyEDA, untouched items keep their current value.
+ * fields.
+ *
+ * **平台契约(官方 @beta remarks 原文)**:「任何无法识别的明细项将被忽略」,且
+ * 「如若存在无法识别的明细项但程序并未出错,将返回 `true` 的结果」——
+ * **这个 API 对写不进去的字段返回成功**,与 platform-delete-lies 同族。
+ * 早期直接透传 `ok` 的实现因此会把「改了个根本不存在的明细项」报成成功;
+ * audit log 实测该 action 32 次调用 0 次成功(20 次真抛错 + 12 次无连接),
+ * 失败 payload 是拿 Size/Width/Height 当纸张属性写 —— 那些不是明细项,
+ * 而旧实现既不能证伪也说不出原因。
+ *
+ * 因此这里走 #151 的三态契约:改前快照 → 写 → 回读逐项比对,产出
+ * applied / alreadySet / notApplied / unknownKeys。`unknownKeys` 是本 action
+ * 特有的诊断:改前明细表里就没有的 key,直接告诉调用方「这不是明细项」。
+ *
+ * 平台限制:官方签名无 pageUuid 参数,**只能改当前聚焦页**(titleblock.get 反而
+ * 支持 pageUuid,两者不对称)。调用前请自行确认聚焦页是目标页。
  */
-const schematicTitleBlockModify: Handler = async (payload) => {
+export const schematicTitleBlockModify: Handler = async (payload) => {
 	const showTitleBlock = optionalBoolean(payload, 'showTitleBlock');
 	const titleBlockData = payload.titleBlockData;
-	if (titleBlockData !== undefined && (typeof titleBlockData !== 'object' || titleBlockData === null)) {
+	if (
+		titleBlockData !== undefined
+		&& (typeof titleBlockData !== 'object' || titleBlockData === null || Array.isArray(titleBlockData))
+	) {
 		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Field "titleBlockData" must be an object.');
 	}
 	if (showTitleBlock === undefined && titleBlockData === undefined) {
 		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Pass at least one of "showTitleBlock" or "titleBlockData".');
 	}
+	const wanted = (titleBlockData ?? {}) as Record<string, TitleBlockPatch>;
+	const wantedKeys = Object.keys(wanted);
+
+	// 改前快照:平台静默忽略不认识的明细项,「哪些 key 本来就存在」「哪些本来
+	// 就等于期望值」是区分 applied / alreadySet / unknownKeys 的唯一依据。
+	const before = await readFocusedTitleBlock();
+
 	let ok;
 	try {
 		ok = await eda.dmt_Schematic.modifySchematicPageTitleBlock(
 			showTitleBlock,
-			titleBlockData as Parameters<typeof eda.dmt_Schematic.modifySchematicPageTitleBlock>[1],
+			wanted as Parameters<typeof eda.dmt_Schematic.modifySchematicPageTitleBlock>[1],
 		);
 	}
 	catch (err) {
 		throw edaError(err, 'Failed to modify schematic page title block.');
 	}
-	return { result: { ok } };
+	if (ok === false) {
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			'EasyEDA rejected the title-block modify (returned false).',
+		);
+	}
+
+	const after = await readFocusedTitleBlock();
+	if (!after) {
+		// 写调用已返回成功但回读不可用:画布可能已变,绝不降级成 ok:false
+		// (那会丢掉 autosave)。如实报 verified:false 交调用方判断(#151 同款)。
+		return {
+			result: { ok: true, verified: false, requestedKeys: wantedKeys },
+			warnings: ['明细表已下发但回读不可用,无法验证是否真的写入(verified:false)。'],
+		};
+	}
+
+	const visibilityApplied = showTitleBlock === undefined || after.showTitleBlock === showTitleBlock;
+	// 改前不存在的 key = 平台不认识的明细项(官方 remarks 明说会被忽略)。
+	// 单列出来,因为它的修法是「换个 key」而不是「重试」。
+	const unknownKeys = before ? wantedKeys.filter(key => !(key in before.titleBlockData)) : [];
+	const notApplied = wantedKeys.filter(key => !titleBlockFieldApplied(after.titleBlockData[key], wanted[key]));
+	// 回读命中的 key 再按 before 二分:改前就等于期望值的无法证明本次写入
+	// (写入同值与被丢弃回读不可区分),归 alreadySet — 不计 applied,
+	// 也不豁免下面的全失败硬门(#151 review 的结论)。
+	const alreadySet = before
+		? wantedKeys.filter(key =>
+			!notApplied.includes(key) && titleBlockFieldApplied(before.titleBlockData[key], wanted[key]))
+		: [];
+	const applied = wantedKeys.filter(key => !notApplied.includes(key) && !alreadySet.includes(key));
+
+	// 「有请求项没落地」与「无一项可证明写入」是两个独立判断:前者决定要不要
+	// 报 partial,后者决定这是不是一次彻头彻尾的假成功。alreadySet 不算证据
+	// (写入同值与被丢弃回读不可区分),所以它不参与 nothingProven。
+	const somethingFailed = notApplied.length > 0 || !visibilityApplied;
+	const nothingProven = applied.length === 0 && !(showTitleBlock !== undefined && visibilityApplied);
+	if (somethingFailed && nothingProven) {
+		// 画布确实没变,假成功必须报错(回读铁律)。
+		const failed = [...notApplied, ...(visibilityApplied ? [] : ['showTitleBlock'])];
+		const hint = unknownKeys.length > 0
+			? ` 其中 ${unknownKeys.join(', ')} 不是本页的明细项(先跑 sch titleblock-get 看可用 key)。`
+			: ' 先跑 sch titleblock-get 确认 key 拼写与大小写。';
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			`Title block modify returned success but nothing was applied: ${failed.join(', ')}.${hint}`,
+		);
+	}
+	if (somethingFailed) {
+		return {
+			result: {
+				ok: true,
+				partial: true,
+				verified: true,
+				applied,
+				alreadySet,
+				notApplied,
+				unknownKeys,
+				visibilityApplied,
+				titleBlockBefore: before?.titleBlockData ?? {},
+			},
+			warnings: [
+				`明细表部分未生效: ${[...notApplied, ...(visibilityApplied ? [] : ['showTitleBlock'])].join(', ')}(平台静默忽略)。`
+				+ (applied.length > 0 ? `已应用子集(${applied.join(', ')})已在画布并照常 autosave;` : '')
+				+ (unknownKeys.length > 0
+					? `${unknownKeys.join(', ')} 不是本页明细项 —— 明细表改不了纸张尺寸,先 sch titleblock-get 看可用 key。`
+					: '先 sch titleblock-get 确认 key 拼写与大小写。'),
+			],
+		};
+	}
+	return {
+		result: {
+			ok: true,
+			verified: true,
+			applied,
+			alreadySet,
+			visibilityApplied,
+			titleBlockBefore: before?.titleBlockData ?? {},
+		},
+	};
 };
 
 /** Create a new schematic page under a schematic document. */

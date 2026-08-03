@@ -784,3 +784,160 @@ test('pcbPageClear: a class whose delete is REJECTED is not hammered every round
 		'the failure is reported once, not once per round');
 	delete (globalThis as any).eda;
 });
+
+// ─── schematic.titleblock.modify 回读验证(平台对不认识的明细项返回 true) ───
+//
+// 官方 @beta remarks 原文:「任何无法识别的明细项将被忽略」,且「如若存在无法
+// 识别的明细项但程序并未出错,将返回 true 的结果」。旧实现直接透传该 ok,
+// 于是「改了个根本不存在的明细项」报成功。audit log 实测这个 action 32 次调用
+// 0 次成功,失败 payload 是拿 Size/Width/Height 当纸张属性写 —— 那些不是明细项。
+
+import { schematicTitleBlockModify } from './actions';
+
+type TBData = Record<string, { showTitle?: boolean; showValue?: boolean; value?: unknown }>;
+
+/** 装一个 dmt_Schematic 假件:第 1 次读返回 before,之后返回 after(默认 = before,
+ *  即平台什么也没改)。readFails 模拟回读不可用。 */
+function installTitleBlockStub(opts: {
+	before: TBData;
+	after?: TBData;
+	showBefore?: boolean;
+	showAfter?: boolean;
+	ok?: boolean;
+	readFails?: 'always' | 'afterOnly';
+}) {
+	let reads = 0;
+	const calls: Array<{ show: unknown; data: unknown }> = [];
+	(globalThis as any).eda = {
+		dmt_Schematic: {
+			getCurrentSchematicPageInfo: async () => {
+				reads += 1;
+				if (opts.readFails === 'always' || (opts.readFails === 'afterOnly' && reads > 1)) {
+					throw new Error('page info unavailable');
+				}
+				const first = reads === 1;
+				return {
+					uuid: 'page-1',
+					name: 'Page1',
+					showTitleBlock: first
+						? (opts.showBefore ?? true)
+						: (opts.showAfter ?? opts.showBefore ?? true),
+					titleBlockData: first ? opts.before : (opts.after ?? opts.before),
+				};
+			},
+			modifySchematicPageTitleBlock: async (show: unknown, data: unknown) => {
+				calls.push({ show, data });
+				return opts.ok ?? true;
+			},
+		},
+	};
+	return calls;
+}
+
+test('titleblock: unknown items are reported as a hard failure, not the platform true', async () => {
+	// 复刻 audit log 里那次真实失败的 payload:拿明细表当纸张属性写。
+	installTitleBlockStub({ before: { Title: { value: 'old' } } });
+	await assert.rejects(
+		() => schematicTitleBlockModify({
+			titleBlockData: { Size: { value: 'A2' }, Width: { value: '2340' } },
+		}) as any,
+		(err: any) => {
+			assert.match(err.message, /nothing was applied/);
+			assert.match(err.message, /Size, Width/, 'the unknown items must be named');
+			assert.match(err.message, /titleblock-get/, 'must point at the way to discover valid keys');
+			return true;
+		},
+	);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: every requested item lands → verified success, not partial', async () => {
+	const calls = installTitleBlockStub({
+		before: { Title: { value: 'old' }, Designer: { value: 'A' } },
+		after: { Title: { value: 'new' }, Designer: { value: 'B' } },
+	});
+	const res: any = await schematicTitleBlockModify({
+		titleBlockData: { Title: { value: 'new' }, Designer: { value: 'B' } },
+	});
+	assert.equal(calls.length, 1);
+	assert.equal(res.result.verified, true);
+	assert.equal(res.result.partial, undefined);
+	assert.deepEqual(res.result.applied.sort(), ['Designer', 'Title']);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: partial application keeps ok:true and lists notApplied', async () => {
+	installTitleBlockStub({
+		before: { Title: { value: 'old' } },
+		after: { Title: { value: 'new' } },
+	});
+	const res: any = await schematicTitleBlockModify({
+		titleBlockData: { Title: { value: 'new' }, Ghost: { value: 'z' } },
+	});
+	assert.equal(res.result.ok, true, 'the applied subset is on canvas — autosave must still arm');
+	assert.equal(res.result.partial, true);
+	assert.deepEqual(res.result.applied, ['Title']);
+	assert.deepEqual(res.result.notApplied, ['Ghost']);
+	assert.deepEqual(res.result.unknownKeys, ['Ghost']);
+	assert.ok(res.warnings.some((w: string) => w.includes('Ghost')));
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: an already-equal item does NOT shield the all-dropped hard gate', async () => {
+	// Title 改前就等于期望值 → 无法证明本次写入 → 不得豁免假成功检测(#151 review)。
+	installTitleBlockStub({ before: { Title: { value: 'same' } } });
+	await assert.rejects(
+		() => schematicTitleBlockModify({
+			titleBlockData: { Title: { value: 'same' }, Ghost: { value: 'z' } },
+		}) as any,
+		/nothing was applied/,
+	);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: platform number→string normalization is NOT a false partial', async () => {
+	installTitleBlockStub({
+		before: { Rev: { value: '1' } },
+		after: { Rev: { value: '2' } },   // 平台回读成字符串
+	});
+	const res: any = await schematicTitleBlockModify({ titleBlockData: { Rev: { value: 2 } } });
+	assert.equal(res.result.partial, undefined);
+	assert.deepEqual(res.result.applied, ['Rev']);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: visibility-only toggle that lands is a clean success', async () => {
+	const calls = installTitleBlockStub({ before: {}, showBefore: true, showAfter: false });
+	const res: any = await schematicTitleBlockModify({ showTitleBlock: false });
+	assert.deepEqual(calls[0].show, false);
+	assert.equal(res.result.visibilityApplied, true);
+	assert.equal(res.result.partial, undefined);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: visibility-only toggle that does NOT land is a hard failure', async () => {
+	installTitleBlockStub({ before: {}, showBefore: true, showAfter: true });
+	await assert.rejects(
+		() => schematicTitleBlockModify({ showTitleBlock: false }) as any,
+		/showTitleBlock/,
+	);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: readback failure degrades to verified:false, never ok:false', async () => {
+	installTitleBlockStub({ before: { Title: { value: 'old' } }, readFails: 'afterOnly' });
+	const res: any = await schematicTitleBlockModify({ titleBlockData: { Title: { value: 'new' } } });
+	assert.equal(res.result.ok, true, 'the write already returned success — do not lose autosave');
+	assert.equal(res.result.verified, false);
+	assert.ok(res.warnings.some((w: string) => w.includes('verified:false')));
+	delete (globalThis as any).eda;
+});
+
+test('titleblock: an explicit false from the SDK is surfaced as an error', async () => {
+	installTitleBlockStub({ before: { Title: { value: 'old' } }, ok: false });
+	await assert.rejects(
+		() => schematicTitleBlockModify({ titleBlockData: { Title: { value: 'new' } } }) as any,
+		/returned false/,
+	);
+	delete (globalThis as any).eda;
+});
