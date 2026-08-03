@@ -28,13 +28,6 @@
 
 > 这些是**已经在 SOP/记忆里有方案,只差落地**的项目。性价比最高。
 
-### P0.1 `pcb route-critical` + `pcb track-lock` 工具
-
-- **背景**:[`routing-tier-ladder-human-click.md`](../.claude/projects/-Users-mikas-github-easyeda-agent/memory/routing-tier-ladder-human-click.md) 明记"P7.0 关键网络先行:电源(fill 大面积块)+差分自己布好并锁定(track 实测可锁),剩余交人工;**待建 track-lock + route-critical**"
-- **现状**:自动布线没有"哪些网络必须保住"的接口;差分对一旦自动走线就散
-- **目标**:`pcb route-critical --net VCC3V3,USB_DP,USB_DM …` 标记关键网 → `pcb track-lock --net N` 锁定现有走线 → `route-short` / `auto-place` 自动跳过锁定 + 关键网
-- **验收**:ceshi 锁电源 + 差分 → `auto-place` → `route-short` → DRC 关键网络 0 改动,非关键网络自动走通
-
 ### P0.2 块成熟度看板
 
 - **背景**:`circuit-block-library-core.md` "下一步 CH340C 块 ceshi 跑通填 validated";库内 26 块大部分停留在 `validated: null / "pending"`
@@ -132,7 +125,18 @@
 
 ## Done(完成后回填)
 
-- _(暂无——本路线图于 2026-08-03 首次落)_
+- **✅ P0.1 `pcb route-critical` + `pcb track-lock` 工具**(commit `0c94481`,connector 0.15.2,#127,
+  2026-07-19 落地):
+  - **`pcb track-lock`** (`cmd_pcb.go:1173-1237`) — `--net/--ids/--all` 锁定 + `--unlock` 释放 +
+    `--no-fills` 控制填包含;dispatch typed `pcb.track.lock` action(graduated from debug.exec_js);
+    tracks + arcs(beautify 拐角)+ vias + net-bound fills 都在范围内,覆铜永不碰;
+    `route.delete` 自动跳过 locked 锁死的图元,实现"锁了自动不动"
+  - **`pcb route-critical`** (`pcb_route_critical.go`,17KB) — 一条命令完成 P7.0 全流程:
+    电源大面积块(2 层 pour / 4 层 planes)+ 差分对(从块库 `signals` + 网表 name-pattern 双源去重)
+    → 短路由规划 → 实测长度 + skew 报告(默认 5 mil,块声明的 `length_match_mm` 覆盖);
+    skew 超差**报告**而非自动蛇形(短距场景成对短优先,#127 范围);真耦合/蛇形仍在路线图
+  - 验证:`pcb_track_lock_test.go` 头注释明记"旧 JS builder 已移除,typed handler 由 real-machine flow 覆盖",
+    Go flag contract 由 `pcb_route_critical_test.go` 隐式覆盖
 
 ---
 
