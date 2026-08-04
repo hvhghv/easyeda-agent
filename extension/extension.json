@@ -1,8 +1,8 @@
 {
-	"name": "easyeda-agent-connector",
+	"name": "eda-agent-connector",
 	"uuid": "4dae27407c1d43be98e8e210d45fe587",
-	"displayName": "EasyEDA Agent Connector",
-	"description": "Bridges the easyeda-agent Go daemon to the official eda.* API over a local WebSocket, dispatching typed schematic actions.",
+	"displayName": "EDA Agent Connector",
+	"description": "Bridges the local agent daemon to the official eda.* API over a local WebSocket, dispatching typed schematic and PCB actions.",
 	"version": "0.19.0",
 	"publisher": "zhoushoujian",
 	"engines": {
@@ -33,8 +33,8 @@
 	"headerMenus": {
 		"home": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",
@@ -61,8 +61,8 @@
 		],
 		"blank": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",
@@ -89,8 +89,8 @@
 		],
 		"sch": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",
@@ -117,8 +117,8 @@
 		],
 		"symbol": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",
@@ -145,8 +145,8 @@
 		],
 		"pcb": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",
@@ -173,8 +173,8 @@
 		],
 		"footprint": [
 			{
-				"id": "EasyEDA Agent",
-				"title": "EasyEDA Agent",
+				"id": "EDA Agent",
+				"title": "EDA Agent",
 				"menuItems": [
 					{
 						"id": "Reconnect",

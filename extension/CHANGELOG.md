@@ -7,9 +7,14 @@ follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
-- **manifest `publisher` 字段改为个人 ID `zhoushoujian`**(原 `easyeda-agent` 以 "easyeda"
-  开头,被立创插件市场管理员判为使用官方信息而下架 v0.18.0 listing)。仅元数据,不影响
-  uuid/功能;v0.19.0 的 GitHub Release `.eext` 资产已同步替换为修正版。
+- **manifest 全面去 "easyeda" 字样 —— 治市场下架**(管理员原话:「发布者信息和扩展名称
+  请移除easyeda」)。`publisher` `easyeda-agent`→`zhoushoujian`;`name`
+  `easyeda-agent-connector`→`eda-agent-connector`;`displayName` →"EDA Agent Connector";
+  description 与编辑器菜单标题同步改写;仅保留 GitHub 仓库 URL(事实链接)。
+  **uuid 不变**,已装用户仍走原地更新;v0.19.0 GitHub Release `.eext` 资产已替换为修正版
+  (回验:包内除 URL 外 0 处 easyeda 字样)。打包产物文件名随 name 变为
+  `eda-agent-connector_v*.eext`(Release 资产名保持 `easyeda-agent-connector.eext`
+  不变,install.sh 依赖它)。
 
 
 ## [0.19.0] - 2026-08-04
