@@ -6,7 +6,20 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`schematic.text.list`(#156)—— 只读枚举激活页全部文本图元**(id/content/x/y/
+  rotation/fontSize/color),配 `sch prim-delete --ids` 清理孤儿 zone-draw 标签,
+  不再需要 `debug.exec_js` 逃生舱。页懒加载定律适用(只见激活页);CLI
+  `easyeda sch text-list [--page <p>]`。真机验:建孤儿标签 → text-list 枚举 →
+  prim-delete 清零。
+
 ### Fixed
+- **放置器件 supplierId 默认成 subPartName(`<MPN>.1`)而非真 C 号(#157)**。
+  平台 `sch_PrimitiveComponent.create` 的原生行为,导致官方「器件标准化」面板全板
+  标红、BOM Supplier Part 不可下单。现在 place / replace / rebind 重放置后自动从
+  device 库记录回填**真立创 C 号**(`^C\d+$` 才写;device 无 C 号的外采占位件不动;
+  回填失败降级 warning 不阻断)。place 结果新增 `supplierIdBackfilled` 字段。
+  真机验:place C1525 → 实例 supplierId=C1525(此前=CL05B104KO5NNNC.1)。
 - **rebind(换封装/换符号)对系统库器件从未工作过,现已修复**。三层根因真机逐一定位:
   ① 绑定链用的 `getState_Component().uuid` 是 16 位符号实例 id,`lib_Device.modify/create`
   一律拒收 → 复用 replace 的 `resolvePlacedDeviceIdentity`(C 号→MPN→工程库名)解析真

@@ -761,6 +761,44 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 		sch.AddCommand(c)
 	}
 
+	// ── text-list ────────────────────────────────────────────────────────────
+	// schematic.text.list (#156) — read-only enumeration of text primitives.
+	{
+		var page string
+		var stay bool
+		c := &cobra.Command{
+			Use:     "text-list",
+			Aliases: []string{"text-ls"},
+			Short:   "List ALL text primitives on the active schematic page (id/content/x/y/…)",
+			Args:    cobra.NoArgs,
+			Long: `Read-only list of every text primitive on the ACTIVE schematic page — the
+typed enumeration that pairs with ` + "`sch prim-delete --ids`" + ` to clean up orphaned
+zone-draw labels without the ` + "`debug exec`" + ` escape hatch (#156).
+
+Page-lazy-load law: only the active page's texts are returned — pass --page (or
+` + "`doc switch`" + `) per page to sweep a multi-page project.`,
+			Example: `  easyeda sch text-list
+  easyeda sch text-list --page P2
+  easyeda sch text-list | jq -r '.result.texts[] | "\(.primitiveId)\t\(.content)"'`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if page != "" {
+					scope, err := switchToPage(cfg, window, page)
+					if err != nil {
+						return err
+					}
+					if !stay {
+						defer func() { _ = scope.restore(cfg) }()
+					}
+					window = scope.window
+				}
+				return dispatch(cfg, "schematic.text.list", window, nil, stdout, stderr)
+			},
+		}
+		c.Flags().StringVar(&page, "page", "", "switch to this page (name|uuid) first, list, then switch back")
+		c.Flags().BoolVar(&stay, "stay", false, "with --page, stay on the target page after listing")
+		sch.AddCommand(c)
+	}
+
 	// ── wire ──────────────────────────────────────────────────────────────
 	// schematic.wire.create
 	{

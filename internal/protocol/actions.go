@@ -315,6 +315,16 @@ func AllActions() []ActionSpec {
 			VerifyWith:  []string{"schematic.components.list", "schematic.drc.check"},
 		},
 		{
+			Name:        "schematic.text.list",
+			Domain:      DomainSchematic,
+			Phase:       1,
+			Mutates:     false,
+			NeedsWindow: true,
+			Description: "Read-only list of ALL text primitives on the ACTIVE schematic page (#156) — the typed enumeration that pairs with schematic.primitives.delete to clean up orphaned zone-draw labels without the debug.exec_js escape hatch. Page-lazy-load law applies: only the active page's texts are returned; iterate pages with document.switch. Each entry carries primitiveId/content/x/y/rotation/fontSize/fontName/color/bold/italic.",
+			Inputs:      []string{},
+			Outputs:     []string{"count", "scope (activePage)", "texts[].primitiveId", "texts[].content", "texts[].x", "texts[].y", "texts[].rotation", "texts[].fontSize", "texts[].color"},
+		},
+		{
 			Name:        "schematic.library.search",
 			Domain:      DomainSchematic,
 			Phase:       1,

@@ -928,6 +928,43 @@ export const schematicComponentsList: Handler = async (payload) => {
 	};
 };
 
+/**
+ * #157: sch_PrimitiveComponent.create defaults the placed instance's supplierId
+ * to `<MPN>.1` (the subPartName), NOT the device's real LCSC C-number — which
+ * flags every part in the official 器件标准化 panel and makes the BOM's
+ * Supplier Part column unorderable. Backfill the REAL C-number from the
+ * device-library record right after create. Only a `^C\d+$` value from the
+ * device is written (outsourced placeholder devices without a C-number are
+ * left untouched), and only when the instance doesn't already carry one.
+ * Best-effort: placement itself never fails on a backfill problem.
+ */
+async function backfillSupplierId(
+	component: SchComponent,
+	device: { libraryUuid: string; uuid: string },
+): Promise<{ component: SchComponent; backfilled?: string; warning?: string }> {
+	let current = '';
+	try { current = String(component.getState_SupplierId() ?? ''); }
+	catch { /* ignore */ }
+	if (/^C\d+$/.test(current)) return { component };
+	let real = '';
+	try {
+		const item = await eda.lib_Device.get(device.uuid, device.libraryUuid) as
+			{ property?: { supplierId?: unknown } } | undefined;
+		real = String(item?.property?.supplierId ?? '');
+	}
+	catch { /* fall through */ }
+	if (!/^C\d+$/.test(real)) return { component };
+	try {
+		const m = await eda.sch_PrimitiveComponent.modify(component.getState_PrimitiveId(), { supplierId: real });
+		if (m) return { component: m, backfilled: real };
+	}
+	catch { /* fall through */ }
+	return {
+		component,
+		warning: `supplierId backfill to ${real} failed — the instance keeps the platform default (subPartName); fix with \`sch modify --patch '{"supplierId":"${real}"}'\`.`,
+	};
+}
+
 export const schematicComponentPlace: Handler = async (payload) => {
 	const libraryUuid = requireString(payload, 'libraryUuid');
 	const uuid = requireString(payload, 'uuid');
@@ -983,11 +1020,17 @@ export const schematicComponentPlace: Handler = async (payload) => {
 		component = modified;
 	}
 
+	// #157: carry the device's real LCSC C-number onto the instance.
+	const backfill = await backfillSupplierId(component, { libraryUuid, uuid });
+	component = backfill.component;
+
 	return {
 		result: {
 			primitiveId: component.getState_PrimitiveId(),
 			component: serializeComponent(component),
+			...(backfill.backfilled ? { supplierIdBackfilled: backfill.backfilled } : {}),
 		},
+		...(backfill.warning ? { warnings: [backfill.warning] } : {}),
 	};
 };
 
@@ -3440,7 +3483,7 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 		};
 
 		const recreate = async (dev: DeviceRef, props: Record<string, unknown>): Promise<SchComponent | undefined> => {
-			const c = await eda.sch_PrimitiveComponent.create(
+			let c = await eda.sch_PrimitiveComponent.create(
 				{ libraryUuid: dev.libraryUuid, uuid: dev.uuid },
 				x, y, subPartName, rotation, mirror, addIntoBom, addIntoPcb,
 			);
@@ -3449,10 +3492,12 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 				// create-time object echoes pre-restore state (see replace).
 				try {
 					const m = await eda.sch_PrimitiveComponent.modify(c.getState_PrimitiveId(), props);
-					if (m) return m;
+					if (m) c = m;
 				}
 				catch { /* best-effort restore */ }
 			}
+			// #157: correct a subPartName-shaped supplierId to the device's real C-number.
+			if (c) c = (await backfillSupplierId(c, dev)).component;
 			return c ?? undefined;
 		};
 
@@ -3667,6 +3712,33 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 
 const schematicRebindFootprint: Handler = makeRebindHandler('footprint');
 const schematicRebindSymbol: Handler = makeRebindHandler('symbol');
+
+// ─── Text primitives: read-only enumeration (#156) ────────────────────
+
+/**
+ * List all text primitives on the ACTIVE schematic page — the missing typed
+ * read that previously forced `debug.exec_js` for cleaning up stale zone-draw
+ * labels (#156). Read-only; pair with `schematic.primitives.delete` to remove
+ * orphans. Page-lazy-load law applies: only the active page's texts are seen.
+ */
+const schematicTextList: Handler = async () => {
+	let texts;
+	try { texts = await eda.sch_PrimitiveText.getAll(); }
+	catch (err) { throw edaError(err, 'Failed to list schematic text primitives.'); }
+	const items = (Array.isArray(texts) ? texts : []).map(t => ({
+		primitiveId: t.getState_PrimitiveId(),
+		content: t.getState_Content(),
+		x: t.getState_X(),
+		y: t.getState_Y(),
+		rotation: t.getState_Rotation(),
+		fontSize: t.getState_FontSize(),
+		fontName: t.getState_FontName(),
+		color: t.getState_TextColor(),
+		bold: t.getState_Bold(),
+		italic: t.getState_Italic(),
+	}));
+	return { result: { count: items.length, scope: 'activePage', texts: items } };
+};
 
 // ─── Replace: swap a placed component's DEVICE(器件标准化「使用推荐器件」)───
 
@@ -3918,7 +3990,7 @@ const schematicComponentReplace: Handler = async (payload) => {
 	};
 
 	const place = async (dev: DeviceRef, props: Record<string, unknown>): Promise<SchComponent | undefined> => {
-		const c = await eda.sch_PrimitiveComponent.create(
+		let c = await eda.sch_PrimitiveComponent.create(
 			{ libraryUuid: dev.libraryUuid, uuid: dev.uuid },
 			x, y, undefined, rotation, mirror, addIntoBom, addIntoPcb,
 		);
@@ -3928,10 +4000,12 @@ const schematicComponentReplace: Handler = async (payload) => {
 			// while the canvas already showed the restored value).
 			try {
 				const m = await eda.sch_PrimitiveComponent.modify(c.getState_PrimitiveId(), props);
-				if (m) return m;
+				if (m) c = m;
 			}
 			catch { /* best-effort restore */ }
 		}
+		// #157: carry the device's real LCSC C-number onto the instance.
+		if (c) c = (await backfillSupplierId(c, dev)).component;
 		return c ?? undefined;
 	};
 
@@ -8791,6 +8865,7 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.rebind.footprint': schematicRebindFootprint,
 	'schematic.rebind.symbol': schematicRebindSymbol,
 	'schematic.component.replace': schematicComponentReplace,
+	'schematic.text.list': schematicTextList,
 	'pcb.documents.list': pcbDocumentsList,
 	'pcb.components.list': pcbComponentsList,
 	'pcb.layers.list': pcbLayersList,
