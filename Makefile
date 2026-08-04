@@ -189,6 +189,14 @@ endif
 # 注意:必须用 $(CURDIR) 绝对路径 —— clawhub 的 workdir 可能被全局配置(如 ~/clawd)
 # 劫持,相对路径 skills/easyeda-agent 会解析到别处、把旧副本发上去(0.8.1 踩过)。
 # ClawHub 版本号不可覆盖,重名直接报错;版本与 repo tag 对齐(去掉 v 前缀)。
+#
+# 发现性 tags:ClawHub 的 tags 是发布时随版本上传的 dist-tag 映射({tag:version},
+# 兼作 listing/搜索的 topic 标签;来源=CLI --tags,不是 SKILL.md frontmatter)。
+# --tags 会**整体覆盖**默认值,所以必须显式带上 latest,否则 latest 指针不更新、
+# `clawhub install` 装到旧版。已发布的历史版本无法补挂 tag(CLI 无 tag 子命令,
+# 版本也不可覆盖)——tags 只能随下一次发版生效。纯 ASCII(服务端对中文 tag 的
+# 校验未知,别拿正式发版赌;中文关键词「嘉立创」走 SKILL.md description 供向量搜索)。
+CLAWHUB_TAGS := latest,easyeda,jlceda,jlc,eda,circuit,schematic,pcb,hardware
 publish-skill: ## publish skills/easyeda-agent to ClawHub  (VERSION=vX.Y.Z required)
 ifndef VERSION
 	$(error VERSION is required — usage: make publish-skill VERSION=v0.8.2)
@@ -196,4 +204,5 @@ endif
 	@find $(CURDIR)/skills/easyeda-agent -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null; \
 		find $(CURDIR)/skills/easyeda-agent -name '*.pyc' -delete 2>/dev/null; true
 	clawhub publish $(CURDIR)/skills/easyeda-agent --slug easyeda-agent --version $(VERSION:v%=%) \
+		--tags "$(CLAWHUB_TAGS)" \
 		--changelog "easyeda-agent $(VERSION) — https://github.com/zhoushoujianwork/easyeda-agent/releases/tag/$(VERSION)"
