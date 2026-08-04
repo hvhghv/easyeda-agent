@@ -4,7 +4,7 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.20.0] - 2026-08-05
 
 ### Added
 - **`schematic.component.replace` —— 整器件替换(换型号)**,官方「器件标准化」面板
@@ -15,7 +15,11 @@ follow [SemVer](https://semver.org/).
   目标三选一:`lcsc`(须唯一)/ `deviceUuid+deviceLibraryUuid` / `query`(须唯一命中);
   delete 后失败回滚重建原器件(含完整身份)。返回 **pinDiff**(同位姿按 pinNumber 对比
   removed/added/moved)——非空即旧导线对不上,须重接线并 `sch drc`/`sch check`。
-  CLI:`easyeda sch replace --id <pid> --lcsc C14663`。
+  CLI:`easyeda sch replace --id <pid> --lcsc C14663`。真机验证(ceshi,双向
+  C14663↔C1525 + same-device 拒绝)并顺带修复两坑:回滚身份不再信 16 位的
+  `getState_Component().uuid`(`resolvePlacedDeviceIdentity` 走 C 号→MPN+封装名解析
+  32 位真身份,解析不出动画布前 abort);响应改用 modify 返回的图元序列化
+  (create 对象立即回读是恢复前的陈旧值)。
 
 ### Fixed
 - **manifest 全面去 "easyeda" 字样 —— 治市场下架**(管理员原话:「发布者信息和扩展名称
