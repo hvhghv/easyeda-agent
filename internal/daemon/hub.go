@@ -180,14 +180,43 @@ func (c *conn) deliver(resp *protocol.Response) {
 	}
 }
 
+// retiredWindow remembers the stable identity a windowId used to carry.
+//
+// The connector mints a FRESH windowId on every handshake (`crypto.randomUUID()`
+// in transport.ts), so a plain page refresh silently invalidates whatever
+// windowId the caller was holding. The old behaviour answered such a request
+// with NO_CONNECTOR / "no EasyEDA connector is available" — which is false and
+// actively misleading: the connector is up, only its id moved. Agents read that
+// as "the link is down" and go restart the daemon or reopen the page.
+//
+// Keeping the retired identity lets the daemon re-route the request to the
+// window that replaced it, and say so, instead of failing the caller.
+type retiredWindow struct {
+	ProjectUUID  string
+	ProjectName  string
+	DocumentUUID string
+	DocumentType string
+	RetiredAt    time.Time
+}
+
+// How long / how many retired windowIds stay resolvable. Long enough to cover a
+// refresh mid-workflow, bounded so a long-lived daemon cannot grow unbounded.
+const (
+	retiredWindowTTL = 30 * time.Minute
+	retiredWindowMax = 64
+)
+
 // hub tracks connected connectors keyed by windowId.
 type hub struct {
 	mu      sync.RWMutex
 	windows map[string]*conn
+	// retired maps a disconnected windowId → the identity it carried, so
+	// resolveRetired can forward a stale-id request to its live successor.
+	retired map[string]retiredWindow
 }
 
 func newHub() *hub {
-	return &hub{windows: map[string]*conn{}}
+	return &hub{windows: map[string]*conn{}, retired: map[string]retiredWindow{}}
 }
 
 func (h *hub) add(c *conn) {
@@ -205,8 +234,111 @@ func (h *hub) remove(windowID string) {
 		return
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Snapshot the identity BEFORE dropping the connection — after the delete
+	// there is no way to learn what project/document this id stood for.
+	if c, ok := h.windows[windowID]; ok {
+		w := c.snapshot()
+		h.retired[windowID] = retiredWindow{
+			ProjectUUID:  w.Context.ProjectUUID,
+			ProjectName:  w.Context.ProjectName,
+			DocumentUUID: w.Context.DocumentUUID,
+			DocumentType: w.Context.DocumentType,
+			RetiredAt:    time.Now().UTC(),
+		}
+	}
 	delete(h.windows, windowID)
-	h.mu.Unlock()
+	h.pruneRetiredLocked()
+}
+
+// pruneRetiredLocked drops expired entries, then the oldest ones if still over
+// the cap. Caller must hold the write lock.
+func (h *hub) pruneRetiredLocked() {
+	now := time.Now().UTC()
+	for id, r := range h.retired {
+		if now.Sub(r.RetiredAt) > retiredWindowTTL {
+			delete(h.retired, id)
+		}
+	}
+	for len(h.retired) > retiredWindowMax {
+		oldestID, oldestAt := "", time.Time{}
+		for id, r := range h.retired {
+			if oldestID == "" || r.RetiredAt.Before(oldestAt) {
+				oldestID, oldestAt = id, r.RetiredAt
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(h.retired, oldestID)
+	}
+}
+
+// resolveRetired maps a windowId that is no longer connected to the live window
+// that replaced it, using the identity the dead id used to carry.
+//
+// The document uuid is the strongest signal — unlike windowId it survives a
+// refresh (it identifies the schematic page / PCB itself), so a window showing
+// the SAME document is unambiguously the successor. Project identity is the
+// fallback when the successor happens to sit on a different page.
+//
+// Returns ok=false when the id is unknown/expired, or when the identity it
+// carried no longer matches any connected window — the caller must then report
+// a real error rather than silently retarget someone else's window.
+func (h *hub) resolveRetired(windowID string) (newID string, prev retiredWindow, ok bool) {
+	if windowID == "" {
+		return "", retiredWindow{}, false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	prev, known := h.retired[windowID]
+	if !known || time.Since(prev.RetiredAt) > retiredWindowTTL {
+		return "", retiredWindow{}, false
+	}
+	var byProject []Window
+	for _, c := range h.windows {
+		w := c.snapshot()
+		if prev.DocumentUUID != "" && w.Context.DocumentUUID == prev.DocumentUUID {
+			return w.WindowID, prev, true // same document — certain successor
+		}
+		sameProject := (prev.ProjectUUID != "" && w.Context.ProjectUUID == prev.ProjectUUID) ||
+			(prev.ProjectName != "" && w.Context.ProjectName == prev.ProjectName)
+		if sameProject {
+			byProject = append(byProject, w)
+		}
+	}
+	// Only redirect on an unambiguous project match: with two windows of the
+	// same project open (schematic + PCB), guessing could land a mutation on the
+	// wrong document — worse than an honest error.
+	if len(byProject) == 1 {
+		return byProject[0].WindowID, prev, true
+	}
+	return "", prev, false
+}
+
+// liveWindowSummary describes the currently connected windows for error text,
+// so "your id is stale" can be answered with "…and here is what IS connected".
+func (h *hub) liveWindowSummary() (count int, summary string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.windows) == 0 {
+		return 0, ""
+	}
+	parts := make([]string, 0, len(h.windows))
+	for _, c := range h.windows {
+		w := c.snapshot()
+		project := w.Context.ProjectName
+		if project == "" {
+			project = "(no project)"
+		}
+		doc := w.Context.DocumentType
+		if doc == "" {
+			doc = "?"
+		}
+		parts = append(parts, fmt.Sprintf("%s [project=%s doc=%s]", w.WindowID, project, doc))
+	}
+	sort.Strings(parts)
+	return len(parts), strings.Join(parts, ", ")
 }
 
 func (h *hub) get(windowID string) (*conn, bool) {

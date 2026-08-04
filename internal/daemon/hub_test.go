@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/protocol"
 )
@@ -131,4 +133,146 @@ func fmtBoolp(p *bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// ── stale-windowId re-routing ────────────────────────────────────────────
+//
+// The connector mints a fresh windowId on every handshake, so a plain page
+// refresh silently invalidates whatever id the caller holds. Before this, such
+// a request was answered "no EasyEDA connector is available" — false, and it
+// sent agents off restarting a daemon that was never down (2026-08-04, user
+// report + real-machine confirmation: 7e161cb4… → 72a3e7e5… across one reload).
+
+func connWithDoc(windowID, projectUUID, project, docUUID, docType string) *conn {
+	c := &conn{windowID: windowID}
+	c.ctx = protocol.Context{
+		ProjectUUID:  projectUUID,
+		ProjectName:  project,
+		DocumentUUID: docUUID,
+		DocumentType: docType,
+	}
+	return c
+}
+
+func TestRemoveRetiresTheWindowIdentity(t *testing.T) {
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+
+	if _, ok := h.windows["old"]; ok {
+		t.Fatal("window must be gone from the live map")
+	}
+	prev, ok := h.retired["old"]
+	if !ok {
+		t.Fatal("the retired identity must be kept — after the delete there is no way to recover it")
+	}
+	if prev.ProjectName != "ceshi" || prev.DocumentUUID != "doc-1" {
+		t.Fatalf("retired identity lost detail: %+v", prev)
+	}
+}
+
+func TestResolveRetiredPrefersTheSameDocument(t *testing.T) {
+	// documentUuid survives a refresh (it identifies the page itself), so a
+	// window showing the same document is unambiguously the successor — even
+	// with another window of the same project also connected.
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+	h.add(connWithDoc("new", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.add(connWithDoc("other", "p-uuid", "ceshi", "doc-2", "pcb"))
+
+	id, prev, ok := h.resolveRetired("old")
+	if !ok || id != "new" {
+		t.Fatalf("resolveRetired = (%q,%v), want (\"new\",true)", id, ok)
+	}
+	if prev.ProjectName != "ceshi" {
+		t.Fatalf("previous identity not returned: %+v", prev)
+	}
+}
+
+func TestResolveRetiredFallsBackToAnUnambiguousProjectMatch(t *testing.T) {
+	// The successor may sit on a different page than the one that died.
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+	h.add(connWithDoc("new", "p-uuid", "ceshi", "doc-9", "pcb"))
+
+	id, _, ok := h.resolveRetired("old")
+	if !ok || id != "new" {
+		t.Fatalf("resolveRetired = (%q,%v), want (\"new\",true)", id, ok)
+	}
+}
+
+func TestResolveRetiredRefusesToGuessBetweenTwoWindowsOfTheSameProject(t *testing.T) {
+	// A project legitimately open in a schematic AND a PCB window: guessing
+	// could land a mutation on the wrong document, which is worse than an
+	// honest error.
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+	h.add(connWithDoc("a", "p-uuid", "ceshi", "doc-7", "schematic"))
+	h.add(connWithDoc("b", "p-uuid", "ceshi", "doc-8", "pcb"))
+
+	if id, _, ok := h.resolveRetired("old"); ok {
+		t.Fatalf("must not guess a successor, got %q", id)
+	}
+}
+
+func TestResolveRetiredDoesNotCrossProjects(t *testing.T) {
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+	h.add(connWithDoc("new", "other-uuid", "motobox", "doc-2", "schematic"))
+
+	if id, _, ok := h.resolveRetired("old"); ok {
+		t.Fatalf("a different project must never absorb a retired id, got %q", id)
+	}
+}
+
+func TestResolveRetiredExpiresAndIsUnknownForFreshIds(t *testing.T) {
+	h := newHub()
+	h.add(connWithDoc("old", "p-uuid", "ceshi", "doc-1", "schematic"))
+	h.remove("old")
+	h.add(connWithDoc("new", "p-uuid", "ceshi", "doc-1", "schematic"))
+
+	stale := h.retired["old"]
+	stale.RetiredAt = time.Now().UTC().Add(-2 * retiredWindowTTL)
+	h.retired["old"] = stale
+	if _, _, ok := h.resolveRetired("old"); ok {
+		t.Fatal("an expired retirement must not resolve")
+	}
+	if _, _, ok := h.resolveRetired("never-seen"); ok {
+		t.Fatal("an unknown id must not resolve")
+	}
+}
+
+func TestPruneRetiredHonoursTheCap(t *testing.T) {
+	h := newHub()
+	for i := 0; i < retiredWindowMax+20; i++ {
+		id := fmt.Sprintf("w%03d", i)
+		h.add(connWithDoc(id, "p", "ceshi", "d", "schematic"))
+		h.remove(id)
+	}
+	if len(h.retired) > retiredWindowMax {
+		t.Fatalf("retired map grew unbounded: %d entries", len(h.retired))
+	}
+}
+
+func TestLiveWindowSummaryDescribesWhatIsConnected(t *testing.T) {
+	h := newHub()
+	h.add(connWithDoc("w1", "p", "ceshi", "d1", "schematic"))
+	h.add(connWithDoc("w2", "p2", "motobox", "d2", "pcb"))
+
+	n, summary := h.liveWindowSummary()
+	if n != 2 {
+		t.Fatalf("count = %d, want 2", n)
+	}
+	for _, want := range []string{"w1", "ceshi", "schematic", "w2", "motobox", "pcb"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q: %s", want, summary)
+		}
+	}
+	if empty, s := (newHub()).liveWindowSummary(); empty != 0 || s != "" {
+		t.Fatalf("empty hub must summarise as (0,\"\"), got (%d,%q)", empty, s)
+	}
 }

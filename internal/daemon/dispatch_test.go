@@ -4,7 +4,11 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/protocol"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 )
 
 func TestRequestTimeout(t *testing.T) {
@@ -70,5 +74,71 @@ func TestNonReentrantSet(t *testing.T) {
 	}
 	if nonReentrant["pcb.components.list"] {
 		t.Fatal("reads must not be guarded")
+	}
+}
+
+// ── stale windowId must not be reported as "no connector" ────────────────
+//
+// A page refresh mints a new windowId, so a caller's id silently dies. Saying
+// "no EasyEDA connector is available" when the connector is up and healthy is
+// what makes an agent go restart a daemon that was never down — the same class
+// of defect as reporting an infra failure as a board failure.
+
+func postActionTo(t *testing.T, s *Server, body string) (int, protocol.Response) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader(body))
+	s.handleAction(rec, req)
+	var resp protocol.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad response json: %v (%s)", err, rec.Body.String())
+	}
+	return rec.Code, resp
+}
+
+func TestStaleWindowIsNotReportedAsNoConnector(t *testing.T) {
+	s := New(Options{})
+	s.hub.add(connWithDoc("live", "p", "ceshi", "doc-1", "schematic"))
+
+	_, resp := postActionTo(t, s, `{"action":"schematic.components.list","windowId":"dead-id"}`)
+	if resp.OK || resp.Error == nil {
+		t.Fatal("expected an error response")
+	}
+	if resp.Error.Code != "STALE_WINDOW" {
+		t.Fatalf("code = %q, want STALE_WINDOW (NO_CONNECTOR sends agents restarting a healthy daemon)", resp.Error.Code)
+	}
+	if strings.Contains(resp.Error.Message, "no EasyEDA connector is available") {
+		t.Fatalf("message must not claim the connector is down: %q", resp.Error.Message)
+	}
+	// The caller must learn what IS connected and how to route stably.
+	for _, want := range []string{"live", "ceshi", "--project"} {
+		if !strings.Contains(resp.Error.Detail, want) {
+			t.Fatalf("detail missing %q: %s", want, resp.Error.Detail)
+		}
+	}
+}
+
+func TestNoWindowsAtAllStillReportsNoConnector(t *testing.T) {
+	// The honest case: nothing is connected. This one SHOULD say so.
+	s := New(Options{})
+	_, resp := postActionTo(t, s, `{"action":"schematic.components.list","windowId":"dead-id"}`)
+	if resp.Error == nil || resp.Error.Code != "NO_CONNECTOR" {
+		t.Fatalf("want NO_CONNECTOR, got %+v", resp.Error)
+	}
+}
+
+func TestAmbiguousWindowWithoutAHintNamesTheCandidates(t *testing.T) {
+	s := New(Options{})
+	s.hub.add(connWithDoc("w1", "p1", "ceshi", "d1", "schematic"))
+	s.hub.add(connWithDoc("w2", "p2", "motobox", "d2", "pcb"))
+
+	_, resp := postActionTo(t, s, `{"action":"schematic.components.list"}`)
+	if resp.Error == nil || resp.Error.Code != "AMBIGUOUS_WINDOW" {
+		t.Fatalf("want AMBIGUOUS_WINDOW, got %+v", resp.Error)
+	}
+	for _, want := range []string{"ceshi", "motobox", "--project"} {
+		if !strings.Contains(resp.Error.Detail, want) {
+			t.Fatalf("detail missing %q: %s", want, resp.Error.Detail)
+		}
 	}
 }

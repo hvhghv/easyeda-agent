@@ -152,14 +152,49 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		req.WindowID = id
 	}
 
+	// A windowId the caller is holding may have been retired by a plain page
+	// refresh (the connector mints a fresh uuid on every handshake). Forward the
+	// request to the window that replaced it rather than reporting a link
+	// failure that did not happen — and tell the caller the new id so its next
+	// call is direct.
+	var redirectWarning string
 	target, ok := s.hub.target(req.WindowID)
+	if !ok && req.WindowID != "" {
+		if newID, prev, resolved := s.hub.resolveRetired(req.WindowID); resolved {
+			if c, found := s.hub.get(newID); found {
+				via := "same project"
+				if prev.DocumentUUID != "" {
+					via = "same document"
+				}
+				redirectWarning = fmt.Sprintf(
+					"window %s was retired (a page refresh mints a new windowId); re-routed to %s via %s. Use --project %q (stable) instead of --window.",
+					req.WindowID, newID, via, prev.ProjectName)
+				s.logf("re-routed stale window %s → %s (%s)", req.WindowID, newID, via)
+				target, ok = c, true
+				req.WindowID = newID
+			}
+		}
+	}
 	if !ok {
 		started := time.Now().UTC()
-		detail := "start EasyEDA with the connector extension, then retry"
-		if req.WindowID != "" {
-			detail = fmt.Sprintf("no connector registered for window %q", req.WindowID)
+		liveCount, liveSummary := s.hub.liveWindowSummary()
+		// Distinguish "nothing is connected" from "your id is stale but the
+		// connector is fine". Reporting the second as the first is what sends
+		// agents off restarting a daemon that was never down.
+		code, message, detail := "NO_CONNECTOR", "no EasyEDA connector is available", "start EasyEDA with the connector extension, then retry"
+		switch {
+		case req.WindowID != "" && liveCount > 0:
+			code = "STALE_WINDOW"
+			message = fmt.Sprintf("window %q is not connected, but %d connector window(s) ARE", req.WindowID, liveCount)
+			detail = fmt.Sprintf("a page refresh mints a new windowId — the connector is fine. Connected now: %s. Route by --project <name> (stable across refreshes) instead of --window.", liveSummary)
+		case req.WindowID != "":
+			detail = fmt.Sprintf("no connector registered for window %q, and no window is connected at all — check `easyeda health`", req.WindowID)
+		case liveCount > 1:
+			code = "AMBIGUOUS_WINDOW"
+			message = fmt.Sprintf("%d connector windows are connected; the target is ambiguous", liveCount)
+			detail = fmt.Sprintf("pass --project <name> (preferred) or --window <id>. Connected now: %s", liveSummary)
 		}
-		errResp := errorResponse(req.ID, "NO_CONNECTOR", "no EasyEDA connector is available", detail)
+		errResp := errorResponse(req.ID, code, message, detail)
 		s.audit.Append(fromResponse(started, &req, &errResp))
 		writeJSON(w, http.StatusServiceUnavailable, errResp)
 		return
@@ -216,6 +251,12 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Type == "" {
 		resp.Type = protocol.TypeResponse
+	}
+	// Surface the stale-id re-route on the successful response: the call worked,
+	// but the caller's windowId is dead and its NEXT call should use the new one
+	// (or --project). Silently succeeding would leave it holding a dead id.
+	if redirectWarning != "" {
+		resp.Warnings = append(resp.Warnings, redirectWarning)
 	}
 	s.persistArtifacts(resp, s.artifactDir(req.OutputDir))
 	// Catalog-driven stage invalidation: a successful placement/outline mutation
