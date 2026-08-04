@@ -6,14 +6,34 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-04
+
+> 🙏 感谢 [@NeoSpecies](https://github.com/NeoSpecies) 的 [PR #154](https://github.com/zhoushoujianwork/easyeda-agent/pull/154)
+> —— 首个外部贡献:定位并修复了「同窗口重复激活互踢 socket」的重连风暴,并带来了 MCP stdio 适配层。
+> 本版连接侧的三层修复(activation-scoped id / 失败轮换 / 端口记忆)正是在这个 PR 的基础上叠加完成的。
+
 ### Added
-- **新增本地 stdio MCP 适配层**:`mcp/` 将现有 `easyeda` CLI/daemon 的连接健康、action
+- **`pcb silk-zone-outline` —— 按模块在丝印层画区域轮廓 + 区名标注**:读模块内器件的
+  真实渲染矩形生成正交阶梯包络,避让穿越轮廓的外部器件,自动选不压器件的位置放区名标签。
+- **`sch gate` —— S5 校验门收成一条固定流水线**:`layout-lint → check → bridge-check → drc`
+  按固定顺序跑完出一张报告,verdict 三态(`pass`/`fail`/**`blocked`**——检查器没跑成 ≠ 板子有
+  问题,报告直接指向 health/doc 修复而不是让 agent 改电路);每个失败 stage 按**实际失败原因**
+  带规定的下一步(`blockingReasons`),check 的阻塞项直接给规则类型直方图;`--json` 是四个
+  单命令 JSON 的超集(`stages[].detail`)。四个单命令保留作局部复查,交付门走 gate。
+- **daemon 对失效 windowId 自动重定向 + 错误分型**:页面刷新会换 windowId,旧 id 的调用
+  此前被误报成 `NO_CONNECTOR`「没有连接器」。现在 daemon 记住退役窗口的稳定身份
+  (documentUUID 最强判据/project 兜底),自动路由到接替窗口并在 warnings 里告知新 id;
+  无法重定向时报 **`STALE_WINDOW`**(明说连接器是好的,列出在线窗口,建议 `--project`)
+  或 **`AMBIGUOUS_WINDOW`**(列候选),`NO_CONNECTOR` 只留给真没连接的情况。
+- **`scripts/audit-baseline.py` —— 暴露面健康度离线体检**:读 audit log 出「调用分布+失败率 /
+  错路回退 / 逐日多样性」三张表;首测揪出 `titleblock.modify` 32 次调用 0 次成功。
+- **新增本地 stdio MCP 适配层**(来自 PR #154,@NeoSpecies):`mcp/` 将现有 `easyeda` CLI/daemon 的连接健康、action
   发现、7 个安全 action domain、电路块和 guarded workflow 暴露为 `easyeda_*` tools。
   MCP 不直连 EasyEDA、不绕过 typed action/审计/workflow gate,并明确不暴露任意
   JavaScript 的 `debug.exec_js`;mutation 仍要求同时提供 project 与 doc。
 
 ### Fixed
-- **修复 EasyEDA Pro 3.2.175 重复激活同一扩展时的永久重连风暴**:旧连接器的所有激活
+- **修复 EasyEDA Pro 3.2.175 重复激活同一扩展时的永久重连风暴**(来自 PR #154,@NeoSpecies):旧连接器的所有激活
   实例共用固定 host WebSocket id,会互相 close/register 同一 socket,表现为交错 heartbeat、
   windowId 持续变化、`AMBIGUOUS_PROJECT` 和 action response 丢失。现在每次激活生成独立
   socket id;daemon 仅在 project/document/type/tab 四项完整且完全相同时把连接视为 transport
@@ -60,6 +80,10 @@ follow [SemVer](https://semver.org/).
   的 id 释放窗口本就紧张 —— **瓶颈是 EasyEDA 那张共享 socket 表的状态机,不是延迟**,
   加速只会喂大它输掉的那场竞争。理由已写进常量注释,免得下次有人再"优化"一遍。
 
+- **`sch gate` 真机验出的三个报告缺陷已修**:strict 档下 summary 缺判据字段导致「全 0 却
+  FAIL」自相矛盾;blocker 从 error 计数拼出「0 个阻塞项」却判失败;建议按 stage 名给,
+  0 bridge 却教「拆真短路」。现在 status/blocker 均由具名 `blockingReasons` 决定,建议按
+  失败原因关键词匹配,绝不把 agent 指向板子没有的问题。
 - **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
   audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,
   **成功 0 次**,却一直挂在 skill 文档里。根因不在我们的调用姿势,而在旧实现**直接透传平台的
