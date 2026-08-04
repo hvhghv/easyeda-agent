@@ -4,6 +4,16 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.21.1] - 2026-08-05
+
+### Fixed
+- **`schematic.read` 的 components 输出漏了 `primitiveId`(真机事故,motobox)**:
+  read 只输出 `uniqueId`(`gge…`,sch↔PCB 关联键),agent 抓它当改动句柄喂给
+  select / delete / modify → 全部 notFound/空选择,看似「任何器件都改不动」。
+  现在每条 components 带 **`primitiveId`(16 位 hex,select/modify/delete/replace/
+  rebind 的唯一合法句柄)**,uniqueId 注释明确标注「非 primitiveId」。
+  真机验:place 返回的 id 与 read 输出一致,按它删除成功。
+
 ## [0.21.0] - 2026-08-05
 
 ### Added

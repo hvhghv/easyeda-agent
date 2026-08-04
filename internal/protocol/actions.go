@@ -447,9 +447,9 @@ func AllActions() []ActionSpec {
 			Domain:      DomainSchematic,
 			Phase:       1,
 			NeedsWindow: true,
-			Description: "ONE-call semantic snapshot of the whole circuit — so the agent reads everything at once instead of stitching components.list + netlist + check. Returns: components[] (designator, type, name/value, footprint, supplierId=LCSC, x/y, pins[] each with its JSON-authoritative net), nets[] (net → connected {designator.pin} keys, degree, isGlobal power/ground flag), floatingPins[] (unconnected pins), and the geometric design check (same as schematic.check; pass includeCheck=false to skip for a faster read). Pin→net comes from the authoritative netlist (getNetlistFile), same source as schematic.check.",
+			Description: "ONE-call semantic snapshot of the whole circuit — so the agent reads everything at once instead of stitching components.list + netlist + check. Returns: components[] (primitiveId — the MUTATION handle for select/modify/delete/replace/rebind — plus designator, type, name/value, uniqueId, footprint, supplierId=LCSC, x/y, pins[] each with its JSON-authoritative net), nets[] (net → connected {designator.pin} keys, degree, isGlobal power/ground flag), floatingPins[] (unconnected pins), and the geometric design check (same as schematic.check; pass includeCheck=false to skip for a faster read). Pin→net comes from the authoritative netlist (getNetlistFile), same source as schematic.check. WARNING: uniqueId (\"gge…\") is the sch↔PCB link key, NOT a primitiveId — feeding it to by-id mutations returns notFound (live incident: primitiveId used to be missing from this output, so agents grabbed uniqueId and every mutation failed).",
 			Inputs:      []string{"allPages optional", "includeCheck optional (default true)"},
-			Outputs:     []string{"components[]", "componentCount", "nets[]", "netCount", "floatingPins[]", "floatingPinCount", "check"},
+			Outputs:     []string{"components[].primitiveId (mutation handle)", "components[]", "componentCount", "nets[]", "netCount", "floatingPins[]", "floatingPinCount", "check"},
 		},
 		{
 			Name:        "schematic.save",

@@ -3085,9 +3085,15 @@ const schematicRead: Handler = async (payload) => {
 		catch { /* pins best-effort */ }
 		components.push({
 			designator,
+			// The MUTATION handle: what select / component.delete / modify /
+			// prim-delete / replace / rebind consume. Was MISSING from read's
+			// output, so agents grabbed the only id-shaped field — uniqueId
+			// ("gge…") — and every by-id mutation came back notFound/empty
+			// (live-incident on motobox 2026-08-05). Keep both, never mix.
+			primitiveId: c.getState_PrimitiveId?.() ?? '',
 			componentType: c.getState_ComponentType?.() ?? '',
 			name: c.getState_Name?.() ?? '',
-			uniqueId: c.getState_UniqueId?.() ?? '', // sch↔PCB link key (for pcb.add_component)
+			uniqueId: c.getState_UniqueId?.() ?? '', // sch↔PCB link key (for pcb.add_component) — NOT a primitiveId
 			footprint: c.getState_Footprint?.() ?? '',
 			supplierId: c.getState_SupplierId?.() ?? '', // LCSC C-number when present
 			x: c.getState_X?.(),
