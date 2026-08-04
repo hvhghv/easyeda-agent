@@ -4,9 +4,18 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.21.0] - 2026-08-05
 
 ### Added
+- **`schematic.component.replace` 已随 0.20.0 发布;本版补齐它牵出的整条「器件标准化」链路**(见下)。
+- **`pcb.component.attrs_backfill` / `easyeda pcb sync-attrs` —— PCB 器件属性回填**:
+  平台 sch→PCB 导入只搬顶层身份字段,otherProperty **键在值空**(Value/耐压/精度/
+  Datasheet/… 全 ""),PCB 侧器件标准化面板整列空白;且**原理图实例的属性值
+  save/reload 后同样为空**(真机实证:place 后即读有值,重开后为空)——原理图不可作
+  同步源。唯一稳定载体是 **device 库记录**:按实例 C 号(#157 回填保证是真 C 号)
+  `getByLcscIds` 批量解析,只填 PCB 侧空值键(手改值优先,`--overwrite` 强制),
+  全程 PCB 前台零切页。`pcb import-changes` 成功后自动跑(`--no-sync-attrs` 关)。
+  真机验:import 后 PCB 件 Value/耐压/精度/Datasheet 等 9+ 字段从空到齐。
 - **`schematic.text.list`(#156)—— 只读枚举激活页全部文本图元**(id/content/x/y/
   rotation/fontSize/color),配 `sch prim-delete --ids` 清理孤儿 zone-draw 标签,
   不再需要 `debug.exec_js` 逃生舱。页懒加载定律适用(只见激活页);CLI

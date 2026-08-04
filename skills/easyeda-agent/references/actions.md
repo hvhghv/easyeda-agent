@@ -76,6 +76,7 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 
 - `schematic.component.place` — 从库放置元件（libraryUuid + uuid + x/y）。放置后自动把 `supplierId` 回填为 device 的**真立创 C 号**（平台 create 默认填成 `<MPN>.1` 的 subPartName，会让官方「器件标准化」面板全标红、BOM Supplier Part 不可下单，#157）；device 无 C 号（外采占位件）不动
 - `schematic.text.list` — **只读**枚举当前激活页全部文本图元（id/content/x/y/rotation/fontSize/color），配 `sch prim-delete --ids` 清理孤儿 zone-draw 标签，免走 `debug exec` 逃生舱（#156）。页懒加载定律：只见激活页，多页工程用 `--page` 逐页扫。CLI：`easyeda sch text-list [--page P2]`
+- `pcb.component.attrs_backfill` — **PCB 器件属性回填（器件标准化 PCB 侧）**。平台 sch→PCB 导入把 otherProperty 建成**键在值空**（Value/耐压/精度/Datasheet 全 ""），且原理图实例属性值 save/reload 后同样为空（不可作源）——唯一稳定源是 **device 库记录**：按实例 C 号 `getByLcscIds` 解析，只填 PCB 侧空值键（手改值优先，`--overwrite` 强制），全程 PCB 前台。无 C 号器件跳过并报告。`pcb import-changes` 成功后**自动跑**（`--no-sync-attrs` 关）。CLI：`easyeda pcb sync-attrs [--overwrite]`
 - `schematic.component.modify` — 修改位置、位号、BOM 属性等
 - `schematic.component.delete` — 删除元件（需确认）
 - `schematic.wire.create` — 创建导线折线

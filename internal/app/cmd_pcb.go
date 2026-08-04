@@ -370,14 +370,21 @@ so in a single-design project you can just run 'easyeda pcb new-board'.`,
 	// pcb.import_changes — the schematic→PCB bridge (components arrive here).
 	{
 		var schematicUUID string
-		var noEnsureBoard, noRecompute bool
+		var noEnsureBoard, noRecompute, noSyncAttrs bool
 		c := &cobra.Command{
 			Use:   "import-changes",
 			Short: "Sync the schematic netlist/components into the active PCB",
 			Long: `Sync the schematic netlist/components into the active PCB (从原理图导入变更).
 
 This is the primary way components arrive on the board. It ensures a Board links the
-schematic and PCB first, then recomputes ratlines.`,
+schematic and PCB first, then recomputes ratlines.
+
+The platform's import copies the top-level identity fields but leaves the
+otherProperty VALUES empty on the PCB side (Value/Voltage Rating/Tolerance/
+Datasheet/… all "") — blanking the 器件标准化 panel's columns. After a
+successful import this command therefore auto-runs the attrs sync
+(schematic pages → PCB, empty-value keys only); disable with --no-sync-attrs
+or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda pcb import-changes
   easyeda pcb import-changes --schematic <uuid>`,
@@ -392,15 +399,53 @@ schematic and PCB first, then recomputes ratlines.`,
 				if noRecompute {
 					payload["recomputeRatline"] = false
 				}
-				if len(payload) == 0 {
-					return dispatch(cfg, "pcb.import_changes", window, nil, stdout, stderr)
+				res, err := dispatchCapture(cfg, "pcb.import_changes", window, payload, stdout)
+				if err != nil {
+					return err
 				}
-				return dispatch(cfg, "pcb.import_changes", window, payload, stdout, stderr)
+				if imported, _ := res.Result["imported"].(bool); imported && !noSyncAttrs {
+					if err := syncSchAttrsToPcb(cfg, window, false, stderr); err != nil {
+						fmt.Fprintf(stderr, "⚠ attrs sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-attrs`\n", err)
+					}
+				}
+				return nil
 			},
 		}
 		c.Flags().StringVar(&schematicUUID, "schematic", "", "source schematic UUID (default: the linked one)")
 		c.Flags().BoolVar(&noEnsureBoard, "no-ensure-board", false, "do not auto-create a Board link if missing")
 		c.Flags().BoolVar(&noRecompute, "no-recompute-ratline", false, "skip ratline recomputation")
+		c.Flags().BoolVar(&noSyncAttrs, "no-sync-attrs", false, "skip the automatic schematic→PCB attribute backfill after import")
+		pcb.AddCommand(c)
+	}
+
+	// ── sync-attrs ────────────────────────────────────────────────────────
+	// pcb.component.attrs_backfill orchestration: read every schematic page's
+	// component attributes (page-active reads — lazy-load law), then fill the
+	// EMPTY otherProperty values the platform's import leaves on the PCB side.
+	{
+		var overwrite bool
+		c := &cobra.Command{
+			Use:   "sync-attrs",
+			Short: "Backfill PCB components' empty attribute values from the schematic (器件标准化字段)",
+			Args:  cobra.NoArgs,
+			Long: `Backfill PCB components' EMPTY otherProperty values from their DEVICE-LIBRARY
+records, resolved by each part's LCSC C-number.
+
+The platform's sch→PCB import creates the attribute keys on the PCB instance
+but leaves the VALUES empty (Value/Voltage Rating/Tolerance/Datasheet/…),
+blanking the 器件标准化 panel's columns and the PCB-side BOM. The schematic is
+NOT a usable source either — its instance values are empty after save/reload
+too — so the device-library record (getByLcscIds via the instance's C-number,
+kept real by the #157 backfill) is the stable carrier. By default only keys
+whose PCB value is empty are filled (hand-edited PCB values win); --overwrite
+forces the library values. Parts without a C-number are skipped and reported.`,
+			Example: `  easyeda pcb sync-attrs
+  easyeda pcb sync-attrs --overwrite`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return syncSchAttrsToPcb(cfg, window, overwrite, stdout)
+			},
+		}
+		c.Flags().BoolVar(&overwrite, "overwrite", false, "overwrite non-empty PCB values with the schematic's (default: fill empty only)")
 		pcb.AddCommand(c)
 	}
 
@@ -3956,4 +4001,33 @@ func runPcbClearVerified(cfg *appConfig, window string, payload map[string]any,
 	out["verified"] = true
 	out["note"] = "verify pass ran: pass1 = in-call clear, pass2 = reload-materialized leftovers (#121); remainingAfterVerify is the post-verify dry-run count — non-zero means locked/preserved primitives or a deeper engine issue"
 	return writeJSON(stdout, out)
+}
+
+// syncSchAttrsToPcb backfills PCB components' EMPTY otherProperty values from
+// their DEVICE-LIBRARY records (resolved by each part's LCSC C-number on the
+// connector side) — repairing the platform's sch→PCB import, which creates the
+// attribute KEYS but leaves the VALUES empty, blanking the 器件标准化 panel's
+// PCB columns. The schematic is NOT a usable source (its instance values are
+// empty after save/reload too — live-verified), so everything runs against the
+// PCB + the library; no page switching involved.
+func syncSchAttrsToPcb(cfg *appConfig, window string, overwrite bool, out io.Writer) error {
+	payload := map[string]any{}
+	if overwrite {
+		payload["overwrite"] = true
+	}
+	res, err := requestActionTimed(cfg, "pcb.component.attrs_backfill", window, payload, rebindTimeout)
+	if err != nil {
+		return err
+	}
+	updated, _ := res.Result["updatedCount"].(float64)
+	withLcsc, _ := res.Result["partsWithLcsc"].(float64)
+	fmt.Fprintf(out, "sync-attrs: %d/%d PCB component(s) backfilled from the device library\n",
+		int(updated), int(withLcsc))
+	if um, ok := res.Result["unresolvedDesignators"].([]any); ok && len(um) > 0 {
+		fmt.Fprintf(out, "⚠ sync-attrs: %d part(s) whose C-number did not resolve in the library: %v\n", len(um), um)
+	}
+	if nl, ok := res.Result["noLcscDesignators"].([]any); ok && len(nl) > 0 {
+		fmt.Fprintf(out, "ℹ sync-attrs: %d part(s) without an LCSC C-number skipped: %v\n", len(nl), nl)
+	}
+	return nil
 }

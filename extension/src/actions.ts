@@ -6521,6 +6521,94 @@ const pcbImportChanges: Handler = async (payload) => {
 	};
 };
 
+// pcb.component.attrs_backfill — fill the EMPTY otherProperty values on PCB
+// components from their DEVICE-LIBRARY records, resolved by LCSC C-number.
+//
+// Why the library, not the schematic: the platform's sch→PCB import creates
+// the attribute KEYS with empty VALUES on the PCB instance (live-verified:
+// Value/Voltage Rating/Tolerance/Datasheet/… all "") — blanking the
+// 器件标准化 panel's PCB columns — and the SCHEMATIC instance's otherProperty
+// values are ALSO empty after save/reload (live-verified: rich right after
+// place, empty after reopen), so the schematic is not a usable source either.
+// The device-library record (getByLcscIds via the instance's supplierId, which
+// DOES survive the import — #157 keeps it a real C-number) is the only stable
+// carrier of the full attribute set. Everything runs PCB-foreground; no page
+// switching, no lazy-load exposure.
+//
+// Merge policy: only keys whose PCB value is empty/missing are filled
+// (hand-edited PCB values win); overwrite=true forces the library values.
+const pcbComponentAttrsBackfill: Handler = async (payload) => {
+	const overwrite = optionalBoolean(payload, 'overwrite') === true;
+
+	let comps;
+	try { comps = await eda.pcb_PrimitiveComponent.getAll(); }
+	catch (err) { throw edaError(err, 'Failed to list PCB components.'); }
+	const parts: Array<{ comp: (NonNullable<typeof comps>)[number]; designator: string; lcsc: string }> = [];
+	const noLcsc: Array<string> = [];
+	for (const comp of comps ?? []) {
+		let designator = '';
+		let lcsc = '';
+		try {
+			designator = String(comp.getState_Designator() ?? '');
+			lcsc = String(comp.getState_SupplierId() ?? '');
+		}
+		catch { continue; }
+		if (!designator) continue;
+		if (/^C\d+$/.test(lcsc)) parts.push({ comp, designator, lcsc });
+		else noLcsc.push(designator);
+	}
+
+	// Resolve each distinct C-number to its device-library attribute set.
+	const attrsByLcsc = new Map<string, Record<string, unknown>>();
+	const distinct = [...new Set(parts.map(p => p.lcsc))];
+	for (let i = 0; i < distinct.length; i += 20) {
+		const batch = distinct.slice(i, i + 20);
+		let raw: Array<Record<string, unknown>> = [];
+		try { raw = (await eda.lib_Device.getByLcscIds(batch)) as unknown as Array<Record<string, unknown>>; }
+		catch { /* batch is best-effort; unresolved parts are reported below */ }
+		for (const r of Array.isArray(raw) ? raw : []) {
+			const id = String(r.supplierId ?? (r.otherProperty as Record<string, unknown> | undefined)?.['Supplier Part'] ?? '');
+			const op = r.otherProperty;
+			if (/^C\d+$/.test(id) && op && typeof op === 'object') attrsByLcsc.set(id, op as Record<string, unknown>);
+		}
+	}
+
+	const updated: Array<{ designator: string; lcsc: string; filledKeys: Array<string> }> = [];
+	const unresolved: Array<string> = [];
+	for (const { comp, designator, lcsc } of parts) {
+		const source = attrsByLcsc.get(lcsc);
+		if (!source) { unresolved.push(designator); continue; }
+		let current: Record<string, unknown> = {};
+		try { current = (comp.getState_OtherProperty() as Record<string, unknown>) ?? {}; }
+		catch { /* treat as empty */ }
+		const filled: Array<string> = [];
+		const merged: Record<string, unknown> = { ...current };
+		for (const [key, value] of Object.entries(source)) {
+			if (value === undefined || value === null || value === '') continue;
+			const existing = current[key];
+			if (!overwrite && existing !== undefined && existing !== null && existing !== '') continue;
+			if (existing === value) continue;
+			merged[key] = value;
+			filled.push(key);
+		}
+		if (!filled.length) continue;
+		try {
+			await eda.pcb_PrimitiveComponent.modify(comp.getState_PrimitiveId(), { otherProperty: merged });
+			updated.push({ designator, lcsc, filledKeys: filled.sort() });
+		}
+		catch { /* best-effort per component; report only successful fills */ }
+	}
+	return {
+		result: {
+			updatedCount: updated.length,
+			partsWithLcsc: parts.length,
+			updated,
+			...(unresolved.length ? { unresolvedDesignators: unresolved } : {}),
+			...(noLcsc.length ? { noLcscDesignators: noLcsc } : {}),
+		},
+	};
+};
+
 // pcb.add_component — place a footprint on the PCB and CONNECT it, bypassing the
 // broken eda.pcb_Document.importChanges (which no-ops for API-added parts even
 // when they're in the netlist with a designator + footprint — see #20). Steps:
@@ -8894,6 +8982,7 @@ const HANDLERS: Record<string, Handler> = {
 	'board.rebind': boardRebind,
 	'pcb.import_changes': pcbImportChanges,
 	'pcb.add_component': pcbAddComponent,
+	'pcb.component.attrs_backfill': pcbComponentAttrsBackfill,
 	'pcb.component.modify': pcbComponentModify,
 	'pcb.component.delete': pcbComponentDelete,
 	'pcb.page.clear': pcbPageClear,

@@ -727,6 +727,17 @@ func AllActions() []ActionSpec {
 			Outputs:      []string{"ok"},
 		},
 		{
+			Name:        "pcb.component.attrs_backfill",
+			Domain:      DomainPcb,
+			Phase:       2,
+			Mutates:     true,
+			NeedsWindow: true,
+			Description: "Fill the EMPTY otherProperty values the platform's sch→PCB import leaves on PCB components (it copies top-level identity fields but creates the attribute KEYS with empty VALUES — Value/Voltage Rating/Tolerance/Datasheet/… all \"\" — blanking the 器件标准化 panel's PCB columns). Source of truth is the DEVICE-LIBRARY record resolved by each part's LCSC C-number (getByLcscIds; the C-number survives import thanks to the #157 backfill) — NOT the schematic, whose instance values are also empty after save/reload (live-verified). Runs entirely PCB-foreground. Merge: by default only empty/missing keys are filled (hand-edited PCB values win); overwrite=true forces the library values. Parts without a C-number are skipped and reported. Orchestrated by `easyeda pcb sync-attrs` and auto-run after `pcb import-changes`.",
+			Inputs:      []string{"overwrite optional (default false)"},
+			Outputs:     []string{"updatedCount", "partsWithLcsc", "updated[].designator", "updated[].lcsc", "updated[].filledKeys", "unresolvedDesignators", "noLcscDesignators"},
+			VerifyWith:  []string{"pcb.components.list"},
+		},
+		{
 			Name:             "pcb.import_changes",
 			Domain:           DomainPcb,
 			Phase:            2,
