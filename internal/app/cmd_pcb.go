@@ -1941,6 +1941,7 @@ external router (Freerouting) would route under the antenna. The result reports
 	pcb.AddCommand(newPcbStageSnapshotCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbStageCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbZonesCmd(cfg, &window, stdout, stderr))
+	pcb.AddCommand(newPcbSilkZoneOutlineCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbRouteCriticalCmd(cfg, &window, stdout, stderr))
 	// ── autoroute: one-command Freerouting round-trip ────────────────────────
 	// export DSN → run an external Freerouting engine → import the routed SES → DRC.
