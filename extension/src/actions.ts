@@ -3565,6 +3565,327 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 const schematicRebindFootprint: Handler = makeRebindHandler('footprint');
 const schematicRebindSymbol: Handler = makeRebindHandler('symbol');
 
+// ─── Replace: swap a placed component's DEVICE(器件标准化「使用推荐器件」)───
+
+/** Pin identity snapshot used for the before/after diff of a device replace. */
+interface PinSnapshot { pinNumber: string; pinName: string; x: number; y: number }
+
+/** Best-effort read of a component's pins as plain snapshots (undefined = read failed). */
+async function readPinSnapshots(primitiveId: string): Promise<Array<PinSnapshot> | undefined> {
+	try {
+		const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(primitiveId);
+		if (!Array.isArray(pins)) return undefined;
+		return pins.map(p => ({
+			pinNumber: String(p.getState_PinNumber() ?? ''),
+			pinName: String(p.getState_PinName() ?? ''),
+			x: p.getState_X(),
+			y: p.getState_Y(),
+		}));
+	}
+	catch { return undefined; }
+}
+
+/**
+ * Diff two pin snapshots by pinNumber. `moved` compares absolute canvas
+ * coordinates — valid because the replacement is re-placed at the SAME x/y as
+ * the original, so any coordinate delta is a real symbol-geometry difference.
+ */
+export function diffPins(
+	oldPins: Array<PinSnapshot>,
+	newPins: Array<PinSnapshot>,
+): { removed: Array<PinSnapshot>; added: Array<PinSnapshot>; moved: Array<{ pinNumber: string; pinName: string; from: { x: number; y: number }; to: { x: number; y: number } }> } {
+	const oldByNumber = new Map(oldPins.map(p => [p.pinNumber, p]));
+	const newByNumber = new Map(newPins.map(p => [p.pinNumber, p]));
+	const removed = oldPins.filter(p => !newByNumber.has(p.pinNumber));
+	const added = newPins.filter(p => !oldByNumber.has(p.pinNumber));
+	const moved: Array<{ pinNumber: string; pinName: string; from: { x: number; y: number }; to: { x: number; y: number } }> = [];
+	for (const [num, oldPin] of oldByNumber) {
+		const newPin = newByNumber.get(num);
+		if (newPin && (newPin.x !== oldPin.x || newPin.y !== oldPin.y)) {
+			moved.push({ pinNumber: num, pinName: newPin.pinName, from: { x: oldPin.x, y: oldPin.y }, to: { x: newPin.x, y: newPin.y } });
+		}
+	}
+	return { removed, added, moved };
+}
+
+/**
+ * Resolve a placed component's REAL 32-char device-library uuid. Needed because
+ * `getState_Component().uuid` is a 16-char placed-SYMBOL id, NOT the device
+ * uuid `sch_PrimitiveComponent.create` consumes (verified live 2026-08-04:
+ * placing device 96b39256… read back as component.uuid 125464da5fa306a1) — so
+ * a rollback that replays it would fail to re-create the original part.
+ * Resolution chain: LCSC C-number (deterministic) → manufacturerId search
+ * narrowed by footprint name. Throws when unresolvable — the caller must abort
+ * BEFORE touching the canvas rather than run without a working rollback.
+ */
+async function resolvePlacedDeviceIdentity(
+	snapshot: Record<string, unknown>,
+): Promise<DeviceRef & { via: string }> {
+	const supplierId = typeof snapshot.supplierId === 'string' ? snapshot.supplierId : '';
+	if (/^C\d+$/.test(supplierId)) {
+		try {
+			const raw = (await eda.lib_Device.getByLcscIds([supplierId])) as unknown as Array<Record<string, unknown>>;
+			const hits = (Array.isArray(raw) ? raw : []).filter(r => typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
+			if (hits.length === 1) {
+				return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'lcsc' };
+			}
+		}
+		catch { /* fall through to the MPN chain */ }
+	}
+	const mpn = typeof snapshot.manufacturerId === 'string' ? snapshot.manufacturerId : '';
+	if (mpn) {
+		let raw: Array<Record<string, unknown>> = [];
+		try {
+			raw = (await eda.lib_Device.search(mpn)) as unknown as Array<Record<string, unknown>>;
+		}
+		catch { /* handled below */ }
+		let hits = (Array.isArray(raw) ? raw : []).filter(r => r.manufacturerId === mpn
+			&& typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
+		if (hits.length > 1) {
+			const fp = (snapshot.footprint as Record<string, unknown> | undefined)?.name;
+			if (typeof fp === 'string' && fp) hits = hits.filter(r => r.footprintName === fp);
+		}
+		if (hits.length === 1) {
+			return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'mpn' };
+		}
+	}
+	throw new ActionError(
+		ErrorCodes.INVALID_STATE,
+		'Cannot resolve the placed component\'s 32-char device-library uuid (no unique LCSC/MPN library match) — '
+		+ 'aborting BEFORE any canvas change because rollback would be impossible. '
+		+ 'Note: the component\'s own device.uuid is a 16-char placed-symbol id and cannot re-create the part.',
+	);
+}
+
+/**
+ * Replace a placed component with a DIFFERENT device (真正的「换型号」) — the
+ * programmatic equivalent of the 器件标准化 panel's「使用推荐器件」button, which
+ * has no extension API of its own (the panel only exposes an open-tab enum).
+ *
+ * WHY delete-then-create: the official API has NO rebind-device primitive —
+ * `sch_PrimitiveComponent.modify` cannot change the placed instance's device
+ * binding (no libraryUuid/uuid in its property table, no setState_Device).
+ * So this follows the rebind template minus the `lib_Device.modify` step:
+ *   1. capture the original state + pin table,
+ *   2. resolve BOTH device identities (old for rollback, new from
+ *      lcsc / deviceUuid / query),
+ *   3. delete the old instance,
+ *   4. create the new device at the same x/y/rotation/mirror/BOM flags,
+ *   5. modify to restore designator + uniqueId (kept so sch↔PCB import-changes
+ *      UPDATES the footprint instead of delete+add).
+ *
+ * Deliberately NOT restored: name / manufacturer(Id) / supplier(Id) — those
+ * identify the PART, and carrying the old part's identity onto the new device
+ * would defeat the replacement. otherProperty is only restored with
+ * keepProperties=true (old custom attrs may describe the old part).
+ *
+ * Any failure after the delete rolls back by re-creating the ORIGINAL device
+ * with its full state (including part-identity fields).
+ */
+const schematicComponentReplace: Handler = async (payload) => {
+	const primitiveId = requireString(payload, 'primitiveId');
+	const lcsc = optionalString(payload, 'lcsc');
+	const explicitUuid = optionalString(payload, 'deviceUuid');
+	const explicitLibraryUuid = optionalString(payload, 'deviceLibraryUuid');
+	const query = optionalString(payload, 'query');
+	const keepProperties = optionalBoolean(payload, 'keepProperties') === true;
+	const selectors = [lcsc, explicitUuid, query].filter(Boolean).length;
+	if (selectors !== 1) {
+		throw new ActionError(
+			ErrorCodes.MISSING_PAYLOAD_FIELD,
+			'Provide exactly ONE target selector: "lcsc" (C-number), "deviceUuid" (+ "deviceLibraryUuid"), or "query" (device name, must match uniquely).',
+		);
+	}
+
+	const component = await getComponentOrThrow(primitiveId);
+	const snapshot = serializeComponent(component);
+	const oldName = typeof snapshot.name === 'string' ? snapshot.name : undefined;
+	// Resolve the OLD device's REAL 32-char library identity up front — it is the
+	// rollback target AND the same-device guard; getState_Component() only carries
+	// a 16-char placed-symbol id, so an unresolvable identity aborts here, before
+	// any canvas change.
+	const oldDevice = await resolvePlacedDeviceIdentity(snapshot);
+	const oldPins = await readPinSnapshots(primitiveId);
+
+	// Resolve the NEW device identity.
+	let target: { uuid: string; libraryUuid: string; name?: string };
+	if (explicitUuid) {
+		if (!explicitLibraryUuid) {
+			throw new ActionError(
+				ErrorCodes.MISSING_PAYLOAD_FIELD,
+				'"deviceUuid" requires "deviceLibraryUuid" (both come from schematic.library.search / get_by_lcsc).',
+			);
+		}
+		target = { uuid: explicitUuid, libraryUuid: explicitLibraryUuid };
+	}
+	else if (lcsc) {
+		let raw: Array<Record<string, unknown>>;
+		try {
+			raw = (await eda.lib_Device.getByLcscIds([lcsc])) as unknown as Array<Record<string, unknown>>;
+		}
+		catch (err) {
+			throw edaError(err, `Failed to resolve LCSC id "${lcsc}".`);
+		}
+		const hits = (Array.isArray(raw) ? raw : []).filter(r => typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
+		if (hits.length === 0) {
+			throw new ActionError(ErrorCodes.INVALID_STATE, `LCSC id "${lcsc}" did not resolve to any library device.`);
+		}
+		if (hits.length > 1) {
+			const uuids = hits.map(h => h.uuid).join(', ');
+			throw new ActionError(
+				ErrorCodes.INVALID_STATE,
+				`LCSC id "${lcsc}" resolved to ${hits.length} devices (uuids: ${uuids}). Pass "deviceUuid" to pick one.`,
+			);
+		}
+		target = { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, name: typeof hits[0].name === 'string' ? hits[0].name as string : undefined };
+	}
+	else {
+		let raw: Array<NamedLibItem>;
+		try {
+			raw = (await eda.lib_Device.search(query as string)) as unknown as Array<NamedLibItem>;
+		}
+		catch (err) {
+			throw edaError(err, `Failed to search the device library for "${query}".`);
+		}
+		const match = pickNamedCandidate(query as string, Array.isArray(raw) ? raw : []);
+		if (match.kind === 'none') {
+			throw new ActionError(
+				ErrorCodes.INVALID_STATE,
+				`No device named "${query}" found. Use schematic.library.search to explore candidates, then pass "deviceUuid" or "lcsc".`,
+			);
+		}
+		if (match.kind === 'ambiguous') {
+			const uuids = match.matches.map(m => m.uuid).join(', ');
+			throw new ActionError(
+				ErrorCodes.INVALID_STATE,
+				`${match.matches.length} devices named "${query}" match (uuids: ${uuids}). Pass "deviceUuid" to pick one.`,
+			);
+		}
+		target = match.item;
+	}
+	if (target.uuid === oldDevice.uuid) {
+		throw new ActionError(
+			ErrorCodes.INVALID_STATE,
+			`Target device is the SAME as the placed one (${target.uuid}) — nothing to replace. Use schematic.component.modify for property-only changes.`,
+		);
+	}
+
+	// Replay geometry + BOM flags into create for both the new device and rollback.
+	const x = typeof snapshot.x === 'number' ? snapshot.x : 0;
+	const y = typeof snapshot.y === 'number' ? snapshot.y : 0;
+	const rotation = typeof snapshot.rotation === 'number' ? snapshot.rotation : undefined;
+	const mirror = typeof snapshot.mirror === 'boolean' ? snapshot.mirror : undefined;
+	const addIntoBom = typeof snapshot.addIntoBom === 'boolean' ? snapshot.addIntoBom : undefined;
+	const addIntoPcb = typeof snapshot.addIntoPcb === 'boolean' ? snapshot.addIntoPcb : undefined;
+	// Identity-preserving props for the NEW device: designator + uniqueId only.
+	const carryProps = {
+		...(typeof snapshot.designator === 'string' ? { designator: snapshot.designator } : {}),
+		...(typeof snapshot.uniqueId === 'string' ? { uniqueId: snapshot.uniqueId } : {}),
+		...(keepProperties && cleanOtherProperty(snapshot.otherProperty as Record<string, unknown> | undefined)
+			? { otherProperty: cleanOtherProperty(snapshot.otherProperty as Record<string, unknown> | undefined) }
+			: {}),
+	};
+	// Full restore props for ROLLBACK (the original part keeps its identity).
+	const rollbackProps = {
+		...carryProps,
+		...(typeof snapshot.manufacturer === 'string' ? { manufacturer: snapshot.manufacturer } : {}),
+		...(typeof snapshot.manufacturerId === 'string' ? { manufacturerId: snapshot.manufacturerId } : {}),
+		...(typeof snapshot.supplier === 'string' ? { supplier: snapshot.supplier } : {}),
+		...(typeof snapshot.supplierId === 'string' ? { supplierId: snapshot.supplierId } : {}),
+		...(cleanOtherProperty(snapshot.otherProperty as Record<string, unknown> | undefined)
+			? { otherProperty: cleanOtherProperty(snapshot.otherProperty as Record<string, unknown> | undefined) }
+			: {}),
+	};
+
+	const place = async (dev: DeviceRef, props: Record<string, unknown>): Promise<SchComponent | undefined> => {
+		const c = await eda.sch_PrimitiveComponent.create(
+			{ libraryUuid: dev.libraryUuid, uuid: dev.uuid },
+			x, y, undefined, rotation, mirror, addIntoBom, addIntoPcb,
+		);
+		if (c && Object.keys(props).length) {
+			// Prefer modify's returned primitive: serializing the create-time object
+			// echoes PRE-restore state (live-verified: designator read back "C?"
+			// while the canvas already showed the restored value).
+			try {
+				const m = await eda.sch_PrimitiveComponent.modify(c.getState_PrimitiveId(), props);
+				if (m) return m;
+			}
+			catch { /* best-effort restore */ }
+		}
+		return c ?? undefined;
+	};
+
+	// Step 3: delete the old instance.
+	try {
+		await eda.sch_PrimitiveComponent.delete(primitiveId);
+	}
+	catch (err) {
+		throw edaError(err, `Failed to delete the old instance "${primitiveId}" (canvas unchanged).`);
+	}
+
+	// Step 4 + 5: place the new device and carry identity over.
+	let created: SchComponent | undefined;
+	let placeError: unknown;
+	try {
+		created = await place({ libraryUuid: target.libraryUuid, uuid: target.uuid }, carryProps);
+	}
+	catch (err) { placeError = err; }
+	if (!created) {
+		// Roll back: re-create the ORIGINAL device with its full state.
+		let restored = false;
+		try { restored = Boolean(await place(oldDevice, rollbackProps)); }
+		catch { /* fall through to the structured error */ }
+		const rollbackNote = restored
+			? 'rolled back — the original component was re-created (with a NEW primitiveId; verify wires)'
+			: 'ROLLBACK FAILED — the original component is GONE; re-place it manually';
+		if (placeError) throw edaError(placeError, `Failed to place the replacement device (${rollbackNote}).`);
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			`Placing the replacement device returned no primitive (${rollbackNote}).`,
+		);
+	}
+
+	const newId = created.getState_PrimitiveId();
+	const newPins = await readPinSnapshots(newId);
+	const pinDiff = oldPins && newPins
+		? (() => {
+			const d = diffPins(oldPins, newPins);
+			return {
+				available: true,
+				oldCount: oldPins.length,
+				newCount: newPins.length,
+				removed: d.removed.slice(0, 20),
+				added: d.added.slice(0, 20),
+				moved: d.moved.slice(0, 20),
+				removedCount: d.removed.length,
+				addedCount: d.added.length,
+				movedCount: d.moved.length,
+			};
+		})()
+		: { available: false as const };
+
+	const warnings = [
+		'Re-placing minted a new primitiveId; wires on the old pins may need re-drawing — run `sch drc` / `sch check` to confirm connectivity.',
+	];
+	if (pinDiff.available && (pinDiff.removedCount || pinDiff.addedCount || pinDiff.movedCount)) {
+		warnings.push(
+			`Pin geometry differs from the old device (removed=${pinDiff.removedCount}, added=${pinDiff.addedCount}, moved=${pinDiff.movedCount}) — existing wires will NOT line up; re-wire the affected pins.`,
+		);
+	}
+
+	return {
+		result: {
+			primitiveId: newId,
+			previousPrimitiveId: primitiveId,
+			previousDevice: { uuid: oldDevice.uuid, libraryUuid: oldDevice.libraryUuid, resolvedVia: oldDevice.via, ...(oldName ? { name: oldName } : {}) },
+			device: { uuid: target.uuid, libraryUuid: target.libraryUuid, ...(target.name ? { name: target.name } : {}) },
+			pinDiff,
+			component: serializeComponent(created),
+		},
+		warnings,
+	};
+};
+
 // ─── Composite: pin → wire → netflag/netport in one call ────────────
 
 type Direction = 'up' | 'down' | 'left' | 'right';
@@ -8349,6 +8670,7 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.library.get_by_lcsc': schematicLibraryGetByLcscIds,
 	'schematic.rebind.footprint': schematicRebindFootprint,
 	'schematic.rebind.symbol': schematicRebindSymbol,
+	'schematic.component.replace': schematicComponentReplace,
 	'pcb.documents.list': pcbDocumentsList,
 	'pcb.components.list': pcbComponentsList,
 	'pcb.layers.list': pcbLayersList,

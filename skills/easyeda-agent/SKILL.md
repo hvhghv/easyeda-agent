@@ -136,7 +136,7 @@ EasyEDA tooling.
 - Schematic 布局规则:读 `references/schematic-layout-conventions.md`。
 - PCB 摆放/布线规则:读 `references/pcb-layout-conventions.md`。
 - CLI 摆放/布线硬坑 + auto-layout/autoconnect SOP:读 `references/auto-layout-sop.md`。
-- 器件选型、JLC/LCSC 排名与标准化:读 `references/part-selection.md`(选型前**先查块**,块 `parts` 已固定标准外围选型)+ `references/standard-parts.json`。
+- 器件选型、JLC/LCSC 排名与标准化:读 `references/part-selection.md`(选型前**先查块**,块 `parts` 已固定标准外围选型)+ `references/standard-parts.json`。已放置件**换型号**用 `easyeda sch replace --id <pid> --lcsc <C号>`(pinDiff 非空须重接线)。
 - **电路块库**:`easyeda blocks ls/show/search`(离线,详见铁律 8 + 块地图速查);贡献一个新块见
   `references/standard-blocks-contributing.md`(验证过的外围回流入库,署名 + `validated` 门)。
 - Netflag/netport 旋转真值:用 `references/orientation.json`;never hand-edit 派生的旋转表。

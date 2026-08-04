@@ -84,6 +84,7 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 - `schematic.pin.set_no_connect` — 给引脚打/清「非连接标识」(NC, X 标记)，告诉 DRC 该脚是故意悬空。按 `--designator` + `--pin`（可多个）定位；`--clear` 清除。底层必须走器件实例 `component.getAllPins()`，每脚 `setState_NoConnected(...)` 后 `await pin.done()` 才真正落到画布，再用新实例回读验证。CLI：`easyeda sch no-connect --designator U1 --pin 23,24`
 - `schematic.rebind.footprint` — 换封装（五步绑定法）。`modify` 改不了已放置件的封装引用，故走 `lib_Device.modify → delete → create → 恢复位号/坐标/属性`；导入器件 `libraryUuid` 为空时先在工程库反查补齐。按封装名精确匹配（同名多命中或未命中会报错，可用 `--footprint-uuid` 直连）。**重建会换新 primitiveId，导线可能需重连——务必跑 `sch drc`/`sch check` 复核连通性。** CLI：`easyeda sch rebind-footprint --id <primitiveId> --footprint <name>`
 - `schematic.rebind.symbol` — 换符号，机制同上（五步绑定法）。CLI：`easyeda sch rebind-symbol --id <primitiveId> --symbol <name>`
+- `schematic.component.replace` — **整器件替换（换型号）**，官方「器件标准化」面板「使用推荐器件」的 API 等价物（该面板本身零 API）。官方无 rebind-device 原语（`modify` 改不了 device 绑定），走 delete → 同位姿 create 新 device → 恢复位号 + uniqueId（保留 uniqueId 使 sch→PCB `import-changes` 走 UPDATE 而非删加）。**器件身份字段（name/制造商/供应商/LCSC）故意不带过去**——跟新 device 走；`--keep-properties` 才连带旧自定义属性。目标三选一：`--lcsc <C号>`（须唯一解析）/ `--device-uuid <u> --device-lib <l>`（确定性）/ `--query <名称>`（须唯一命中）。delete 后失败自动回滚重建原器件（含完整身份）。返回 **pinDiff**（同位姿下按 pinNumber 对比 removed/added/moved）——非空说明旧导线对不上新引脚，**必须重接线再跑 `sch drc`/`sch check`**。CLI：`easyeda sch replace --id <primitiveId> --lcsc C14663`
 - `schematic.save` — 保存原理图。既定流程中的阶段过门后必须显式保存并核对
   `saved:true`；只有用户要求逐步确认时才在保存前停下
 

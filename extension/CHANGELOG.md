@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`schematic.component.replace` —— 整器件替换(换型号)**,官方「器件标准化」面板
+  「使用推荐器件」的 API 等价物(该面板仅暴露打开面板的枚举,零数据/操作 API)。
+  官方无 rebind-device 原语,走 delete → 同位姿 create → 恢复位号 + uniqueId
+  (保 uniqueId 使 sch→PCB import-changes 走 UPDATE);器件身份字段(name/制造商/
+  供应商/LCSC)**不带过去**,跟新 device 走,`keepProperties` 才连带旧自定义属性。
+  目标三选一:`lcsc`(须唯一)/ `deviceUuid+deviceLibraryUuid` / `query`(须唯一命中);
+  delete 后失败回滚重建原器件(含完整身份)。返回 **pinDiff**(同位姿按 pinNumber 对比
+  removed/added/moved)——非空即旧导线对不上,须重接线并 `sch drc`/`sch check`。
+  CLI:`easyeda sch replace --id <pid> --lcsc C14663`。
+
 ### Fixed
 - **manifest 全面去 "easyeda" 字样 —— 治市场下架**(管理员原话:「发布者信息和扩展名称
   请移除easyeda」)。`publisher` `easyeda-agent`→`zhoushoujian`;`name`

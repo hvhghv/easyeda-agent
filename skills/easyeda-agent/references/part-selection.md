@@ -61,6 +61,15 @@ This makes [`standard-parts.json`](./standard-parts.json) selections justified
 by live stock/price/basic data instead of a guess. Validated: 100nF→C1525,
 10µF→C440198, AMS1117→C6186 — all matched the curated standard library.
 
+**Already-placed parts** (standardizing an existing schematic — the 器件标准化
+panel's use case): don't delete+re-place by hand. `easyeda sch replace --id
+<primitiveId> --lcsc <C#>` swaps the placed component for the recommended device
+in one call — keeps designator/uniqueId/pose, drops the OLD part's identity
+fields (they follow the new device), rolls back on failure, and reports a
+`pinDiff`; a non-empty pinDiff means re-wire, then `sch drc`/`sch check`.
+Property-only assignment (writing a C# onto a part without changing the device)
+stays `easyeda sch modify --patch '{"supplierId":"C…"}'`.
+
 ## Known limitations / refinements
 
 - **Basic-search page depth** — *fixed*: the base-filtered query fetches a generous

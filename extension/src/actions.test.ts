@@ -941,3 +941,37 @@ test('titleblock: an explicit false from the SDK is surfaced as an error', async
 	);
 	delete (globalThis as any).eda;
 });
+
+// ─── schematic.component.replace: diffPins ──────────────────────────────
+
+import { diffPins } from './actions';
+
+test('diffPins: identical pin tables → empty diff', () => {
+	const pins = [
+		{ pinNumber: '1', pinName: 'VCC', x: 100, y: 200 },
+		{ pinNumber: '2', pinName: 'GND', x: 100, y: 180 },
+	];
+	const d = diffPins(pins, pins);
+	assert.equal(d.removed.length, 0);
+	assert.equal(d.added.length, 0);
+	assert.equal(d.moved.length, 0);
+});
+
+test('diffPins: removed / added / moved are keyed by pinNumber', () => {
+	const oldPins = [
+		{ pinNumber: '1', pinName: 'VCC', x: 100, y: 200 },
+		{ pinNumber: '2', pinName: 'GND', x: 100, y: 180 },
+		{ pinNumber: '3', pinName: 'EN', x: 100, y: 160 },
+	];
+	const newPins = [
+		{ pinNumber: '1', pinName: 'VDD', x: 100, y: 200 }, // renamed, same spot → NOT moved
+		{ pinNumber: '2', pinName: 'GND', x: 120, y: 180 }, // moved
+		{ pinNumber: '4', pinName: 'NC', x: 100, y: 140 }, // added
+	];
+	const d = diffPins(oldPins, newPins);
+	assert.deepEqual(d.removed.map(p => p.pinNumber), ['3']);
+	assert.deepEqual(d.added.map(p => p.pinNumber), ['4']);
+	assert.deepEqual(d.moved, [
+		{ pinNumber: '2', pinName: 'GND', from: { x: 100, y: 180 }, to: { x: 120, y: 180 } },
+	]);
+});

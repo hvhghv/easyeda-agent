@@ -633,6 +633,78 @@ run ` + "`easyeda sch drc`" + ` / ` + "`easyeda sch check`" + ` after to confirm
 		sch.AddCommand(c)
 	}
 
+	// ── replace ──────────────────────────────────────────────────────────────
+	// schematic.component.replace — swap a placed component for a DIFFERENT device.
+	{
+		var id, lcsc, deviceUUID, deviceLib, query string
+		var keepProperties bool
+		c := &cobra.Command{
+			Use:   "replace",
+			Short: "Replace a placed component with a different library device (换型号 / 器件标准化)",
+			Args:  cobra.NoArgs,
+			Long: `Replace an already-placed schematic component with a DIFFERENT library device —
+the programmatic equivalent of the 器件标准化 panel's 使用推荐器件 (which has no
+extension API of its own).
+
+The official API cannot re-bind a placed instance to another device, so this
+runs delete → create-at-same-pose → restore. Carried over: designator, uniqueId
+(so sch→PCB import-changes UPDATES the footprint instead of delete+add),
+position/rotation/mirror/BOM flags. Deliberately NOT carried over: name,
+manufacturer(Id), supplier(Id)/LCSC — part identity follows the NEW device.
+Pass --keep-properties to also carry old custom attributes (otherProperty).
+
+Failure after the delete rolls back by re-creating the original device with its
+full identity.
+
+The result includes a pinDiff (removed/added/moved pins by pinNumber, compared
+at the identical placement pose). A non-empty pinDiff means existing wires will
+NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` /
+` + "`easyeda sch check`" + ` to confirm connectivity.`,
+			Example: `  easyeda sch replace --id <primitiveId> --lcsc C14663
+  easyeda sch replace --id <id> --device-uuid <u> --device-lib <l>
+  easyeda sch replace --id <id> --query "CL05B104KO5NNNC" --keep-properties`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if id == "" {
+					return fmt.Errorf("--id is required")
+				}
+				selectors := 0
+				for _, s := range []string{lcsc, deviceUUID, query} {
+					if s != "" {
+						selectors++
+					}
+				}
+				if selectors != 1 {
+					return fmt.Errorf("provide exactly one of --lcsc, --device-uuid (+--device-lib), or --query")
+				}
+				if deviceUUID != "" && deviceLib == "" {
+					return fmt.Errorf("--device-uuid requires --device-lib")
+				}
+				payload := map[string]any{"primitiveId": id}
+				if lcsc != "" {
+					payload["lcsc"] = lcsc
+				}
+				if deviceUUID != "" {
+					payload["deviceUuid"] = deviceUUID
+					payload["deviceLibraryUuid"] = deviceLib
+				}
+				if query != "" {
+					payload["query"] = query
+				}
+				if keepProperties {
+					payload["keepProperties"] = true
+				}
+				return dispatch(cfg, "schematic.component.replace", window, payload, stdout, stderr)
+			},
+		}
+		c.Flags().StringVar(&id, "id", "", "placed component primitive ID (required)")
+		c.Flags().StringVar(&lcsc, "lcsc", "", "target LCSC C-number (must resolve uniquely, e.g. C14663)")
+		c.Flags().StringVar(&deviceUUID, "device-uuid", "", "target device-library uuid (from `easyeda lib search` / `lib by-lcsc`)")
+		c.Flags().StringVar(&deviceLib, "device-lib", "", "target device library UUID (required with --device-uuid)")
+		c.Flags().StringVar(&query, "query", "", "target device name (must match uniquely; ambiguity errors out with candidates)")
+		c.Flags().BoolVar(&keepProperties, "keep-properties", false, "also carry the OLD component's custom attributes (otherProperty) onto the replacement")
+		sch.AddCommand(c)
+	}
+
 	// ── delete ────────────────────────────────────────────────────────────
 	// schematic.component.delete
 	{

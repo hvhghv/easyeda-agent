@@ -355,6 +355,17 @@ func AllActions() []ActionSpec {
 			VerifyWith:  []string{"schematic.components.list", "schematic.drc.check"},
 		},
 		{
+			Name:        "schematic.component.replace",
+			Domain:      DomainSchematic,
+			Phase:       1,
+			Mutates:     true,
+			NeedsWindow: true,
+			Description: "Replace a placed component with a DIFFERENT device (真正的「换型号」— the programmatic equivalent of the 器件标准化 panel's 使用推荐器件, which has no API of its own). The official API has no rebind-device primitive (modify cannot change the device binding), so this runs the rebind template minus the lib_Device.modify step: capture state + pin table → delete → create the new device at the same x/y/rotation/mirror/BOM flags → restore designator + uniqueId (kept so sch→PCB import-changes UPDATES the footprint instead of delete+add). Part-identity fields (name/manufacturer/supplier/LCSC) are deliberately NOT carried over — they follow the NEW device; pass keepProperties to also carry old custom otherProperty. Target is exactly one of lcsc (C-number, must resolve uniquely), deviceUuid+deviceLibraryUuid (deterministic), or query (device name, must match uniquely). Failure after the delete rolls back by re-creating the ORIGINAL device with its full identity. Result includes a pinDiff (removed/added/moved by pinNumber at identical placement) — non-empty pinDiff means existing wires will NOT line up; re-wire and verify with sch drc/check.",
+			Inputs:      []string{"primitiveId", "lcsc OR deviceUuid (+deviceLibraryUuid) OR query", "keepProperties optional (default false)"},
+			Outputs:     []string{"primitiveId (new)", "previousPrimitiveId", "previousDevice", "device", "pinDiff {available,removed,added,moved,…counts}", "component state"},
+			VerifyWith:  []string{"schematic.components.list", "schematic.drc.check"},
+		},
+		{
 			Name:        "schematic.power.connect_pin",
 			Domain:      DomainSchematic,
 			Phase:       1,
