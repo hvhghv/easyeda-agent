@@ -34,11 +34,20 @@ follow [SemVer](https://semver.org/).
 
   **两者都只是改善概率,都没根治** —— 真实形态不是「永不恢复」而是「**恢复耗时不可预测**」
   (5s / 90s / 210s+)。根因待查,而排查被下面这条可观测性缺陷挡住。
-- **连接器诊断日志此前在最需要时不可见,现补 console 输出**:`diag()` 只经 WebSocket 发给
-  daemon —— **断线时恰好发不出去**,而断线正是唯一需要它的时刻;这正是上面那个 bug 长期
-  难查的结构性原因。现在同时 `console.log`,并在每轮扫描起手打 `scan start
-  session/retryCount/wsId`。⚠️ 已知局限:连接器跑在扩展沙箱上下文,该 console **不汇总到
-  主页面 console**(chrome-devtools `list_console_messages` 看不到),取日志的途径仍待解决。
+- **连接器诊断日志此前在最需要时不可见,现改走 `eda.sys_Log`**:`diag()` 原本只经
+  WebSocket 发给 daemon —— **断线时恰好发不出去**,而断线正是唯一需要它的时刻;这正是
+  重连 bug 长期只能黑盒试的结构性原因。排查中实证了两件事(EasyEDA Pro 3.2.175):
+  ① **扩展里的 `console.*` 是死代码** —— 沙箱发给扩展的 `console` 每个方法都literally
+  是 `()=>{}`(经 `_EXTAPI_SCRIPT_SPACES_[uuid].console.log.toString()` 验证),所以先前
+  想补的 console 输出一行也到不了 DevTools;② 沙箱把 `window`/`document`/`localStorage`/
+  `indexedDB`/`postMessage` 一律置为 `undefined`,**`eda.*` 是唯一的对外通道**。
+  因此主 sink 改为 `eda.sys_Log.add()`:断线时照写、用户在编辑器「日志」面板直接可见、
+  且 `eda.sys_Log.sort()` 可编程读回 —— 这才让离线 soak 变得可诊断。WebSocket 发送保留
+  为在线路径。同时在每轮扫描起手打 `scan start session/retryCount/wsId`。
+  **首次拿到断线期日志即暴露真问题**:一轮全端口扫描要 **18 秒**(每个端口都死等满
+  `CONNECTION_TIMEOUT_MS=1500`,说明 `register()` 对连不上的端口**不回调失败**、只能靠
+  超时兜底),叠加 `retryCount>5` 后的 10s 慢重试 → 一个周期 ~28s。这就是「恢复耗时
+  不可预测」的直接来源,也是下一步要收的口子。
 
 - **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
   audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,

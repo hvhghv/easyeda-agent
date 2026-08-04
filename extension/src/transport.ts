@@ -460,13 +460,33 @@ function sendFrame(frame: unknown): void {
  * side. Deliberately NOT called per ping/pong, to keep the daemon log readable.
  * Best-effort; never throws.
  */
+/**
+ * Emit one diagnostic line.
+ *
+ * Routing matters here, and it is not obvious (2026-08-04, probed on a live
+ * EasyEDA Pro 3.2.175):
+ *
+ * - **`console.*` is DEAD CODE inside an extension.** The EasyEDA sandbox hands
+ *   the extension its own `console` whose every method is literally `()=>{}`
+ *   (verified via `_EXTAPI_SCRIPT_SPACES_[uuid].console.log.toString()`), so
+ *   nothing a connector logs that way reaches DevTools or anywhere else. The
+ *   sandbox also blanks `window`/`document`/`localStorage`/`indexedDB`/
+ *   `postMessage` to `undefined` — `eda.*` is the ONLY channel out.
+ * - **The WebSocket alone was the old behaviour, and it fails exactly when it
+ *   matters.** Diagnostics for a connection problem cannot travel over the
+ *   connection that is down. That is the structural reason the reconnect bug
+ *   stayed a black box for so long.
+ *
+ * So the primary sink is `eda.sys_Log`: it works while disconnected, the user
+ * can read it in the editor's 日志 panel, and `eda.sys_Log.sort()` reads it
+ * back programmatically — which is what makes an offline soak diagnosable at
+ * all. The WebSocket send is kept as the online path (daemon-side log frames).
+ */
 function diag(msg: string): void {
-	// 也打到 console:diag 原本只经 WebSocket 发给 daemon,于是**断线时诊断信息
-	// 恰好发不出去** —— 而断线正是最需要它的时刻(2026-08-04 soak 排查实证)。
 	try {
-		console.log(`[easyeda-agent] ${msg}`);
+		eda.sys_Log.add(`[easyeda-agent] ${msg}`);
 	}
-	catch { /* ignore */ }
+	catch { /* log panel unavailable — never let diagnostics break transport */ }
 	try {
 		eda.sys_WebSocket.send(wsId, JSON.stringify({ type: 'log', msg }));
 	}
