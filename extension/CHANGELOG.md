@@ -4,6 +4,22 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **rebind(换封装/换符号)对系统库器件从未工作过,现已修复**。三层根因真机逐一定位:
+  ① 绑定链用的 `getState_Component().uuid` 是 16 位符号实例 id,`lib_Device.modify/create`
+  一律拒收 → 复用 replace 的 `resolvePlacedDeviceIdentity`(C 号→MPN→工程库名)解析真
+  32 位身份;② **系统库 device 记录平台层面只读**(32 位 uuid 也 modify=false)→ 新增
+  **个人库克隆回退**:复制/复用同名副本 → 副本绑新封装/符号 → 重放置,结果
+  `mode='cloned-to-personal-library'` + `clonedDevice`,回滚删副本;③ 克隆的 copy 与
+  modify 都会弹「符号/封装另存为」冲突框且 **promise 挂死到有人点击**(#124 家族),
+  而后台 tab 的 setTimeout 轮询被 Chrome 节流到 ~1次/分 → 改用 **MutationObserver
+  自动点「确认」**(默认选项「使用已有的库」即所需语义),护航整个克隆段。
+  全链 sys_Log 埋点(`[rebind]`)可回读诊断;CLI rebind/replace 超时提至 90s
+  (串行库链在线搜索+克隆最坏情况超默认 20s)。ceshi 真机:系统库电容
+  C0603→C0805 换封装 4.1s 完成,位号保留,弹框自动确认(dialog clicks: 1)。
+
 ## [0.20.0] - 2026-08-05
 
 ### Added

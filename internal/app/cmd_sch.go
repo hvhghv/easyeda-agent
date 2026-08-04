@@ -19,6 +19,11 @@ import (
 // library uuid (from `lib search`). See placeUUIDHint.
 const placeTimeout = 8 * time.Second
 
+// rebind/replace run a long SERIAL eda.* chain (identity resolution via online
+// library search → lib_Device copy/modify → delete → create → restore); the
+// clone fallback pushed the worst case past the default 20s dispatch window.
+const rebindTimeout = 90 * time.Second
+
 // placeUUIDHint translates a bare deadline-exceeded into an actionable message:
 // the most common cause of a hung placement is replaying an instance uuid that
 // `sch list` exposes (component/symbol/footprint/uniqueId) instead of the
@@ -571,7 +576,7 @@ run ` + "`easyeda sch drc`" + ` / ` + "`easyeda sch check`" + ` after to confirm
 				if scope != "" {
 					payload["scope"] = scope
 				}
-				return dispatch(cfg, "schematic.rebind.footprint", window, payload, stdout, stderr)
+				return dispatchTimed(cfg, "schematic.rebind.footprint", window, payload, rebindTimeout, stdout, stderr)
 			},
 		}
 		c.Flags().StringVar(&id, "id", "", "placed component primitive ID (required)")
@@ -622,7 +627,7 @@ run ` + "`easyeda sch drc`" + ` / ` + "`easyeda sch check`" + ` after to confirm
 				if scope != "" {
 					payload["scope"] = scope
 				}
-				return dispatch(cfg, "schematic.rebind.symbol", window, payload, stdout, stderr)
+				return dispatchTimed(cfg, "schematic.rebind.symbol", window, payload, rebindTimeout, stdout, stderr)
 			},
 		}
 		c.Flags().StringVar(&id, "id", "", "placed component primitive ID (required)")
@@ -693,7 +698,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 				if keepProperties {
 					payload["keepProperties"] = true
 				}
-				return dispatch(cfg, "schematic.component.replace", window, payload, stdout, stderr)
+				return dispatchTimed(cfg, "schematic.component.replace", window, payload, rebindTimeout, stdout, stderr)
 			},
 		}
 		c.Flags().StringVar(&id, "id", "", "placed component primitive ID (required)")

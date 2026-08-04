@@ -73,12 +73,12 @@ function edaError(err: unknown, message: string): ActionError {
  *     (sub-primitive ids of this specific placement). They are NOT device-library
  *     uuids — replaying one into `sch place` makes `sch_PrimitiveComponent.create` hang.
  *   - `device` is the device-library identity of the placed part, taken from
- *     `getState_Component()` — the SAME { libraryUuid, uuid } shape the rebind
- *     handler consumes (see `makeRebindHandler` / `resolveDeviceLibrary`). Its
+ *     `getState_Component()` — WARNING: its `uuid` is a 16-char placed-symbol id, NOT
+ *     the 32-char device uuid (resolve via `resolvePlacedDeviceIdentity`). Its
  *     `uuid` is the device uuid that `lib_Device.search` reports and `sch place
  *     --uuid` expects. CAVEAT: imported devices (Altium/KiCad → EasyEDA) often
  *     carry an EMPTY `libraryUuid` on the placed instance; when empty, resolve it
- *     via `lib search` / `lib by-lcsc` or the rebind path's `resolveDeviceLibrary`
+ *     via `lib search` / `lib by-lcsc` or `resolvePlacedDeviceIdentity`
  *     before feeding it back into `sch place`. Exposing this lets an image-tracing
  *     flow lock onto the exact symbol variant of a golden design instead of
  *     re-searching by LCSC C-number (which can hit a different pin-numbering variant).
@@ -3288,53 +3288,6 @@ const schematicLibraryGetByLcscIds: Handler = async (payload) => {
 /** A device-library identity ({ libraryUuid, uuid }) as reported by getState_Component(). */
 interface DeviceRef { libraryUuid: string; uuid: string }
 
-/**
- * Resolve a device's real library UUID. Imported devices (Altium/KiCad → EasyEDA)
- * often carry an EMPTY `libraryUuid` on the placed instance, which makes
- * `lib_Device.modify` / `sch_PrimitiveComponent.create` hang. When that happens we
- * reverse-look-up the true library UUID by searching the PROJECT library by the
- * device's name and matching on the device uuid (falling back to a lone hit).
- *
- * @param ref - the { libraryUuid, uuid } from getState_Component()
- * @param name - the device name (getState_Name()) used for the reverse search
- * @returns the ref with libraryUuid filled in, or a structured error if unresolvable
- */
-async function resolveDeviceLibrary(ref: DeviceRef, name: string | undefined): Promise<DeviceRef> {
-	if (ref.libraryUuid) return ref;
-	if (!name) {
-		throw new ActionError(
-			ErrorCodes.INVALID_STATE,
-			'This component has an empty device libraryUuid and no name to reverse-look-up from. '
-			+ 'Cannot rebind — re-import the device from a library first.',
-		);
-	}
-	let raw: Array<Record<string, unknown>>;
-	try {
-		// 'project' scope: search the current project's library (imported devices live here).
-		raw = (await eda.lib_Device.search(name, 'project')) as unknown as Array<Record<string, unknown>>;
-	}
-	catch (err) {
-		throw edaError(err, `Failed to reverse-look-up device library for "${name}".`);
-	}
-	if (!Array.isArray(raw) || raw.length === 0) {
-		throw new ActionError(
-			ErrorCodes.INVALID_STATE,
-			`Device "${name}" has an empty libraryUuid and was not found in the project library. `
-			+ 'Cannot resolve its real library UUID for rebind.',
-		);
-	}
-	const byUuid = raw.find(r => r.uuid === ref.uuid);
-	const chosen = byUuid ?? (raw.length === 1 ? raw[0] : undefined);
-	if (!chosen || typeof chosen.libraryUuid !== 'string' || !chosen.libraryUuid) {
-		throw new ActionError(
-			ErrorCodes.INVALID_STATE,
-			`Could not resolve a unique library UUID for device "${name}" (${raw.length} candidates). `
-			+ 'Rebind aborted to avoid modifying the wrong device.',
-		);
-	}
-	return { libraryUuid: chosen.libraryUuid, uuid: typeof chosen.uuid === 'string' ? chosen.uuid : ref.uuid };
-}
-
 /** Keep only the string|number|boolean entries of an otherProperty map (modify's accepted shape). */
 function cleanOtherProperty(
 	op: Record<string, unknown> | undefined,
@@ -3410,15 +3363,17 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 			);
 		}
 
+		// Step-level diagnostics via sys_Log (readable back even on daemon timeout).
+		const rlog = (m: string) => { try { eda.sys_Log.add(`[rebind] ${m}`); } catch { /* ignore */ } };
+		rlog(`start ${kind} ${primitiveId}`);
 		const component = await getComponentOrThrow(primitiveId);
 		const snapshot = serializeComponent(component);
-		const deviceRaw = component.getState_Component() as DeviceRef;
 		const oldSymbol = component.getState_Symbol() as DeviceRef | undefined;
 		const oldFootprint = component.getState_Footprint() as DeviceRef | undefined;
-		const device = await resolveDeviceLibrary(
-			{ libraryUuid: deviceRaw?.libraryUuid ?? '', uuid: deviceRaw?.uuid ?? '' },
-			typeof snapshot.name === 'string' ? snapshot.name : undefined,
-		);
+		// The REAL 32-char device identity — getState_Component().uuid is a 16-char
+		// placed-symbol id that lib_Device.modify/create reject (live-verified).
+		const device = await resolvePlacedDeviceIdentity(snapshot);
+		rlog(`identity via=${device.via} ${device.uuid}`);
 
 		// Resolve the target footprint/symbol identity.
 		let target: NamedLibItem;
@@ -3484,40 +3439,178 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 				: {}),
 		};
 
-		const recreate = async (): Promise<SchComponent | undefined> => {
+		const recreate = async (dev: DeviceRef, props: Record<string, unknown>): Promise<SchComponent | undefined> => {
 			const c = await eda.sch_PrimitiveComponent.create(
-				{ libraryUuid: device.libraryUuid, uuid: device.uuid },
+				{ libraryUuid: dev.libraryUuid, uuid: dev.uuid },
 				x, y, subPartName, rotation, mirror, addIntoBom, addIntoPcb,
 			);
-			if (c && Object.keys(restoreProps).length) {
-				try { await eda.sch_PrimitiveComponent.modify(c.getState_PrimitiveId(), restoreProps); }
+			if (c && Object.keys(props).length) {
+				// modify's returned primitive reflects the restored props; the
+				// create-time object echoes pre-restore state (see replace).
+				try {
+					const m = await eda.sch_PrimitiveComponent.modify(c.getState_PrimitiveId(), props);
+					if (m) return m;
+				}
 				catch { /* best-effort restore */ }
 			}
 			return c ?? undefined;
 		};
 
+		// Auto-confirm the 符号/封装另存为 conflict dialogs that lib_Device.copy opens
+		// when the personal library already holds same-named symbol/footprint
+		// documents (a PREVIOUS clone of the same family). The copy promise HANGS
+		// while a dialog is open (live-verified: 90s dispatch timeout), and the
+		// platform opens ONE DIALOG PER conflicting document in sequence — so the
+		// dialogs must be clicked concurrently, #124 style. A setTimeout POLLING
+		// loop does NOT work here: MCP/CLI-driven editor tabs are BACKGROUND tabs,
+		// where Chrome throttles chained timers to ~1/min (live-verified — the
+		// loop never fired while the dialog sat open). MutationObserver callbacks
+		// are not throttled, so the clicker is armed once and fires on DOM change.
+		// The pre-selected option 使用已有的库 (reuse the existing documents) is
+		// exactly the semantics we want; we only click 确认.
+		const armLibConflictAutoClicker = async (): Promise<() => number> => {
+			const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as {
+				new (body: string): () => Promise<() => number>;
+			};
+			const arm = new AsyncFunction(`
+				let clicks = 0;
+				const tryClick = () => {
+					const modals = Array.from(document.querySelectorAll('.arco-modal, [class*=modal]'))
+						.filter(e => e.offsetParent !== null && /另存为|同名库/.test(e.innerText || ''));
+					if (!modals.length) return;
+					const btn = modals.flatMap(m => Array.from(m.querySelectorAll('button')))
+						.find(b => (b.innerText || '').replace(/\\s+/g, '') === '确认' && b.offsetParent !== null);
+					if (btn) { btn.click(); clicks++; }
+				};
+				tryClick();
+				const obs = new MutationObserver(tryClick);
+				obs.observe(document.body, { childList: true, subtree: true, attributes: true });
+				return () => { obs.disconnect(); return clicks; };
+			`);
+			return arm();
+		};
+
+		// Step 2: point the device at the new footprint/symbol — in place when the
+		// library record is writable (project/personal-library devices), else via a
+		// personal-library CLONE (system-library records reject lib_Device.modify
+		// unconditionally, live-verified with the true 32-char uuid).
+		let inPlaceOk = false;
+		try {
+			inPlaceOk = (await eda.lib_Device.modify(device.uuid, device.libraryUuid, undefined, undefined, newAssoc)) !== false;
+		}
+		catch { inPlaceOk = false; }
+		rlog(`in-place modify: ${inPlaceOk}`);
+
+		let effectiveDevice: DeviceRef = device;
+		let clonedDevice: { uuid: string; libraryUuid: string; name: string } | undefined;
+		if (!inPlaceOk) {
+			let personalLib: string | undefined;
+			try { personalLib = await eda.lib_LibrariesList.getPersonalLibraryUuid(); }
+			catch { /* handled below */ }
+			if (!personalLib) {
+				throw new ActionError(
+					ErrorCodes.EDA_CALL_FAILED,
+					`lib_Device.modify rejected the ${kind} rebind (read-only library record) and no personal library is available for the clone fallback.`,
+				);
+			}
+			let baseName = '';
+			try { baseName = (await eda.lib_Device.get(device.uuid, device.libraryUuid))?.name ?? ''; }
+			catch { /* fall through */ }
+			if (!baseName) {
+				baseName = (typeof snapshot.manufacturerId === 'string' && snapshot.manufacturerId) || device.uuid.slice(0, 8);
+			}
+			// Clone-name suffix: prefer the human footprint/symbol name; an
+			// explicit-uuid call has no name, so use a short uuid prefix.
+			const suffix = target.name && target.name !== target.uuid ? target.name : `${kind}-${target.uuid.slice(0, 8)}`;
+			const cloneName = `${baseName}_${suffix}`;
+			// The observer clicker guards the ENTIRE clone segment: BOTH
+			// lib_Device.copy and the clone's lib_Device.modify open 符号/封装另存为
+			// conflict dialogs (live-verified — the modify-side one was the second
+			// 90s hang) and their promises stall until the dialog is answered.
+			const stopClicker = await armLibConflictAutoClicker();
+			let copied: string | undefined;
+			try {
+				const attemptCopy = async (name: string): Promise<string | undefined> => {
+					rlog(`copy start ${name}`);
+					const got = await Promise.race([
+						eda.lib_Device
+							.copy(device.uuid, device.libraryUuid, personalLib as string, undefined, name)
+							.catch((e) => { rlog(`copy rejected: ${String(e && (e as Error).message || e).slice(0, 80)}`); return undefined; })
+							.then(v => v ?? undefined),
+						new Promise<string | undefined>(r => setTimeout(() => r(undefined), 45_000)),
+					]);
+					if (got) return got;
+					// The promise may resolve late (or unreliably) after the dialog —
+					// the ground truth is whether the clone landed in the PERSONAL
+					// library (search's 2nd arg scopes the library; the default
+					// scope does NOT surface personal-library devices).
+					try {
+						const hits = (await eda.lib_Device.search(name, personalLib)) as unknown as Array<Record<string, unknown>>;
+						const hit = (Array.isArray(hits) ? hits : []).find(h => h.name === name && typeof h.uuid === 'string');
+						rlog(`landed check: ${hit ? 'found' : 'missing'}`);
+						return hit ? hit.uuid as string : undefined;
+					}
+					catch { return undefined; }
+				};
+				// Reuse an existing same-named clone (repeat rebinds of the same
+				// family) — skips the copy entirely; the clone is modified to the
+				// target association right below either way.
+				try {
+					const pre = (await eda.lib_Device.search(cloneName, personalLib)) as unknown as Array<Record<string, unknown>>;
+					const hit = (Array.isArray(pre) ? pre : []).find(h => h.name === cloneName && typeof h.uuid === 'string');
+					if (hit) { copied = hit.uuid as string; rlog(`clone reused: ${copied}`); }
+				}
+				catch { /* fall through to copy */ }
+				if (!copied) copied = await attemptCopy(cloneName);
+				if (!copied) copied = await attemptCopy(`${cloneName}_2`);
+				if (!copied) {
+					throw new ActionError(
+						ErrorCodes.EDA_CALL_FAILED,
+						`The device record is read-only and cloning it into the personal library failed (tried "${cloneName}"). Canvas unchanged.`,
+					);
+				}
+				let cloneModOk = false;
+				try {
+					cloneModOk = (await Promise.race([
+						eda.lib_Device.modify(copied, personalLib, undefined, undefined, newAssoc),
+						new Promise<false>(r => setTimeout(() => r(false), 45_000)),
+					])) !== false;
+				}
+				catch { cloneModOk = false; }
+				rlog(`clone modify: ${cloneModOk}`);
+				if (!cloneModOk) {
+					try { await eda.lib_Device.delete(copied, personalLib); } catch { /* best-effort */ }
+					throw new ActionError(
+						ErrorCodes.EDA_CALL_FAILED,
+						`Failed to bind the new ${kind} onto the personal-library clone "${cloneName}" (clone removed, canvas unchanged).`,
+					);
+				}
+			}
+			finally {
+				const clicks = stopClicker();
+				rlog(`clone segment done (dialog clicks: ${clicks})`);
+			}
+			effectiveDevice = { uuid: copied, libraryUuid: personalLib };
+			clonedDevice = { uuid: copied, libraryUuid: personalLib, name: cloneName };
+			rlog(`clone bound: ${copied}`);
+		}
+
 		let deleted = false;
 		const rollback = async () => {
-			if (rollbackAssoc) {
+			// In-place path mutated the SHARED library record — point it back.
+			if (inPlaceOk && rollbackAssoc) {
 				try { await eda.lib_Device.modify(device.uuid, device.libraryUuid, undefined, undefined, rollbackAssoc); }
 				catch { /* best-effort */ }
 			}
+			// Clone path left the shared record untouched — drop the orphan clone.
+			if (clonedDevice) {
+				try { await eda.lib_Device.delete(clonedDevice.uuid, clonedDevice.libraryUuid); }
+				catch { /* best-effort */ }
+			}
 			if (deleted) {
-				try { await recreate(); } catch { /* best-effort */ }
+				try { await recreate(device, restoreProps); } catch { /* best-effort */ }
 			}
 		};
-
-		// Step 2: point the device at the new footprint/symbol.
-		try {
-			const ok = await eda.lib_Device.modify(device.uuid, device.libraryUuid, undefined, undefined, newAssoc);
-			if (ok === false) {
-				throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `lib_Device.modify returned false for ${kind} rebind.`);
-			}
-		}
-		catch (err) {
-			if (err instanceof ActionError) throw err;
-			throw edaError(err, `Failed to bind the new ${kind} onto device "${device.uuid}".`);
-		}
 
 		// Step 3: delete the stale placed instance.
 		try {
@@ -3528,11 +3621,12 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 			await rollback();
 			throw edaError(err, `Failed to delete the old instance "${primitiveId}" (rolled back the ${kind} binding).`);
 		}
+		rlog('old instance deleted');
 
 		// Step 4 + 5: re-place and restore original state.
 		let created: SchComponent | undefined;
 		try {
-			created = await recreate();
+			created = await recreate(effectiveDevice, restoreProps);
 		}
 		catch (err) {
 			await rollback();
@@ -3545,19 +3639,28 @@ function makeRebindHandler(kind: 'footprint' | 'symbol'): Handler {
 				`Re-placing the component after ${kind} rebind returned no primitive (rolled back).`,
 			);
 		}
+		rlog(`re-created ${created.getState_PrimitiveId()}`);
 
+		const warnings = [
+			`Re-placing minted a new primitiveId; wires on the old instance's pins may need re-drawing — run \`sch drc\` / \`sch check\` to confirm connectivity.`,
+		];
+		if (clonedDevice) {
+			warnings.push(
+				`The original device record is read-only (system library), so the component now references a personal-library clone "${clonedDevice.name}" carrying the new ${kind}. BOM identity (manufacturer/supplier) was restored from the original part.`,
+			);
+		}
 		return {
 			result: {
 				primitiveId: created.getState_PrimitiveId(),
 				previousPrimitiveId: primitiveId,
 				rebound: kind,
-				device: { uuid: device.uuid, libraryUuid: device.libraryUuid },
+				mode: clonedDevice ? 'cloned-to-personal-library' : 'in-place',
+				device: { uuid: effectiveDevice.uuid, libraryUuid: effectiveDevice.libraryUuid },
+				...(clonedDevice ? { clonedDevice, originalDevice: { uuid: device.uuid, libraryUuid: device.libraryUuid } } : {}),
 				[kind]: { uuid: target.uuid, libraryUuid: target.libraryUuid, name: target.name },
 				component: serializeComponent(created),
 			},
-			warnings: [
-				`Re-placing minted a new primitiveId; wires on the old instance's pins may need re-drawing — run \`sch drc\` / \`sch check\` to confirm connectivity.`,
-			],
+			warnings,
 		};
 	};
 }
@@ -3615,7 +3718,9 @@ export function diffPins(
  * placing device 96b39256… read back as component.uuid 125464da5fa306a1) — so
  * a rollback that replays it would fail to re-create the original part.
  * Resolution chain: LCSC C-number (deterministic) → manufacturerId search
- * narrowed by footprint name. Throws when unresolvable — the caller must abort
+ * narrowed by footprint name → device-name search in the PROJECT library (the
+ * home of imported Altium/KiCad devices, which have neither a C-number nor a
+ * library-searchable MPN). Throws when unresolvable — the caller must abort
  * BEFORE touching the canvas rather than run without a working rollback.
  */
 async function resolvePlacedDeviceIdentity(
@@ -3649,9 +3754,24 @@ async function resolvePlacedDeviceIdentity(
 			return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'mpn' };
 		}
 	}
+	// Imported (Altium/KiCad) devices live in the project library under their
+	// device name, with no C-number and no online-searchable MPN.
+	const name = typeof snapshot.name === 'string' ? snapshot.name : '';
+	if (name && !name.startsWith('={')) {
+		let raw: Array<Record<string, unknown>> = [];
+		try {
+			raw = (await eda.lib_Device.search(name, 'project')) as unknown as Array<Record<string, unknown>>;
+		}
+		catch { /* handled below */ }
+		const hits = (Array.isArray(raw) ? raw : []).filter(r => r.name === name
+			&& typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
+		if (hits.length === 1) {
+			return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'project-name' };
+		}
+	}
 	throw new ActionError(
 		ErrorCodes.INVALID_STATE,
-		'Cannot resolve the placed component\'s 32-char device-library uuid (no unique LCSC/MPN library match) — '
+		'Cannot resolve the placed component\'s 32-char device-library uuid (no unique LCSC/MPN/project-name library match) — '
 		+ 'aborting BEFORE any canvas change because rollback would be impossible. '
 		+ 'Note: the component\'s own device.uuid is a 16-char placed-symbol id and cannot re-create the part.',
 	);
