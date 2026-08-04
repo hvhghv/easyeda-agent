@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the **EasyEDA Agent Connector** are documented here.
+All notable changes to the **EDA Agent Connector** (the easyeda-agent project's connector extension) are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 

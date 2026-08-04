@@ -1,11 +1,11 @@
-# EasyEDA Agent Connector
+# EDA Agent Connector
 
 面向 EasyEDA（嘉立创EDA专业版）的 AI 原生自动化连接器。
 
 `easyeda-agent` 把官方 EasyEDA 扩展 API 变成一套**有类型、可观测、Skill 友好**的系统。这个连接器插件本身保持很薄：它只负责连接本地 `easyeda-agent` daemon，并把 typed actions 分发到官方 `eda.*` API；真正的工作流、校验、确认、产物处理和多步编排，都在 Go CLI/daemon 与 Skill 层完成。
 
 ```text
-Skill / CLI -> Go daemon -> EasyEDA Agent Connector -> official eda.* API
+Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 ```
 
 - GitHub 仓库：https://github.com/zhoushoujianwork/easyeda-agent
