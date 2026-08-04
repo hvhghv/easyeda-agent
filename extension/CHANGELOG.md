@@ -6,6 +6,12 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **manifest `publisher` 字段改为个人 ID `zhoushoujian`**(原 `easyeda-agent` 以 "easyeda"
+  开头,被立创插件市场管理员判为使用官方信息而下架 v0.18.0 listing)。仅元数据,不影响
+  uuid/功能;v0.19.0 的 GitHub Release `.eext` 资产已同步替换为修正版。
+
+
 ## [0.19.0] - 2026-08-04
 
 > 🙏 感谢 [@NeoSpecies](https://github.com/NeoSpecies) 的 [PR #154](https://github.com/zhoushoujianwork/easyeda-agent/pull/154)

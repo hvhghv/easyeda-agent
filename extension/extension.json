@@ -4,7 +4,7 @@
 	"displayName": "EasyEDA Agent Connector",
 	"description": "Bridges the easyeda-agent Go daemon to the official eda.* API over a local WebSocket, dispatching typed schematic actions.",
 	"version": "0.19.0",
-	"publisher": "easyeda-agent",
+	"publisher": "zhoushoujian",
 	"engines": {
 		"eda": "~3.2.0"
 	},
