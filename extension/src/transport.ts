@@ -19,6 +19,7 @@
 
 import { buildContextFrame, readEasyEdaVersion } from './eda-context';
 import { runAction } from './actions';
+import { createWebSocketId } from './transport-identity';
 import {
 	ActionError,
 	CAPABILITIES,
@@ -35,24 +36,20 @@ import {
 
 // ─── Configuration ───────────────────────────────────────────────────
 
-// Base id for eda.sys_WebSocket registrations. NOT used directly — see wsId.
-const WS_ID_BASE = 'easyeda-agent';
-// After this many consecutive fully-failed scans, mint a NEW websocket id.
-//
-// Why this exists (2026-08-04, real-machine): `register()` silently ignores the
-// new url/callback while a connection with the same id is still "active" on
-// EasyEDA's side (pro-api-types index.d.ts:21025 — the same trap REGISTER_DELAY_MS
-// guards within one attempt). When the DAEMON disappears, the half-closed socket
-// can leave that id wedged "active" indefinitely, and every later register() is
-// dropped on the floor: the connector scans forever, and **even a page reload
-// does not recover it** — only closing the tab did. Same family as the desktop
-// "re-import doesn't reload an open window, fully quit EasyEDA" trap.
-//
-// A fresh id has no such record, so register() is guaranteed to take effect.
-// Rotating only after repeated whole-range failures keeps the happy path (daemon
-// present → first scan connects) on the stable id, and costs nothing when the
-// daemon is genuinely absent.
+// EasyEDA 3.2.175 can activate the same extension more than once in one app
+// window. eda.sys_WebSocket is shared across those activations, so a fixed id
+// makes each activation close/re-register the other's socket forever. Give each
+// activation its own host-managed socket; the daemon coalesces registrations
+// that report the same project/document/tab when routing an action.
+const WS_ID_BASE = createWebSocketId();
+// 叠加在 PR #154 的 activation-scoped id 之上:即便每个激活已有独立 id,真机 soak
+// 实测(2026-08-04,停 daemon 45s/60s 各一轮)仍会卡死 —— 第二轮 210s 没能自愈,
+// 60832 上持续报 "closed before the connection is established"。activation-scoped
+// 解决的是「多激活互踢」,解决不了「本激活自己的 id 被 EasyEDA 判为 active 后
+// register() 被静默忽略」。连续整轮扫描失败后换一个全新 id 才是逃生口。
 const WS_ID_ROTATE_AFTER_FAILED_SCANS = 2;
+let wsId: string = WS_ID_BASE;
+let wsIdGeneration = 0;
 const PORT_START = 0xeda0; // 60832 — "EDA0" in hex; own range, no official-gateway conflict
 const PORT_END = 0xeda9; // 60841
 const RETRY_DELAY_MS = 3000;
@@ -69,9 +66,8 @@ const MAX_RETRIES = 5;
 const HEARTBEAT_INTERVAL_MS = 3000;
 // Liveness is consecutive-miss based, NOT a single round-trip deadline. The
 // daemon never idle-closes, and EasyEDA's webview can lag pong delivery under
-// load (canvas redraw, GC). Tearing the socket down on ONE missed pong tore down
-// perfectly healthy connections every ~5s — the reconnect storm. Only give up
-// after this many pings go unanswered in a row (~9s of true silence).
+// load (canvas redraw, GC). Only give up after this many pings go unanswered in
+// a row (~9s of true silence).
 const MAX_MISSED_PONGS = 3;
 const CONNECTION_TIMEOUT_MS = 1500;
 // A full 10-port scan (each up to CONNECTION_TIMEOUT_MS + REGISTER_DELAY_MS) settles
@@ -92,12 +88,6 @@ const REGISTER_DELAY_MS = 200;
 const STORAGE_KEY_AUTO_CONNECT = 'autoConnectEnabled';
 
 // ─── State ────────────────────────────────────────────────────────────
-
-// The websocket id currently registered with EasyEDA. Starts at WS_ID_BASE and
-// only ever rotates when repeated scans fail (see WS_ID_ROTATE_AFTER_FAILED_SCANS),
-// so the id stays stable and greppable in the normal case.
-let wsId: string = WS_ID_BASE;
-let wsIdGeneration = 0;
 
 let currentPort: number | null = null;
 let handshakeVerified = false;
@@ -163,30 +153,18 @@ function isConnectionSessionActive(sessionId: number): boolean {
 	return sessionId === connectionSessionId;
 }
 
+function rotateWsId(): void {
+	closeWebSocket();
+	wsIdGeneration += 1;
+	wsId = `${WS_ID_BASE}-r${wsIdGeneration}`;
+	diag(`rotated websocket id → ${wsId} (previous id never accepted a registration)`);
+}
+
 function closeWebSocket(): void {
 	try {
 		eda.sys_WebSocket.close(wsId);
 	}
 	catch { /* ignore */ }
-}
-
-/**
- * Mint a fresh websocket id after repeated scan failures.
- *
- * The escape hatch for a wedged id: EasyEDA drops `register()` on the floor
- * while it still considers the id "active", and a daemon that vanished can
- * leave it that way for good — the connector then scans forever and even a page
- * reload does not clear it. A brand-new id has no such record.
- *
- * The old id is closed best-effort first; if EasyEDA never releases it, that is
- * precisely the condition we are escaping, and leaking one dead registration is
- * far cheaper than never reconnecting.
- */
-function rotateWsId(): void {
-	closeWebSocket();
-	wsIdGeneration += 1;
-	wsId = `${WS_ID_BASE}-${wsIdGeneration}`;
-	diag(`rotated websocket id → ${wsId} (previous id never accepted a registration)`);
 }
 
 function cancelConnectionFlow(resetRetryCount = true): void {
@@ -255,6 +233,7 @@ async function scanAndConnect(): Promise<void> {
 	const sessionId = nextConnectionSessionId();
 	isConnecting = true;
 	clearRetryTimer();
+	diag(`scan start session=${sessionId} retryCount=${retryCount} wsId=${wsId}`);
 
 	try {
 		for (let port = PORT_START; port <= PORT_END; port++) {
@@ -270,17 +249,15 @@ async function scanAndConnect(): Promise<void> {
 			if (found) {
 				currentPort = port;
 				retryCount = 0;
-				startHeartbeat(sessionId);
+				startHeartbeat();
 				return;
 			}
 		}
 
 		retryCount++;
-		// A whole range scanned with nothing accepted means either the daemon is
-		// absent, or our websocket id is wedged "active" on EasyEDA's side and
-		// every register() is being ignored. The two are indistinguishable from
-		// here — so after a couple of failed sweeps, rotate the id. Harmless if
-		// the daemon was simply down; the only way back if the id was wedged.
+		// 整轮扫完无人应答 = daemon 不在,或我们的 id 已被焊死、register 全被忽略。
+		// 从连接器视角这两者不可分辨,所以扫失败够两轮就换 id:daemon 真不在时换了
+		// 也无副作用,id 被焊死时这是唯一的出路。
 		if (retryCount % WS_ID_ROTATE_AFTER_FAILED_SCANS === 0) {
 			rotateWsId();
 		}
@@ -484,6 +461,12 @@ function sendFrame(frame: unknown): void {
  * Best-effort; never throws.
  */
 function diag(msg: string): void {
+	// 也打到 console:diag 原本只经 WebSocket 发给 daemon,于是**断线时诊断信息
+	// 恰好发不出去** —— 而断线正是最需要它的时刻(2026-08-04 soak 排查实证)。
+	try {
+		console.log(`[easyeda-agent] ${msg}`);
+	}
+	catch { /* ignore */ }
 	try {
 		eda.sys_WebSocket.send(wsId, JSON.stringify({ type: 'log', msg }));
 	}
@@ -492,11 +475,7 @@ function diag(msg: string): void {
 
 // ─── Heartbeat ────────────────────────────────────────────────────────
 
-// startHeartbeat just (re)arms the liveness state on a fresh connection — the
-// actual pinging is driven by the watchdog ticker (see startWatchdog), which is
-// worker-backed so it keeps firing even when EasyEDA's window is backgrounded and
-// the main thread's setInterval is frozen (the old nudge-to-reconnect bug).
-function startHeartbeat(_sessionId: number): void {
+function startHeartbeat(): void {
 	heartbeatPending = false;
 	missedPongs = 0;
 }
@@ -506,9 +485,9 @@ function stopHeartbeat(): void {
 	missedPongs = 0;
 }
 
-// heartbeatTick runs one liveness round on the live connection: count a miss if
-// the previous ping is still unanswered, reconnect after MAX_MISSED_PONGS, else
-// send the next ping (+ piggyback a context refresh). Called by the watchdog.
+// heartbeatTick runs one liveness round on this activation's socket: count a
+// miss if the previous ping is still unanswered, reconnect after
+// MAX_MISSED_PONGS, else send the next ping (+ context refresh).
 function heartbeatTick(): void {
 	if (!handshakeVerified) {
 		return;
@@ -519,8 +498,6 @@ function heartbeatTick(): void {
 		void scanAndConnect();
 	};
 
-	// Liveness check BEFORE sending the next ping: a still-pending ping is a miss.
-	// Only reconnect after MAX_MISSED_PONGS in a row — one lagged pong isn't death.
 	if (heartbeatPending) {
 		missedPongs += 1;
 		if (missedPongs >= MAX_MISSED_PONGS) {

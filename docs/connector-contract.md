@@ -16,7 +16,7 @@ The connector runs inside EasyEDA's webview, which shapes the transport:
 1. For each port in `127.0.0.1:60832-60841` (`0xEDA0`-`0xEDA9`), open a WebSocket to `ws://127.0.0.1:PORT/eda` via `eda.sys_WebSocket.register`.
 2. Wait briefly (~1.5s) for the daemon to send a `handshake` frame. Verify `service === "easyeda-agent"`.
 3. On a valid handshake, generate a `windowId` and send `register`, then `context`.
-4. Start a `ping`/`pong` heartbeat; on a missed pong or socket error, re-scan and reconnect.
+4. Start a `ping`/`pong` heartbeat; on consecutive missed pongs or a socket error, re-scan and reconnect.
 
 ## Required Messages
 
@@ -58,7 +58,7 @@ Sent by the daemon immediately on connect so the connector can confirm it reache
 
 ### ping / pong (heartbeat)
 
-The connector sends `ping` periodically; the daemon answers `pong` echoing the `id`. A missed pong triggers reconnect.
+The connector sends `ping` periodically; the daemon answers `pong` echoing the `id`. Consecutive missed pongs trigger reconnect. Each extension activation uses a distinct host WebSocket id because EasyEDA 3.2.175 can activate one extension more than once in a window; sharing a fixed id would make those activations close each other's connection.
 
 ```json
 { "type": "ping", "id": "hb-1" }

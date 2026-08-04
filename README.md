@@ -130,6 +130,23 @@ clawhub install easyeda-agent
 
 > EasyEDA 需开启「**允许外部交互**」,连接器的 WebSocket 才能连到本地 daemon。
 
+### 可选:MCP 接入
+
+仓库内的 [`mcp/`](mcp) 是一个本地 stdio MCP 适配层,方便 Codex 等支持 MCP 的
+agent 直接发现并调用 `easyeda_*` 工具。它复用现有 `easyeda` CLI/daemon,不会绕过
+typed action、审计、workflow gate 或官方 `eda.*` API;任意 JavaScript 的
+`debug.exec_js` 域不会通过 MCP 暴露。
+
+```bash
+npm --prefix mcp ci --ignore-scripts
+codex mcp add easyeda-agent \
+  --env EASYEDA_BIN="$(command -v easyeda)" \
+  -- node "$(pwd)/mcp/src/server.mjs"
+```
+
+重启 agent 客户端后即可使用。其他 MCP 客户端使用同一 stdio command/env 配置;
+详细工具清单与开发验证见 [`mcp/README.md`](mcp/README.md)。
+
 ## 效果演示
 
 > **完整实战案例:[一份需求文档 → AI 全自动画完 ESP32-S3 四层板](docs/showcase-esp32-mini.md)** ——

@@ -6,21 +6,40 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **新增本地 stdio MCP 适配层**:`mcp/` 将现有 `easyeda` CLI/daemon 的连接健康、action
+  发现、7 个安全 action domain、电路块和 guarded workflow 暴露为 `easyeda_*` tools。
+  MCP 不直连 EasyEDA、不绕过 typed action/审计/workflow gate,并明确不暴露任意
+  JavaScript 的 `debug.exec_js`;mutation 仍要求同时提供 project 与 doc。
+
 ### Fixed
-- **连接器卡死后能自己爬回来:扫描连续失败会轮换 websocket id**(⚠️ 代码已落但**真机未验**,
-  见下)。`eda.sys_WebSocket.register()` 在同 id 连接仍被 EasyEDA 视为 "active" 时会
-  **静默忽略新的 url/callback**(pro-api-types `index.d.ts:21025`;`REGISTER_DELAY_MS`
-  本来就是为同一次连接流程内的这个竞态设的)。**daemon 消失**留下的半关连接会把这个 id
-  焊死,之后每次 register 都被丢弃 —— 连接器永远扫不上,**而且连页面 reload 都救不回来**,
-  实测只有关掉 tab 重开才行(2026-08-04,web 编辑器;同族于桌面版「re-import 不 reload
-  已开窗口、必须完全退出 EasyEDA」)。修法:`WS_ID` 由常量改为可轮换的 `wsId`,连续
-  `WS_ID_ROTATE_AFTER_FAILED_SCANS`(2)轮全端口扫描失败后换成 `easyeda-agent-<n>` ——
-  全新 id 在 EasyEDA 侧没有记录,register 必然生效。happy path(daemon 在线,首轮即连上)
-  始终用基础 id,不受影响;daemon 真的不在时轮换也无副作用。旧 id 会尽力 close,
-  若 EasyEDA 始终不释放 —— 那正是我们要逃离的状态,泄漏一个死注册远比永不重连划算。
-  **验证状态**:tsc + 86 单测通过,但轮换真正要证明的是「换 id 后 register 能生效」,
-  这只能在真机上验(停 daemon → 等 ≥2 轮扫描失败 → 起 daemon → 不关 tab 能否自动恢复),
-  **尚未做**。
+- **修复 EasyEDA Pro 3.2.175 重复激活同一扩展时的永久重连风暴**:旧连接器的所有激活
+  实例共用固定 host WebSocket id,会互相 close/register 同一 socket,表现为交错 heartbeat、
+  windowId 持续变化、`AMBIGUOUS_PROJECT` 和 action response 丢失。现在每次激活生成独立
+  socket id;daemon 仅在 project/document/type/tab 四项完整且完全相同时把连接视为 transport
+  duplicate,并路由到最新连接。真实不同 tab 或身份不完整仍保持 ambiguous,不会静默误路由。
+- **连接器卡死后能自己爬回来:扫描连续失败会轮换 websocket id**(叠加在同版
+  activation-scoped id 之上)。`eda.sys_WebSocket.register()` 在同 id 连接仍被 EasyEDA 视为
+  "active" 时会**静默忽略新的 url/callback**(pro-api-types `index.d.ts:21025`)。
+  activation-scoped id 解决的是「同窗口多激活互踢」,解决不了「**本激活自己的 id 被判为
+  active 后 register 全被忽略**」——连续 `WS_ID_ROTATE_AFTER_FAILED_SCANS`(2)轮全端口
+  扫描失败后换成 `<base>-r<n>`,全新 id 在 EasyEDA 侧没有记录,register 必然生效。
+  happy path(daemon 在线、首轮即连上)始终用基础 id 不受影响;daemon 真不在时轮换也无副作用。
+  **真机 soak 实测(2026-08-04,web 编辑器;停 daemon 后不关 tab、不 reload,看能否自愈)**:
+
+  | 版本 | 停 45s | 停 60s | 停 75s |
+  |---|---|---|---|
+  | 仅 activation-scoped | ✅ 5s | ❌ 210s 未自愈 | — |
+  | + 轮换 | ✅ 5s | ✅ 5s | ❌ 120s 未自愈 / 同条件重测 ✅ 90s |
+
+  **两者都只是改善概率,都没根治** —— 真实形态不是「永不恢复」而是「**恢复耗时不可预测**」
+  (5s / 90s / 210s+)。根因待查,而排查被下面这条可观测性缺陷挡住。
+- **连接器诊断日志此前在最需要时不可见,现补 console 输出**:`diag()` 只经 WebSocket 发给
+  daemon —— **断线时恰好发不出去**,而断线正是唯一需要它的时刻;这正是上面那个 bug 长期
+  难查的结构性原因。现在同时 `console.log`,并在每轮扫描起手打 `scan start
+  session/retryCount/wsId`。⚠️ 已知局限:连接器跑在扩展沙箱上下文,该 console **不汇总到
+  主页面 console**(chrome-devtools `list_console_messages` 看不到),取日志的途径仍待解决。
+
 - **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
   audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,
   **成功 0 次**,却一直挂在 skill 文档里。根因不在我们的调用姿势,而在旧实现**直接透传平台的
@@ -38,7 +57,6 @@ follow [SemVer](https://semver.org/).
 - **audit log 记录 `errorDetail`** —— 协议 `Error.Detail`(连接器捕获的平台原始报错)此前
   被丢弃,日志里只剩我们自己的包装文案(如 "Failed to modify schematic page title block."),
   事后定位根因无从谈起:上面那条 titleblock 的调查只能从 payload 反推。现在原始错误一并落盘。
-
 ## [0.18.3] - 2026-08-01
 
 ### Added
