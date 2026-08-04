@@ -69,6 +69,18 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 // load (canvas redraw, GC). Only give up after this many pings go unanswered in
 // a row (~9s of true silence).
 const MAX_MISSED_PONGS = 3;
+// Per-port attempt budget. Every dead port burns this in full — register() never
+// reports a refused connection, so only the timeout ends the attempt.
+//
+// It is tempting to shrink this (10 dead ports ≈ 18s here), and 600ms was tried:
+// **it made recovery strictly worse** (soak 2026-08-04: 45s ✅ / 60s ❌ / 75s ❌
+// vs 45s ✅ / 60s ✅ / 75s ❌ at 1500ms; one run reached scan session=58 without
+// ever reconnecting). A faster sweep doubles the rate of close()/register()
+// cycles against EasyEDA's shared socket table, and REGISTER_DELAY_MS's 200ms
+// release window stops being enough — the real bottleneck is that id state
+// machine, not latency, so speeding the loop up feeds the very race it loses.
+// The sweep cost is instead removed by scanOrder(): a reconnect normally probes
+// ONE port, not ten.
 const CONNECTION_TIMEOUT_MS = 1500;
 // A full 10-port scan (each up to CONNECTION_TIMEOUT_MS + REGISTER_DELAY_MS) settles
 // in well under 20s. If `isConnecting` stays true longer than this many watchdog
@@ -90,6 +102,9 @@ const STORAGE_KEY_AUTO_CONNECT = 'autoConnectEnabled';
 // ─── State ────────────────────────────────────────────────────────────
 
 let currentPort: number | null = null;
+// The last port that completed a handshake. Survives disconnects on purpose —
+// it is the hint that makes a reconnect a single attempt instead of a sweep.
+let lastGoodPort: number | null = null;
 let handshakeVerified = false;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let watchdogStarted = false;
@@ -151,6 +166,33 @@ function nextConnectionSessionId(): number {
 
 function isConnectionSessionActive(sessionId: number): boolean {
 	return sessionId === connectionSessionId;
+}
+
+/**
+ * Port order for one scan: the last port that worked first, then the rest.
+ *
+ * Measured on a live editor (2026-08-04, first offline log capture): a full
+ * sweep costs ~18s because every dead port burns the whole
+ * CONNECTION_TIMEOUT_MS — `eda.sys_WebSocket.register()` never reports a
+ * refused connection, so only the timeout ends the attempt. With the daemon on
+ * 60832 (the range's first port) that was survivable; the moment it sits later
+ * in the range, every reconnect pays for all the dead ports before it.
+ *
+ * A restarted daemon re-binds the same port in practice (it scans the range in
+ * order and takes the first free one), so trying the last known-good port first
+ * turns the common reconnect from a sweep into a single attempt.
+ */
+export function scanOrder(lastGood: number | null, start = PORT_START, end = PORT_END): number[] {
+	const ports: number[] = [];
+	if (lastGood !== null && lastGood >= start && lastGood <= end) {
+		ports.push(lastGood);
+	}
+	for (let port = start; port <= end; port++) {
+		if (port !== lastGood) {
+			ports.push(port);
+		}
+	}
+	return ports;
 }
 
 function rotateWsId(): void {
@@ -236,7 +278,7 @@ async function scanAndConnect(): Promise<void> {
 	diag(`scan start session=${sessionId} retryCount=${retryCount} wsId=${wsId}`);
 
 	try {
-		for (let port = PORT_START; port <= PORT_END; port++) {
+		for (const port of scanOrder(lastGoodPort)) {
 			if (!isConnectionSessionActive(sessionId)) {
 				return;
 			}
@@ -248,6 +290,10 @@ async function scanAndConnect(): Promise<void> {
 
 			if (found) {
 				currentPort = port;
+				// Remember it: a daemon that restarts almost always re-binds the
+				// same port, so this is what turns a reconnect from a full sweep
+				// into a single attempt (see scanOrder).
+				lastGoodPort = port;
 				retryCount = 0;
 				startHeartbeat();
 				return;

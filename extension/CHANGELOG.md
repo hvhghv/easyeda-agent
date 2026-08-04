@@ -49,6 +49,17 @@ follow [SemVer](https://semver.org/).
   超时兜底),叠加 `retryCount>5` 后的 10s 慢重试 → 一个周期 ~28s。这就是「恢复耗时
   不可预测」的直接来源,也是下一步要收的口子。
 
+- **重连不再每次都全端口重扫:优先重试上次成功的端口**(`scanOrder`)。断线期日志显示
+  一轮全扫要 ~18s,因为 `eda.sys_WebSocket.register()` **从不报告"连接被拒"**,每个空端口
+  都得烧满 `CONNECTION_TIMEOUT_MS`。而重启的 daemon 实际上总是重新绑到同一个端口
+  (它按序取范围内第一个空闲端口),所以先试上次成功的端口能把常见重连从「整轮扫描」
+  变成「一次尝试」。4 个单测钉住顺序、去重、越界历史值与全覆盖。
+  ⚠️ **同期试过把 `CONNECTION_TIMEOUT_MS` 1500→600 加速全扫,实测是负优化并已回退**:
+  soak 从 `45s✅/60s✅/75s❌` 退到 `45s✅/60s❌/75s❌`,有一轮扫到 `session=58` 仍未重连。
+  更快的扫描 = 单位时间内 close()/register() 循环翻倍,而 `REGISTER_DELAY_MS` 那 200ms
+  的 id 释放窗口本就紧张 —— **瓶颈是 EasyEDA 那张共享 socket 表的状态机,不是延迟**,
+  加速只会喂大它输掉的那场竞争。理由已写进常量注释,免得下次有人再"优化"一遍。
+
 - **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
   audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,
   **成功 0 次**,却一直挂在 skill 文档里。根因不在我们的调用姿势,而在旧实现**直接透传平台的
