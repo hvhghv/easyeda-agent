@@ -35,7 +35,24 @@ import {
 
 // ─── Configuration ───────────────────────────────────────────────────
 
-const WS_ID = 'easyeda-agent';
+// Base id for eda.sys_WebSocket registrations. NOT used directly — see wsId.
+const WS_ID_BASE = 'easyeda-agent';
+// After this many consecutive fully-failed scans, mint a NEW websocket id.
+//
+// Why this exists (2026-08-04, real-machine): `register()` silently ignores the
+// new url/callback while a connection with the same id is still "active" on
+// EasyEDA's side (pro-api-types index.d.ts:21025 — the same trap REGISTER_DELAY_MS
+// guards within one attempt). When the DAEMON disappears, the half-closed socket
+// can leave that id wedged "active" indefinitely, and every later register() is
+// dropped on the floor: the connector scans forever, and **even a page reload
+// does not recover it** — only closing the tab did. Same family as the desktop
+// "re-import doesn't reload an open window, fully quit EasyEDA" trap.
+//
+// A fresh id has no such record, so register() is guaranteed to take effect.
+// Rotating only after repeated whole-range failures keeps the happy path (daemon
+// present → first scan connects) on the stable id, and costs nothing when the
+// daemon is genuinely absent.
+const WS_ID_ROTATE_AFTER_FAILED_SCANS = 2;
 const PORT_START = 0xeda0; // 60832 — "EDA0" in hex; own range, no official-gateway conflict
 const PORT_END = 0xeda9; // 60841
 const RETRY_DELAY_MS = 3000;
@@ -75,6 +92,12 @@ const REGISTER_DELAY_MS = 200;
 const STORAGE_KEY_AUTO_CONNECT = 'autoConnectEnabled';
 
 // ─── State ────────────────────────────────────────────────────────────
+
+// The websocket id currently registered with EasyEDA. Starts at WS_ID_BASE and
+// only ever rotates when repeated scans fail (see WS_ID_ROTATE_AFTER_FAILED_SCANS),
+// so the id stays stable and greppable in the normal case.
+let wsId: string = WS_ID_BASE;
+let wsIdGeneration = 0;
 
 let currentPort: number | null = null;
 let handshakeVerified = false;
@@ -142,9 +165,28 @@ function isConnectionSessionActive(sessionId: number): boolean {
 
 function closeWebSocket(): void {
 	try {
-		eda.sys_WebSocket.close(WS_ID);
+		eda.sys_WebSocket.close(wsId);
 	}
 	catch { /* ignore */ }
+}
+
+/**
+ * Mint a fresh websocket id after repeated scan failures.
+ *
+ * The escape hatch for a wedged id: EasyEDA drops `register()` on the floor
+ * while it still considers the id "active", and a daemon that vanished can
+ * leave it that way for good — the connector then scans forever and even a page
+ * reload does not clear it. A brand-new id has no such record.
+ *
+ * The old id is closed best-effort first; if EasyEDA never releases it, that is
+ * precisely the condition we are escaping, and leaking one dead registration is
+ * far cheaper than never reconnecting.
+ */
+function rotateWsId(): void {
+	closeWebSocket();
+	wsIdGeneration += 1;
+	wsId = `${WS_ID_BASE}-${wsIdGeneration}`;
+	diag(`rotated websocket id → ${wsId} (previous id never accepted a registration)`);
 }
 
 function cancelConnectionFlow(resetRetryCount = true): void {
@@ -234,6 +276,14 @@ async function scanAndConnect(): Promise<void> {
 		}
 
 		retryCount++;
+		// A whole range scanned with nothing accepted means either the daemon is
+		// absent, or our websocket id is wedged "active" on EasyEDA's side and
+		// every register() is being ignored. The two are indistinguishable from
+		// here — so after a couple of failed sweeps, rotate the id. Harmless if
+		// the daemon was simply down; the only way back if the id was wedged.
+		if (retryCount % WS_ID_ROTATE_AFTER_FAILED_SCANS === 0) {
+			rotateWsId();
+		}
 		// Daemon is genuinely gone — let the next successful connect announce again.
 		connectionAnnounced = false;
 		// Toast ONCE per outage (on the first failed scan), then retry SILENTLY.
@@ -308,7 +358,7 @@ function tryConnectToPort(port: number, sessionId: number): Promise<boolean> {
 
 			try {
 				eda.sys_WebSocket.register(
-					WS_ID,
+					wsId,
 					`ws://127.0.0.1:${port}/eda`,
 					async (event: MessageEvent) => {
 						let msg: InboundFrame;
@@ -419,7 +469,7 @@ async function sendContext(force = false): Promise<void> {
 
 function sendFrame(frame: unknown): void {
 	try {
-		eda.sys_WebSocket.send(WS_ID, JSON.stringify(frame));
+		eda.sys_WebSocket.send(wsId, JSON.stringify(frame));
 	}
 	catch (err) {
 		console.error('[easyeda-agent] Failed to send frame:', err);
@@ -435,7 +485,7 @@ function sendFrame(frame: unknown): void {
  */
 function diag(msg: string): void {
 	try {
-		eda.sys_WebSocket.send(WS_ID, JSON.stringify({ type: 'log', msg }));
+		eda.sys_WebSocket.send(wsId, JSON.stringify({ type: 'log', msg }));
 	}
 	catch { /* socket not ready — ignore */ }
 }
@@ -487,7 +537,7 @@ function heartbeatTick(): void {
 	try {
 		// Send directly (not via sendFrame) so a throw — the socket is gone —
 		// becomes an immediate reconnect signal.
-		eda.sys_WebSocket.send(WS_ID, JSON.stringify({ type: 'ping', id: `hb-${heartbeatSeq}` }));
+		eda.sys_WebSocket.send(wsId, JSON.stringify({ type: 'ping', id: `hb-${heartbeatSeq}` }));
 	}
 	catch {
 		reconnectNow('heartbeat send failed (socket gone)');

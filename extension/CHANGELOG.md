@@ -7,6 +7,20 @@ follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **连接器卡死后能自己爬回来:扫描连续失败会轮换 websocket id**(⚠️ 代码已落但**真机未验**,
+  见下)。`eda.sys_WebSocket.register()` 在同 id 连接仍被 EasyEDA 视为 "active" 时会
+  **静默忽略新的 url/callback**(pro-api-types `index.d.ts:21025`;`REGISTER_DELAY_MS`
+  本来就是为同一次连接流程内的这个竞态设的)。**daemon 消失**留下的半关连接会把这个 id
+  焊死,之后每次 register 都被丢弃 —— 连接器永远扫不上,**而且连页面 reload 都救不回来**,
+  实测只有关掉 tab 重开才行(2026-08-04,web 编辑器;同族于桌面版「re-import 不 reload
+  已开窗口、必须完全退出 EasyEDA」)。修法:`WS_ID` 由常量改为可轮换的 `wsId`,连续
+  `WS_ID_ROTATE_AFTER_FAILED_SCANS`(2)轮全端口扫描失败后换成 `easyeda-agent-<n>` ——
+  全新 id 在 EasyEDA 侧没有记录,register 必然生效。happy path(daemon 在线,首轮即连上)
+  始终用基础 id,不受影响;daemon 真的不在时轮换也无副作用。旧 id 会尽力 close,
+  若 EasyEDA 始终不释放 —— 那正是我们要逃离的状态,泄漏一个死注册远比永不重连划算。
+  **验证状态**:tsc + 86 单测通过,但轮换真正要证明的是「换 id 后 register 能生效」,
+  这只能在真机上验(停 daemon → 等 ≥2 轮扫描失败 → 起 daemon → 不关 tab 能否自动恢复),
+  **尚未做**。
 - **`schematic.titleblock.modify` 从「32 次调用 0 次成功」修到有回读验证** —— 这条是
   audit log 离线体检(`scripts/audit-baseline.py`)抓出来的:该 action 历史上被调用 32 次,
   **成功 0 次**,却一直挂在 skill 文档里。根因不在我们的调用姿势,而在旧实现**直接透传平台的
