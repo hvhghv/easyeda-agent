@@ -355,6 +355,26 @@ func (s *Server) persistArtifacts(resp *protocol.Response, dir string) {
 		a.Size = int64(len(data))
 		a.SHA256 = hex.EncodeToString(sum[:])
 	}
+
+	// Mirror the absolute on-disk path(s) INTO result: agents read `result`
+	// first and routinely miss the sibling top-level `artifacts` array, then
+	// can't find the file (live feedback). result.artifactPath = first (the
+	// common single-artifact case); artifactPaths lists all when there are more.
+	paths := make([]string, 0, len(resp.Artifacts))
+	for i := range resp.Artifacts {
+		if p := resp.Artifacts[i].Path; p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) > 0 {
+		if resp.Result == nil {
+			resp.Result = map[string]any{}
+		}
+		resp.Result["artifactPath"] = paths[0]
+		if len(paths) > 1 {
+			resp.Result["artifactPaths"] = paths
+		}
+	}
 }
 
 // systemHealthResponse reports daemon liveness and the connected windows.

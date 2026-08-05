@@ -70,7 +70,7 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 
 - `schematic.components.list` — 当前页（或全页）所有元件，可含 pins
 - `schematic.select` — 按 primitiveId 选中图元
-- `schematic.snapshot` — 截取当前渲染区域为 PNG artifact。**默认先「适应全部」再截**（整张图入画，无需另调 `view.fit`）；`easyeda sch snapshot --no-fit` 保留当前视口。**局部截图**：先 `easyeda view region --left --right --top --bottom`（或 `view zoom --x --y --scale`）框住目标区域，再 `easyeda sch snapshot --no-fit` 截该视口
+- `schematic.snapshot` — 截取当前渲染区域为 PNG artifact。**默认先「适应全部」再截**（整张图入画，无需另调 `view.fit`）；`easyeda sch snapshot --no-fit` 保留当前视口。**局部截图**：先 `easyeda view region --left --right --top --bottom`（或 `view zoom --x --y --scale`）框住目标区域，再 `easyeda sch snapshot --no-fit` 截该视口。**落盘绝对路径**在 `result.artifactPath`（所有产 artifact 的动作统一如此，含 pcb snapshot/BOM/网表导出），stderr 另有 `📎 artifact saved: <path>` 一行 —— 读图直接用这个路径
 
 ## Mutate Schematic
 

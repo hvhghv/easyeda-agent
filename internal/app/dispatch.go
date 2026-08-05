@@ -83,6 +83,7 @@ func dispatchTimed(cfg *appConfig, action, window string, payload any, timeout t
 	if len(respBody) > 0 && respBody[len(respBody)-1] != '\n' {
 		fmt.Fprintln(stdout)
 	}
+	printArtifactPaths(respBody, stderr)
 
 	var parsed struct {
 		OK bool `json:"ok"`
@@ -91,6 +92,28 @@ func dispatchTimed(cfg *appConfig, action, window string, payload any, timeout t
 		return errActionFailed
 	}
 	return nil
+}
+
+// printArtifactPaths surfaces each persisted artifact's ABSOLUTE path as one
+// unmissable stderr line. The JSON already carries artifacts[].path (and the
+// daemon mirrors it into result.artifactPath), but agents scanning the result
+// block have repeatedly failed to locate the file — an explicit line removes
+// the treasure hunt without touching the machine-readable stdout stream.
+func printArtifactPaths(respBody []byte, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	var parsed struct {
+		Artifacts []artifactRef `json:"artifacts"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return
+	}
+	for _, a := range parsed.Artifacts {
+		if a.Path != "" {
+			fmt.Fprintf(stderr, "📎 artifact saved: %s\n", a.Path)
+		}
+	}
 }
 
 // actionContext mirrors the live project/document context the connector attaches
@@ -210,6 +233,7 @@ func dispatchCapture(cfg *appConfig, action, window string, payload any, stdout 
 	if len(respBody) > 0 && respBody[len(respBody)-1] != '\n' {
 		fmt.Fprintln(stdout)
 	}
+	printArtifactPaths(respBody, os.Stderr)
 
 	var parsed struct {
 		OK        bool           `json:"ok"`
