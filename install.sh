@@ -235,7 +235,7 @@ printf '     a) Sideload this release (strictly CLI-version-locked, recommended)
 printf '          Download: %s/easyeda-agent-connector.eext\n' "$BASE_URL"
 printf '          In EasyEDA Pro: 扩展管理 → 导入扩展 → select the .eext file\n'
 printf '     b) 立创官方插件市场 (one-click, auto-updates in place; may lag the CLI):\n'
-printf '          https://jlc-ext.com/item/zhoushoujian/eda-agent-connector\n'
+printf '          https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector\n'
 printf '          (renamed from easyeda-agent-connector; same uuid — existing installs\n'
 printf '           keep auto-updating in place, no action needed)\n\n'
 printf '  3. In EasyEDA Pro: 设置 → 允许外部交互 (Allow external interaction)\n\n'

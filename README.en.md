@@ -92,15 +92,15 @@ parts point back into the standard-parts library (BOM-ready).
 Install the `easyeda` CLI/daemon first, then add the EasyEDA connector — two
 channels: import the **strictly CLI-version-locked** GitHub-Release `.eext` whose URL
 the installer prints, or one-click install from the
-[**official 立创EDA marketplace**](https://jlc-ext.com/item/zhoushoujian/eda-agent-connector)
+[**official 立创EDA marketplace**](https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector)
 (the platform auto-updates it in place, but the listing can lag the CLI — use the
 Release `.eext` when the four-piece kit must be strictly same-version):
 
-> **ℹ️ Rename notice (2026-08)**: at the marketplace admins' request the extension was
-> renamed `easyeda-agent-connector` → **`eda-agent-connector`** (display name
-> "EDA Agent Connector"; no "easyeda" in the name/publisher). Per the admins the
-> **uuid stays the same** and the SAME listing is re-uploaded under the new name —
-> in-place auto-update for existing installs is unaffected; no action needed.
+> **ℹ️ Rename notice (2026-08)**: at the marketplace admins' request the extension's
+> **display name** changed to **"EDA Agent Connector"** (no "easyeda" in it). Per the
+> admins the internal package name `easyeda-agent-connector` and the uuid both **stay
+> the same** — the SAME listing is re-uploaded; in-place auto-update for existing
+> installs is unaffected, no action needed.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh

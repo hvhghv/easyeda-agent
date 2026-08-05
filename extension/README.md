@@ -52,14 +52,14 @@ Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 
 **1. 装本连接器**（两条通道任选）：
 
-- 在[立创官方插件市场](https://jlc-ext.com/item/zhoushoujian/eda-agent-connector)点击「安装」—— 平台可原地自动更新，最省心；
+- 在[立创官方插件市场](https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector)点击「安装」—— 平台可原地自动更新，最省心；
 - 或从 [GitHub Release](https://github.com/zhoushoujianwork/easyeda-agent/releases/latest) 侧载 `easyeda-agent-connector.eext` —— 与 CLI **严格同版**。
 
 > 市场上架版本可能**滞后于 CLI**。四件套需严格同版时，请以 GitHub Release 里与 CLI 对齐的 `.eext` 为准；市场版胜在平台自动更新，但可能落后。
 
-> **更名说明（2026-08）**：应市场管理规范要求，本插件由 `easyeda-agent-connector`
-> 更名为 **`eda-agent-connector`**（显示名 EDA Agent Connector）。uuid 保持不变，
-> 同一条目更名后重新上传 —— 已装用户的原地自动更新不受影响，无需任何操作。
+> **更名说明（2026-08）**：应市场管理规范要求，本插件**显示名**改为
+> **EDA Agent Connector**（不再含 "easyeda" 字样）。内部包名与 uuid 均保持不变，
+> 同一条目重新上传 —— 已装用户的原地自动更新不受影响，无需任何操作。
 
 **2. 装 CLI/daemon 并启动**：
 
