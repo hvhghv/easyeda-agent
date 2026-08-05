@@ -315,6 +315,17 @@ func AllActions() []ActionSpec {
 			VerifyWith:  []string{"schematic.components.list", "schematic.drc.check"},
 		},
 		{
+			Name:        "schematic.component.resolve_lcsc",
+			Domain:      DomainSchematic,
+			Phase:       1,
+			Mutates:     true,
+			NeedsWindow: true,
+			Description: "Batch-resolve every placed part on the ACTIVE page to its device's REAL LCSC C-number, deterministically (#158): exact-match chain only (instance C# → MPN equality → project-library name), the match's footprint must equal the instance's, and NOTHING is ever guessed — a bare lib_Device.search takes fragment-matched garbage (live: U.FL antenna socket resolved to a C1017 ferrite bead via r[0]) and lone hits with a different footprint are package-variant mismatches (SMBJ33A LS5.4 vs LS5.3), so both cases land in result.unresolved WITH candidates for a human call. apply=true writes resolved C-numbers back onto instances whose supplierId is not a real C# (the platform subPartName default, #157) — the one-command 166-part supplierId repair. Per-MPN+footprint cached; read-only unless apply. Page-lazy-load law: active page only — sweep pages via --page/doc switch.",
+			Inputs:      []string{"primitiveId optional (single part)", "apply optional (default false = dry-run report)"},
+			Outputs:     []string{"total", "resolvedCount", "unresolvedCount", "appliedCount (with apply)", "items[].{designator,lcsc,via,footprint,previousSupplierId,applied}", "unresolved[].{designator,mpn,footprint,reason,candidates}"},
+			VerifyWith:  []string{"schematic.components.list"},
+		},
+		{
 			Name:        "schematic.text.list",
 			Domain:      DomainSchematic,
 			Phase:       1,

@@ -4,6 +4,18 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`schematic.component.resolve_lcsc`(#158)—— 确定性「已放置器件→真 C 号」批量解析**。
+  精确匹配链(实例 C 号 → MPN 严格相等 → 工程库名),匹配的**封装必须与实例一致**
+  (唯一命中但封装不同 = 封装变体不符,照样 unresolved)——绝不模糊兜底
+  (真机事故:裸 search("U.FL-R-SMT-1(01)") 的 r[0] 是 C1017 磁珠)。默认 dry-run;
+  `apply` 把 C 号写回 supplierId 非 C 号形状的实例(整板修复一条命令,166 件场景
+  免手工)。unresolved 附候选;同 MPN+封装缓存。replace/rebind 的身份解析同步加固
+  (唯一命中也强制封装一致)。CLI `easyeda sch resolve-lcsc [--apply] [--page]`。
+  真机验:坏 supplierId 件 via=mpn 解析+写回,已带真 C 号件 via=instance 不重写。
+
 ## [0.21.2] - 2026-08-05
 
 ### Changed

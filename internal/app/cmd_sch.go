@@ -761,6 +761,61 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 		sch.AddCommand(c)
 	}
 
+	// ── resolve-lcsc ─────────────────────────────────────────────────────────
+	// schematic.component.resolve_lcsc (#158) — deterministic placed-part → C#.
+	{
+		var id, page string
+		var apply, stay bool
+		c := &cobra.Command{
+			Use:   "resolve-lcsc",
+			Short: "Deterministically resolve placed parts to their device's REAL LCSC C-number (dry-run; --apply writes back)",
+			Args:  cobra.NoArgs,
+			Long: `Resolve every placed part on the active page to its device's REAL LCSC
+C-number — deterministically, never by fuzzy guessing (#158).
+
+Chain: instance C# (if already real) → exact-MPN library match → project-library
+name match; the match's footprint must equal the instance's. A bare
+lib_Device.search picks fragment-matched garbage (a U.FL antenna socket resolved
+to a C1017 ferrite bead), and a lone hit with a different footprint is a
+package-variant mismatch — both land in result.unresolved WITH candidates
+instead of being silently applied.
+
+--apply writes each resolved C-number onto instances whose supplierId is not a
+real C# (the platform defaults it to the subPartName, #157) — the one-command
+version of a whole-board supplierId repair. Multi-page projects: run per page
+(--page or doc switch); only the active page is scanned.`,
+			Example: `  easyeda sch resolve-lcsc                 # dry-run report
+  easyeda sch resolve-lcsc --apply         # write resolved C#s back
+  easyeda sch resolve-lcsc --page P2 --apply
+  easyeda sch resolve-lcsc --id <primitiveId>`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if page != "" {
+					scope, err := switchToPage(cfg, window, page)
+					if err != nil {
+						return err
+					}
+					if !stay {
+						defer func() { _ = scope.restore(cfg) }()
+					}
+					window = scope.window
+				}
+				payload := map[string]any{}
+				if id != "" {
+					payload["primitiveId"] = id
+				}
+				if apply {
+					payload["apply"] = true
+				}
+				return dispatchTimed(cfg, "schematic.component.resolve_lcsc", window, payload, rebindTimeout, stdout, stderr)
+			},
+		}
+		c.Flags().StringVar(&id, "id", "", "resolve a single part by primitive ID")
+		c.Flags().BoolVar(&apply, "apply", false, "write resolved C-numbers back onto instances whose supplierId is not a real C#")
+		c.Flags().StringVar(&page, "page", "", "switch to this page (name|uuid) first, then switch back")
+		c.Flags().BoolVar(&stay, "stay", false, "with --page, stay on the target page")
+		sch.AddCommand(c)
+	}
+
 	// ── text-list ────────────────────────────────────────────────────────────
 	// schematic.text.list (#156) — read-only enumeration of text primitives.
 	{

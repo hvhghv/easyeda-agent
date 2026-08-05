@@ -3801,59 +3801,192 @@ export function diffPins(
  * library-searchable MPN). Throws when unresolvable — the caller must abort
  * BEFORE touching the canvas rather than run without a working rollback.
  */
-async function resolvePlacedDeviceIdentity(
-	snapshot: Record<string, unknown>,
-): Promise<DeviceRef & { via: string }> {
+/** A resolution candidate surfaced when the safe chain refuses to pick. */
+interface LcscCandidate { name: string; lcsc: string; footprintName: string; uuid: string }
+
+/** Structured outcome of the safe placed-part → device resolution (#158). */
+interface DeviceResolution {
+	device?: DeviceRef & { via: string };
+	lcsc?: string;
+	deviceFootprint?: string;
+	reason?: string;
+	candidates?: Array<LcscCandidate>;
+}
+
+const asCandidate = (r: Record<string, unknown>): LcscCandidate => ({
+	name: String(r.name ?? ''),
+	lcsc: String(r.supplierId ?? ''),
+	footprintName: String(r.footprintName ?? ''),
+	uuid: String(r.uuid ?? ''),
+});
+
+/**
+ * Safe structured resolver behind resolvePlacedDeviceIdentity — NEVER falls
+ * back to an unrelated first hit (#158: a bare `search("U.FL-R-SMT-1(01)")`
+ * returns fragment-matched garbage — a ferrite bead ranked first — and a
+ * take-r[0] caller silently swaps an antenna socket for C1017). Match rules:
+ * exact-field equality only (manufacturerId / name), and when the instance
+ * knows its footprint the match's footprintName MUST equal it — a lone hit
+ * with a DIFFERENT footprint is a package-variant mismatch (SMBJ33A LS5.4 vs
+ * LS5.3 family), reported as unresolved WITH candidates instead of picked.
+ */
+async function resolvePlacedDevice(snapshot: Record<string, unknown>): Promise<DeviceResolution> {
+	const instanceFp = (snapshot.footprint as Record<string, unknown> | undefined)?.name;
+	const fpName = typeof instanceFp === 'string' ? instanceFp : '';
+	const finish = (hits: Array<Record<string, unknown>>, via: string): DeviceResolution | undefined => {
+		let pool = hits.filter(r => typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
+		const before = pool;
+		if (fpName) pool = pool.filter(r => r.footprintName === fpName);
+		if (pool.length === 1) {
+			const hit = pool[0];
+			return {
+				device: { uuid: hit.uuid as string, libraryUuid: hit.libraryUuid as string, via },
+				lcsc: /^C\d+$/.test(String(hit.supplierId ?? '')) ? String(hit.supplierId) : undefined,
+				deviceFootprint: String(hit.footprintName ?? ''),
+			};
+		}
+		if (before.length > 0) {
+			return {
+				reason: pool.length === 0
+					? `matched ${before.length} device(s) by ${via} but NONE carries the instance footprint "${fpName}" (package-variant mismatch)`
+					: `${pool.length} devices match by ${via} + footprint — ambiguous`,
+				candidates: before.slice(0, 5).map(asCandidate),
+			};
+		}
+		return undefined;
+	};
+
 	const supplierId = typeof snapshot.supplierId === 'string' ? snapshot.supplierId : '';
 	if (/^C\d+$/.test(supplierId)) {
 		try {
 			const raw = (await eda.lib_Device.getByLcscIds([supplierId])) as unknown as Array<Record<string, unknown>>;
-			const hits = (Array.isArray(raw) ? raw : []).filter(r => typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
-			if (hits.length === 1) {
-				return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'lcsc' };
-			}
+			const r = finish(Array.isArray(raw) ? raw : [], 'lcsc');
+			if (r) return r;
 		}
 		catch { /* fall through to the MPN chain */ }
 	}
 	const mpn = typeof snapshot.manufacturerId === 'string' ? snapshot.manufacturerId : '';
 	if (mpn) {
 		let raw: Array<Record<string, unknown>> = [];
-		try {
-			raw = (await eda.lib_Device.search(mpn)) as unknown as Array<Record<string, unknown>>;
-		}
+		try { raw = (await eda.lib_Device.search(mpn)) as unknown as Array<Record<string, unknown>>; }
 		catch { /* handled below */ }
-		let hits = (Array.isArray(raw) ? raw : []).filter(r => r.manufacturerId === mpn
-			&& typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
-		if (hits.length > 1) {
-			const fp = (snapshot.footprint as Record<string, unknown> | undefined)?.name;
-			if (typeof fp === 'string' && fp) hits = hits.filter(r => r.footprintName === fp);
-		}
-		if (hits.length === 1) {
-			return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'mpn' };
-		}
+		const r = finish((Array.isArray(raw) ? raw : []).filter(h => h.manufacturerId === mpn), 'mpn');
+		if (r) return r;
 	}
 	// Imported (Altium/KiCad) devices live in the project library under their
 	// device name, with no C-number and no online-searchable MPN.
 	const name = typeof snapshot.name === 'string' ? snapshot.name : '';
 	if (name && !name.startsWith('={')) {
 		let raw: Array<Record<string, unknown>> = [];
-		try {
-			raw = (await eda.lib_Device.search(name, 'project')) as unknown as Array<Record<string, unknown>>;
-		}
+		try { raw = (await eda.lib_Device.search(name, 'project')) as unknown as Array<Record<string, unknown>>; }
 		catch { /* handled below */ }
-		const hits = (Array.isArray(raw) ? raw : []).filter(r => r.name === name
-			&& typeof r.uuid === 'string' && typeof r.libraryUuid === 'string');
-		if (hits.length === 1) {
-			return { uuid: hits[0].uuid as string, libraryUuid: hits[0].libraryUuid as string, via: 'project-name' };
-		}
+		const r = finish((Array.isArray(raw) ? raw : []).filter(h => h.name === name), 'project-name');
+		if (r) return r;
 	}
+	return { reason: 'no exact LCSC/MPN/project-name library match' };
+}
+
+async function resolvePlacedDeviceIdentity(
+	snapshot: Record<string, unknown>,
+): Promise<DeviceRef & { via: string }> {
+	const res = await resolvePlacedDevice(snapshot);
+	if (res.device) return res.device;
 	throw new ActionError(
 		ErrorCodes.INVALID_STATE,
-		'Cannot resolve the placed component\'s 32-char device-library uuid (no unique LCSC/MPN/project-name library match) — '
+		`Cannot resolve the placed component's 32-char device-library uuid (${res.reason ?? 'no match'}) — `
 		+ 'aborting BEFORE any canvas change because rollback would be impossible. '
 		+ 'Note: the component\'s own device.uuid is a 16-char placed-symbol id and cannot re-create the part.',
 	);
 }
+
+/**
+ * schematic.component.resolve_lcsc (#158) — batch-resolve every placed part on
+ * the ACTIVE page to its device's REAL LCSC C-number, deterministically:
+ * exact-match chain only (instance C# → MPN → project-name), footprint must
+ * agree, NEVER pick an unrelated first hit; anything not uniquely provable is
+ * reported as unresolved WITH candidates for a human call. apply=true writes
+ * the resolved C-number back onto instances whose supplierId is not a real C#
+ * (the platform's subPartName default, #157) — the one-command version of the
+ * 166-part supplierId repair that motivated the issue.
+ */
+const schematicComponentResolveLcsc: Handler = async (payload) => {
+	const onlyId = optionalString(payload, 'primitiveId');
+	const apply = optionalBoolean(payload, 'apply') === true;
+
+	let comps;
+	try { comps = await eda.sch_PrimitiveComponent.getAll(); }
+	catch (err) { throw edaError(err, 'Failed to list schematic components.'); }
+	const parts = (comps ?? []).filter((c) => {
+		try {
+			if (String(c.getState_ComponentType()) !== 'part') return false;
+			return !onlyId || c.getState_PrimitiveId() === onlyId;
+		}
+		catch { return false; }
+	});
+	if (onlyId && parts.length === 0) {
+		throw new ActionError(ErrorCodes.INVALID_STATE, `No part with primitiveId "${onlyId}" on the active page.`);
+	}
+
+	// Same MPN ⇒ same resolution: cache per manufacturerId+footprint so a
+	// 166-part board does tens, not hundreds, of online searches.
+	const cache = new Map<string, DeviceResolution>();
+	const items: Array<Record<string, unknown>> = [];
+	const unresolved: Array<Record<string, unknown>> = [];
+	let appliedCount = 0;
+
+	for (const comp of parts) {
+		const snapshot = serializeComponent(comp);
+		const designator = String(snapshot.designator ?? '');
+		const current = typeof snapshot.supplierId === 'string' ? snapshot.supplierId : '';
+		const fp = (snapshot.footprint as Record<string, unknown> | undefined)?.name ?? '';
+		if (/^C\d+$/.test(current)) {
+			items.push({ designator, lcsc: current, via: 'instance', footprint: fp });
+			continue;
+		}
+		const mpn = typeof snapshot.manufacturerId === 'string' ? snapshot.manufacturerId : '';
+		const cacheKey = `${mpn}|${fp}`;
+		let res = cache.get(cacheKey);
+		if (!res) {
+			res = await resolvePlacedDevice(snapshot);
+			cache.set(cacheKey, res);
+		}
+		if (!res.lcsc) {
+			unresolved.push({
+				designator,
+				mpn,
+				footprint: fp,
+				reason: res.reason ?? (res.device ? 'device resolved but carries no LCSC C-number' : 'no match'),
+				...(res.candidates ? { candidates: res.candidates } : {}),
+			});
+			continue;
+		}
+		const item: Record<string, unknown> = { designator, lcsc: res.lcsc, via: res.device?.via, footprint: fp, previousSupplierId: current };
+		if (apply) {
+			try {
+				const m = await eda.sch_PrimitiveComponent.modify(comp.getState_PrimitiveId(), { supplierId: res.lcsc });
+				item.applied = Boolean(m);
+				if (m) appliedCount++;
+			}
+			catch { item.applied = false; }
+		}
+		items.push(item);
+	}
+
+	return {
+		result: {
+			total: parts.length,
+			resolvedCount: items.length,
+			unresolvedCount: unresolved.length,
+			...(apply ? { appliedCount } : {}),
+			items,
+			...(unresolved.length ? { unresolved } : {}),
+			scope: 'activePage',
+		},
+		...(unresolved.length
+			? { warnings: [`${unresolved.length} part(s) could not be resolved deterministically — review result.unresolved (candidates included); nothing was guessed.`] }
+			: {}),
+	};
+};
 
 /**
  * Replace a placed component with a DIFFERENT device (真正的「换型号」) — the
@@ -8959,6 +9092,7 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.rebind.footprint': schematicRebindFootprint,
 	'schematic.rebind.symbol': schematicRebindSymbol,
 	'schematic.component.replace': schematicComponentReplace,
+	'schematic.component.resolve_lcsc': schematicComponentResolveLcsc,
 	'schematic.text.list': schematicTextList,
 	'pcb.documents.list': pcbDocumentsList,
 	'pcb.components.list': pcbComponentsList,
