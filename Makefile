@@ -111,7 +111,7 @@ eext: ## bump patch + build importable .eext (STABLE uuid; uninstall old → imp
 	node extension/scripts/bump.mjs patch
 	npm --prefix extension run typecheck
 	npm --prefix extension run build
-	@printf '\n✅ uninstall old in 已安装, then import → extension/build/dist/easyeda-agent-connector_v%s.eext\n' "$$(node -p "require('./extension/extension.json').version")"
+	@printf '\n✅ uninstall old in 已安装, then import → extension/build/dist/eda-agent-connector_v%s.eext\n' "$$(node -p "require('./extension/extension.json').version")"
 
 # Fallback only: mint a FRESH uuid so it imports as a NEW extension with no
 # uninstall — but it leaves a duplicate "EasyEDA Agent" entry you must delete
@@ -120,7 +120,7 @@ eext-fresh: ## bump patch + FRESH uuid (imports as new entry; delete the old one
 	node extension/scripts/bump.mjs patch --uuid
 	npm --prefix extension run typecheck
 	npm --prefix extension run build
-	@printf '\n✅ fresh-uuid build → import extension/build/dist/easyeda-agent-connector_v%s.eext, then DELETE the old entry\n' "$$(node -p "require('./extension/extension.json').version")"
+	@printf '\n✅ fresh-uuid build → import extension/build/dist/eda-agent-connector_v%s.eext, then DELETE the old entry\n' "$$(node -p "require('./extension/extension.json').version")"
 
 # ── Release ───────────────────────────────────────────────────────────────────
 # Usage: make release VERSION=v0.2.0

@@ -4,6 +4,17 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.21.2] - 2026-08-05
+
+### Changed
+- **换新 uuid(`0c94777a…`)—— 以新插件身份重新提审立创市场**。旧市场条目
+  (`easyeda-agent-connector`)被管理员下架(名称须去 "easyeda"),而平台不允许
+  同 uuid 换名重传(报「扩展名错误」),故整仓换 uuid,新条目名
+  `eda-agent-connector`(显示名 EDA Agent Connector)。**已装旧 uuid 连接器的
+  用户(市场装或侧载皆是):在「已安装」中卸载旧条目后安装本版**——新旧条目
+  之间原地自动更新不互通;功能与配置不受影响。README / install.sh / 包内
+  README 均已附更名与迁移说明。
+
 ## [0.21.1] - 2026-08-05
 
 ### Fixed

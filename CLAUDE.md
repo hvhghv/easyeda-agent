@@ -169,15 +169,22 @@ reaches the daemon.
   entry). **`make eext-fresh`** mints a new uuid → imports as a *separate* entry
   with no uninstall, but you must delete the stale one (two connectors fight over
   the daemon otherwise) — it's the fallback when the installed one won't
-  uninstall. Our manifest is complete. **The connector is now LIVE on the official
-  立创EDA (jlc-ext) marketplace** — https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector
-  — so there are now two install channels: (1) a **sideloaded `.eext`** (the
-  `make eext` / GitHub-Release path above) has **no in-place auto-update** (manual
+  uninstall. Our manifest is complete. **Marketplace status (2026-08): the OLD
+  listing (`easyeda-agent-connector`) was TAKEN DOWN by the admins** (the name had
+  to drop "easyeda"); the portal rejects a rename under the same uuid
+  ("扩展名错误"), so **v0.21.2 minted a FRESH uuid
+  (`0c94777a7dd24780882b3f453fde87fc`) and re-submits as a NEW extension
+  `eda-agent-connector`** — expected URL
+  https://jlc-ext.com/item/zhoushoujian/eda-agent-connector (unreachable until
+  approved). Old-uuid installs (marketplace AND sideload) must be manually
+  uninstalled in 已安装 — auto-update does not bridge identities. Two install
+  channels remain: (1) a **sideloaded `.eext`** (the `make eext` /
+  GitHub-Release path above) has **no in-place auto-update** (manual
   uninstall→import) but is **strictly version-locked to the CLI**, so it stays the
   source of truth for dev/regression; (2) a **marketplace-installed** copy the
-  platform **can auto-update in place** — but the listing **lags** (currently
-  v0.9.0 vs repo 0.11.x; there is no publish CLI/API for jlc-ext — each release is
-  a manual web-portal re-submit), so a marketplace connector can be **older** than
+  platform **can auto-update in place** — but the listing **lags** (there is no
+  publish CLI/API for jlc-ext — each release is a manual web-portal re-submit),
+  so a marketplace connector can be **older** than
   your CLI and flag `connectorVersionOk:false`. **Most changes don't
   even need a re-import — use the `debug.exec_js` escape hatch** for scriptable
   behavior; only manifest/handler changes require a rebuild. **And re-importing
