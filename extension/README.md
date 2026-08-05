@@ -58,9 +58,8 @@ Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 > 市场上架版本可能**滞后于 CLI**。四件套需严格同版时，请以 GitHub Release 里与 CLI 对齐的 `.eext` 为准；市场版胜在平台自动更新，但可能落后。
 
 > **更名说明（2026-08）**：应市场管理规范要求，本插件由 `easyeda-agent-connector`
-> 更名为 **`eda-agent-connector`**（显示名 EDA Agent Connector）。因平台不允许同
-> uuid 换名重传，v0.21.2 起启用新 uuid 作为新插件重新上架 —— 装过旧条目的用户请先在
-> 「已安装」中**卸载旧条目**再安装本插件（新旧条目之间自动更新不互通，功能不受影响）。
+> 更名为 **`eda-agent-connector`**（显示名 EDA Agent Connector）。uuid 保持不变，
+> 同一条目更名后重新上传 —— 已装用户的原地自动更新不受影响，无需任何操作。
 
 **2. 装 CLI/daemon 并启动**：
 

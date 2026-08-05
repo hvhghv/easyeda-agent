@@ -90,12 +90,10 @@ easyeda-agent 是一套**四件套**,四者需**同版本、同时在位**:CLI/d
 
 先装 `easyeda` CLI/daemon,再装 EasyEDA 连接器 —— 两条通道任选:安装器会打印**与 CLI 严格同版**的 GitHub Release `.eext` 下载地址(导入即用),或从[**立创官方插件市场**](https://jlc-ext.com/item/zhoushoujian/eda-agent-connector)一键安装(平台可原地自动更新,但市场版本可能滞后 CLI,严格四件套同版时以 Release `.eext` 为准):
 
-> **⚠️ 插件更名与重新上架说明(2026-08)**:应市场管理员要求,插件从
+> **ℹ️ 插件更名说明(2026-08)**:应市场管理规范要求,插件从
 > `easyeda-agent-connector` 更名为 **`eda-agent-connector`**(显示名 EDA Agent
-> Connector,名称/发布者中不再含 "easyeda" 字样)。旧市场条目已被下架,且平台不允许
-> 同 uuid 换名重传,因此 **v0.21.2 起连接器启用了新 uuid,作为新插件重新提审**。
-> 已装旧连接器(无论市场装还是侧载)的用户:在「已安装」里**卸载旧条目**后安装新版
-> 即可,原地自动更新链在旧新条目之间不互通;功能与配置不受影响。
+> Connector,名称/发布者中不再含 "easyeda" 字样)。经与市场管理员沟通,**uuid 保持
+> 不变**,同一条目更名后重新上传 —— 已装用户的原地自动更新不受影响,无需任何操作。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh

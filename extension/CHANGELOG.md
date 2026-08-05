@@ -7,13 +7,12 @@ follow [SemVer](https://semver.org/).
 ## [0.21.2] - 2026-08-05
 
 ### Changed
-- **换新 uuid(`0c94777a…`)—— 以新插件身份重新提审立创市场**。旧市场条目
-  (`easyeda-agent-connector`)被管理员下架(名称须去 "easyeda"),而平台不允许
-  同 uuid 换名重传(报「扩展名错误」),故整仓换 uuid,新条目名
-  `eda-agent-connector`(显示名 EDA Agent Connector)。**已装旧 uuid 连接器的
-  用户(市场装或侧载皆是):在「已安装」中卸载旧条目后安装本版**——新旧条目
-  之间原地自动更新不互通;功能与配置不受影响。README / install.sh / 包内
-  README 均已附更名与迁移说明。
+- **更名重传立创市场:`easyeda-agent-connector` → `eda-agent-connector`(uuid 不变)**。
+  名称按市场管理规范去除 "easyeda" 字样(显示名 EDA Agent Connector)。经与市场
+  管理员沟通,原条目的撤销已解除,**同 uuid 更名后重新上传即可**——已装用户的
+  原地自动更新不受影响,无需任何操作。(网页端同 uuid 直传曾报「扩展名错误」,
+  为管理员侧校验限制,已由管理员解除。)README(中/英)/包内 README/install.sh
+  均已附更名说明。
 
 ## [0.21.1] - 2026-08-05
 
