@@ -60,10 +60,13 @@ func padOnSilkSide(padLayer, silkLayer int) bool {
 
 // ── R18: silk-over-pad (§11.2 丝印不压焊盘) ─────────────────────────────────
 // Silk text printed over an exposed pad is clipped by the fab (solder mask
-// opening wins) and can wick into the joint. Text extent is estimated from the
-// string length at the REAL font size (pcb.silk.list fontSize; 40mil default
-// when the connector omits it); pads use their real half-extents. Still a WARN,
-// not an ERROR — text width is an aspect-ratio estimate.
+// opening wins) and can wick into the joint. Extent: the connector's REAL
+// rendered bbox when present (#155 — no anchor/char-width/rotation guessing);
+// fallback estimate builds the box FROM the stored bottom-left anchor (s.X/s.Y
+// is NOT the text center — centering the estimate on it shifted the test box
+// half a text down-left and produced false silk-over-pad findings against
+// positions silk-align had correctly verified as clean). Pads use their real
+// half-extents. Still a WARN — the fallback width is an aspect-ratio estimate.
 func findSilkOverPad(silk []pcbSilkText, pads []pcbPadP) []pcbCheckFinding {
 	var out []pcbCheckFinding
 	for _, s := range silk {
@@ -71,15 +74,27 @@ func findSilkOverPad(silk []pcbSilkText, pads []pcbPadP) []pcbCheckFinding {
 		if txt == "" {
 			continue
 		}
-		fh := s.FontSize
-		if fh <= 0 {
-			fh = pcbSilkEstH
-		}
-		hw := float64(len([]rune(txt))) * fh * pcbSilkCharAsp / 2
-		hh := fh / 2
-		// 90°/270° rotation swaps the box extents.
-		if r := math.Mod(math.Abs(s.Rotation), 180); r > 45 && r < 135 {
-			hw, hh = hh, hw
+		// Text box center (cx,cy) + half extents (hw,hh).
+		var cx, cy, hw, hh float64
+		if s.BBox != nil {
+			cx = (s.BBox.MinX + s.BBox.MaxX) / 2
+			cy = (s.BBox.MinY + s.BBox.MaxY) / 2
+			hw = (s.BBox.MaxX - s.BBox.MinX) / 2
+			hh = (s.BBox.MaxY - s.BBox.MinY) / 2
+		} else {
+			fh := s.FontSize
+			if fh <= 0 {
+				fh = pcbSilkEstH
+			}
+			hw = float64(len([]rune(txt))) * fh * pcbSilkCharAsp / 2
+			hh = fh / 2
+			// 90°/270° rotation swaps the box extents.
+			if r := math.Mod(math.Abs(s.Rotation), 180); r > 45 && r < 135 {
+				hw, hh = hh, hw
+			}
+			// s.X/s.Y is the bottom-left anchor → center is half a box up-right.
+			cx = s.X + hw
+			cy = s.Y + hh
 		}
 		for _, p := range pads {
 			if !padOnSilkSide(p.Layer, s.Layer) {
@@ -89,7 +104,7 @@ func findSilkOverPad(silk []pcbSilkText, pads []pcbPadP) []pcbCheckFinding {
 			if phw <= 0 || phh <= 0 {
 				phw, phh = 0, 0 // unknown pad size → test the pad center only
 			}
-			if math.Abs(p.X-s.X) > hw+phw+pcbSilkPadSlack || math.Abs(p.Y-s.Y) > hh+phh+pcbSilkPadSlack {
+			if math.Abs(p.X-cx) > hw+phw+pcbSilkPadSlack || math.Abs(p.Y-cy) > hh+phh+pcbSilkPadSlack {
 				continue
 			}
 			ref := p.Designator

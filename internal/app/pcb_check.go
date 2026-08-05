@@ -154,7 +154,15 @@ type pcbSilkText struct {
 	FontSize  float64 // mil; 0 = unknown (older connector) → estimate at 40
 	CompID    string
 	CompLayer int
-	X, Y      float64
+	X, Y      float64 // stored BOTTOM-LEFT anchor, NOT the text center (#155)
+	// Real rendered extent from the connector (nil on older connectors). When
+	// present it supersedes any anchor/char-width/rotation estimation.
+	BBox *pcbRect
+}
+
+// pcbRect is a plain min/max rectangle in board mils.
+type pcbRect struct {
+	MinX, MinY, MaxX, MaxY float64
 }
 
 // Silk / component side layer ids (EPCB_LayerId).
@@ -1984,9 +1992,20 @@ func fetchPcbSilk(cfg *appConfig, window string) ([]pcbSilkText, error) {
 		compLayer, _ := asFloatOK(tm["componentLayer"])
 		x, _ := asFloatOK(tm["x"])
 		y, _ := asFloatOK(tm["y"])
+		var bbox *pcbRect
+		if bm, ok := tm["bbox"].(map[string]any); ok {
+			minX, ok1 := asFloatOK(bm["minX"])
+			minY, ok2 := asFloatOK(bm["minY"])
+			maxX, ok3 := asFloatOK(bm["maxX"])
+			maxY, ok4 := asFloatOK(bm["maxY"])
+			if ok1 && ok2 && ok3 && ok4 && maxX > minX && maxY > minY {
+				bbox = &pcbRect{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}
+			}
+		}
 		silk = append(silk, pcbSilkText{
 			ID: id, Kind: kind, Key: key, Text: text, Layer: int(layer), Mirror: mirror,
 			Reverse: reverse, Rotation: rotation, FontSize: fontSize, CompID: compID, CompLayer: int(compLayer), X: x, Y: y,
+			BBox: bbox,
 		})
 	}
 	return silk, nil

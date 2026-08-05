@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`pcb check` silk-over-pad 误报根修(#155)**:真机裁决 —— `pcb silk-align` 的
+  落点**一直是对的**(报告中心 = 实测渲染 bbox 中心,分毫不差),issue 观测的
+  「实际落点偏左下半文本」是把**存储的左下角锚点**误读成落点。真凶在 check 侧:
+  silk-over-pad 把 silk.list 的 x/y(左下角锚点)**当文本中心**用,判定框整体偏移
+  半个文本 → 对 silk-align 验证过干净的位置误报压焊盘(「换个焊盘继续压」= 判定框
+  恒在真实文本左下方)。修:`pcb.silk.list` 每条文本附**真实渲染 bbox**
+  (getPrimitivesBBox),check 直接矩形相交 —— 锚点/字宽/旋转全不用猜;旧连接器
+  回退近似也改为从锚点正确起箱。真机双向验收:silk-align 摆好 → check 0;故意压
+  焊盘 → check 1。
+
 ### Added
 - **`schematic.component.resolve_lcsc`(#158)—— 确定性「已放置器件→真 C 号」批量解析**。
   精确匹配链(实例 C 号 → MPN 严格相等 → 工程库名),匹配的**封装必须与实例一致**

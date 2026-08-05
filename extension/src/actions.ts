@@ -5412,6 +5412,16 @@ const pcbSilkList: Handler = async () => {
 	}
 
 	const texts: Array<Record<string, unknown>> = [];
+	// Real rendered extent per text (#155): the stored x/y is the BOTTOM-LEFT
+	// anchor, so any consumer that centers an estimated box on it is off by half
+	// a text — the bbox removes anchor/char-width/rotation guessing entirely.
+	const silkBBox = async (id: string): Promise<Record<string, number> | null> => {
+		try {
+			const b = (await eda.pcb_Primitive.getPrimitivesBBox([id])) as { minX: number; minY: number; maxX: number; maxY: number } | null;
+			return b ? { minX: b.minX, minY: b.minY, maxX: b.maxX, maxY: b.maxY } : null;
+		}
+		catch { return null; }
+	};
 
 	// 1. designator / value attributes (component-bound silk text)
 	try {
@@ -5423,6 +5433,7 @@ const pcbSilkList: Handler = async () => {
 			const pid = a.getState_ParentPrimitiveId?.() ?? '';
 			texts.push({
 				primitiveId: a.getState_PrimitiveId(),
+				bbox: await silkBBox(a.getState_PrimitiveId()),
 				kind: 'attribute',
 				text: a.getState_Value?.() ?? '',
 				key: a.getState_Key?.() ?? '',
@@ -5451,6 +5462,7 @@ const pcbSilkList: Handler = async () => {
 			}
 			texts.push({
 				primitiveId: s.getState_PrimitiveId(),
+				bbox: await silkBBox(s.getState_PrimitiveId()),
 				kind: 'string',
 				text: s.getState_Text?.() ?? '',
 				layer,
