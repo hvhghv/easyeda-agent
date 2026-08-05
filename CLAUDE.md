@@ -169,13 +169,12 @@ reaches the daemon.
   entry). **`make eext-fresh`** mints a new uuid → imports as a *separate* entry
   with no uninstall, but you must delete the stale one (two connectors fight over
   the daemon otherwise) — it's the fallback when the installed one won't
-  uninstall. Our manifest is complete. **Marketplace status (2026-08): only the
-  `displayName` changed — "EDA Agent Connector" (must not contain "easyeda");
-  the internal `name` (`easyeda-agent-connector`) and uuid
-  (`4dae27407c1d43be98e8e210d45fe587`) both STAY** per the admins (the earlier
-  "扩展名错误" came from changing `name` on the same-uuid listing — name must
-  match the existing entry). The admins lifted the takedown; re-upload the SAME
-  listing — existing installs keep auto-updating in place. Two install
+  uninstall. Our manifest is complete. **Marketplace status: LIVE again at
+  v0.21.2** — https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector
+  (same slug/entry; only the `displayName` changed to "EDA Agent Connector" —
+  must not contain "easyeda"; the internal `name` and uuid both stayed, per the
+  admins — the earlier "扩展名错误" came from changing `name` on the same-uuid
+  listing). Existing installs keep auto-updating in place. Two install
   channels remain: (1) a **sideloaded `.eext`** (the `make eext` /
   GitHub-Release path above) has **no in-place auto-update** (manual
   uninstall→import) but is **strictly version-locked to the CLI**, so it stays the
