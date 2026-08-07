@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/spec"
+	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 // cmd_pcb_stage.go — the `easyeda pcb stage` group (issue #97): human-in-the-loop
@@ -338,7 +343,8 @@ func stageProjectLabel(p string) string {
 // pinned to the CURRENT placement by fingerprint, so a later out-of-band move
 // (GUI drag / exec_js / another agent) is detected and invalidates it.
 func newPcbStageConfirmLayoutCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
-	var note, force string
+	var note, force, specPath string
+	var minScore float64
 	c := &cobra.Command{
 		Use:   "confirm-layout",
 		Short: "Confirm the placement (P2): sets placement_confirmed (pinned by fingerprint)",
@@ -354,21 +360,27 @@ the routability gate passed.`,
 		Example: `  easyeda pcb stage confirm-layout --project ceshi --note "USB-C opening out, antenna at top edge"
   easyeda pcb stage confirm-layout --force "两件小板无分档必要" --project ceshi`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStageConfirmLayoutForced(cfg, *window, note, force, stderr)
+			return runStageConfirmLayoutForced(cfg, *window, note, force, specPath, minScore, stderr)
 		},
 	}
 	c.Flags().StringVar(&note, "note", "", "what was reviewed/confirmed (recorded in the audit trail)")
 	c.Flags().StringVar(&force, "force", "", "bypass the tier ladder gate with a reason (audited) — tiers 1-4 normally must be confirmed first (issue #125)")
+	c.Flags().StringVar(&specPath, "spec", "", "S0 spec JSON — unlocks the intent dimensions of the recorded quality snapshot (flow-order, internal connectors)")
+	c.Flags().Float64Var(&minScore, "min-score", 0,
+		"refuse the sign-off when the weighted layout-score falls below this (0 = record the score but never block).\n"+
+			"Deliberately opt-in: the nine dimensions' weights and thresholds are still\n"+
+			"calibration seeds (#167 LEARNING), and gating on an uncalibrated ruler would\n"+
+			"manufacture more false blocks than it catches real problems")
 	return c
 }
 
 // runStageConfirmLayout is the P2 sign-off implementation, shared by
 // `pcb stage confirm-layout` and `workflow confirm layout` (no tier bypass).
 func runStageConfirmLayout(cfg *appConfig, window, note string, stderr io.Writer) error {
-	return runStageConfirmLayoutForced(cfg, window, note, "", stderr)
+	return runStageConfirmLayoutForced(cfg, window, note, "", "", 0, stderr)
 }
 
-func runStageConfirmLayoutForced(cfg *appConfig, window, note, forceReason string, stderr io.Writer) error {
+func runStageConfirmLayoutForced(cfg *appConfig, window, note, forceReason, specPath string, minScore float64, stderr io.Writer) error {
 	project, err := resolveStageProject(cfg, window)
 	if err != nil {
 		return fmt.Errorf("confirm-layout needs a connected window (the confirmation is fingerprinted against the live placement): %w", err)
@@ -441,6 +453,30 @@ func runStageConfirmLayoutForced(cfg *appConfig, window, note, forceReason strin
 		return errActionFailed
 	}
 
+	// 多维布局质量(#167)：拍一张快照记进状态，并把逐维分摊给签字的人看。
+	//
+	// 为什么**默认不拦**：九维的权重和阈值现在大多还是「待校准初值」（各维实现里
+	// 都诚实标了），拿一把没校准的尺子做硬门，制造的假阻塞会比拦下的真问题多。
+	// 这与项目已有的教训一致——降级 ≠ 删除，Tier2 不担契约硬门。
+	// 想要严格的人显式传 --min-score；不传就只记录 + 显示。
+	quality, qerr := captureLayoutQuality(cfg, window, specPath, minScore)
+	if qerr != nil {
+		// 打分失败绝不阻断签字：它是质量表不是硬门，而硬门（layout-lint --gate）
+		// 上面已经过了。
+		fmt.Fprintf(stderr, "⚠️  layout quality snapshot skipped (%v)\n", qerr)
+	} else if quality != nil {
+		st.Layout.Quality = quality
+		if minScore > 0 && quality.Overall < minScore {
+			fmt.Fprintf(stderr, "❌ layout quality %.1f is below the requested --min-score %.1f (%d dimension(s) scored, %d skipped)\n",
+				quality.Overall, minScore, quality.ScoredDims, quality.SkippedDims)
+			for _, line := range weakestQualityLines(quality, 3) {
+				fmt.Fprintf(stderr, "   %s\n", line)
+			}
+			fmt.Fprintln(stderr, "   run `easyeda pcb layout-score --all` for the per-component attribution")
+			return errActionFailed
+		}
+	}
+
 	fp := workflowNewFingerprint(workflowHashLayout(poses), len(poses))
 	st.Confirm(stagePlacementReady, "confirm", note)
 	st.Confirm(stagePlacementConfirmed, "confirm", note)
@@ -453,7 +489,78 @@ func runStageConfirmLayoutForced(cfg *appConfig, window, note, forceReason strin
 	fmt.Fprintf(stderr, "  assembly %s · min gap %.1fmil · tight pairs %d · iron-access blocked %d (corridor %.1fmil) · lint score %d\n",
 		st.Assembly.Profile, st.Layout.MinGapMil, st.Layout.TightPairs,
 		st.Layout.AccessBlocked, st.Layout.AccessMil, st.Layout.Score)
+	if quality != nil {
+		fmt.Fprintf(stderr, "  布局质量 %.1f/100 [%s] — %d 维参与加权，%d 维未测\n",
+			quality.Overall, quality.Verdict, quality.ScoredDims, quality.SkippedDims)
+		for _, line := range weakestQualityLines(quality, 3) {
+			fmt.Fprintf(stderr, "    %s\n", line)
+		}
+	}
 	return nil
+}
+
+// captureLayoutQuality 拉一张实时快照跑多维打分，落成可存的摘要。
+//
+// 它是 best-effort 的：任何失败都返回 error 让调用方降级成一行警告，绝不阻断
+// confirm-layout —— 质量表读不出来不该拦住一次合法的签字。
+func captureLayoutQuality(cfg *appConfig, window, specPath string, minScore float64) (*workflow.QualitySummary, error) {
+	snap, err := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{withSilk: true, withRules: true, withLayers: true})
+	if err != nil {
+		return nil, err
+	}
+	var s0 *spec.Spec
+	if specPath != "" {
+		raw, rerr := os.ReadFile(specPath)
+		if rerr != nil {
+			return nil, fmt.Errorf("read spec: %w", rerr)
+		}
+		if s0, err = spec.Parse(raw); err != nil {
+			return nil, err
+		}
+	}
+	rep := analyzeLayoutScore(snap, s0, layoutScoreOpts{minScore: minScore})
+	dims := make(map[string]float64, len(rep.Dimensions))
+	for _, d := range rep.Dimensions {
+		if d.Status == dimSkipped {
+			continue // 跳过的维不进快照：存一个 0 会在下次对比时假装"退化了"
+		}
+		dims[d.ID] = d.Score
+	}
+	return &workflow.QualitySummary{
+		Overall: rep.Overall, Verdict: rep.Verdict, Dimensions: dims,
+		ScoredDims: rep.ScoredDims, SkippedDims: rep.SkippedDims,
+		MinScore: minScore, At: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// weakestQualityLines 挑最弱的几维排成人读行 —— 签字时最该看的就是这几行。
+func weakestQualityLines(q *workflow.QualitySummary, n int) []string {
+	type kv struct {
+		id string
+		v  float64
+	}
+	var all []kv
+	for id, v := range q.Dimensions {
+		all = append(all, kv{id, v})
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].v != all[j].v {
+			return all[i].v < all[j].v
+		}
+		return all[i].id < all[j].id
+	})
+	if len(all) > n {
+		all = all[:n]
+	}
+	out := make([]string, 0, len(all))
+	for _, e := range all {
+		title := dimensionTitles[e.id]
+		if title == "" {
+			title = e.id
+		}
+		out = append(out, fmt.Sprintf("最弱维 %s(%s) %.1f", title, e.id, e.v))
+	}
+	return out
 }
 
 // newPcbStageConfirmOutlineCmd confirms outline_confirmed — the P3 board-frame

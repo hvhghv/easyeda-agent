@@ -99,6 +99,27 @@ type GateSummary struct {
 	AccessBlocked int     `json:"accessBlocked,omitempty"`
 	Assembly      string  `json:"assembly,omitempty"`
 	At            string  `json:"at"`
+	// Quality 是 confirm-layout 时拍下的多维布局质量快照(#167)。它与上面那些
+	// 字段的性质不同：上面是**可布性硬门**的判据（重叠/间距/烙铁通道，不过就是
+	// 造不出来），Quality 是**质量表**（布得好不好）。两者刻意分开存，因为它们
+	// 该用不同的力度对待——把未校准的质量分当硬门会制造大量假阻塞。
+	Quality *QualitySummary `json:"quality,omitempty"`
+}
+
+// QualitySummary 是 `pcb layout-score` 的落盘快照：综合分 + 逐维分 + 跳过维数。
+//
+// 为什么要存逐维分而不只是综合分：综合分掉了 5 分，可能是齐整度松了一点（无所谓），
+// 也可能是功能分区串了（要返工）。只存总分的话，下次对比时无法回答「哪一维退化了」
+// ——而这正是精修环和金标准回归都要问的问题。
+type QualitySummary struct {
+	Overall     float64            `json:"overall"`
+	Verdict     string             `json:"verdict"`
+	Dimensions  map[string]float64 `json:"dimensions,omitempty"`
+	ScoredDims  int                `json:"scoredDims"`
+	SkippedDims int                `json:"skippedDims"`
+	// MinScore 是签字时生效的门限；0 表示当时没有设门（只记录不拦）。
+	MinScore float64 `json:"minScore,omitempty"`
+	At       string  `json:"at"`
 }
 
 // CheckGateSummary is the machine-readable `pcb check` gate snapshot stored
