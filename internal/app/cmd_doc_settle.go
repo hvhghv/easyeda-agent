@@ -45,11 +45,29 @@ const docSettleDeadline = 8 * time.Second
 // docSettleInterval is the gap between primitive-count samples.
 const docSettleInterval = 400 * time.Millisecond
 
-// countActivePagePrimitives reads the active page's component count via
-// schematic.components.list (active page only — no allPages). A read error
-// yields (0,false) so the caller keeps polling rather than aborting.
-func countActivePagePrimitives(cfg *appConfig, window string) (int, bool) {
-	res, err := requestAction(cfg, "schematic.components.list", window, nil)
+// docSettleMaxProbeErrors caps consecutive probe failures. The probe is a plain
+// read; when it fails this many times in a row it is not "still loading", it is
+// the wrong probe for this document (or the window is gone), and polling on to
+// the deadline only produces noise. Issue #161: a PCB target used to burn the
+// full 8s as 21 consecutive EDA_CALL_FAILED rows in the audit log, all of them
+// swallowed into "keep polling".
+const docSettleMaxProbeErrors = 3
+
+// settleProbeAction picks the count probe for a document type. The two document
+// families expose disjoint list actions, so probing with the wrong one fails on
+// every sample rather than returning a count.
+func settleProbeAction(docType string) string {
+	if docType == "pcb" {
+		return "pcb.components.list"
+	}
+	return "schematic.components.list"
+}
+
+// countActivePageWith reads the active document's component count via the given
+// list action. The second return distinguishes "read produced a count" from
+// "read failed" so the caller can stop retrying a probe that cannot work here.
+func countActivePageWith(cfg *appConfig, window, action string) (int, bool) {
+	res, err := requestAction(cfg, action, window, nil)
 	if err != nil || res.Result == nil {
 		return 0, false
 	}
@@ -67,12 +85,30 @@ func countActivePagePrimitives(cfg *appConfig, window string) (int, bool) {
 // the page settled, false on timeout — callers proceed either way, using the
 // bool to flag ready:false when the page never quieted down.
 func waitDocSettle(cfg *appConfig, window string) bool {
+	return waitDocSettleFor(cfg, window, "schematic")
+}
+
+// waitDocSettleFor is waitDocSettle with the probe chosen by document type, so
+// a PCB target is polled with pcb.components.list instead of the schematic
+// probe. It also bails out after docSettleMaxProbeErrors consecutive read
+// failures instead of spinning to the deadline (issue #161).
+func waitDocSettleFor(cfg *appConfig, window, docType string) bool {
+	action := settleProbeAction(docType)
 	tracker := &settleTracker{minEmptySamples: 3}
 	deadline := time.Now().Add(docSettleDeadline)
+	probeErrors := 0
 	for {
-		count, ok := countActivePagePrimitives(cfg, window)
-		if ok && tracker.observe(count) {
-			return true
+		count, ok := countActivePageWith(cfg, window, action)
+		if ok {
+			probeErrors = 0
+			if tracker.observe(count) {
+				return true
+			}
+		} else {
+			probeErrors++
+			if probeErrors >= docSettleMaxProbeErrors {
+				return false
+			}
 		}
 		if time.Now().After(deadline) {
 			return false
@@ -113,7 +149,10 @@ func switchToPage(cfg *appConfig, window, target string) (pageScope, error) {
 		}
 		sc.switched = true
 	}
-	sc.settled = waitDocSettle(cfg, win)
+	// Probe by the resolved document's own type: `doc switch` already guarded
+	// this, but --page went through here unguarded, so a PCB target polled the
+	// schematic probe 21 times over the full deadline (issue #161).
+	sc.settled = waitDocSettleFor(cfg, win, match.Type)
 	return sc, nil
 }
 

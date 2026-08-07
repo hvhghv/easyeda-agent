@@ -93,12 +93,10 @@ func newDocCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 			}
 			// document.open returns as soon as the tab exists — BEFORE the page's
 			// primitives/netlist finish loading. Wait for the page data to settle
-			// (schematic pages only; a PCB has no components.list) so a read fired
-			// right after the switch doesn't sample a half-loaded page (issue #67).
-			ready := true
-			if match.Type == "schematic" {
-				ready = waitDocSettle(cfg, win)
-			}
+			// so a read fired right after the switch doesn't sample a half-loaded
+			// page (issue #67). The probe follows the document type — a PCB is
+			// polled with pcb.components.list rather than skipped (issue #161).
+			ready := waitDocSettleFor(cfg, win, match.Type)
 			out := map[string]any{
 				"switchedTo": match,
 				"ready":      ready,
