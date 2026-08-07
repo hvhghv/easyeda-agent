@@ -13,6 +13,7 @@ import { test } from 'node:test';
 
 import {
 	connectPinEndpoint,
+	getComponentOrThrow,
 	normalizeDeviceRef,
 	schematicComponentsList,
 	serializeComponent,
@@ -974,4 +975,90 @@ test('diffPins: removed / added / moved are keyed by pinNumber', () => {
 	assert.deepEqual(d.moved, [
 		{ pinNumber: '2', pinName: 'GND', from: { x: 100, y: 180 }, to: { x: 120, y: 180 } },
 	]);
+});
+
+// ─── #162: "not on the active page" must not be reported as "does not exist" ──
+
+/** Which page the stubbed editor currently has in front (tagComponentPages cycles it). */
+let current = 'page-1';
+
+/** eda stub with an active-page-scoped get() and a document-wide getAll(). */
+function edaWithPages(activeIds: string[], otherPageIds: string[]) {
+	const idComponent = (id: string) => ({ getState_PrimitiveId: () => id }) as any;
+	return {
+		sch_PrimitiveComponent: {
+			get: async (id: string) => (activeIds.includes(id) ? idComponent(id) : undefined),
+			getAll: async (_types?: unknown, allPages?: boolean) =>
+				(allPages ? [...activeIds, ...otherPageIds] : activeIds).map(idComponent),
+		},
+		dmt_SelectControl: { getCurrentDocumentInfo: async () => ({ uuid: 'page-1' }) },
+		dmt_Schematic: {
+			getAllSchematicPagesInfo: async () => [
+				{ uuid: 'page-1', name: 'P1' },
+				{ uuid: 'page-5', name: 'P5' },
+			],
+		},
+		dmt_EditorControl: {
+			openDocument: async (uuid: string) => {
+				// Emulate active-page scoping: getAll() with no allPages follows the tab.
+				current = uuid;
+			},
+		},
+	};
+}
+
+test('getComponentOrThrow: off-active-page id is diagnosed as such, not as missing', async () => {
+	const stub: any = edaWithPages(['on-active'], ['eefc6f2c400c3794']);
+	// tagComponentPages walks pages; make getAll() (active-page form) follow the tab.
+	stub.sch_PrimitiveComponent.getAll = async (_t?: unknown, allPages?: boolean) => {
+		const ids = allPages
+			? ['on-active', 'eefc6f2c400c3794']
+			: current === 'page-5' ? ['eefc6f2c400c3794'] : ['on-active'];
+		return ids.map(id => ({ getState_PrimitiveId: () => id })) as any;
+	};
+	(globalThis as any).eda = stub;
+	try {
+		await assert.rejects(
+			() => getComponentOrThrow('eefc6f2c400c3794'),
+			(err: any) => {
+				assert.equal(err.code, 'INVALID_STATE');
+				assert.match(err.message, /not the ACTIVE page/);
+				assert.match(err.message, /P5/); // names the page it actually lives on
+				assert.doesNotMatch(err.message, /No schematic component found/);
+				return true;
+			},
+		);
+	}
+	finally {
+		current = 'page-1';
+		delete (globalThis as any).eda;
+	}
+});
+
+test('getComponentOrThrow: a truly absent id still reports not-found (on any page)', async () => {
+	(globalThis as any).eda = edaWithPages(['on-active'], ['elsewhere']) as any;
+	try {
+		await assert.rejects(
+			() => getComponentOrThrow('ghost'),
+			(err: any) => {
+				assert.equal(err.code, 'INVALID_STATE');
+				assert.match(err.message, /No schematic component found with primitiveId "ghost" on any page/);
+				return true;
+			},
+		);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('getComponentOrThrow: returns the component when it is on the active page', async () => {
+	(globalThis as any).eda = edaWithPages(['here'], []) as any;
+	try {
+		const c: any = await getComponentOrThrow('here');
+		assert.equal(c.getState_PrimitiveId(), 'here');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
 });

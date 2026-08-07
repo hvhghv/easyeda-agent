@@ -443,3 +443,99 @@ export function filterExactLcsc(
 	const want = lcsc.trim().toUpperCase();
 	return records.filter(r => readLcscField(r).trim().toUpperCase() === want);
 }
+
+// ─── Thrown-value description ─────────────────────────────────────────
+
+/** Upper bound for a rendered thrown value, so one fat object cannot flood the audit log. */
+export const THROWN_DETAIL_MAX = 600;
+
+/** Fields a platform error object may carry its human-readable text in, best first. */
+const MESSAGE_LIKE_KEYS = ['message', 'msg', 'error', 'detail', 'description'] as const;
+
+/**
+ * `JSON.stringify` that never throws: cycles become `[Circular]`, bigints and
+ * functions get readable placeholders. Returns '' when the value is not
+ * representable at all.
+ */
+function stringifySafe(value: unknown): string {
+	const seen = new WeakSet<object>();
+	try {
+		return JSON.stringify(value, (_key, val: unknown) => {
+			if (typeof val === 'bigint') return `${val}n`;
+			if (typeof val === 'function') return `[Function ${val.name || 'anonymous'}]`;
+			if (typeof val === 'object' && val !== null) {
+				if (seen.has(val)) return '[Circular]';
+				seen.add(val);
+			}
+			return val;
+		}) ?? '';
+	}
+	catch {
+		return '';
+	}
+}
+
+/** First non-empty string among the message-like keys of a plain object. */
+function pickMessageLike(record: Record<string, unknown>): string {
+	for (const key of MESSAGE_LIKE_KEYS) {
+		const value = record[key];
+		if (typeof value === 'string' && value.trim() !== '') return value.trim();
+	}
+	return '';
+}
+
+/**
+ * Render an unknown thrown value into a detail string that actually says what
+ * went wrong.
+ *
+ * `String(err)` — the shape this replaces — flattens every non-Error object to
+ * the literal `[object Object]`, which is exactly what the audit log's
+ * `errorDetail` field exists to prevent (a post-mortem then has only the
+ * payload to go on). EasyEDA's `eda.*` calls do throw bare objects, so this
+ * path is live, not hypothetical.
+ *
+ * Precedence: Error → `message` (falling back to `name` when empty); string →
+ * itself; object → `[code] message | {json}` so a truncation still keeps the
+ * readable part; anything else → `String(err)`.
+ *
+ * @param err - the thrown value
+ * @param maxLength - truncation bound; the overflow is flagged inline
+ * @returns a non-empty, single-line-ish description
+ */
+export function describeThrown(err: unknown, maxLength: number = THROWN_DETAIL_MAX): string {
+	const raw = describeThrownRaw(err);
+	if (raw.length <= maxLength) return raw;
+	return `${raw.slice(0, maxLength)}… (truncated, ${raw.length} chars total)`;
+}
+
+function describeThrownRaw(err: unknown): string {
+	if (err === null) return 'null';
+	if (err === undefined) return 'undefined';
+	if (typeof err === 'string') return err;
+
+	if (err instanceof Error) {
+		const message = err.message?.trim();
+		if (message) return message;
+		return err.name || 'Error';
+	}
+
+	if (typeof err !== 'object') return String(err);
+
+	const record = err as Record<string, unknown>;
+	const label = pickMessageLike(record);
+	const code = typeof record.code === 'string' || typeof record.code === 'number'
+		? String(record.code)
+		: '';
+	const json = stringifySafe(err);
+	const hasJson = json !== '' && json !== '{}' && json !== 'null';
+
+	if (label) {
+		const head = code === '' ? label : `[${code}] ${label}`;
+		return hasJson ? `${head} | ${json}` : head;
+	}
+	if (hasJson) return json;
+
+	// No enumerable properties at all (DOMException, host objects, …). Say so
+	// explicitly rather than emitting a bare, indistinguishable "[object X]".
+	return `${Object.prototype.toString.call(err)} (no enumerable properties)`;
+}

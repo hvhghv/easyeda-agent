@@ -18,6 +18,7 @@ import {
 	blobToBase64,
 	classifyPinConnectivity,
 	classifyWireConnectivity,
+	describeThrown,
 	filterExactLcsc,
 	isLcscQuery,
 	newArtifactId,
@@ -58,7 +59,7 @@ type PcbPad = NonNullable<Awaited<ReturnType<typeof eda.pcb_PrimitiveComponent.g
  * @returns an ActionError carrying EDA_CALL_FAILED and the original detail
  */
 function edaError(err: unknown, message: string): ActionError {
-	const detail = err instanceof Error ? err.message : String(err);
+	const detail = describeThrown(err);
 	return new ActionError(ErrorCodes.EDA_CALL_FAILED, message, detail);
 }
 
@@ -898,7 +899,7 @@ export const schematicComponentsList: Handler = async (payload) => {
 			}
 			catch (err) {
 				record.pinsAvailable = false;
-				record.pinsError = err instanceof Error ? err.message : String(err);
+				record.pinsError = describeThrown(err);
 			}
 		}
 		serialized.push(record);
@@ -1333,7 +1334,7 @@ const SCH_SHEET_TYPE = 'sheet';
 
 /** Format a caught error for a non-fatal warning entry. */
 function warnText(label: string, err: unknown): string {
-	return `${label}: ${err instanceof Error ? err.message : String(err)}`;
+	return `${label}: ${describeThrown(err)}`;
 }
 
 /** Delete a group of ids via its owning class (components fall through to the component class). */
@@ -3112,7 +3113,7 @@ const schematicRead: Handler = async (payload) => {
 			check = (await schematicCheck(payload)).result;
 		}
 		catch (err) {
-			check = { error: err instanceof Error ? err.message : String(err) };
+			check = { error: describeThrown(err) };
 		}
 	}
 
@@ -3350,9 +3351,50 @@ function cleanOtherProperty(
 }
 
 /**
- * Fetch the placed component primitive by id, or throw a NOT-FOUND-style error.
+ * Diagnose a `get(primitiveId)` miss: is the component genuinely absent, or
+ * merely on another page?
+ *
+ * `eda.sch_PrimitiveComponent.get` is ACTIVE-PAGE scoped, while
+ * `getAll(undefined, true)` and `component.delete` see the whole document.
+ * Reporting the miss as "no component found" therefore sent callers hunting a
+ * phantom deletion — issue #162 caught `replace` refusing an id twice and
+ * `delete` accepting the very same id 17 seconds later, with nothing but a page
+ * switch in between.
+ *
+ * Runs only on the error path, so the page-tagging round trip (which cycles the
+ * active document) is affordable.
  */
-async function getComponentOrThrow(primitiveId: string): Promise<SchComponent> {
+async function componentMissError(primitiveId: string): Promise<ActionError> {
+	let existsElsewhere = false;
+	try {
+		const all = await eda.sch_PrimitiveComponent.getAll(undefined, true);
+		existsElsewhere = (all ?? []).some(c => c.getState_PrimitiveId() === primitiveId);
+	}
+	catch { /* fall through to the plain not-found message */ }
+
+	if (!existsElsewhere) {
+		return new ActionError(
+			ErrorCodes.INVALID_STATE,
+			`No schematic component found with primitiveId "${primitiveId}" on any page.`,
+		);
+	}
+
+	const page = (await tagComponentPages()).get(primitiveId);
+	const where = page ? `page "${page.pageName}" (${page.pageUuid})` : 'another page';
+	const fix = page
+		? `easyeda doc switch ${page.pageName}`
+		: 'easyeda doc ls  →  easyeda doc switch <page>';
+	return new ActionError(
+		ErrorCodes.INVALID_STATE,
+		`Component "${primitiveId}" is on ${where}, not the ACTIVE page — this action only reaches the active page. Switch to it first: ${fix}`,
+	);
+}
+
+/**
+ * Fetch the placed component primitive by id, or throw a NOT-FOUND-style error
+ * that names the real cause (see componentMissError).
+ */
+export async function getComponentOrThrow(primitiveId: string): Promise<SchComponent> {
 	let component: SchComponent | undefined;
 	try {
 		component = await eda.sch_PrimitiveComponent.get(primitiveId);
@@ -3361,10 +3403,7 @@ async function getComponentOrThrow(primitiveId: string): Promise<SchComponent> {
 		throw edaError(err, `Failed to read component "${primitiveId}".`);
 	}
 	if (!component) {
-		throw new ActionError(
-			ErrorCodes.INVALID_STATE,
-			`No schematic component found with primitiveId "${primitiveId}".`,
-		);
+		throw await componentMissError(primitiveId);
 	}
 	return component;
 }
@@ -6122,7 +6161,7 @@ const pcbReport: Handler = async () => {
 		result.netCount = nets.length;
 	}
 	catch (err) {
-		result.netsError = err instanceof Error ? err.message : String(err);
+		result.netsError = describeThrown(err);
 	}
 
 	try {
@@ -6134,7 +6173,7 @@ const pcbReport: Handler = async () => {
 			return { name: c.name, nets: c.nets, totalLength: measured ? total : null };
 		}));
 	}
-	catch (err) { result.netClassesError = err instanceof Error ? err.message : String(err); }
+	catch (err) { result.netClassesError = describeThrown(err); }
 
 	try {
 		const pairsRaw = await eda.pcb_Drc.getAllDifferentialPairs();
@@ -6150,7 +6189,7 @@ const pcbReport: Handler = async () => {
 			return { name: p.name, positiveNet: p.positiveNet, negativeNet: p.negativeNet, positiveLength: lp, negativeLength: ln, skew };
 		}));
 	}
-	catch (err) { result.differentialPairsError = err instanceof Error ? err.message : String(err); }
+	catch (err) { result.differentialPairsError = describeThrown(err); }
 
 	try {
 		const groups = (await eda.pcb_Drc.getAllEqualLengthNetGroups()) ?? [];
@@ -6162,7 +6201,7 @@ const pcbReport: Handler = async () => {
 			return { name: g.name, members, spread };
 		}));
 	}
-	catch (err) { result.equalLengthNetGroupsError = err instanceof Error ? err.message : String(err); }
+	catch (err) { result.equalLengthNetGroupsError = describeThrown(err); }
 
 	return { result };
 };

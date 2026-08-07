@@ -33,6 +33,7 @@ import {
 	type ResponseFrame,
 	SERVICE_ID,
 } from './protocol';
+import { describeThrown } from './util';
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -761,7 +762,7 @@ function toResponseError(err: unknown): ResponseFrame['error'] {
 			detail: err.detail,
 		};
 	}
-	const message = err instanceof Error ? err.message : String(err);
+	const message = describeThrown(err);
 	return {
 		code: ErrorCodes.INTERNAL_ERROR,
 		message,

@@ -7,6 +7,20 @@ follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **`errorDetail` 不再被折叠成 `[object Object]`(#160)**:`edaError` 用
+  `String(err)` 渲染抛出物,平台抛**裸对象**时根因整条丢失(实测 `debug.exec_js`
+  两条只剩「有个对象」)。而 `errorDetail` 存在的**唯一理由**就是承载 `eda.*` 的
+  原始抛出物(titleblock.modify 0/32 那次复盘只能靠 payload 反推)。新增纯函数
+  `describeThrown`:Error→message(空则 name)、对象→`[code] message | {json}`
+  (可读部分在前,截断也留得住)、循环引用标 `[Circular]`、无可枚举属性直说
+  ——替换 `actions.ts` 9 处 + `transport.ts` 1 处同款三元(共享出口覆盖 140 个
+  `edaError` 调用点)。离线单测 10 条。
+- **跨页 `primitiveId` 不再被误报「不存在」(#162)**:`getComponentOrThrow` 只调
+  活动页作用域的 `get()`,查不到就抛 `No schematic component found` —— 但
+  `delete` 走全页 `getAll`,**同一个 id 同一个窗口**,`replace` 说找不到、17 秒后
+  `delete` 却删得掉(审计实证:切页后同 id 即成功)。现在 miss 走一次全页判定:
+  在别页 → 报出**它到底在哪页**并给 `easyeda doc switch <page>` 指引;确实不存在
+  → 文案明确为「on any page」。收敛 modify / rebind / replace 5 个调用点。
 - **`pcb check` silk-over-pad 误报根修(#155)**:真机裁决 —— `pcb silk-align` 的
   落点**一直是对的**(报告中心 = 实测渲染 bbox 中心,分毫不差),issue 观测的
   「实际落点偏左下半文本」是把**存储的左下角锚点**误读成落点。真凶在 check 侧:
