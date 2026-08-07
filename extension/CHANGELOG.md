@@ -6,7 +6,31 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-08-07
+
 ### Fixed
+- **(CLI/daemon) `go test` 不再把 fixture 写进用户真实审计日志(#159)**:
+  `newAuditWriter("")` 兜底到 `~/.easyeda-agent/audit`,而 daemon 测试里的
+  `New(Options{})` 都不设 `AuditDir` —— 每个走 `handleAction` 的测试都往生产日志
+  追加假窗口 `w1`/`w2`、假工程 `motobox`(已污染 33 条,巡检时被当成真实的连日
+  `schematic.components.list` 失败)。新增 `EASYEDA_AUDIT_DIR` 覆写(与
+  `EASYEDA_WORKFLOW_DIR` 同款约定,**读写两侧同源** —— `audit tail`/`audit export`
+  与 skill 的 `audit-baseline.py` 都认),并在 `testing.Testing()` 下**禁用**默认
+  兜底路径:忘了传 `AuditDir` 的新测试再也污染不到用户日志(结构性防漏,不靠纪律)。
+- **(CLI) `waitDocSettle` 对 PCB 文档不再空转 8s(#161)**:settle 探针写死
+  `schematic.components.list`,`--page` 指向 PCB 时探针必然失败,而失败被吞成
+  「继续轮询」→ 审计日志 **21 连发** `EDA_CALL_FAILED`、`ready` 恒 false。现在
+  探针按文档类型选(`pcb` → `pcb.components.list`),守卫**下沉到探针本身**而不是
+  指望每个调用方记得判断(`doc switch` 有守卫、`switchToPage` 没有,漏一个就复现);
+  连续 3 次探针失败即止损。实测 21 连发 → 0,8s → 3.4s。
+- **(CLI) `sch zone-draw` 框贴图纸边缘并压标题栏 keep-out(#163)**:zones 模式在
+  **原始 sheet bbox** 上分格且只内缩 4 单位,底排落在标题栏 x 范围内的格直接压进
+  明细表 —— zone-draw 画的框会触发我们自己的 `titleblock-overlap` 规则,而 keep-out
+  几何一直是现成的(`deriveSheetGeometry`,partition 模式和 `sch check` 都在用),
+  zones 模式只是没消费它。现在先按 margin(默认 20)内缩出可用区**再分格**,并把与
+  keep-out 相交的框底边抬到上沿 + 8;标签移入框内不再压框线;收缩后过短的格跳过
+  不画残条。真机(A4 1170×825 / keepout [468,0→1170,165]):整体由 `x[4..1166]
+  y[4..821]` 收到 `x[24..1146] y[24..801]`,底排底边 4 → 173,`titleblockOverlaps: 0`。
 - **`errorDetail` 不再被折叠成 `[object Object]`(#160)**:`edaError` 用
   `String(err)` 渲染抛出物,平台抛**裸对象**时根因整条丢失(实测 `debug.exec_js`
   两条只剩「有个对象」)。而 `errorDetail` 存在的**唯一理由**就是承载 `eda.*` 的
