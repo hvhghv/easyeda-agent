@@ -1382,9 +1382,41 @@ async function deleteSchGroup(key: string, ids: Array<string>): Promise<void> {
 	const kind = SCH_PAGE_PRIMITIVE_KINDS.find(k => k.key === key);
 	for (let i = 0; i < ids.length; i += SCH_DELETE_BATCH) {
 		const batch = ids.slice(i, i + SCH_DELETE_BATCH);
-		if (kind) await kind.del(batch);
-		else await eda.sch_PrimitiveComponent.delete(batch);
+		if (!kind) {
+			await eda.sch_PrimitiveComponent.delete(batch);
+			continue;
+		}
+		// Page primitives go through the GENERIC object class, not their own —
+		// see deleteSchPagePrimitives.
+		if (!await deleteSchPagePrimitives(batch)) await kind.del(batch);
 	}
+}
+
+/**
+ * Delete page primitives through `eda.sch_PrimitiveObject` (the generic
+ * primitive class), returning false when that class is unavailable so the
+ * caller can fall back to the per-class delete.
+ *
+ * WHY not the per-class delete (issue #164): `sch_PrimitiveText.delete()`
+ * removes the text from the in-memory/render index ONLY — it never reaches the
+ * persisted document model. Live-measured on a real page: delete → getAll says
+ * gone → `schematic.save` → `doc reload` → **all of the original ids are back**.
+ * Worse, `modify` on a text is dropped the same way, so a text was effectively
+ * frozen at creation. Rectangles and wires do persist their per-class delete,
+ * which is why this looked like a text-only curiosity for so long.
+ *
+ * `sch_PrimitiveObject.delete()` persists across a reload for every page class
+ * (verified on a mixed batch of 6 texts + 1 rectangle + 1 wire: all zero after
+ * reload, including labels stranded by earlier sessions). It is also
+ * type-agnostic, so one call can carry a mixed batch.
+ */
+async function deleteSchPagePrimitives(ids: Array<string>): Promise<boolean> {
+	const generic = (eda as unknown as {
+		sch_PrimitiveObject?: { delete?: (ids: Array<string>) => Promise<boolean> };
+	}).sch_PrimitiveObject;
+	if (typeof generic?.delete !== 'function') return false;
+	await generic.delete(ids);
+	return true;
 }
 
 /**

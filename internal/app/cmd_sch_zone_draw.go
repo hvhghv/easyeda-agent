@@ -125,10 +125,19 @@ func writeZoneRectangleCreateJS(b *strings.Builder, r layoutBBox, colorJS []byte
 // accumulated so far and reports any survivor.
 func writeZoneDrawPrelude(b *strings.Builder) {
 	b.WriteString(`const rects=[], texts=[];
+const genericPrim = eda.sch_PrimitiveObject && typeof eda.sch_PrimitiveObject.delete === 'function'
+  ? eda.sch_PrimitiveObject : null;
 const cleanupCreated = async () => {
   const cleanupErrors = [];
-  try { if (rects.length) await eda.sch_PrimitiveRectangle.delete(rects); } catch (err) { cleanupErrors.push(String(err)); }
-  try { if (texts.length) await eda.sch_PrimitiveText.delete(texts); } catch (err) { cleanupErrors.push(String(err)); }
+  // Generic class first: the per-class text delete does not persist (issue #164),
+  // so a rollback through it leaves the labels behind on the next reload.
+  if (genericPrim) {
+    try { const all = [...rects, ...texts]; if (all.length) await genericPrim.delete(all); }
+    catch (err) { cleanupErrors.push(String(err)); }
+  } else {
+    try { if (rects.length) await eda.sch_PrimitiveRectangle.delete(rects); } catch (err) { cleanupErrors.push(String(err)); }
+    try { if (texts.length) await eda.sch_PrimitiveText.delete(texts); } catch (err) { cleanupErrors.push(String(err)); }
+  }
   try {
     const aliveRects = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
     const aliveTexts = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
@@ -194,6 +203,13 @@ func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, tb *layou
 // buildZoneClearJS deletes only recorded ids and verifies them against the live
 // page. The platform's delete boolean is not authoritative (large/no-op deletes
 // may still return true), so a survivor makes the operation fail closed.
+//
+// Deletion goes through the GENERIC `sch_PrimitiveObject` class (issue #164):
+// `sch_PrimitiveText.delete()` only drops the text from the in-memory index, so
+// the labels came back on the next `doc reload` — and because the survivor check
+// below re-reads IMMEDIATELY, it saw them gone and reported a clean sweep. Live
+// run before the fix: "cleared 6 previous zone-frame primitive(s)" while all 3
+// labels were still on the page. `sch_PrimitiveObject.delete()` persists.
 func buildZoneClearJS(f *workflow.SchZoneFrames) string {
 	rects, _ := json.Marshal(f.Rects)
 	texts, _ := json.Marshal(f.Texts)
@@ -202,13 +218,18 @@ const rectAliveBefore = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitive
 const textAliveBefore = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
 const foundRects = rects.filter(id => rectAliveBefore.has(id));
 const foundTexts = texts.filter(id => textAliveBefore.has(id));
-if (foundRects.length) await eda.sch_PrimitiveRectangle.delete(foundRects);
-if (foundTexts.length) await eda.sch_PrimitiveText.delete(foundTexts);
+const generic = eda.sch_PrimitiveObject && typeof eda.sch_PrimitiveObject.delete === 'function'
+  ? eda.sch_PrimitiveObject : null;
+if (generic) { const all = [...foundRects, ...foundTexts]; if (all.length) await generic.delete(all); }
+else {
+  if (foundRects.length) await eda.sch_PrimitiveRectangle.delete(foundRects);
+  if (foundTexts.length) await eda.sch_PrimitiveText.delete(foundTexts);
+}
 const rectAliveAfter = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
 const textAliveAfter = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
 const survived = [...rects.filter(id => rectAliveAfter.has(id)), ...texts.filter(id => textAliveAfter.has(id))];
 const found = foundRects.length + foundTexts.length;
-return {ok:survived.length===0, requested:rects.length+texts.length, found, deleted:found-survived.length, survived};`, rects, texts)
+return {ok:survived.length===0, requested:rects.length+texts.length, found, deleted:found-survived.length, survived, viaGeneric: !!generic};`, rects, texts)
 }
 
 func asStringSlice(v any) []string {

@@ -15,14 +15,25 @@ follow [SemVer](https://semver.org/).
   (可读部分在前,截断也留得住)、循环引用标 `[Circular]`、无可枚举属性直说
   ——替换 `actions.ts` 9 处 + `transport.ts` 1 处同款三元(共享出口覆盖 140 个
   `edaError` 调用点)。离线单测 10 条。
+- **原理图图元删除改走 `sch_PrimitiveObject`,文本删除终于真落盘(#164)**:
+  `sch_PrimitiveText.delete()` **只从内存/渲染索引摘除,从不进持久化模型** ——
+  删完 getAll 说没了、`save` 也说没了,`doc reload` 后**原 id 全部复活**。于是
+  zone-draw 的「删旧+重画」实为只加不减(车机V2 P5 累积到 56 个标签)。真机定因:
+  同一次 save 里新建的文本**落盘了**、删掉的文本**回来了** —— 不是没标脏,是
+  delete 压根没进模型。两处订正原 issue:**矩形/导线的 per-class delete 其实是
+  落盘的**(只有文本坏);**文本的 `modify` 同样被丢弃**(改内容 reload 后回退),
+  等于文本一经创建就冻结。修法=页面图元统一走**通用图元类**
+  `eda.sch_PrimitiveObject.delete(ids)`,它跨类型且真持久化(混批 6 文本+1 矩形
+  +1 导线,reload 后全零,连历史遗留的孤儿标签一并清掉);旧平台无此类时回退
+  per-class。`sch zone-draw --clear` 与创建失败回滚路径同步改走通用类。
 - **`schematic.primitives.delete` 改为回读验证计数(#164)**:此前
   `deleted[key] = ids.length` **直接来自请求数**,从不回读 —— 与 `page.clear`
-  修过的「把枚举数当删除数报」是同一个坑,只是没修到这里。于是 zone-draw 的
-  「删旧+重画」每轮都报干净、实则只加不减(车机V2 P5 累积到 56 个标签)。现在
-  删完重新枚举各类目:`deleted`/`total` 只计真正消失的,有幸存则按 #151 约定返回
-  `partial:true` + `survived` + warning(画布已变不抛错),CLI 侧 `sch prim-delete`
-  随之非零退出。**注意这不覆盖平台的持久化坑本身** —— 立即回读=0 而 `doc reload`
-  后复活的那一层,仍需 reload 复查(文案已写进 skill)。
+  修过的「把枚举数当删除数报」是同一个坑,只是没修到这里。现在删完重新枚举:
+  `deleted`/`total` 只计真正消失的,有幸存则按 #151 约定返回 `partial:true` +
+  `survived` + warning(画布已变不抛错),CLI 侧 `sch prim-delete` 随之非零退出。
+  **同时记一条判据教训**:立即回读**证明不了持久化** —— 文本删除的立即回读一直
+  是"已删",`zone-draw --clear` 那套 fail-closed 校验因此报了一路"cleared 6"、
+  实则 3 个标签全在。凡涉及删除是否落盘,唯一可信判据是 **`doc reload` 后复查**。
 - **跨页 `primitiveId` 不再被误报「不存在」(#162)**:`getComponentOrThrow` 只调
   活动页作用域的 `get()`,查不到就抛 `No schematic component found` —— 但
   `delete` 走全页 `getAll`,**同一个 id 同一个窗口**,`replace` 说找不到、17 秒后
