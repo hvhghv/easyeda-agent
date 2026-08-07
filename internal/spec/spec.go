@@ -380,7 +380,11 @@ func Validate(s *Spec) []Issue {
 	}
 
 	// --- flow ---
-	if len(s.Flow) > 0 {
+	if len(s.Flow) == 0 {
+		// 提前告知而不是让用户在打分报告里发现少了一维：没有 flow 就没有目标序列，
+		// flow-order 维会被标 skipped。这是能力降级不是错误，所以只报 INFO。
+		add("INFO", "flow", "no signal flow declared — the flow-order dimension of `pcb layout-score` will be skipped (e.g. \"flow\": [\"POWER\",\"MCU\",\"RF\",\"ANT\"])")
+	} else {
 		seenFlow := map[string]bool{}
 		for i, f := range s.Flow {
 			field := fmt.Sprintf("flow[%d]", i)

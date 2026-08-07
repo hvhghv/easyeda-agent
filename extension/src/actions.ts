@@ -9206,10 +9206,88 @@ const pcbOutlineGet: Handler = async () => {
 		}
 		bbox = { minX, maxX, minY, maxY };
 	}
+	// Real polygon points (#167). The bbox alone is an AABB: on a non-rectangular
+	// board (Type-C sticking out, a notch, a milled cutout) "distance to the board
+	// edge" computed from it is simply wrong — a part hugging the real edge of a
+	// protrusion reads as far from the edge. The internal-on-edge / edge-IO layout
+	// dimensions need the true boundary.
+	//
+	// NOTE the points are the outline's CENTER LINE, while the bbox is the RENDERED
+	// extent and therefore includes the outline's line width (measured on ceshi:
+	// 5 mil larger on every side for a 10-mil outline). The mill follows the center
+	// line, so the points are the truthful board edge.
+	let points: Array<[number, number]> | null = null;
+	let outlineFormat: string | null = null;
+	if (polylines.length === 1) {
+		try {
+			const src = polylines[0].getState_Polygon()?.getSource();
+			const parsed = polygonSourceToPoints(src as unknown[]);
+			points = parsed.points;
+			outlineFormat = parsed.format;
+		}
+		catch { /* best-effort: callers fall back to the bbox */ }
+	}
+	else if (polylines.length > 1) {
+		// Several polylines on the outline layer = board + cutouts (or a stale
+		// leftover). Which one is the boundary is ambiguous, so don't guess — the
+		// caller degrades to the bbox and says so.
+		outlineFormat = `ambiguous:${polylines.length}-polylines`;
+	}
+
 	// `outline` = the canonical polyline-based board outline; `segments`/`arcs` keep
 	// reporting legacy line/arc counts so old boards still read sensibly.
-	return { result: { outline: polylines.length, segments: lines.length, arcs: arcCount, bbox } };
+	return { result: { outline: polylines.length, segments: lines.length, arcs: arcCount, bbox, points, outlineFormat } };
 };
+
+/**
+ * Flatten a TPCB_PolygonSourceArray into plain [x, y] points.
+ *
+ * The source array is an SVG-path-like flat mix of command tokens and numbers:
+ * `[x0, y0, 'L', x1, y1, x2, y2, …]` — a start point followed by commands, where
+ * `L` takes an arbitrary run of coordinate pairs (verified on a live ceshi board).
+ *
+ * Curved commands (`ARC`/`CARC`/`C`/`R`/`CIRCLE`) carry parameter layouts we have
+ * not been able to observe on a real board, so rather than guessing an arg count
+ * — and silently emitting a mangled polygon — we bail out and report the command
+ * that stopped us. A wrong boundary is worse than an admitted approximation: the
+ * caller degrades to the AABB and labels it.
+ *
+ * Worth noting: `pcb outline-round` does NOT produce arcs. It approximates each
+ * rounded corner with a 7-point polyline, so every outline this toolchain creates
+ * — rounded ones included — is pure `L` and parses exactly.
+ */
+function polygonSourceToPoints(src: unknown): { points: Array<[number, number]> | null; format: string | null } {
+	if (!Array.isArray(src) || src.length < 6) return { points: null, format: 'empty' };
+	const pts: Array<[number, number]> = [];
+	let i = 0;
+	if (typeof src[0] !== 'number' || typeof src[1] !== 'number') {
+		return { points: null, format: `unexpected-start:${String(src[0])}` };
+	}
+	pts.push([src[0] as number, src[1] as number]);
+	i = 2;
+	while (i < src.length) {
+		const tok = src[i];
+		if (typeof tok !== 'string') return { points: null, format: `unexpected-token:${String(tok)}` };
+		if (tok !== 'L') return { points: null, format: `unsupported-command:${tok}` };
+		i++;
+		let consumed = 0;
+		while (i + 1 < src.length && typeof src[i] === 'number' && typeof src[i + 1] === 'number') {
+			pts.push([src[i] as number, src[i + 1] as number]);
+			i += 2;
+			consumed++;
+		}
+		if (consumed === 0) return { points: null, format: 'malformed-L' };
+	}
+	// A closed ring repeats its first point last; drop the duplicate so consumers
+	// can treat the list as a plain ring without special-casing it.
+	if (pts.length > 2) {
+		const [fx, fy] = pts[0];
+		const [lx, ly] = pts[pts.length - 1];
+		if (Math.abs(fx - lx) < 1e-6 && Math.abs(fy - ly) < 1e-6) pts.pop();
+	}
+	if (pts.length < 3) return { points: null, format: 'degenerate' };
+	return { points: pts, format: 'polyline' };
+}
 
 /** Remove the current board outline (all primitives on the BOARD_OUTLINE layer). */
 const pcbOutlineClear: Handler = async () => {

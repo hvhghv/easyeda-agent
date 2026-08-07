@@ -65,15 +65,81 @@
 | **T3 主芯片** | ≥8 脚芯片 / 晶振 / `anchor=true` | 保持种子位、冻结(**工具不做主芯片 floorplan——种子由 agent 给**)|
 | **T4 卫星** | 去耦/上下拉/LED/按键 | 螺旋合法化,**net-aware 吸到搭档芯片**;不冲突的保持原位(不扰手调)|
 
-### edge role —— 边缘件的两种边语义(块声明)
-块 `placement.<ref>.edge` 声明边缘件的**边角色**,工具据此分流(`edgeRoleOf`):
-- **`user-facing`**:USB / SD / 螺钉端子 / 排针——用户插拔的外部 I/O。**≥2 件时分组到同一条
-  共享边、沿边居中紧凑排布**;共享边由 **net-aware** 选(搭档芯片所在边),外部 I/O 聚一处
-  又不拉长网。diag 标 `:grouped`。
+### edge role —— 边缘件的**三种**边语义
+块 `placement.<ref>.edge` 与 S0 spec 的 `interfaces[].facing` 声明边缘件的**边角色**,
+工具据此分流(`edgeRoleOf`):
+- **`user-facing`**:USB / SD / 螺钉端子 / 排针——用户插拔的外部 I/O,外壳要开孔。**≥2 件时
+  分组到同一条共享边、沿边居中紧凑排布**;共享边由 **net-aware** 选(搭档芯片所在边),
+  外部 I/O 聚一处又不拉长网。diag 标 `:grouped`。
 - **`any`**:RF 天线 / 无线模组——必须在**某条**边(缩短天线走线),但哪条都行 → 保持各自最近边。
+- **`internal`**(#168 新增):只在**箱内**连线的连接器——备份电池座 / 板间排针 / 内部排线口。
+  它**不需要**外壳开孔,因此**不该占板外沿**:外沿是稀缺资源,应该留给真要出线的对外口;
+  内部件占了外沿会挤掉对外口的可达边,而且电芯辫线还得从边上绕回箱内。
+  证据来自 box-v2 rev-a(4 层车载盒子,166 器件):`J1 = PH2.0-3P` 是接**箱内**电芯的备份
+  锂电池座(`J1.1=VBATT / J1.2=GND / J1.3=TS_NTC`),却和车辆端子、Type-C 一起挤在底边外沿。
+  判据落成 `pcb check` 的 `internal-on-edge` 规则,并作为 `pcb layout-score` 的 `edge-io` 维输入。
+
+**语义来源与置信度**(三层,冲突时越具体越优先):
+
+| 来源 | 表达 | 冲突时 | finding 档 |
+|---|---|---|---|
+| **S0 spec**(板级决定) | `interfaces[].facing` / `internal: true` + `ref` 钉位号 | **最高**——这块板的具体决定 | WARN |
+| **块库**(类别通用知识) | `placement.<ROLE>.edge` | 次之——器件类别的一般经验 | WARN |
+| **启发式**(兜底推定) | 网络不含对外语义网 + wire-to-board 类封装 → 推定 internal | 最低 | **INFO** |
+
+启发式命中只报 INFO 是刻意的:推定错了不该像显式标注那样理直气壮地拦人。
 
 匹配:优先读块 hint(独特 designator 前缀 JP/SW/LED/ANT),通用前缀 J*/U* 走 device-name
-regex 兜底(regex 是块数据的镜像)。**仍不解析自由文本 `orientation`**——那要 `blocks show` 摊给用户。
+regex 兜底(regex 是块数据的镜像)。**注意 `PlacementIndex.ByRefPrefix` 明确跳过 <2 字母
+前缀**,所以 `J1` 这类通用位号**永远拿不到块数据**——而 internal 判定的主要目标恰恰是它们,
+这就是为什么 `internal` 必须能从 S0 spec 进来。**仍不解析自由文本 `orientation`**——那要
+`blocks show` 摊给用户。
+
+### 插头护套包络(plug envelope)
+连接器**插头**(而非 PCB 上的母座)的外壳宽度。母座 footprint 不重叠 ≠ 插头插得进去:
+Type-C 粗线插头的护套明显宽于母座本体(母座 ~9mm,护套 ~12-13mm),两个口挨太近时插头
+物理打架、手指也捏不进去。这是 `layout-lint` 的 overlap 与 `pcb check` 既有规则都抓不到
+的——它们只看 footprint/courtyard,不看插头三维包络。
+
+几何里**根本不存在**这个量(PCB 只有铜箔和渲染 bbox,3D 模型也不给尺寸),只能查表:
+`internal/blocks/data/_plug_envelope.json`(按 device-name 子串匹配,与 `openings` 同范式)。
+查不到时回落到 bbox 宽 + 余量并在 finding 里标 `plug-width=fallback`——**估算值必须自曝**,
+否则用户会把一个瞎猜的宽度当实测。判据落成 `connector-plug-clearance` 规则。
+
+### 布局质量的可计算维度(layout dimensions)—— #167
+
+「好布局」不是玄学。审一块外包交付的 box-v2 布局(166 器件 / 4 层 / 4G+GNSS 双 RF)时,
+它肉眼「赏心悦目」的地方拆开看**全是能从几何 + 网表算出来的属性**。`pcb layout-score`
+把它们拆成九个各自 0-100 的维度:
+
+| 维度 id | 测什么 | 数据来源 |
+|---|---|---|
+| `partition` | 功能分区不串:模块 bbox 互不交错、内部紧凑 | spec modules[] 或信号网连通度聚类 |
+| `flow-order` | 信号流向单调(电源→数字→RF→天线) | spec `flow` + 模块质心沿轴的 Kendall-tau |
+| `edge-io` | 对外口聚一条边、开口朝外;内部件不占外沿 | 板框 + `facing` + 插头护套表 |
+| `protection` | 保护件贴端子(fuse/TVS/ESD)、去耦贴 IC | 同网 pad 最近距离 |
+| `tidy` | 齐整:落格 / 朝向一致 / 位号同侧 / 字号统一 | 器件 rotation + anchor + 丝印(#153)|
+| `compact` | 紧凑不真撞:板面利用率 | bbox 面积 / 板框面积 |
+| `rf` | RF 馈线短 + keepout 全层 | 天线同网 pad 距离 |
+| `routable` | 可布性:ratsnest 交叉**密度** | 复用 `layout-lint` 的 MST 交叉 |
+| `clearance` | 装配间距:tight pair + 手焊通道 | 复用 `layout-lint` 的间距/#99 |
+
+三条设计约定(违反了这套度量就不可信):
+
+1. **「没测」≠「测了满分」。** 数据或意图缺失的维标 `skipped`,**不参与加权**且必须给出
+   原因。默认给满分会让第 5 点的校准判据失效——一块什么都没测的板会拿满分。
+2. **硬错不抹平分数。** 跨网短路 / 器件重叠 / 出板框进独立的 `blocking` 列表一票否决,
+   不进加权。旧 `layout-lint` 一处重叠就把分数打成 0,其余维度的差异全被抹平,
+   看不出布局到底好在哪差在哪——这正是要拆多维的直接动机。
+3. **计数与判定同源。** `verdict` 只从 `blocking` 数和 `overall` 推,单一产出点。
+   聚合类命令在这里踩过「0 个阻塞项却 FAIL」的判读陷阱。
+
+**归因是一等产出**:每维要给出「是哪几个器件拉低了它」及各自扣分,这是打分驱动精修环的
+梯度来源。只给分数不给归因的维等于没做——你知道 62 分,但不知道该动谁。
+
+**校准闭环(第 5 点)**:拿一块公认的好板跑分,它就该得高分;**某维在好板上得低分 → 是度量
+错了,回去改度量,不是改板**。好板 dump(`pcb dump`)进 fixture 做回归:度量改了 / 规则加了,
+好板一跑分数不该掉。权重表(`defaultDimensionWeights`)是**待校准初值**,不是真理。
 
 ### partner chip(搭档芯片)
 一个连接器/卫星**电气驱动的那颗固定主芯片**(经共享 local 网)。net-aware 布局的目标点:
@@ -151,6 +217,8 @@ net ID、全量 verification、provenance 和复杂 PCB constraints；否则保�
 | 网络连通 | `pcb drc` 的 **Connection Error 数**(0=通) | `pcb track-list` 计数(#103:已布线板读 0)|
 | 器件覆盖/间距 | `pcb/sch layout-lint` | 截图(stale/blank)|
 | 手焊可达 | `layout-lint --gate` #99(每件 ≥1 侧 ≥60mil)| — |
+| **布局好不好** | `pcb layout-score` 的**逐维分 + 归因**(#167)| 单一总分(掩盖是哪维差)、`skipped` 维当满分 |
+| **度量本身对不对** | 好板 fixture 回归:好板必须高分 | 在差板上调参调到"看着顺眼" |
 | 阶段门 | `workflow` 机械强制(指纹绑定,mutation 自动失效)| 人肉记状态 |
 | 布线间距 | `pcb drc` 的 **Clearance Error 数** | — |
 | 读 mutation 后的状态 | 先 `doc reload` 再读(见 [[pcb-stale-reads-need-doc-reload]])| mutation 后第一次读 |

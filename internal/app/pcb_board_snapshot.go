@@ -145,6 +145,10 @@ type boardOutline struct {
 	BBox   layoutBBox   `json:"bbox"`
 	Points [][2]float64 `json:"points,omitempty"`
 	Source string       `json:"source"` // "polygon" | "bbox"
+	// Format 是连接器解析板框时的自述（"polyline" / "unsupported-command:ARC" /
+	// "ambiguous:3-polylines" / "" 表示旧连接器没这个字段）。降级时它就是原因，
+	// 直接进报告的 partial[]，省得用户猜"为什么这块板只有 AABB"。
+	Format string `json:"format,omitempty"`
 }
 
 func (o *boardOutline) width() float64  { return o.BBox.MaxX - o.BBox.MinX }
@@ -478,7 +482,7 @@ func parseBoardOutline(result map[string]any) *boardOutline {
 	if result == nil {
 		return nil
 	}
-	o := &boardOutline{Source: "bbox"}
+	o := &boardOutline{Source: "bbox", Format: asString(result["outlineFormat"])}
 	bbOK := false
 	if bb, ok := mnav(result, "bbox").(map[string]any); ok {
 		minX, ok1 := asFloatOK(bb["minX"])
@@ -570,7 +574,21 @@ func fetchBoardSnapshot(cfg *appConfig, window string, opts boardSnapshotOpts) (
 	if snap.Outline == nil {
 		snap.note("board outline unavailable (is the PCB the foreground document?) — edge/off-board dimensions skipped")
 	} else if snap.Outline.Source != "polygon" {
-		snap.note("board outline is an AABB approximation (connector returned no polygon) — edge distances on a non-rectangular board are approximate")
+		// 把连接器给的原因带上：是旧连接器没这个字段、还是板框用了我们解析不了的
+		// 圆弧命令、还是外框层上有多条 polyline 分不清哪条是边界。三种成因的处置
+		// 完全不同（升级 / 改板框 / 清理残留），笼统说一句"是近似"等于没说。
+		why := "connector returned no polygon"
+		switch f := snap.Outline.Format; {
+		case f == "":
+			why = "connector predates the polygon output — re-import the .eext to get exact edge distances"
+		case strings.HasPrefix(f, "unsupported-command:"):
+			why = fmt.Sprintf("outline uses a curve command this parser does not decode (%s)", f)
+		case strings.HasPrefix(f, "ambiguous:"):
+			why = fmt.Sprintf("several polylines on the outline layer (%s) — which one is the boundary is ambiguous; clear stale outline primitives", f)
+		default:
+			why = "connector reported outline format " + f
+		}
+		snap.note("board outline is an AABB approximation (%s) — edge distances on a non-rectangular board are approximate", why)
 	}
 
 	if opts.withSilk {
@@ -594,29 +612,26 @@ func fetchBoardSnapshot(cfg *appConfig, window string, opts boardSnapshotOpts) (
 	return snap, nil
 }
 
-// fetchCopperLayerCount 读铜层数（叠层相关维度用）。pcb.layers.list 返回全部层，
-// 铜层是 type=="SIGNAL" 或 "PLANE" 的那些。
+// fetchCopperLayerCount 读铜层数（射频 keepout 等叠层相关维度用）。
+//
+// 用连接器算好的 copperLayerCount，**不要**自己数 type=="SIGNAL"|"PLANE"。
+// 真机验出来的坑：`pcb.layers.list` 返回 260 层，其中 SIGNAL/PLANE 有 34 个 ——
+// EasyEDA 把 Inner1..Inner30 全部预置在层表里，未启用的靠 `layerStatus == 0`
+// 区分。按 type 数会把一块 4 层板报成 34 层（ceshi 实测），而 antenna-keepout
+// 的判据正是 `copperLayers > 2 时还要求内层覆盖` —— 数错就会对着不存在的内层
+// 要求 keepout。
+//
+// pcb_check.go:2019 的 fetchAntennaContext 早就是这么读的，这里保持同一判据，
+// 不引入第二套铜层口径。
 func fetchCopperLayerCount(cfg *appConfig, window string) (int, error) {
 	res, err := requestAction(cfg, "pcb.layers.list", window, nil)
 	if err != nil {
 		return 0, err
 	}
-	raw, _ := mnav(res.Result, "layers").([]any)
-	n := 0
-	for _, li := range raw {
-		lm, ok := li.(map[string]any)
-		if !ok {
-			continue
-		}
-		switch strings.ToUpper(asString(lm["type"])) {
-		case "SIGNAL", "PLANE":
-			n++
-		}
+	if n, ok := asFloatOK(mnav(res.Result, "copperLayerCount")); ok && n > 0 {
+		return int(n), nil
 	}
-	if n == 0 {
-		return 0, fmt.Errorf("no copper layers reported")
-	}
-	return n, nil
+	return 0, fmt.Errorf("connector reported no copperLayerCount")
 }
 
 // loadBoardSnapshotFile 从磁盘读回一份快照（金标准回归 / --from 离线打分）。

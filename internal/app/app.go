@@ -75,6 +75,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSchCmd(cfg, stdout, stderr),
 		newPcbCmd(cfg, stdout, stderr),
 		newWorkflowCmd(cfg, stdout, stderr),
+		newSpecCmd(stdout, stderr),
 		newBoardCmd(cfg, stdout, stderr),
 		newViewCmd(cfg, stdout, stderr),
 		newBomCmd(cfg, stdout, stderr),
