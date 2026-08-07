@@ -6,6 +6,22 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`schematic.export.image` —— 选区/整页导出 SVG·PNG·PDF(#166)**。
+  `easyeda sch export-image --ids '[...]' --out block.svg` 把**指定图元**单独渲染出来
+  (自动选中并把画布裁到选区:实测 3 个器件 → 283×155,整页 1191×846),省略 `--ids`
+  导整页;`--format svg|png|pdf`、`--scope selection|page|project`、`--page`、`--out`。
+  **这是 agent「看局部原理图」的可靠通路** —— 老路子 `view region` + `snapshot --no-fit`
+  依赖视口重绘,**标签页不在前台时 rAF 不触发、画布不重画,于是静默截回上一帧整页**
+  (#166 报的「仍截整页」真因在此,不是 #20 回归);新命令不走视口、不需前台、不弹框,
+  SVG 还是矢量。
+  ⚠️ **底层 `getExportDocumentFile` 的 `object` 字面量,官方类型定义三个值全是错的**
+  (`'All Schematic'`/`'Current Schematic'`/`'Current Schematic Page'`),真值是
+  `'Current Page'`/`'Current Page Selected Items'`/`'Project'`(读 `sch-main.js` 源码实证)。
+  传错**不报错**:内部 `Z.pureSchematics[<非法key>].sort` 抛 TypeError、空 reject 无人接,
+  **外层 promise 既不 resolve 也不 reject**,编辑器卡在 1% 进度条(实测两次卡死)。
+  handler 固化真值并加 30s 超时兜底,绝不再让动作队列被悬着的 promise 占死。
+
 ## [0.21.4] - 2026-08-07
 
 ### Fixed

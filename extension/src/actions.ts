@@ -3132,6 +3132,153 @@ const schematicExportNetlist: Handler = async (payload) => {
 	return { result: { artifactId: artifact.id, netlistType: netlistType ?? null }, artifacts: [artifact] };
 };
 
+/**
+ * `object` values `getExportDocumentFile` ACTUALLY accepts.
+ *
+ * ⚠️ The published type declaration is WRONG. `@jlceda/pro-api-types` declares
+ * `'All Schematic' | 'Current Schematic' | 'Current Schematic Page'` — **none of
+ * those three work**. The real literals, read out of the shipped `sch-main.js`
+ * (`function k$(i){return["Current Page","Current Page Selected Items"].includes(i)}`),
+ * are the ones below.
+ *
+ * Passing a declared-but-wrong literal does not throw: `k$()` returns false, the
+ * value falls through to `Z.pureSchematics[<bad key>].sort`, that TypeErrors,
+ * the rejection is never caught internally, and **the promise you awaited neither
+ * resolves nor rejects** — the editor just shows a 1% progress toast forever
+ * (live-verified: two hung sessions, 90s+, no console error beyond a bare
+ * `Uncaught (in promise)`). Hence the timeout guard in schematicExportImage.
+ *
+ * DO NOT "fix" these strings to match the .d.ts.
+ */
+const SCH_EXPORT_OBJECT: Record<string, string> = {
+	selection: 'Current Page Selected Items',
+	page: 'Current Page',
+	project: 'Project',
+};
+
+const SCH_EXPORT_FORMAT: Record<string, { fileType: string; ext: string; mime: string }> = {
+	svg: { fileType: 'SVG', ext: 'svg', mime: 'image/svg+xml' },
+	png: { fileType: 'PNG', ext: 'png', mime: 'image/png' },
+	pdf: { fileType: 'PDF', ext: 'pdf', mime: 'application/pdf' },
+};
+
+/** Upper bound for one export. A correct call is ~100-200ms; anything near this
+ *  means the platform swallowed the request, and we must not hold the action
+ *  queue hostage waiting on a promise that will never settle. */
+const SCH_EXPORT_TIMEOUT_MS = 30_000;
+
+/**
+ * Export the active schematic page — or just the SELECTED primitives — as
+ * SVG / PNG / PDF (issue #166).
+ *
+ * The selection scope is the point: a full-page snapshot of a dense sheet is
+ * unreadable, and the pre-existing `view region` + `snapshot --no-fit` path is
+ * viewport-dependent (a backgrounded tab never repaints, so it silently returns
+ * the previous full-page frame). This renders the requested primitives directly:
+ * no viewport, no foreground requirement, no dialog — and SVG is vector, so the
+ * agent can zoom without resampling.
+ */
+const schematicExportImage: Handler = async (payload) => {
+	const format = (optionalString(payload, 'format') ?? 'svg').toLowerCase();
+	const spec = SCH_EXPORT_FORMAT[format];
+	if (!spec) {
+		throw new ActionError(
+			ErrorCodes.MISSING_PAYLOAD_FIELD,
+			`Unsupported format "${format}". Use one of: ${Object.keys(SCH_EXPORT_FORMAT).join(', ')}.`,
+		);
+	}
+
+	const rawIds = payload.primitiveIds;
+	let ids: Array<string> | undefined;
+	if (typeof rawIds === 'string') ids = [rawIds];
+	else if (Array.isArray(rawIds) && rawIds.every(id => typeof id === 'string')) ids = rawIds as Array<string>;
+	else if (rawIds !== undefined) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, '"primitiveIds" must be a string or string[].');
+	}
+
+	const scope = optionalString(payload, 'scope') ?? (ids && ids.length ? 'selection' : 'page');
+	const objectLiteral = SCH_EXPORT_OBJECT[scope];
+	if (!objectLiteral) {
+		throw new ActionError(
+			ErrorCodes.MISSING_PAYLOAD_FIELD,
+			`Unknown scope "${scope}". Use one of: ${Object.keys(SCH_EXPORT_OBJECT).join(', ')}.`,
+		);
+	}
+
+	// Explicit ids drive the selection; otherwise a 'selection' scope exports
+	// whatever the user/agent selected earlier.
+	if (ids && ids.length) {
+		try {
+			await eda.sch_SelectControl.doSelectPrimitives(ids);
+		}
+		catch (err) {
+			throw edaError(err, 'Failed to select the primitives to export.');
+		}
+	}
+	let selected: Array<string> = [];
+	try {
+		selected = (await eda.sch_SelectControl.getAllSelectedPrimitives_PrimitiveId()) ?? [];
+	}
+	catch { /* selection read is advisory */ }
+	if (scope === 'selection' && selected.length === 0) {
+		throw new ActionError(
+			ErrorCodes.INVALID_STATE,
+			'Nothing is selected, so a selection export would be empty. Pass primitiveIds, or use scope "page".',
+		);
+	}
+
+	const fileName = optionalString(payload, 'fileName') ?? `schematic-export.${spec.ext}`;
+	const typeParams = {
+		theme: (optionalString(payload, 'theme') ?? 'Default') as 'Default',
+		lineWidth: (optionalString(payload, 'lineWidth') ?? 'Default') as 'Default',
+	};
+
+	let file: File | undefined;
+	try {
+		file = await withTimeout(
+			eda.sch_ManufactureData.getExportDocumentFile(
+				fileName,
+				spec.fileType as ESCH_ExportDocumentFileType,
+				typeParams,
+				objectLiteral,
+			),
+			SCH_EXPORT_TIMEOUT_MS,
+			`Export did not settle within ${SCH_EXPORT_TIMEOUT_MS}ms. The platform drops the request without rejecting when it dislikes an argument — the editor will show a stuck progress toast; reload the document to clear it.`,
+		);
+	}
+	catch (err) {
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, 'Failed to export the schematic image.');
+	}
+	if (!file) {
+		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Export returned no file.');
+	}
+
+	const artifact = await blobToArtifact(file, 'schematic_export', file.name || fileName, spec.mime);
+	return {
+		result: {
+			artifactId: artifact.id,
+			format,
+			scope,
+			selectedCount: selected.length,
+			bytes: file.size,
+			fileName: file.name || fileName,
+		},
+		artifacts: [artifact],
+	};
+};
+
+/** Reject after ms rather than await forever. */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new ActionError(ErrorCodes.EDA_CALL_FAILED, message)), ms);
+		p.then(
+			(v) => { clearTimeout(timer); resolve(v); },
+			(e) => { clearTimeout(timer); reject(e); },
+		);
+	});
+}
+
 // schematic.read — ONE call that returns a coherent semantic snapshot of the
 // circuit, so the agent doesn't stitch components.list + netlist + check itself.
 // Components (with each pin's net, from the JSON-authoritative netlist — reuses
@@ -9231,6 +9378,7 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.read': schematicRead,
 	'schematic.save': schematicSave,
 	'schematic.export.netlist': schematicExportNetlist,
+	'schematic.export.image': schematicExportImage,
 	'schematic.export.bom': schematicExportBom,
 	'schematic.power.connect_pin': schematicPowerConnectPin,
 	'schematic.library.search': schematicLibrarySearch,

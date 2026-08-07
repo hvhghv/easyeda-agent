@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,6 +135,39 @@ type artifactRef struct {
 	Path     string `json:"path,omitempty"`
 	FileName string `json:"fileName,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
+}
+
+// saveFirstArtifact copies the response's first persisted artifact to `out`.
+// The daemon already decoded the connector's inlineBase64 into its artifact
+// directory and filled Path; this just puts it where the caller asked, so
+// `--out` behaves like any other tool's output flag instead of making the user
+// hunt through the artifact dir.
+func saveFirstArtifact(res *actionResult, out string, stderr io.Writer) error {
+	if res == nil || len(res.Artifacts) == 0 {
+		return fmt.Errorf("the action returned no artifact to write to %s", out)
+	}
+	src := res.Artifacts[0].Path
+	if src == "" {
+		return fmt.Errorf("artifact %q has no persisted path (daemon did not decode it)", res.Artifacts[0].FileName)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read artifact %s: %w", src, err)
+	}
+	if dir := filepath.Dir(out); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create output dir %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(out, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", out, err)
+	}
+	abs, aerr := filepath.Abs(out)
+	if aerr != nil {
+		abs = out
+	}
+	fmt.Fprintf(stderr, "✓ wrote %s (%d bytes)\n", abs, len(data))
+	return nil
 }
 
 // actionResult is the parsed form of an /action response, for callers that need

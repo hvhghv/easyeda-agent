@@ -481,6 +481,16 @@ func AllActions() []ActionSpec {
 			Outputs:     []string{"artifact id", "file path", "netlist type"},
 		},
 		{
+			Name:        "schematic.export.image",
+			Domain:      DomainArtifact,
+			Phase:       1,
+			NeedsWindow: true,
+			Description: "Render the active schematic page — or ONLY the given primitives — to SVG/PNG/PDF (#166). The selection scope is the point: a whole-page snapshot of a dense sheet is unreadable, and `view region` + `snapshot --no-fit` is viewport-dependent (a backgrounded tab never repaints, so it silently returns the previous full-page frame). This renders the requested primitives directly — no viewport, no foreground requirement, no dialog — and SVG is vector, so zooming in costs nothing.",
+			Inputs:      []string{"format svg|png|pdf (default svg)", "primitiveIds optional (auto-selects them)", "scope selection|page|project", "fileName optional", "theme optional", "lineWidth optional"},
+			Outputs:     []string{"artifact id", "file path", "format", "scope", "selectedCount", "bytes"},
+			VerifyWith:  []string{"schematic.components.list"},
+		},
+		{
 			Name:        "schematic.export.bom",
 			Domain:      DomainArtifact,
 			Phase:       1,

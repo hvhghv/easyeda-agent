@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1559,6 +1560,84 @@ The keepouts[] format is what sch autoconnect / autolayout consume.`,
 			},
 		}
 		c.Flags().StringVar(&netlistType, "type", "", "netlist format (e.g. kicad, spice, protel)")
+		sch.AddCommand(c)
+	}
+
+	// ── export-image ──────────────────────────────────────────────────────
+	// schematic.export.image (#166)
+	{
+		var idsJSON, format, scope, out, page, theme, lineWidth string
+		var stay bool
+		c := &cobra.Command{
+			Use:   "export-image",
+			Short: "Render the page — or only the given primitives — to SVG/PNG/PDF",
+			Args:  cobra.NoArgs,
+			Long: `Render the active schematic page, or ONLY the primitives you name, to
+SVG / PNG / PDF (#166).
+
+Why not ` + "`view region` + `snapshot`" + `: that path is viewport-dependent — a
+backgrounded tab never repaints, so it silently hands back the previous
+full-page frame. This renders the requested primitives directly: no viewport,
+no foreground requirement, no dialog. SVG is vector, so an agent can zoom into
+dense wiring without resampling a blurry screenshot.
+
+--ids selects those primitives and exports just them (the export box shrinks to
+the selection). Without --ids it exports the whole active page.`,
+			Example: `  easyeda sch export-image --ids '["id1","id2"]' --out block.svg
+  easyeda sch export-image --format png --out page.png
+  easyeda sch export-image --scope page --format pdf --page P2 --out p2.pdf`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if page != "" {
+					scopeRes, err := switchToPage(cfg, window, page)
+					if err != nil {
+						return err
+					}
+					if !stay {
+						defer func() { _ = scopeRes.restore(cfg) }()
+					}
+					window = scopeRes.window
+				}
+				payload := map[string]any{}
+				if idsJSON != "" {
+					var ids []any
+					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
+						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+					}
+					payload["primitiveIds"] = ids
+				}
+				if format != "" {
+					payload["format"] = format
+				}
+				if scope != "" {
+					payload["scope"] = scope
+				}
+				if theme != "" {
+					payload["theme"] = theme
+				}
+				if lineWidth != "" {
+					payload["lineWidth"] = lineWidth
+				}
+				if out != "" {
+					payload["fileName"] = filepath.Base(out)
+				}
+				res, err := dispatchCapture(cfg, "schematic.export.image", window, payload, stdout)
+				if err != nil {
+					return err
+				}
+				if out != "" {
+					return saveFirstArtifact(res, out, stderr)
+				}
+				return nil
+			},
+		}
+		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to export alone, e.g. '["id1","id2"]' (omit to export the whole page)`)
+		c.Flags().StringVar(&format, "format", "", "svg | png | pdf (default svg)")
+		c.Flags().StringVar(&scope, "scope", "", "selection | page | project (default: selection when --ids given, else page)")
+		c.Flags().StringVarP(&out, "out", "o", "", "write the rendered file to this path")
+		c.Flags().StringVar(&page, "page", "", "schematic page to export (name or uuid)")
+		c.Flags().StringVar(&theme, "theme", "", "Default | White on Black | Black on White")
+		c.Flags().StringVar(&lineWidth, "line-width", "", "Default | Always 1px | Follow the Zoom Change")
+		c.Flags().BoolVar(&stay, "stay", false, "with --page: stay on that page instead of restoring the previous one")
 		sch.AddCommand(c)
 	}
 

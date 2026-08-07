@@ -113,6 +113,13 @@ profile 里持久化)。
 
 ```
 1. make eext                        # 产出 extension/dist/index.js(19 万字节级)
+   ⚠️ 必须 `make eext`,**不能只 `npm run compile`**:后者不 bump extension.json 的
+   version,IndexedDB 里字节确实换成了新的(读回验证 bundle 含新代码),但编辑器
+   照旧加载旧扩展——现象是新 action 一直 UNKNOWN_ACTION、health 版本号也不变。
+   version 变了才触发重新加载。
+   ⚠️ 另:新增 typed action 时 **daemon 也要重启**(它有自己的 action catalog)。
+   `UNKNOWN_ACTION` 的 detail 若是 "run `easyeda actions` for the supported set",
+   那是 **daemon 拦的**,跟连接器无关——别再去折腾热重载。
 2. 起本地 WS 文件服务器(编辑器是 HTTPS,fetch http://127.0.0.1 被
    mixed-content 拦,ws://127.0.0.1 放行——连接器本身就靠它):
    一个 ~30 行 node 脚本,收 {action:"getFile"} 回 {content:<base64>}。
