@@ -1,4 +1,4 @@
-.PHONY: help test mcp-test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test release publish-skill replay demo-replay replay-sch replay-pcb
+.PHONY: help test mcp-test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test blocks-audit layout-calibrate release publish-skill replay demo-replay replay-sch replay-pcb
 
 DIST := dist
 
@@ -30,6 +30,12 @@ lint-test: ## linter rule-trust harness (orientation + fixtures)
 
 blocks-audit: ## check every block pin ref against real symbol pins (offline; --probe to refresh)
 	python3 skills/easyeda-agent/scripts/blocks-pin-audit.py
+
+# 金标准好板回归(#167 第五层)：参考板九维不该掉分,负对照九维必须还会响。
+# 全离线、不连编辑器。改了 pcb_score_*.go 的判据/阈值/权重后先跑这个。
+# fixture 与「怎么加一块真板」见 internal/app/testdata/boards/README.md。
+layout-calibrate: ## layout-score 金标准板回归(offline; 好板不掉分 + 坏板仍报警)
+	go test ./internal/app/ -run TestLayoutScore_GoldenBoards -v
 
 fmt: ## gofmt cmd + internal
 	gofmt -w cmd internal

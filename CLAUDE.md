@@ -92,6 +92,9 @@ make daemon       # one-shot daemon (no reload) — prefer `make dev`
 make test         # go test ./...
 make lint-test    # linter rule-trust harness (orientation consistency + fixtures)
 make blocks-audit # 块引脚引用 vs 真实符号引脚表(离线;首审揪出 14 个块 41 处错)
+make layout-calibrate # layout-score 金标准板回归(离线):参考板九维不该掉分 +
+                  # 负对照九维必须还会响。改 pcb_score_*.go 的判据/阈值/权重后先跑它。
+                  # fixture 与「怎么加一块真板」见 internal/app/testdata/boards/README.md
 make actions      # print the typed action catalog
 make eext         # bump PATCH + build importable .eext, STABLE uuid (update in place: uninstall old → import)
 make eext-fresh   # fallback: bump PATCH + FRESH uuid (imports as a new entry; delete the old one) — for when the installed one won't uninstall

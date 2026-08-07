@@ -1,0 +1,100 @@
+{
+  "board": {
+    "outline": "rect",
+    "widthMm": 50.8,
+    "heightMm": 29.21
+  },
+  "stackup": {
+    "layers": 4,
+    "groundStrategy": "single-plane",
+    "innerLayers": [
+      "GND",
+      "3V3"
+    ]
+  },
+  "assembly": {
+    "profile": "reflow",
+    "side": "top"
+  },
+  "flow": [
+    "POWER",
+    "MCU",
+    "RF",
+    "ANT"
+  ],
+  "flowAxis": "x",
+  "modules": [
+    {
+      "name": "PWR",
+      "kind": "POWER",
+      "parts": [
+        "J1",
+        "D1",
+        "F1",
+        "U1",
+        "C1"
+      ]
+    },
+    {
+      "name": "BRAIN",
+      "kind": "MCU",
+      "parts": [
+        "U2",
+        "C2",
+        "C3",
+        "C9",
+        "X1"
+      ]
+    },
+    {
+      "name": "RADIO",
+      "kind": "RF",
+      "parts": [
+        "L1",
+        "C11",
+        "C12"
+      ]
+    },
+    {
+      "name": "AERIAL",
+      "kind": "ANT",
+      "parts": [
+        "ANT1"
+      ]
+    },
+    {
+      "name": "IO",
+      "kind": "IO",
+      "parts": [
+        "J2",
+        "J3"
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "BATT",
+      "ref": "J1",
+      "facing": "internal"
+    },
+    {
+      "name": "USB-C",
+      "ref": "J2",
+      "edge": "bottom",
+      "facing": "user-facing"
+    },
+    {
+      "name": "UART",
+      "ref": "J3",
+      "edge": "bottom",
+      "facing": "user-facing"
+    }
+  ],
+  "rf": {
+    "parts": [
+      "ANT1"
+    ],
+    "keepoutLayers": "all",
+    "feed": "RF_ANT"
+  }
+}

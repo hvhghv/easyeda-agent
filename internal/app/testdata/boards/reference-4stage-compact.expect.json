@@ -1,0 +1,42 @@
+{
+  "kind": "reference",
+  "title": "四段流向紧凑参考板（合成）",
+  "note": [
+    "合成参考板：POWER→MCU→RF→ANT 四段流向、16 器件、2000×1150mil 四层板。",
+    "它是**手工照着九维判据摆出来的**，所以九维都拿 100 分 —— 这不是校准证据，",
+    "而是「度量在一块摆对了的板上不该扣分」的机械化断言（README 的范围声明）。",
+    "",
+    "维持 100 分的那些几何关系（改 fixture 前先读这一段，否则会莫名其妙掉分）：",
+    "  · 模块 bbox 两两不相交（PWR / BRAIN / RADIO / AERIAL / IO 各占一块互不交错的矩形）；",
+    "  · 模块质心沿 +x 单调递增，顺序与 spec.flow 一致 → flow-order 满分；",
+    "  · J2(Type-C) 与 J3(KF301) 都贴底边，中心距 550mil > 插头护套包络要求的 453mil；",
+    "  · J1 是 spec 声明的 internal 电池座，bbox 四角到板边都 ≥300mil（外沿带宽），不占外沿；",
+    "  · F1/D1 到 J1.VBATT ≤250mil（保护件预算）、C1/C2/C3/C9 到最近 3V3 IC 脚 ≤100mil（去耦预算）；",
+    "  · 器件 bbox 面积和 / 板面积 = 21.8%，落在紧凑度平台区 20%–60%；",
+    "  · ANT1 馈点到 C12.RF_ANT 75mil ≤ 200mil（λ/10 不扣分区）；",
+    "  · 全部 anchor 落 5mil 格、rotation 全 0、位号丝印一律在器件正上方且字号统一 40mil；",
+    "  · C9/C3/C2 在 x=950 上等距成列（步进 210mil），喂给 tidy 的阵列子规则一个合规样本。",
+    "",
+    "三处 degraded（是数据边界，不是缺陷，不必修）：",
+    "  · edge-io：Type-C 没有块库声明的开口方向 —— 对称口的开口不在铜箔里；",
+    "  · compact / clearance：本仓只有渲染 bbox，没有 IPC courtyard；",
+    "  · rf：keepout 覆盖要 region 数据，板级快照不带（那条走 `pcb check`）。"
+  ],
+  "minOverall": 96,
+  "maxBlocking": 0,
+  "minDimension": {
+    "partition": 95,
+    "flow-order": 95,
+    "edge-io": 95,
+    "protection": 95,
+    "tidy": 95,
+    "compact": 95,
+    "rf": 95,
+    "routable": 95,
+    "clearance": 95
+  },
+  "requireScored": [
+    "partition", "flow-order", "edge-io", "protection",
+    "tidy", "compact", "rf", "routable", "clearance"
+  ]
+}

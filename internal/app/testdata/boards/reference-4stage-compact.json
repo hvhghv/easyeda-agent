@@ -1,0 +1,1130 @@
+{
+  "components": [
+    {
+      "primitiveId": "p_J1",
+      "designator": "J1",
+      "device": "PH2.0-3P",
+      "layer": 1,
+      "x": 380,
+      "y": 650,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 320.0,
+        "minY": 550.0,
+        "maxX": 440.0,
+        "maxY": 750.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_J1_1",
+          "padNumber": "1",
+          "net": "VBATT",
+          "layer": 1,
+          "x": 330,
+          "y": 710,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J1_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 330,
+          "y": 650,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J1_3",
+          "padNumber": "3",
+          "net": "NTC",
+          "layer": 1,
+          "x": 330,
+          "y": 590,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_D1",
+      "designator": "D1",
+      "device": "SMBJ5.0A TVS",
+      "layer": 1,
+      "x": 540,
+      "y": 700,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 510.0,
+        "minY": 680.0,
+        "maxX": 570.0,
+        "maxY": 720.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_D1_1",
+          "padNumber": "1",
+          "net": "VBATT",
+          "layer": 1,
+          "x": 520,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_D1_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 560,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_F1",
+      "designator": "F1",
+      "device": "PPTC FUSE 1206",
+      "layer": 1,
+      "x": 540,
+      "y": 800,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 510.0,
+        "minY": 780.0,
+        "maxX": 570.0,
+        "maxY": 820.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_F1_1",
+          "padNumber": "1",
+          "net": "VBATT",
+          "layer": 1,
+          "x": 520,
+          "y": 800,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_F1_2",
+          "padNumber": "2",
+          "net": "VIN",
+          "layer": 1,
+          "x": 560,
+          "y": 800,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_U1",
+      "designator": "U1",
+      "device": "XL1509",
+      "layer": 1,
+      "x": 720,
+      "y": 730,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 620.0,
+        "minY": 640.0,
+        "maxX": 820.0,
+        "maxY": 820.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_U1_1",
+          "padNumber": "1",
+          "net": "VIN",
+          "layer": 1,
+          "x": 640,
+          "y": 730,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U1_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 720,
+          "y": 660,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U1_3",
+          "padNumber": "3",
+          "net": "3V3",
+          "layer": 1,
+          "x": 800,
+          "y": 730,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C1",
+      "designator": "C1",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 880,
+      "y": 730,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 855.0,
+        "minY": 715.0,
+        "maxX": 905.0,
+        "maxY": 745.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C1_1",
+          "padNumber": "1",
+          "net": "3V3",
+          "layer": 1,
+          "x": 865,
+          "y": 730,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C1_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 895,
+          "y": 730,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_U2",
+      "designator": "U2",
+      "device": "ESP32-S3-WROOM-1",
+      "layer": 1,
+      "x": 1250,
+      "y": 720,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1000.0,
+        "minY": 470.0,
+        "maxX": 1500.0,
+        "maxY": 970.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_U2_1",
+          "padNumber": "1",
+          "net": "3V3",
+          "layer": 1,
+          "x": 1010,
+          "y": 930,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 1250,
+          "y": 720,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_3",
+          "padNumber": "3",
+          "net": "3V3",
+          "layer": 1,
+          "x": 1010,
+          "y": 510,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_4",
+          "padNumber": "4",
+          "net": "RF_OUT",
+          "layer": 1,
+          "x": 1490,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_5",
+          "padNumber": "5",
+          "net": "USB_DP",
+          "layer": 1,
+          "x": 1080,
+          "y": 480,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_6",
+          "padNumber": "6",
+          "net": "USB_DM",
+          "layer": 1,
+          "x": 1120,
+          "y": 480,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_7",
+          "padNumber": "7",
+          "net": "TX",
+          "layer": 1,
+          "x": 1380,
+          "y": 480,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_8",
+          "padNumber": "8",
+          "net": "RX",
+          "layer": 1,
+          "x": 1420,
+          "y": 480,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_9",
+          "padNumber": "9",
+          "net": "XTAL1",
+          "layer": 1,
+          "x": 1190,
+          "y": 960,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_10",
+          "padNumber": "10",
+          "net": "XTAL2",
+          "layer": 1,
+          "x": 1310,
+          "y": 960,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_11",
+          "padNumber": "11",
+          "net": "GND",
+          "layer": 1,
+          "x": 1250,
+          "y": 480,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_U2_12",
+          "padNumber": "12",
+          "net": "3V3",
+          "layer": 1,
+          "x": 1010,
+          "y": 720,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C2",
+      "designator": "C2",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 950,
+      "y": 930,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 925.0,
+        "minY": 915.0,
+        "maxX": 975.0,
+        "maxY": 945.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C2_1",
+          "padNumber": "1",
+          "net": "3V3",
+          "layer": 1,
+          "x": 935,
+          "y": 930,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C2_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 965,
+          "y": 930,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C3",
+      "designator": "C3",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 950,
+      "y": 720,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 925.0,
+        "minY": 705.0,
+        "maxX": 975.0,
+        "maxY": 735.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C3_1",
+          "padNumber": "1",
+          "net": "3V3",
+          "layer": 1,
+          "x": 935,
+          "y": 720,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C3_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 965,
+          "y": 720,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C9",
+      "designator": "C9",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 950,
+      "y": 510,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 925.0,
+        "minY": 495.0,
+        "maxX": 975.0,
+        "maxY": 525.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C9_1",
+          "padNumber": "1",
+          "net": "3V3",
+          "layer": 1,
+          "x": 935,
+          "y": 510,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C9_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 965,
+          "y": 510,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_X1",
+      "designator": "X1",
+      "device": "40MHZ XTAL 3225",
+      "layer": 1,
+      "x": 1250,
+      "y": 1040,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1175.0,
+        "minY": 1000.0,
+        "maxX": 1325.0,
+        "maxY": 1080.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_X1_1",
+          "padNumber": "1",
+          "net": "XTAL1",
+          "layer": 1,
+          "x": 1190,
+          "y": 1040,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_X1_2",
+          "padNumber": "2",
+          "net": "XTAL2",
+          "layer": 1,
+          "x": 1310,
+          "y": 1040,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_L1",
+      "designator": "L1",
+      "device": "IND0402 2N7",
+      "layer": 1,
+      "x": 1560,
+      "y": 700,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1535.0,
+        "minY": 685.0,
+        "maxX": 1585.0,
+        "maxY": 715.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_L1_1",
+          "padNumber": "1",
+          "net": "RF_OUT",
+          "layer": 1,
+          "x": 1545,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_L1_2",
+          "padNumber": "2",
+          "net": "RF_ANT",
+          "layer": 1,
+          "x": 1575,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C11",
+      "designator": "C11",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 1560,
+      "y": 610,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1535.0,
+        "minY": 595.0,
+        "maxX": 1585.0,
+        "maxY": 625.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C11_1",
+          "padNumber": "1",
+          "net": "RF_OUT",
+          "layer": 1,
+          "x": 1545,
+          "y": 610,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C11_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 1575,
+          "y": 610,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_C12",
+      "designator": "C12",
+      "device": "CAP0402",
+      "layer": 1,
+      "x": 1640,
+      "y": 700,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1615.0,
+        "minY": 685.0,
+        "maxX": 1665.0,
+        "maxY": 715.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_C12_1",
+          "padNumber": "1",
+          "net": "RF_ANT",
+          "layer": 1,
+          "x": 1625,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_C12_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 1655,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_ANT1",
+      "designator": "ANT1",
+      "device": "ANT-SMD 2450AT18A100",
+      "layer": 1,
+      "x": 1840,
+      "y": 700,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1690.0,
+        "minY": 625.0,
+        "maxX": 1990.0,
+        "maxY": 775.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_ANT1_1",
+          "padNumber": "1",
+          "net": "RF_ANT",
+          "layer": 1,
+          "x": 1700,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_ANT1_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 1980,
+          "y": 700,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_J2",
+      "designator": "J2",
+      "device": "USB3.1 TYPE-C 16P",
+      "layer": 1,
+      "x": 1050,
+      "y": 140,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 875.0,
+        "minY": 20.0,
+        "maxX": 1225.0,
+        "maxY": 260.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_J2_1",
+          "padNumber": "1",
+          "net": "VIN",
+          "layer": 1,
+          "x": 900,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J2_2",
+          "padNumber": "2",
+          "net": "GND",
+          "layer": 1,
+          "x": 940,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J2_3",
+          "padNumber": "3",
+          "net": "USB_DP",
+          "layer": 1,
+          "x": 1040,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J2_4",
+          "padNumber": "4",
+          "net": "USB_DM",
+          "layer": 1,
+          "x": 1080,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    },
+    {
+      "primitiveId": "p_J3",
+      "designator": "J3",
+      "device": "KF301-5.08-2P",
+      "layer": 1,
+      "x": 1600,
+      "y": 140,
+      "rotation": 0.0,
+      "locked": false,
+      "bbox": {
+        "minX": 1500.0,
+        "minY": 50.0,
+        "maxX": 1700.0,
+        "maxY": 230.0
+      },
+      "pads": [
+        {
+          "primitiveId": "p_J3_1",
+          "padNumber": "1",
+          "net": "TX",
+          "layer": 1,
+          "x": 1540,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        },
+        {
+          "primitiveId": "p_J3_2",
+          "padNumber": "2",
+          "net": "RX",
+          "layer": 1,
+          "x": 1660,
+          "y": 140,
+          "width": 25,
+          "height": 25
+        }
+      ]
+    }
+  ],
+  "outline": {
+    "bbox": {
+      "minX": 0,
+      "minY": 0,
+      "maxX": 2000,
+      "maxY": 1150
+    },
+    "points": [
+      [
+        0,
+        0
+      ],
+      [
+        2000,
+        0
+      ],
+      [
+        2000,
+        1150
+      ],
+      [
+        0,
+        1150
+      ]
+    ],
+    "source": "polygon",
+    "format": "polyline"
+  },
+  "silk": [
+    {
+      "ID": "s_J1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "J1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_J1",
+      "CompLayer": 1,
+      "X": 350.0,
+      "Y": 755.0,
+      "BBox": {
+        "MinX": 350.0,
+        "MinY": 755.0,
+        "MaxX": 410.0,
+        "MaxY": 785.0
+      }
+    },
+    {
+      "ID": "s_D1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "D1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_D1",
+      "CompLayer": 1,
+      "X": 510.0,
+      "Y": 725.0,
+      "BBox": {
+        "MinX": 510.0,
+        "MinY": 725.0,
+        "MaxX": 570.0,
+        "MaxY": 755.0
+      }
+    },
+    {
+      "ID": "s_F1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "F1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_F1",
+      "CompLayer": 1,
+      "X": 510.0,
+      "Y": 825.0,
+      "BBox": {
+        "MinX": 510.0,
+        "MinY": 825.0,
+        "MaxX": 570.0,
+        "MaxY": 855.0
+      }
+    },
+    {
+      "ID": "s_U1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "U1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_U1",
+      "CompLayer": 1,
+      "X": 690.0,
+      "Y": 825.0,
+      "BBox": {
+        "MinX": 690.0,
+        "MinY": 825.0,
+        "MaxX": 750.0,
+        "MaxY": 855.0
+      }
+    },
+    {
+      "ID": "s_C1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C1",
+      "CompLayer": 1,
+      "X": 850.0,
+      "Y": 750.0,
+      "BBox": {
+        "MinX": 850.0,
+        "MinY": 750.0,
+        "MaxX": 910.0,
+        "MaxY": 780.0
+      }
+    },
+    {
+      "ID": "s_U2",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "U2",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_U2",
+      "CompLayer": 1,
+      "X": 1220.0,
+      "Y": 975.0,
+      "BBox": {
+        "MinX": 1220.0,
+        "MinY": 975.0,
+        "MaxX": 1280.0,
+        "MaxY": 1005.0
+      }
+    },
+    {
+      "ID": "s_C2",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C2",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C2",
+      "CompLayer": 1,
+      "X": 920.0,
+      "Y": 950.0,
+      "BBox": {
+        "MinX": 920.0,
+        "MinY": 950.0,
+        "MaxX": 980.0,
+        "MaxY": 980.0
+      }
+    },
+    {
+      "ID": "s_C3",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C3",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C3",
+      "CompLayer": 1,
+      "X": 920.0,
+      "Y": 740.0,
+      "BBox": {
+        "MinX": 920.0,
+        "MinY": 740.0,
+        "MaxX": 980.0,
+        "MaxY": 770.0
+      }
+    },
+    {
+      "ID": "s_C9",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C9",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C9",
+      "CompLayer": 1,
+      "X": 920.0,
+      "Y": 530.0,
+      "BBox": {
+        "MinX": 920.0,
+        "MinY": 530.0,
+        "MaxX": 980.0,
+        "MaxY": 560.0
+      }
+    },
+    {
+      "ID": "s_X1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "X1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_X1",
+      "CompLayer": 1,
+      "X": 1220.0,
+      "Y": 1085.0,
+      "BBox": {
+        "MinX": 1220.0,
+        "MinY": 1085.0,
+        "MaxX": 1280.0,
+        "MaxY": 1115.0
+      }
+    },
+    {
+      "ID": "s_L1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "L1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_L1",
+      "CompLayer": 1,
+      "X": 1530.0,
+      "Y": 720.0,
+      "BBox": {
+        "MinX": 1530.0,
+        "MinY": 720.0,
+        "MaxX": 1590.0,
+        "MaxY": 750.0
+      }
+    },
+    {
+      "ID": "s_C11",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C11",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C11",
+      "CompLayer": 1,
+      "X": 1530.0,
+      "Y": 630.0,
+      "BBox": {
+        "MinX": 1530.0,
+        "MinY": 630.0,
+        "MaxX": 1590.0,
+        "MaxY": 660.0
+      }
+    },
+    {
+      "ID": "s_C12",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "C12",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_C12",
+      "CompLayer": 1,
+      "X": 1610.0,
+      "Y": 720.0,
+      "BBox": {
+        "MinX": 1610.0,
+        "MinY": 720.0,
+        "MaxX": 1670.0,
+        "MaxY": 750.0
+      }
+    },
+    {
+      "ID": "s_ANT1",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "ANT1",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_ANT1",
+      "CompLayer": 1,
+      "X": 1810.0,
+      "Y": 780.0,
+      "BBox": {
+        "MinX": 1810.0,
+        "MinY": 780.0,
+        "MaxX": 1870.0,
+        "MaxY": 810.0
+      }
+    },
+    {
+      "ID": "s_J2",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "J2",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_J2",
+      "CompLayer": 1,
+      "X": 1020.0,
+      "Y": 265.0,
+      "BBox": {
+        "MinX": 1020.0,
+        "MinY": 265.0,
+        "MaxX": 1080.0,
+        "MaxY": 295.0
+      }
+    },
+    {
+      "ID": "s_J3",
+      "Kind": "attribute",
+      "Key": "Designator",
+      "Text": "J3",
+      "Layer": 3,
+      "Mirror": false,
+      "Reverse": false,
+      "Rotation": 0,
+      "FontSize": 40,
+      "CompID": "p_J3",
+      "CompLayer": 1,
+      "X": 1570.0,
+      "Y": 235.0,
+      "BBox": {
+        "MinX": 1570.0,
+        "MinY": 235.0,
+        "MaxX": 1630.0,
+        "MaxY": 265.0
+      }
+    }
+  ],
+  "copperLayers": 4,
+  "rules": {
+    "clearanceMil": 6,
+    "trackWidthMil": 10,
+    "powerWidthMil": 20,
+    "trackWidthMinMil": 6,
+    "viaDrillMil": 12,
+    "viaDiameterMil": 24,
+    "copperToEdgeMil": 20,
+    "source": "live"
+  },
+  "project": "synthetic-reference"
+}
