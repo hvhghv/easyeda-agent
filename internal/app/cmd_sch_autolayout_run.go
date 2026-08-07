@@ -641,7 +641,8 @@ func drawAutolayoutZones(cfg *appConfig, window, targetUUID string, claims map[s
 	if _, err := clearPriorZoneFrames(st, targetUUID, exec, io.Discard); err != nil {
 		return err
 	}
-	v, err := exec("draw zone frames", buildZoneDrawJS(claims, *sheet, "#AA00AA", defaultFixedZoneFontSize))
+	titleBlock, _ := titleBlockKeepout(sheet)
+	v, err := exec("draw zone frames", buildZoneDrawJS(claims, *sheet, titleBlock, "#AA00AA", defaultFixedZoneFontSize))
 	if err != nil {
 		return err
 	}

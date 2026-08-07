@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"regexp"
@@ -21,17 +22,23 @@ func TestBuildZoneDrawJS(t *testing.T) {
 		"MCU":   {Zone: "center", Parts: []string{"U1"}},
 		"BAD":   {Zone: "nope", Parts: []string{"X1"}}, // unknown zone → skipped
 	}
-	js := buildZoneDrawJS(zones, sheet, "#AA00AA", 14)
+	js := buildZoneDrawJS(zones, sheet, nil, "#AA00AA", 14)
 	if !strings.Contains(js, `"MCU (center)"`) || !strings.Contains(js, `"POWER (left-top)"`) {
 		t.Errorf("labels missing:\n%s", js)
 	}
 	if strings.Contains(js, "BAD") {
 		t.Error("unknown zone was not skipped")
 	}
-	// MCU (center, full height) target bbox is [304,4 → 596,596].
-	// Rectangle.create takes its TOP-LEFT at (MinX, MaxY), then extends toward -y.
-	if !strings.Contains(js, "create(304, 596, 292, 592, 0, 0, \"#AA00AA\", null, 1, 1)") {
-		t.Errorf("MCU rect geometry wrong:\n%s", js)
+	// Rectangle.create takes its TOP-LEFT at (MinX, MaxY) and extends toward -y,
+	// so the emitted call must carry the frame's MaxY, never its MinY.
+	mcu, ok := schZoneFrameRect("center", sheet, nil, defaultSchZoneOpts())
+	if !ok {
+		t.Fatal("center produced no drawable frame")
+	}
+	wantCreate := fmt.Sprintf("create(%g, %g, %g, %g, 0, 0, \"#AA00AA\", null, 1, 1)",
+		mcu.MinX, mcu.MaxY, mcu.MaxX-mcu.MinX, mcu.MaxY-mcu.MinY)
+	if !strings.Contains(js, wantCreate) {
+		t.Errorf("MCU rect geometry wrong: want %s\n%s", wantCreate, js)
 	}
 	// Deterministic order: MCU before POWER (sorted).
 	if strings.Index(js, "MCU") > strings.Index(js, "POWER") {
@@ -92,12 +99,18 @@ func TestZoneDrawRectangleSemanticsSharedByFixedAndPartition(t *testing.T) {
 	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 900, MaxY: 600}
 	fixedJS := buildZoneDrawJS(map[string]*schZoneClaim{
 		"IO": {Zone: "right-bottom", Parts: []string{"J1"}},
-	}, sheet, "#AA00AA", 14)
+	}, sheet, nil, "#AA00AA", 14)
 	fixedBoxes := renderedZoneRectangleBBoxes(t, fixedJS)
 	if len(fixedBoxes) != 1 {
 		t.Fatalf("fixed mode emitted %d rectangles, want 1\n%s", len(fixedBoxes), fixedJS)
 	}
-	target := layoutBBox{MinX: 604, MinY: 4, MaxX: 896, MaxY: 296}
+	// The frame geometry itself is schZoneFrameRect's contract (asserted in the
+	// #163 tests); here the target is whatever it planned, and the point is that
+	// BOTH modes render that same bbox through the SDK call.
+	target, ok := schZoneFrameRect("right-bottom", sheet, nil, defaultSchZoneOpts())
+	if !ok {
+		t.Fatal("right-bottom produced no drawable frame")
+	}
 	requireZoneBBoxEqual(t, fixedBoxes[0], target)
 
 	partitionJS := buildPartitionDrawJS(partitionPlan{Partitions: []partitionRect{{
@@ -286,5 +299,79 @@ func TestRunFixedZoneDrawPersistsIdsAndExplicitlySaves(t *testing.T) {
 	calls := daemon.snapshot()
 	if len(calls) == 0 || calls[len(calls)-1].Action != "schematic.save" {
 		t.Fatalf("zone draw did not end with explicit schematic.save: %+v", calls)
+	}
+}
+
+// ─── #163: frames must clear the sheet border and the title block ─────
+
+// The A4-landscape numbers are the ones measured in issue #163: the frames sat
+// 4 units off the sheet border and the bottom row ran through the title block.
+func TestZoneDrawFramesClearSheetBorderAndTitleBlock(t *testing.T) {
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	keepout := layoutBBox{MinX: 468, MinY: 0, MaxX: 1170, MaxY: 165}
+	opts := defaultSchZoneOpts()
+
+	// The full 3×2 grid zone-draw uses by default.
+	zones := []string{
+		"left-top", "center-top", "right-top",
+		"left-bottom", "center-bottom", "right-bottom",
+	}
+	for _, zone := range zones {
+		frame, ok := schZoneFrameRect(zone, sheet, &keepout, opts)
+		if !ok {
+			t.Errorf("%s: no drawable frame left", zone)
+			continue
+		}
+		if !bboxContains(sheet, frame) {
+			t.Errorf("%s: frame %+v escaped the sheet %+v", zone, frame, sheet)
+		}
+		if frame.MinX < sheet.MinX+opts.Margin || frame.MaxX > sheet.MaxX-opts.Margin ||
+			frame.MinY < sheet.MinY+opts.Margin || frame.MaxY > sheet.MaxY-opts.Margin {
+			t.Errorf("%s: frame %+v is not inset by the %g margin", zone, frame, opts.Margin)
+		}
+		if boxesOverlap(frame, keepout) {
+			t.Errorf("%s: frame %+v still crosses the title block %+v", zone, frame, keepout)
+		}
+	}
+}
+
+// The label must sit INSIDE its frame, not on the frame line (which on the
+// bottom/outer row is also the sheet border).
+func TestZoneDrawLabelSitsInsideItsFrame(t *testing.T) {
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	keepout := layoutBBox{MinX: 468, MinY: 0, MaxX: 1170, MaxY: 165}
+	const fontSize = 14
+
+	js := buildZoneDrawJS(map[string]*schZoneClaim{
+		"IO": {Zone: "right-bottom", Parts: []string{"J1"}},
+	}, sheet, &keepout, "#AA00AA", fontSize)
+
+	frames := renderedZoneRectangleBBoxes(t, js)
+	if len(frames) != 1 {
+		t.Fatalf("emitted %d rectangles, want 1\n%s", len(frames), js)
+	}
+	m := regexp.MustCompile(`sch_PrimitiveText\.create\(([-+0-9.eE]+), ([-+0-9.eE]+),`).FindStringSubmatch(js)
+	if m == nil {
+		t.Fatalf("no text create found\n%s", js)
+	}
+	x, _ := strconv.ParseFloat(m[1], 64)
+	y, _ := strconv.ParseFloat(m[2], 64)
+	// Text is anchored bottom-left and grows upward by fontSize.
+	label := layoutBBox{MinX: x, MinY: y, MaxX: x, MaxY: y + fontSize}
+	f := frames[0]
+	if label.MinX <= f.MinX || label.MaxY >= f.MaxY || label.MinY <= f.MinY {
+		t.Errorf("label %+v is not strictly inside frame %+v", label, f)
+	}
+}
+
+// A zone whose cell is entirely swallowed by the keep-out must be skipped, not
+// drawn as a sliver or a negative-height rectangle.
+func TestZoneDrawSkipsFrameFullySwallowedByTitleBlock(t *testing.T) {
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 400, MaxY: 300}
+	// A keep-out covering everything below the mid line leaves the bottom row
+	// with nothing usable.
+	keepout := layoutBBox{MinX: 0, MinY: 0, MaxX: 400, MaxY: 300}
+	if _, ok := schZoneFrameRect("right-bottom", sheet, &keepout, defaultSchZoneOpts()); ok {
+		t.Error("a frame fully inside the keep-out must not be drawable")
 	}
 }

@@ -31,6 +31,77 @@ import (
 // on the exact same boundary line (schematic units).
 const schZoneFrameInset = 4
 
+// schZoneMinFrameSpan is the smallest frame worth drawing after the margin and
+// title-block adjustments: below this a "frame" is a sliver that reads as a
+// stray line, so the zone is skipped instead.
+const schZoneMinFrameSpan = 40
+
+// schZoneOpts are the fixed-grid frame tunables. The defaults mirror the
+// partition mode's page margin so the two modes look like the same tool.
+type schZoneOpts struct {
+	Margin   float64 // inset from the sheet border, so frames never sit on it
+	Inset    float64 // gap between adjacent frames
+	LabelPad float64 // label inset from the frame's own lines
+	Gap      float64 // clearance kept from the title-block keep-out
+}
+
+func defaultSchZoneOpts() schZoneOpts {
+	return schZoneOpts{Margin: 20, Inset: schZoneFrameInset, LabelPad: 6, Gap: 8}
+}
+
+// schZoneFrameRect computes the rectangle actually drawn for one zone: the grid
+// cell of the margin-inset sheet, shrunk by Inset, then lifted clear of the
+// title-block keep-out. The bool is false when nothing usable survives.
+//
+// Issue #163: the frames used to be laid out on the RAW sheet bbox with only a
+// 4-unit inset, so they sat on the sheet border and the bottom row ran straight
+// through the title block — `sch check`'s own titleblock-overlap rule fired on
+// frames zone-draw had just drawn, even though the keep-out geometry was
+// already available from deriveSheetGeometry.
+func schZoneFrameRect(zone string, sheet layoutBBox, tb *layoutBBox, o schZoneOpts) (layoutBBox, bool) {
+	usable := layoutBBox{
+		MinX: sheet.MinX + o.Margin, MaxX: sheet.MaxX - o.Margin,
+		MinY: sheet.MinY + o.Margin, MaxY: sheet.MaxY - o.Margin,
+	}
+	if usable.MaxX-usable.MinX <= 0 || usable.MaxY-usable.MinY <= 0 {
+		return layoutBBox{}, false
+	}
+	cell := zoneRect(zone, usable)
+	frame := layoutBBox{
+		MinX: cell.MinX + o.Inset, MaxX: cell.MaxX - o.Inset,
+		MinY: cell.MinY + o.Inset, MaxY: cell.MaxY - o.Inset,
+	}
+	frame, ok := liftClearOfTitleBlock(frame, tb, o.Gap)
+	if !ok {
+		return layoutBBox{}, false
+	}
+	if frame.MaxX-frame.MinX < schZoneMinFrameSpan || frame.MaxY-frame.MinY < schZoneMinFrameSpan {
+		return layoutBBox{}, false
+	}
+	return frame, true
+}
+
+// liftClearOfTitleBlock pulls a frame off the title-block keep-out. The title
+// block sits at the sheet's bottom-right, so the natural move is to raise the
+// frame's bottom edge above it; lowering the top edge is the fallback for the
+// (unusual) keep-out that sits above the frame's middle.
+func liftClearOfTitleBlock(frame layoutBBox, tb *layoutBBox, gap float64) (layoutBBox, bool) {
+	if tb == nil || !boxesOverlap(frame, *tb) {
+		return frame, true
+	}
+	// Keep-out covers the frame's lower part → raise the floor.
+	if lifted := tb.MaxY + gap; lifted < frame.MaxY {
+		frame.MinY = lifted
+		return frame, true
+	}
+	// Keep-out covers the frame's upper part → drop the ceiling.
+	if dropped := tb.MinY - gap; dropped > frame.MinY {
+		frame.MaxY = dropped
+		return frame, true
+	}
+	return layoutBBox{}, false // fully swallowed by the keep-out
+}
+
 // writeZoneRectangleCreateJS emits the one rectangle-create call shared by the
 // fixed-grid and data-driven partition draw paths. EasyEDA anchors schematic
 // rectangles at the visual TOP-LEFT corner: (MinX, MaxY) on the y-UP canvas,
@@ -81,12 +152,13 @@ func writeZoneDrawEpilogue(b *strings.Builder) {
 
 // buildZoneDrawJS renders the one-shot exec_js script: create every fixed-grid
 // frame + label, return their ids, and self-clean on partial failure.
-func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, color string, fontSize float64) string {
+func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, tb *layoutBBox, color string, fontSize float64) string {
 	var names []string
 	for n := range zones {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	opts := defaultSchZoneOpts()
 	var b strings.Builder
 	writeZoneDrawPrelude(&b)
 	for _, name := range names {
@@ -94,12 +166,9 @@ func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, color str
 		if zc == nil || !pcbZoneNames[zc.Zone] {
 			continue
 		}
-		r := zoneRect(zc.Zone, sheet)
-		frame := layoutBBox{
-			MinX: r.MinX + schZoneFrameInset,
-			MinY: r.MinY + schZoneFrameInset,
-			MaxX: r.MaxX - schZoneFrameInset,
-			MaxY: r.MaxY - schZoneFrameInset,
+		frame, ok := schZoneFrameRect(zc.Zone, sheet, tb, opts)
+		if !ok {
+			continue
 		}
 		label, _ := json.Marshal(fmt.Sprintf("%s (%s)", name, zc.Zone))
 		colorJS, _ := json.Marshal(color)
@@ -109,8 +178,11 @@ func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, color str
 		fmt.Fprintf(&b, "  if (!rc) throw new Error(%q);\n", "rectangle create returned undefined for "+name)
 		fmt.Fprintf(&b, "  const rid = rc.getState_PrimitiveId(); if (!rid) { await eda.sch_PrimitiveRectangle.delete(rc); throw new Error(%q); } rects.push(rid);\n",
 			"rectangle id missing for "+name)
+		// The label is anchored bottom-left and grows upward, so its top edge is
+		// (y + fontSize): park it a pad below the frame's top line instead of
+		// exactly on it (#163 — labels used to sit on the frame/sheet border).
 		fmt.Fprintf(&b, "  const tx = await eda.sch_PrimitiveText.create(%g, %g, %s, 0, %s, null, %g);\n",
-			frame.MinX+4, frame.MaxY-fontSize, label, colorJS, fontSize)
+			frame.MinX+opts.LabelPad, frame.MaxY-fontSize-opts.LabelPad, label, colorJS, fontSize)
 		fmt.Fprintf(&b, "  if (!tx) throw new Error(%q);\n", "text create returned undefined for "+name)
 		fmt.Fprintf(&b, "  const tid = tx.getState_PrimitiveId(); if (!tid) { await eda.sch_PrimitiveText.delete(tx); throw new Error(%q); } texts.push(tid); }\n",
 			"text id missing for "+name)
@@ -412,10 +484,16 @@ func runFixedZoneDraw(
 	if fontSize <= 0 {
 		fontSize = defaultFixedZoneFontSize
 	}
+	// Same keep-out source the partition planner and `sch check` use, so the
+	// frames we draw cannot trip our own titleblock-overlap rule (#163).
+	titleBlock, provisional := titleBlockKeepout(sheet)
+	if provisional {
+		fmt.Fprintln(stderr, "⚠ title-block keep-out could not be derived for this sheet — frames are NOT checked against it")
+	}
 	if _, err := clearPriorZoneFrames(st, docUUID, exec, stderr); err != nil {
 		return err
 	}
-	v, err := exec("draw fixed zone frames", buildZoneDrawJS(zones, *sheet, color, fontSize))
+	v, err := exec("draw fixed zone frames", buildZoneDrawJS(zones, *sheet, titleBlock, color, fontSize))
 	if err != nil {
 		return err
 	}
