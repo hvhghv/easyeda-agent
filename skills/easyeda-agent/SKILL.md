@@ -30,7 +30,7 @@ EasyEDA tooling.
 3. **mutate 前先 inspect** — 放/移/连/同步/存之前先读 doc/页/器件/引脚/板层/网络/规则,别盲改;破坏性操作(clear/delete/bulk import)先确认。
 4. **无图纸不摆放/布线** — 找不到 sheet 立即停,让用户建/批准 A4(默认 A4)。→ design-flow S1
 5. **PCB mutation(rip-up/route/delete/via/track)后先 `easyeda doc reload` 再读/判/DRC** — 否则 list/DRC 读 stale;同网 Connection Error 暴增多是 pour 连通性 stale(先 `pour-rebuild`),不是真断。daemon 会在 stale 风险读操作时返回 `staleRisk` 警告(CLI 打到 stderr,机械兜底),但别等警告——mutation 后主动 reload。→ pcb.md
-6. **判对错只看 `list/check/drc/layout-lint`,不看截图** — 截图会 stale/blank;data 有内容但截图空 = 窗口没渲染(切前台),不是设计错。`pcb drc/check` 这类重画布计算**需 PCB 在前台**,超时=切前台**单发一次、绝不循环重试**(重发被 `ACTION_BUSY` 拒)。**录制/演示模式例外**:截图变交付物 → design-flow 录制/演示模式。
+6. **判对错只看 `list/check/drc/layout-lint/layout-score`,不看截图** — 截图会 stale/blank;data 有内容但截图空 = 窗口没渲染(切前台),不是设计错。(`layout-score` 是**诊断视角不是门**——门只有 `layout-lint --gate` 一个;且它的 `skipped` 维是「没测」不是「满分」。)`pcb drc/check` 这类重画布计算**需 PCB 在前台**,超时=切前台**单发一次、绝不循环重试**(重发被 `ACTION_BUSY` 拒)。**录制/演示模式例外**:截图变交付物 → design-flow 录制/演示模式。
 7. **每过一个阶段门显式 `save`(sch/PCB)** — place/wire/modify 只改内存,autosave 只兜底;整板每 ~10 件 save 一次。→ design-flow S 段 💾
 8. **手工连任何已知外围前先查块库 `easyeda blocks`**(离线,无需 daemon/窗口)— 20 块/11 类目,照抄验证过的块只重绑端口。**查不到 → 起草 `block-gap` issue;块用出问题(脚名不符/拓扑错/停产)→ 起草 `block-bug` issue 带证据 —— 都必须经用户确认后才 `gh issue create`,绝不自动上报**。→ ② 块地图速查 · standard-blocks-contributing.md §七
 9. **netflag 必须经真 wire 连、离 pin 非零距** — 重叠坐标 EasyEDA 不认作连接;禁零长 wire;多脚同名 pin 要全连(如多 GND、AMS1117 双 VOUT)。→ schematic.md
@@ -73,6 +73,7 @@ EasyEDA tooling.
 | `pour-fit --replace` | **true(会清跨层同网 pour)** | 顶/底 GND pour 要显式 `--replace=false` |
 | 线宽档(net-class) | 按角色:信号=live默认 / 支线(3V3/1V8)10 / 主干(+5V)15 / 大电流(VBUS/VIN)20mil | `pcb net-classes` 查当前表;`route-short` 自动按角色给宽;偏细电源线被 `pcb check` **width-under-spec** 逮(§7.8) |
 | 电源走铺铜 | **2层 `power-pour` / 4层 `power-planes`** | 电源走铜面不走细线(#1 DRC 源);别拿细线穿焊盘阵布电源,裸电源网被 `pcb check` **power-not-poured** 逮 |
+| 布局质量档 | **门=`layout-lint --gate`(唯一);质量表=`pcb layout-score --spec <s0>`(诊断,不落确认)** | 只有一个门,别跑成两个。layout-score 九维各 0-100+逐器件归因;**默认不设 `--min-score`**(只有 blocking=短路/重叠/出板框才非零退出),要当门用才显式给(建议 75=good 档下沿)。带 `--spec` 才解锁 flow-order 与 internal 连接器判定,否则这两维 **skipped(「没测」≠「满分」)** → design-flow P6 |
 
 ### P7 交自动布线前必做两步(常被遗忘,已实测踩坑)
 
@@ -119,7 +120,7 @@ EasyEDA tooling.
 - `health` 显示 `windows: []` / `NO_CONNECTOR`,或改了连接器(`extension/`):读
   `references/environment-setup.md`。web 编辑器(`pro.lceda.cn`)+ chrome-devtools MCP 时
   agent 可自举全环境;**桌面客户端 chrome-devtools 够不到窗口,需用户手动开/切工程**(连接器照常附着,typed action 一样)。
-- **整板 / 从零 / >~10 件,或走到某阶段拿不准**:先读 `references/design-flow.md`(流程脊柱 S0–S6 / P0–P10,顶部有阶段 TOC)。含 S0 事前摸底子步 `references/design-pre-analysis.md`(轻量摸底,可选、非门禁)。
+- **整板 / 从零 / >~10 件,或走到某阶段拿不准**:先读 `references/design-flow.md`(流程脊柱 S0–S6 / P0–P10,顶部有阶段 TOC)。含 S0 事前摸底子步 `references/design-pre-analysis.md`(轻量摸底,可选、非门禁)。**S0 方案书 spec 写完必跑 `easyeda spec validate`(无 ERROR 才算过门,`--strict` 交付前用)**——字段形状(含 `flow`/`modules[].kind`/`interfaces[].ref·edge·facing·internal`)在 design-flow S0。
 - **布线阶段(P7)选档 / 关键网先行 / 自动布线对话框清单**:读 `references/design-flow.md` **P7 三档阶梯**——别停在 `pcb.md` 的命令手册(那里只给命令,布线档默认在 design-flow)。
 - 架构权衡坑(真选择,非唯一答案——叠层、地策略、接口取向、成本档、单/双面、焊接工艺):读
   `references/design-decisions.md`;S0 从中产出方案书让用户确认。(RF/天线 keepout 是 guardrail 铁律 10,不进这张决策表。)
@@ -165,6 +166,13 @@ Summarize changed primitives, commands run, DRC/check/lint status, saved checkpo
 and artifact paths. If a gate cannot pass, stop at the failing data, explain the next
 repair step, and do not claim the design is complete. 录制/演示模式下,额外列出每张阶段图并
 标注 **native EasyEDA 截图** 或 **data-rendered 图**,显式报告任何 stale/替换帧。
+
+**PCB 交付摘要额外必报布局质量(#167)**——只报一个综合分等于什么都没说:
+① **逐维分**(九维各自 0-100 + 加权综合 + verdict);② **每个弱维「是哪几个器件拉低了它」**
+(`pcb layout-score --all` 的归因,`penalty` 就是「先动谁」的排序);③ **`N skipped` 及其原因**
+——skipped 是「没测」不是「满分」,不写出来就是把 7 维体检报成全面体检;
+④ `blocking[]`(短路/重叠/出板框)必须是 0,非 0 就停在失败数据别宣称完成。
+`degraded` 维(compact / rf 恒为 degraded)要连同降级理由一起报,别把近似当实测。
 
 **收尾回流(块库共建)**:若本板含**手工搭建且已跑通 `sch check` + DRC=0 / 网表逐网核实**的标准外围(库里没有的),
 按 `references/standard-blocks-contributing.md` 顺手回流一个块(署名 + `validated` = 本次证据)——验证刚过正是入库时机,

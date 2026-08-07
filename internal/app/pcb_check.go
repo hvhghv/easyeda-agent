@@ -25,6 +25,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/spec"
 )
 
 // Geometry thresholds, all in mil (PCB primitives are native mil — pcb.line.create
@@ -220,9 +222,12 @@ type pcbCheckSummary struct {
 	CopperNearEdge    int `json:"copperNearEdge"`
 	FiducialMissing   int `json:"fiducialMissing"`
 	ZoneViolation     int `json:"zoneViolation"`
-	Errors            int `json:"errors"`
-	Warnings          int `json:"warnings"`
-	Total             int `json:"total"`
+	// #168 连接器布局：内部件占板外沿 / 相邻对外口插头护套打架。
+	InternalOnEdge         int `json:"internalOnEdge"`
+	ConnectorPlugClearance int `json:"connectorPlugClearance"`
+	Errors                 int `json:"errors"`
+	Warnings               int `json:"warnings"`
+	Total                  int `json:"total"`
 }
 
 type pcbCheckReport struct {
@@ -1611,8 +1616,8 @@ func uniqStr(in []string) []string {
 
 // runPcbCheck pulls placed copper (tracks + vias + pads), runs the DFM audit,
 // renders it, and (with strict) returns a non-zero exit when there are findings.
-func runPcbCheck(cfg *appConfig, window string, couplingW float64, strict, asJSON bool, stdout, stderr io.Writer) error {
-	rep, err := gatherPcbCheckReport(cfg, window, couplingW, stderr)
+func runPcbCheck(cfg *appConfig, window string, couplingW float64, checkSpec *spec.Spec, strict, asJSON bool, stdout, stderr io.Writer) error {
+	rep, err := gatherPcbCheckReport(cfg, window, couplingW, checkSpec, stderr)
 	if err != nil {
 		return err
 	}
@@ -1637,7 +1642,7 @@ func runPcbCheck(cfg *appConfig, window string, couplingW float64, strict, asJSO
 // and returns the report — the reusable seam `workflow advance` drives for the
 // post_route_checked gate (布完必查), while `pcb check` keeps owning rendering
 // and --strict semantics.
-func gatherPcbCheckReport(cfg *appConfig, window string, couplingW float64, stderr io.Writer) (*pcbCheckReport, error) {
+func gatherPcbCheckReport(cfg *appConfig, window string, couplingW float64, checkSpec *spec.Spec, stderr io.Writer) (*pcbCheckReport, error) {
 	pads, err := fetchPcbPads(cfg, window)
 	if err != nil {
 		return nil, fmt.Errorf("fetch PCB pads: %w", err)
@@ -1742,6 +1747,36 @@ func gatherPcbCheckReport(cfg *appConfig, window string, couplingW float64, stde
 			}
 			rep.Passed = rep.Summary.Total == 0
 		}
+	}
+
+	// 连接器布局规则（issue #168）：internal-on-edge + connector-plug-clearance。
+	// 同为 LIVE-only —— 它们要的是**器件级**几何（bbox / 到板框距离 / 设备名），
+	// 而纯核只吃焊盘和铜箔。两条共用一次板级快照，不各拉一遍。
+	//
+	// 意图来源：优先读 --spec 指定的 S0 spec（连接器 facing/internal 显式声明），
+	// 没有就退回启发式并把 finding 降到 INFO —— 推定错了不该像显式标注那样理直气壮
+	// 地拦人（docs/concepts.md 的三层置信度表）。
+	if connSnap, cerr := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{}); cerr != nil {
+		fmt.Fprintf(stderr, "warning: connector layout checks skipped (%v)\n", cerr)
+	} else {
+		conns := collectBoardConnectors(connSnap, checkSpec)
+		for _, f := range findInternalOnEdge(conns, connSnap.Outline) {
+			rep.Findings = append(rep.Findings, f)
+			rep.Summary.InternalOnEdge++
+			if f.Level != "INFO" {
+				rep.Summary.Warnings++
+			}
+			rep.Summary.Total++
+		}
+		for _, f := range findConnectorPlugClearance(conns, connSnap.Outline) {
+			rep.Findings = append(rep.Findings, f)
+			rep.Summary.ConnectorPlugClearance++
+			if f.Level != "INFO" {
+				rep.Summary.Warnings++
+			}
+			rep.Summary.Total++
+		}
+		rep.Passed = rep.Summary.Total == 0
 	}
 
 	// Antenna keep-out is a LIVE-only rule (needs component bboxes + regions, which
@@ -2128,9 +2163,9 @@ func renderPcbCheckReport(rep pcbCheckReport, w io.Writer) {
 		fmt.Fprintln(w, "  ✓ no DFM issues found")
 		return
 	}
-	fmt.Fprintf(w, "  ERROR=%d WARN=%d  |  dangling=%d acute=%d nonOrtho=%d overPad=%d clearance=%d silkFlipped=%d overlapVia=%d singleLayerVia=%d widthMismatch=%d dupSegment=%d coupling=%d antennaKeepout=%d netlessPour=%d viaCrossesPlane=%d floatingIsland=%d powerNotPoured=%d netlessViaInPad=%d widthUnderSpec=%d silkOverPad=%d decapTooFar=%d viaInPad=%d copperNearEdge=%d fiducialMissing=%d\n",
+	fmt.Fprintf(w, "  ERROR=%d WARN=%d  |  dangling=%d acute=%d nonOrtho=%d overPad=%d clearance=%d silkFlipped=%d overlapVia=%d singleLayerVia=%d widthMismatch=%d dupSegment=%d coupling=%d antennaKeepout=%d netlessPour=%d viaCrossesPlane=%d floatingIsland=%d powerNotPoured=%d netlessViaInPad=%d widthUnderSpec=%d silkOverPad=%d decapTooFar=%d viaInPad=%d copperNearEdge=%d fiducialMissing=%d zoneViolation=%d internalOnEdge=%d plugClearance=%d\n",
 		s.Errors, s.Warnings-s.Errors,
-		s.DanglingEnds, s.AcuteAngles, s.NonOrthogonal, s.TrackOverPad, s.Clearance, s.SilkscreenFlipped, s.OverlappingVias, s.SingleLayerVias, s.WidthMismatches, s.DuplicateSegments, s.ParallelCoupling, s.AntennaKeepout, s.NetlessPours, s.ViaCrossesPlane, s.FloatingIslands, s.PowerNotPoured, s.NetlessViaInPad, s.WidthUnderSpec, s.SilkOverPad, s.DecapTooFar, s.ViaInPad, s.CopperNearEdge, s.FiducialMissing)
+		s.DanglingEnds, s.AcuteAngles, s.NonOrthogonal, s.TrackOverPad, s.Clearance, s.SilkscreenFlipped, s.OverlappingVias, s.SingleLayerVias, s.WidthMismatches, s.DuplicateSegments, s.ParallelCoupling, s.AntennaKeepout, s.NetlessPours, s.ViaCrossesPlane, s.FloatingIslands, s.PowerNotPoured, s.NetlessViaInPad, s.WidthUnderSpec, s.SilkOverPad, s.DecapTooFar, s.ViaInPad, s.CopperNearEdge, s.FiducialMissing, s.ZoneViolation, s.InternalOnEdge, s.ConnectorPlugClearance)
 	for _, f := range rep.Findings {
 		loc := ""
 		if f.At != nil {

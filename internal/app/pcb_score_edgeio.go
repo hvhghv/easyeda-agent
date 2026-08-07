@@ -260,7 +260,7 @@ func edgeIOFinding(kind, level string, b boardConnector, msg string) pcbCheckFin
 	f := pcbCheckFinding{
 		Type: kind, Level: level,
 		Designator: b.comp.Designator,
-		Message:    msg + docRule("3.1", "布局优先级顺序"),
+		Message:    msg + docRule("3.5", "对外接口与板沿"),
 		At:         &pcbXY{X: round2(cx), Y: round2(cy)},
 	}
 	if b.comp.ID != "" {

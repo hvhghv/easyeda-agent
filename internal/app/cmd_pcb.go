@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/pcb/svgimport"
+	"github.com/zhoushoujianwork/easyeda-agent/internal/spec"
 )
 
 // pcbClearScopes is the canonical set of `pcb clear --only` values, mirrored in
@@ -3108,6 +3109,7 @@ gate (issue #99). Exits non-zero on overlap/off-board or a failed gate.`,
 	{
 		var strict, asJSON bool
 		var couplingW float64
+		var checkSpecPath string
 		c := &cobra.Command{
 			Use:   "check",
 			Short: "DFM audit: acute angles / dangling copper / bad vias / neck-down / 3W coupling (read-only)",
@@ -3148,12 +3150,27 @@ so it can gate the flow. Arcs are out of scope for v1 (line/via/pad only).`,
   easyeda pcb check --strict
   easyeda pcb check --coupling-w 2.5`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return runPcbCheck(cfg, window, couplingW, strict, asJSON, stdout, stderr)
+				var checkSpec *spec.Spec
+				if checkSpecPath != "" {
+					raw, rerr := os.ReadFile(checkSpecPath)
+					if rerr != nil {
+						return fmt.Errorf("read spec: %w", rerr)
+					}
+					var perr error
+					if checkSpec, perr = spec.Parse(raw); perr != nil {
+						return perr
+					}
+				}
+				return runPcbCheck(cfg, window, couplingW, checkSpec, strict, asJSON, stdout, stderr)
 			},
 		}
 		c.Flags().BoolVar(&strict, "strict", false, "exit non-zero when there are issues (gate mode)")
 		c.Flags().BoolVar(&asJSON, "json", false, "emit the report as JSON")
 		c.Flags().Float64Var(&couplingW, "coupling-w", 3.0, "3W-rule factor: flag different-net parallel traces closer than this × trace width")
+		c.Flags().StringVar(&checkSpecPath, "spec", "", "S0 spec JSON — lets the connector rules (internal-on-edge) read the declared facing\n"+
+			"instead of guessing. A spec-declared internal connector reports WARN; a heuristic\n"+
+			"guess only reports INFO, because being wrong about someone's intent should not\n"+
+			"block them as loudly as a fact they wrote down themselves")
 		pcb.AddCommand(c)
 	}
 

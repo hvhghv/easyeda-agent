@@ -85,6 +85,16 @@ type boardConnector struct {
 //
 // 注意 cpReAnyEdge 里的 wroom/antenna 不在此列：无线模组和贴片天线不是连接器，
 // 它们不参与插头打架，也不该被算进「对外口聚一条边」。
+//
+// **位号优先于器件名**（真板实测修正，车机V2 166 器件板）：位号是设计者写下的分类，
+// 器件名子串只是猜。放任 cpReEdgeConn 直接判，真板上出了两个假连接器：
+//
+//	ESD1     = USBLC6-2SC6  → 名字含 "usb" → 被判成 USB 连接器（它是 ESD 二极管）
+//	TVS_VBUS = SMAJ5.0A     → 名字含 "sma" → 被判成 SMA 射频接头（它是 TVS，SMA 是**封装**名）
+//
+// 后一个尤其危险：它不但进了连接器集合，还从插头护套表里查到了 SMA 射频接头的
+// 14mm 包络，于是报出「ESD1 ↔ TVS_VBUS 插头打架」这种纯属虚构的 WARN。
+// 所以先按位号前缀把无源/半导体件排除掉，再谈器件名。
 func isBoardConnector(c boardComp) bool {
 	des := strings.ToUpper(strings.TrimSpace(c.Designator))
 	if strings.HasPrefix(des, "JP") {
@@ -96,8 +106,26 @@ func isBoardConnector(c boardComp) bool {
 	if connectorDesRe.MatchString(des) {
 		return true
 	}
+	// 位号已经声明了它是别的东西 —— 器件名撞关键词不算数。
+	if nonConnectorDesRe.MatchString(des) {
+		return false
+	}
 	return c.Device != "" && cpReEdgeConn.MatchString(c.Device)
 }
+
+// nonConnectorDesRe 是「位号已表明它不是连接器」的前缀集：无源件、分立半导体、
+// 保护件、晶体、测试点、安装孔。后面必须跟数字或下划线，所以 `TVS_VBUS`、`ESD1`、
+// `D_ESD_ANT`、`F1`、`L2` 命中，而 `USB1`（U 后面是 S）不会被误伤。
+//
+// 刻意**不**包含的几个，各有理由：
+//   - `U` —— 真板上 microSD 卡座、SIM 座、无线模组常标成 U*（单测里的
+//     `U3 = MICRO-SD-PUSHPUSH` 就是），排掉它会把真卡座漏判成非连接器。
+//     U* 继续走器件名判据，代价是 IC 若撞上 cpReEdgeConn 的关键词仍会误判 ——
+//     但那个代价比漏判一个真卡座小。
+//   - `P` / `CN` / `CON` —— 本来就是连接器位号。
+//   - `SW` / `K` —— 开关、继电器虽不是连接器，但它们是用户可触的 user-facing 件，
+//     edge-io 维要看它们，这里不做一刀切。
+var nonConnectorDesRe = regexp.MustCompile(`(?i)^(?:C|R|L|D|Q|FB|F|Y|X|TP|MH|H|RV|TVS|ESD|VR)[\d_]`)
 
 // connectorPins 是去重后的焊盘编号数。同号多焊盘（USB-C 的 A/B 双取向、大电流端子的
 // 并联焊盘）只算一个引脚位 —— 排式连接器的胶壳宽度跟**位**数走，不跟焊盘数走。
@@ -316,7 +344,7 @@ func findInternalOnEdge(conns []boardConnector, o *boardOutline) []pcbCheckFindi
 		f := pcbCheckFinding{
 			Type: "internal-on-edge", Level: level,
 			Designator: b.comp.Designator,
-			Message:    msg + docRule("3.1", "布局优先级顺序"),
+			Message:    msg + docRule("3.5", "对外接口与板沿 — 外沿是稀缺资源"),
 			At:         &pcbXY{X: round2(cx), Y: round2(cy)},
 		}
 		if b.comp.ID != "" {
@@ -417,7 +445,7 @@ func findConnectorPlugClearance(conns []boardConnector, o *boardOutline) []pcbCh
 		f := pcbCheckFinding{
 			Type: "connector-plug-clearance", Level: "WARN",
 			Designator: a.comp.Designator,
-			Message:    msg + docRule("3.4", "元件间距"),
+			Message:    msg + docRule("3.5", "插头护套包络 ≠ 母座本体宽"),
 			At:         &pcbXY{X: round2((ax + bx) / 2), Y: round2((ay + by) / 2)},
 		}
 		for _, id := range []string{a.comp.ID, b.comp.ID} {

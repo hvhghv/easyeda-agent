@@ -75,7 +75,7 @@ func TestFindInternalOnEdge_SourceDrivesSeverity(t *testing.T) {
 	if !strings.Contains(got[0].Message, "internal=spec") {
 		t.Errorf("finding must record that the verdict came from the spec: %s", got[0].Message)
 	}
-	if !strings.Contains(got[0].Message, "规范 §3.1") {
+	if !strings.Contains(got[0].Message, "规范 §3.5") {
 		t.Errorf("finding must cite the design-rules section: %s", got[0].Message)
 	}
 }

@@ -150,7 +150,7 @@ func workflowNext(st *pcbStageState, f workflowFacts) (next, why string) {
 //   - INFO-level power-not-poured (the check's own #110 plane-invisibility
 //     downgrade) never blocks.
 func runPostRouteCheckGate(cfg *appConfig, window, project string, st *pcbStageState, f workflowFacts, stdout, stderr io.Writer) error {
-	rep, err := gatherPcbCheckReport(cfg, window, 0, stderr)
+	rep, err := gatherPcbCheckReport(cfg, window, 0, nil, stderr)
 	if err != nil {
 		return fmt.Errorf("post-route check gate: %w", err)
 	}

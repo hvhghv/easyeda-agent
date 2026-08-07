@@ -275,7 +275,7 @@ func planStepFor(d scoreDimension, snap *boardSnapshot, immovable map[string]str
 // **它自己可能制造的**问题负责，不该被板上早已存在的告警绑架。
 // 读失败返回 -1，调用方视作"无法复核"并保守回滚。
 func countGateableFindings(cfg *appConfig, window string, stderr io.Writer) int {
-	rep, err := gatherPcbCheckReport(cfg, window, 0, stderr)
+	rep, err := gatherPcbCheckReport(cfg, window, 0, nil, stderr)
 	if err != nil || rep == nil {
 		return -1
 	}

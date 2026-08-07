@@ -60,16 +60,24 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
     {
       "modules": [
-        {"name": "MCU", "parts": ["U1","C18","C19","R6"], "page": "P1_MCU_USB", "zone": "center"},
-        {"name": "USB_HUB", "parts": ["J2","U10","X1","C30","R15"], "page": "P1_MCU_USB", "zone": "left-top"}
+        {"name": "POWER",   "kind": "POWER", "parts": ["U2","L1","C1","C2","F1"], "page": "P2_POWER", "zone": "left"},
+        {"name": "MCU",     "kind": "MCU",   "parts": ["U1","C18","C19","R6"],    "page": "P1_MCU_USB", "zone": "center"},
+        {"name": "USB_HUB", "kind": "USB",   "parts": ["J2","U10","X1","C30","R15"], "page": "P1_MCU_USB", "zone": "left-top"},
+        {"name": "ANT",     "kind": "ANT",   "parts": ["ANT1"], "page": "P1_MCU_USB", "zone": "right"}
       ],
+      "flow": ["POWER", "MCU", "USB", "ANT"],
+      "flowAxis": "auto",
       "pages": [
-        {"name": "P1_MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB"]}
+        {"name": "P1_MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB","ANT"]}
       ],
       "stackup": {
         "layers": 4,
         "groundStrategy": "plane",
         "innerLayers": ["GND", "VCC_3V3"]
+      },
+      "assembly": {
+        "profile": "hand-solder",
+        "side": "top"
       },
       "rf": {
         "parts": ["U_WROOM1"],
@@ -79,20 +87,41 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
         "outline": "compact"
       },
       "interfaces": [
-        {"name": "USB_C", "orientation": "dual"}
+        {"name": "USB_C",      "ref": "J2", "edge": "bottom", "facing": "user-facing",
+         "orientation": "dual", "plugWidthMm": 13.0},
+        {"name": "备份电池座",  "ref": "J1", "internal": true},
+        {"name": "IPEX 天线座", "ref": "E1", "edge": "any"}
       ],
       "costTier": "standard"
     }
 
   逐字段说明:
-  - `modules[]` — `name`/`parts`/`page`/`zone`;S2 模块编组直接读 `page` + `zone`,不重新分区。**标准外设模块可直接引用电路块**:给该 module 记 `block`(如 `"block.ch340c_usb_serial"`),S3 摆放时照抄该块拓扑、只重绑 ports——先 `easyeda blocks ls` 看有没有现成块,能少写一整个模块的选型+接线。
+  - `modules[]` — `name`/**`kind`**/`parts`/`page`/`zone`;S2 模块编组直接读 `page` + `zone`,不重新分区。**标准外设模块可直接引用电路块**:给该 module 记 `block`(如 `"block.ch340c_usb_serial"`),S3 摆放时照抄该块拓扑、只重绑 ports——先 `easyeda blocks ls` 看有没有现成块,能少写一整个模块的选型+接线。
+  - **`modules[].kind`(#167 新增)** — 受控功能域词汇,`flow` 里出现的就是这些值:`POWER` `MCU` `RF` `ANT` `IO` `ANALOG` `SENSOR` `STORAGE` `USB` `DEBUG` `PROTECTION` `POWER_MON` `OTHER`。为什么需要受控词汇:`name` 是自由文本,靠 name 匹配会在大小写和同义词上碎掉,而 P6 的 `flow-order` 维要把「模块质心沿轴的排序」与「spec 声明的顺序」对上。**没写 `kind` 时会拿 `name` 去词表碰一次**(老 spec 的 `name` 恰好常是 MCU/RF/IO),碰不上就报 WARN 且该模块不参与 flow-order。
+  - **`flow` / `flowAxis`(#167 新增)** — `flow` 是**有序**功能域列表,表达「电源 → 数字 → RF → 天线」这种信号流向意图;`flowAxis` = `x` | `y` | `auto`(默认 `auto` = 取板框长边,长边通常就是信号流方向)。**方向不强制**:板上从右到左走 POWER→ANT 与从左到右同样好(打分时正反都算取绝对值大的)。**没写 `flow` 时 `pcb layout-score` 的 flow-order 维会被标 skipped 而不是给满分**——「没测」和「测了满分」必须可区分。`flow` 里重复或不在词表里的阶段是 ERROR;声明了但板上没有对应模块的阶段是 WARN。
   - `pages[]` — `name`/`sheet`(幅面,默认 `"A4"`)/`modules`;S1 分页直接读,不重新估算页数。
-  - `stackup` — `layers`(层数)/`groundStrategy`(`"plane"` = 单 GND 内电层,或 `"signal-zones-with-pour"` = 分区 pour + 桥地)/`innerLayers`;P8 叠层+电源+铺铜直接读,不重新选地策略。
+  - `stackup` — `layers`(层数)/`groundStrategy`(`"plane"` = 单 GND 内电层,或 `"signal-zones-with-pour"` = 分区 pour + 桥地)/`innerLayers`;P8 叠层+电源+铺铜直接读,不重新选地策略。**兼容旧写法** `inner1`/`inner2`(会被归一成 `innerLayers`)。
+  - `assembly` — `profile`(`hand-solder` | `reflow`)/`side`(`top` | `both`);P2 的两个决策落盘处(仍需 `pcb stage set-assembly` 落进 workflow 状态,spec 只是意图正本)。
   - `rf` — `parts`(RF/天线器件位号列表)/`keepoutLayers`(如 `"all"` 或具体层号数组);P4 禁布区直接读作用范围,不重新判断该不该禁、禁哪些层。
-  - `board` — 板框意图:客户给了尺寸/外形就原样记(如 `{"outline": "50x40mm"}`),**没给就写 `"compact"`(默认)**——紧凑是无信息时的正确目标(省板费+小体积),不要摊大饼;P1 落件与 P3 板框据此执行。
-  - `interfaces[]` — `name`/`orientation`(如 USB 的 `"single"`/`"dual"` 取向);布线/丝印阶段直接读。
+  - `board` — 板框意图:客户给了尺寸/外形就原样记(如 `{"outline": "50x40mm"}`),**没给就写 `"compact"`(默认)**——紧凑是无信息时的正确目标(省板费+小体积),不要摊大饼;P1 落件与 P3 板框据此执行。**兼容旧写法**:直接写字符串 `"board": "compact"` 也能读。
+  - `interfaces[]` — `name` + **`ref`/`edge`/`facing`/`internal`/`plugWidthMm`(#167/#168 新增)** + 既有的 `orientation`:
+    - **`ref`** — 位号(`J1`/`USB1`…),把板级意图**钉到具体器件**上。没写 `ref` 的接口,#168 的连接器规则只能对它走启发式(报 INFO 而非 WARN),`pcb floorplan` 也不会为它钉边 —— 所以能写就写。
+    - **`edge`** — `left`|`right`|`top`|`bottom`|`any`;`pcb floorplan` 只把**显式声明了 `ref`+`edge`** 的连接器钉到板边(边序是装配体验,工具不猜)。
+    - **`facing`** — `user-facing`(用户插拔的对外口,外壳要开孔,理应占板外沿)| `internal`(只在箱内连线,如备份电池座/板间排针,占外沿就是浪费稀缺资源)| `any`(必须在某条边但哪条都行,如 RF 天线座)。**`"internal": true` 是 `facing:"internal"` 的简写**;两者矛盾(`internal:true` + `facing:"user-facing"`)是 ERROR。
+    - **`plugWidthMm`** — 插头护套包络宽的人工覆盖(块库查找表查不到、或手上有真插头量过时用)。
+    - **为什么这些非写不可**:「这个连接器对内还是对外」是**设计意图不是几何属性** —— 同一个 PH2.0-3P 座接箱内电芯是 internal、接箱外传感器就是 user-facing,铜箔再精确也推不出来。写了 spec → 判定升 WARN(板级决定可信);不写 → 只能靠启发式推定,只报 INFO。规范见 `pcb-design-rules.md` §3.5。
   - `costTier` — 选型成本档位(如 `"standard"`/`"premium"`),`parts-select.py` 选型时参考。
-- **过门条件**:上面这份 spec 已经**过用户确认,并且落成了文件**(与 `autolayout --spec` 文件同样对待——写到磁盘,可在后续阶段被引用,不是只停留在对话记录里);不再是「每个器件归到了某个模块」这么单薄。这正是「里程碑确认」模式的第一个确认点;若当前是「逐步确认」模式,同样在这里停住等确认(见「交互模式」一节);「全自动」模式下按已有 spec 或默认推荐值直接产出文件,不阻塞。
+
+  **写完必须校验**(#167 起 spec 有 Go 类型 + 校验命令,写错不再静默):
+
+  ```bash
+  easyeda spec validate .easyeda/s0-<project>.json           # ERROR 才非零退出
+  easyeda spec validate .easyeda/s0-<project>.json --strict   # 交付前用:WARN 也失败
+  easyeda spec show     .easyeda/s0-<project>.json            # 看「工具实际读到的」归一化结果
+  ```
+
+  判定口径刻意宽松以兼容既有 spec:**ERROR** = 写了但写错(枚举外的 zone/kind/facing、flow 里重复或不存在的阶段、自相矛盾的 internal/facing);**WARN** = 缺了会让某维测不了;**INFO** = 能力降级。**既有 spec 全部继续能读**,缺新字段只报 WARN/INFO,不会一夜作废。
+- **过门条件**:上面这份 spec 已经**过用户确认、落成了文件、并且 `easyeda spec validate` 无 ERROR**(与 `autolayout --spec` 文件同样对待——写到磁盘,可在后续阶段被引用,不是只停留在对话记录里);不再是「每个器件归到了某个模块」这么单薄。这正是「里程碑确认」模式的第一个确认点;若当前是「逐步确认」模式,同样在这里停住等确认(见「交互模式」一节);「全自动」模式下按已有 spec 或默认推荐值直接产出文件,不阻塞。
 
 ### S1 — 图纸 / 分页(先图纸,再分页!)
 - **做什么**:确认当前页有图纸,默认 A4;再按模块/功能把设计**先分到几页**(电源一页、主控一页、接口一页…),别全堆一页。
@@ -230,6 +259,14 @@ P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → 
 - **P2 摆放 — 按优先级分档,每档过确认(2026-07-09 走查#1 用户反馈定型)**:
   **摆放前先问两个决策**(见 design-decisions.md #13/#14,里程碑档必问):① **单面还是双面布局**(SD 卡槽、去耦帽这类矮件适合底面,双面省板但双面贴装贵);② **焊接工艺**(产线贴片可用 0402;手工焊接封装下限 0603/0805,直接影响选型与间距)。
   **回答后立即落盘,不能只记在对话里**:`pcb stage set-assembly --profile hand-solder --min-gap 40 --large-pad-access 60`(或 `--profile reflow`)。手焊的 40mil 是普通器件外框间距地板;USB 外壳脚、SOT-223、模组大焊盘等至少留一个 60–80mil 烙铁进入方向——**这条 gate 已机械检查**(solder-access:每器件 bbox 四侧至少一侧 ≥ `largePadAccessMil` 净通道,四面被围 = gate 失败,`confirm-layout` 拒绝;进入方向是否合理仍截图复核)。电气 DRC clearance 不能替代此门。`pcb auto-place` 的 `--assembly-gap` 默认自动取项目 profile 的 min-gap(摆放与门用同一间距)。完成 P2 全布局后运行一次 `pcb layout-lint --gate`,通过才允许 `confirm-layout`(确认摘要会打印 profile/min-gap/tight/access 数);P3 改板框会使该结果失效,P6 必须在最终板框上重跑。(issue #99)
+  **S0 有 `flow` 时,动手摆件之前先看一眼骨架(#167,只读)**:跑
+  `easyeda pcb floorplan --spec <s0-spec.json>` —— 它把 `flow`(如 `["POWER","MCU","RF","ANT"]`)沿流向轴切成
+  **有序功能带**(带宽按各段器件面积分配),并把 spec 里写了 `ref`+`edge` 的连接器钉到目标边,
+  给出一张「板子该怎么分区」的骨架 + `unzoned[]`(哪些件还没归属)+ `warnings[]`。
+  **⚠️ 它不搬器件**——落笔仍走下面的分档流程(`place-constrained`)。之所以先看一眼:floorplan 决定的是
+  分区本身,这件事错了后面搬多少次件都是白搬。与 `pcb zones` 并存不互斥:zones 是固定九宫格
+  (表达「MCU 在中间」这种位置意图),floorplan 表达它表达不了的**顺序 / 比例 / 段数**。
+  方向不强制——已有器件更接近反向时它按反向切带(输出 `reversed=true`),不会把一块本来就摆对的板翻过来重排。
   **优先级档序(每档摆完→截图/坐标表向用户确认→锁定→`pcb stage confirm-tier <n> --parts …` 落档,再摆下一档;#125 起分档是机器状态不再靠自觉)**:
   每档确认记录该档器件清单+**姿态指纹**:档间递进强制(跳档被拒)、动了某档的件只作废该档及其后(前面档存活)、`--empty` 声明空档(如无 RF 板)、档 4 缺省=其余全部;**`confirm-layout` 拒绝在四档未齐/有无主件时封章**(`--force <理由>` 审计放行)。`pcb stage status` 看梯子。
   1. **安装孔/结构孔**(M3 四角等)——最先放+**锁定**,后续所有档避开垫圈净空(M3 头 Ø6mm ≈ R118mil);孔后置必然与边缘件冲突(实测:四角 IPEX/USB 全压在垫圈区上)。
@@ -242,6 +279,22 @@ P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → 
 - **P4 禁布区(靠前!)**:天线/挖槽用**一个多层区域**即可——`pcb region create --layer 12(多层) --rule no-pours --rule no-wires --rule no-fills`,一个区域盖全铜层,**不用逐层建 4 个**;内层用「填充区域」禁止,不需要 no-inner-electrical。**删旧区域要「删完校验再建」**——delete 紧跟 create 同批次会竞态,删没生效就累积。RF/天线器件清单与禁布层范围读 S0 方案书 spec 的 `rf.parts` / `rf.keepoutLayers`,这里不重新判断该不该禁、禁哪些层。**RF 块的 `pcb_layout` `rf-keepout`/`balun-mirror`(severity=must)与 spec.rf 一并 `blocks show` 读。**
 - **P5 丝印对齐(靠前!)**:`pcb silk-align`(位号摆正+位置感知+`--spacing` 装配间距)。导入的位号常 180° 倒置,这里一并摆正。放布线前,让布线避开丝印占位。📸 录制模式:禁布区+丝印就位后抓一张阶段截图。
 - **P6 装配+可布性门(强制,#97/#99)**:P3 最终板框确认后重跑 `pcb layout-lint --gate`(P2 的初检会因改框失效)。门读取项目 assembly profile;同时要求 0 overlap、0 off-board、**0 tight spacing**、≥ `--min-score`、ratsnest 交叉 ≤ `--max-crossings`。手焊 profile 未设置或任何器件低于40mil时必须失败,不得进入布线。**通过才重新落 `pre_route_passed`**;P7 布线命令默认要求 `outline_confirmed` + `pre_route_passed`,否则拒绝;确需推进用 `--force <理由>` 显式授权并记入审计(**仅本次执行有效**——不落任何确认,下次无 `--force` 照样被拦)。用 `easyeda pcb stage status` 查装配档案与阶段。
+  **诊断视角:`pcb layout-score`(#167)——只有一个门,别跑成两个门。** 两者分工是硬的:
+
+  | | `layout-lint --gate` | `pcb layout-score` |
+  |---|---|---|
+  | 回答 | **能不能布线**(硬门) | **布得好不好**(质量表) |
+  | 输出 | 单标量分 + pass/fail | 九维各自 0-100 + 加权综合 + **逐器件归因** |
+  | 门禁 | **是**,落 `pre_route_passed` | **不是**,不落任何 workflow 确认 |
+  | 何时跑 | P6 必跑,通过才进 P7 | 门挂了要**定位原因**、或想把板从"能布"提到"好看/好造"时跑 |
+
+  用法:`easyeda pcb layout-score --spec <s0-spec.json>`(带 spec 才解锁 flow-order 与 internal 连接器判定;
+  不带就是那两维 skipped)。**读报告先看三件事**:① `blocking` 有没有(短路/重叠/出板框 = 一票否决,
+  跟 gate 同源);② 摘要里的 **`N skipped`**——skipped 是「没测」不是「满分」,别把「7 维 90 分」读成全面体检;
+  ③ 最弱那几维的**归因列表**(报告里长这样:`↓ 齐整度(tidy)（80.0）拉低它的是: C2 −20.0 — anchor 离最近 5mil 格点 0.0015mil`),`penalty` 就是「先动谁」的排序。
+  `--only tidy,compact --all` 只深挖两维;`--min-score 75` 才会让分数不达标非零退出(不设则只有 blocking 才非零)。
+  **权重和阈值是待校准初值**,好板某维掉分优先怀疑度量而不是板子——用 `pcb dump` 把好板存成 fixture、
+  `layout-score --from` 离线复现,再回改代码。
   **门禁的机械强制面(#97 后续,2026-07-12)**:① 状态**全局持久化**在 `~/.easyeda-agent/workflow/<project>.json`(换 cwd 跑 CLI 骗不过门;`EASYEDA_WORKFLOW_DIR` 可覆写);② **daemon 在 /action 派发层同样拦截** `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`(raw HTTP 调用也绕不过),且任何摆放/板框类 action(component.modify/move/arrange/align/add/delete/import_changes/outline.set/clear)成功后**自动失效下游确认**并在响应 warning 里报 `workflow stage invalidated`;③ `confirm-layout`/`confirm-outline` 会把签核**指纹绑定**到当时的器件坐标/旋转/层与板框几何——GUI 拖动、`debug.exec_js`、其它 agent 的门外改动,会在下一次 gate 时指纹失配 → 自动失效并指回该重确认的阶段。
 - **任意阶段切入 / 会话恢复(workflow 命令族)**:换了模型、丢了上下文、或用户手改了板子,都不需要重走流程——
   1. `easyeda workflow status --reconcile`:拉实况(器件数/板框/已布线数)+ 校验指纹,自动失效漂移的确认,报告不一致(如「有走线但从未过门」);

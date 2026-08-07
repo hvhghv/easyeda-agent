@@ -387,6 +387,85 @@ subset; `--dry-run` prints the per-corner plan. Save after placing; delete via
   (`ok=false`、score 归零、verdict `short`、gate 直接失败)。**短路判定按焊盘层而不是装配面**:
   两个异面 SMD 焊盘永不短路,但**通孔焊盘(层 12=multi)贯穿所有层**,能跟对面焊盘真短 —— 这是唯一
   不吃「同面才比」规则的地方。焊盘形状取不到尺寸(多边形焊盘)或无网络时**跳过而不猜**。
+- `easyeda pcb layout-score` — **九维布局质量表 + 逐器件归因(#167)**。`layout-lint` 给的是**单标量可布性分**,
+  公式 `100 −100×short −100×overlap −20×offBoard −4×crossing −1×tight` —— **一处重叠就把分数打成 0**,
+  其余维度的差异全被抹平,看不出布局到底好在哪差在哪。`layout-score` 把「好布局」拆成九个**各自 0-100**
+  的维度 + 加权综合分 + **每维「是哪几个器件拉低了它」**:
+
+  | id | 中文 | 量什么 | 默认权重 |
+  |---|---|---|---|
+  | `partition` | 功能分区 | 模块领地(成员 center 包络)两两交错度 60 + 模块内紧凑度 40。归属优先读 spec `modules[].parts`,没 spec 就按信号网并查集**推断**(整维标 degraded) | 1.2 |
+  | `flow-order` | 信号流向 | 各 flow 阶段的**面积加权质心**投影到流向轴,与 spec `flow` 声明顺序算 **Kendall tau-b**;分数 `(tau+1)/2×100`。**方向不强制** —— 板上从右到左走 电源→天线 与从左到右同样好(正反都算取绝对值大者,`reversed` 记进 Metrics)。板上不存在的阶段剔除而不是当 (0,0) | 0.8 |
+  | `edge-io` | 对外接口与板沿 | ① 对外口聚一条边 + 开口朝外 ② `internal-on-edge` ③ `connector-plug-clearance`(见下) | 1.2 |
+  | `protection` | 保护件/去耦就近 | `protection-too-far`(F\*/TVS/ESD/RV\* → 同网端子最近中心距)+ 复用既有 `decap-too-far`;两族**等权**合成(去耦件数通常碾压保护件,按件数加权会把保护件淹掉) | 1.0 |
+  | `tidy` | 齐整度 | #153 五条子规则:落格 / 朝向一致 / 位号同侧 / 字号统一 / 阵列步进。**纯 cosmetic,永不进 blocking** | 0.5 |
+  | `compact` | 紧凑度 | 板面利用率,**双侧评分**(太空和太挤都扣)。⚠️ 恒为 `degraded`:本项目没有真 courtyard,分母是**渲染 bbox**(含丝印/位号,比本体大 40%+),绝对刻度不可信、相对量可用 | 0.8 |
+  | `rf` | 射频 | 天线馈点 → RF 源的馈线长度(2.4G 板上 λ≈2000mil,λ/10≈200mil 是"电气短"门槛)。⚠️ 恒为 `degraded`:keepout 全层那半边这里测不了(归 `pcb check` 的 antenna-keepout) | 1.0 |
+  | `routable` | 可布性 | ratsnest 跨网交叉**密度**(÷信号网数)+ 飞线长度密度(÷板对角线)。**用密度不用绝对数** —— 166 器件的板天然比 20 器件的板交叉多,同样水准不该被判"very-hard" | 1.5 |
+  | `clearance` | 装配间距 | tight pair(**绝对计数**,0.2mm 是工艺硬约束、大板不许挤)+ 手焊烙铁通道(#99 `no-access`)。一处违规先扣固定 25 分**把分压到 good 档以下**,保证「分数低 ⟺ gate 会挂」不再打架 | 1.5 |
+
+  **三条硬约定**(这套度量可信的前提,读报告前先记住):
+  1. **「没测」≠「测了满分」** —— 数据/意图缺失的维 `status=skipped`,**不参与加权**且必须给原因
+     (如「没给 `--spec` 所以没有 flow 目标序列」「PCB 不在前台导致板框读不到」)。报告摘要显式写
+     `N skipped`,不会把「7 维 90 分」读成全面体检。`degraded` 是第三态:算出来了但输入是近似,参与加权但要说明。
+  2. **硬错不抹平分数** —— 短路 / 器件重叠 / 出板框进独立 `blocking[]` **一票否决**(verdict=`blocked`、
+     非零退出),**不进加权**;而且几何两维**绝不再扣它们的分**,否则同一个缺陷被罚三次。
+  3. **计数与判定同源** —— `verdict` 只从 `blocking` 数和 `overall` 推(`verdictFor` 唯一产出点,
+     单测钉死),不会再出现「0 个阻塞项却 FAIL」。verdict 档:`blocked` / `poor`<55 / `fair`<75 / `good`<90 / `excellent`≥90。
+
+  flag:`--spec <s0.json>`(解锁意图类维度;spec 有 ERROR 直接拒,WARN 打 stderr)、
+  `--from <dump.json>`(离线重放,不连编辑器)、`--json`、`--min-score N`(不达标非零退出;**不设则只有 blocking 才非零**)、
+  `--only/--skip <id,…>`(**拼错维度名直接报错**,不静默变成"一维都没算")、`--weight dim=val`(可重复)、
+  `--grid <mil>`(齐整度落格网格,默认 **5**)、`--min-gap <mil>`(默认取板载 live clearance 规则)、`--all`(列全部归因)。
+  默认每维只列前 3 个归因、且 ≥90 分的维不展开。归因 `penalty` 是**可比的扣分量**(不是布尔标记),
+  `Σ 归因 = 100 − 该维分数` 是恒等式 —— 先动哪个器件涨多少分是可预测的。
+  **`layout-lint` 与 `layout-score` 不互相取代**:前者是**硬门**(能不能布线,`--gate` 落 `pre_route_passed`),
+  后者是**质量表**(布得好不好,诊断视角,不落任何 workflow 确认)。几何维**复用** layout-lint 的纯核
+  (`analyzePcbLayout`),同一个量只准有一个算法。权重与阈值全是**待校准初值**,校准闭环 = `pcb dump` 出好板 fixture
+  → `--from` 离线重放 → 好板某维掉分就回去改度量,不是改板子。
+  > **#168 两条连接器规则两边都出**:`pcb check`(计数 `internalOnEdge` / `connectorPlugClearance`)
+  > 与 `layout-score` 的 `edge-io` 维(`--json` 的 `dimensions[].findings[]`)。判据本体是
+  > `pcb_check_connector.go` 里的纯函数,两边共用同一份实现,不会给出矛盾答案。
+  > `pcb check --spec <s0.json>` 让 `internal-on-edge` 读 spec 声明的 facing 而不是靠猜:
+  > - **`internal-on-edge`** — 被标 internal 的连接器占了板外沿(默认 300mil 外沿带)。
+  >   **spec 显式声明 → WARN**(板级决定,可信);**启发式推定 → INFO**(线对板封装 + 无对外语义网,
+  >   会把接箱外传感器的 XH 座误判,不该阻塞)。报文自带 `internal=spec|heuristic` 标明来源。
+  > - **`connector-plug-clearance`** — 相邻**对外**连接器中心距 < 两者**插头护套包络宽**的均值 → WARN。
+  >   护套宽三级取值:spec `interfaces[].plugWidthMm` > 块库查找表
+  >   `internal/blocks/data/_plug_envelope.json`(13 条,每条带 `confidence`=datasheet/measured/estimated + 出处;
+  >   排式连接器按 `pitch×(pins−1)+margin` 随脚数算)> **bbox+2mm 兜底并标 `plug-width=fallback`**。
+  >   只比同装配面 + 同板边的配对。**这是 layout-lint/pcb check 结构性看不见的一类**:
+  >   它们只看铜箔与渲染 bbox,而插头护套是板上根本不存在的三维实体(实测 box-v2 rev-a 底边三口
+  >   中心距 12–13mm,按母座 ~9mm 判全过,按插头护套判才暴露)。
+  >
+  > 完整规范 → `pcb-design-rules.md` **§3.5 对外接口与板沿**(报文里的 `[规范 §3.5]` 即指该节)。
+- `easyeda pcb floorplan --spec <s0.json>` — **从 S0 `flow` 推布局骨架(只读,#167)**。把
+  `flow`(如 `["POWER","MCU","RF","ANT"]`)沿流向轴切成**有序**功能带,**带宽按各段器件面积分配**,
+  并把 spec 里显式声明了 `ref`+`edge` 的连接器钉到目标边(边序是装配体验,工具不猜 —— 没写 `edge` 就不钉)。
+  **与 `pcb zones` 并存不互相取代**:zones 是固定 3×2 九宫格,能表达「MCU 在中间」这种位置意图,
+  但表达不了**顺序**(谁在谁之后)、**比例**(166 器件的域不该和 3 器件的域等宽)和**段数**(flow 可能 2 段也可能 6 段)。
+  **⚠️ 只读 —— 本命令不搬器件**,落笔仍走 `pcb place-constrained`。之所以先只做规划:floorplan 决定的是
+  「板子怎么分区」,这件事错了后面搬多少次件都是白搬,值得先让人看一眼。**方向不强制**:已有器件分布更接近
+  反向时按反向切带(输出 `reversed=true`),不会把一块本来就摆对的板翻过来重排。flag:`--from <dump.json>`(离线)、
+  `--json`、`--margin <mil>`(板边留白,默认 300)、`--min-band <mil>`(最小带宽,默认 400 —— 小段不许塌成零)。
+  输出含 `bands[]`(功能域/面积/矩形/器件)、`pins[]`(钉边连接器目标点)、`unzoned[]`(未归属器件)、`warnings[]`。
+  `--spec` 必填(骨架只能从 flow 来,没有别的东西可推);spec 有 ERROR 时拒绝执行。
+- `easyeda pcb dump [--out board.json]` — **板级几何快照(只读)**。一次拉齐器件
+  (anchor/rotation/locked/bbox/pads)+ 板框 + 丝印 + live DRC 规则 + 铜层数,写成**自包含 JSON**。
+  存在理由是**金标准好板回归**(#167 第五层):好板必须能变成**离线 fixture**,否则每次改权重都得开着
+  EasyEDA 手动重跑,回归形同虚设。喂回 `pcb layout-score --from board.json` / `pcb floorplan --from …`
+  即可**不连编辑器**重放(CI 里也能跑)。⚠️ **板框需要 PCB 是前台文档**(否则平台返 null)——
+  快照把这类降级如实记进 `partial[]`,不假装板子没有边。与 `pcb stage-snapshot` 区别:那个抓 PNG 给人看,
+  这个抓结构化几何给 CLI/单测吃。flag:`--out`(默认 stdout)、`--label`、`--no-silk`/`--no-rules`/`--no-layers`(省往返)。
+- `easyeda spec validate <s0.json>` / `easyeda spec show <s0.json>` — **S0 方案书的校验与归一化查看(#167)**。
+  在此之前 S0 spec 写错是**完全静默**的(只要 `modules[].zone/parts` 对,`zones set` 就成功,其余字段无人看)。
+  判定口径刻意宽松以兼容既有 spec:**ERROR** = 写了但写错(枚举外的 zone/kind/facing、flow 里重复或不存在的阶段、
+  `internal:true` 与 `facing:"user-facing"` 自相矛盾);**WARN** = 缺了会让某维测不了(没有 flow、模块没归功能域、
+  flow 阶段在板上没有对应模块);**INFO** = 能力降级(接口没写 `ref` → 连接器规则只能退回启发式 INFO 档)。
+  默认只有 ERROR 非零退出,`--strict` 让 WARN 也失败(交付前用),`--json` 出 `{ok, issues, counts}`。
+  `spec show` 打印**归一化后**的 spec(`board` 字符串写法折进 outline、`stackup.inner1/inner2` 折进 `innerLayers`、
+  模块 `kind` 按 `name` 补全)—— 用来确认「工具**实际读到的**意图」与你写的是不是一回事。
+  字段形状见 [`design-flow.md`](./design-flow.md) S0。**兼容性原则是只加不改**:既有 spec 全部继续能读,缺新字段只报 WARN/INFO。
 - `easyeda pcb route-short` — **short-trace self-router** (daemon-side, the heuristic tier — NOT `pcb autoroute`/Freerouting). Per net: MST over pads, then a track per hop ≤ `--max-len` (Manhattan) on the pads' shared layer. **Skips power+ground nets by default** (VCC/3V3/GND/… via `isGlobalNet`) — they belong in a POUR, not thin tracks; `--route-power` forces routing them. (Measured on ceshi: routing 3V3 as thin tracks caused **18 of 27** Safe-Spacing violations — pouring power instead dropped Safe-Spacing 27→3. Do `pcb pour` GND + each power net after routing signal. Residual No-Connection on a 2-layer board = the pour can't reach every scattered power pad on a shared layer; that needs via-stitching / a dedicated plane layer.) Also skips already-routed nets, cross-layer hops (need a via), over-long hops (maze tier). **Widths are net-class rule-aware**: each net's width is picked by **role** (signal / power-branch 3V3·1V8 / power-trunk +5V / high-current VBUS·VIN — the §7.8 role split on the §1.2 metric grid: 0.25/0.4/0.5mm, `pcb_netclass.go`), seeded from the board's live DRC track-width spec (`pcb.drc.rules`, clamped ≥ the rule minimum) so a 3V3 branch gets 0.25mm (≈9.84mil) while a VBUS input gets 0.5mm (≈19.69mil), instead of the old flat power/signal 20/10 mil buckets. `pcb net-classes` prints the active ladder; `--width-signal` overrides the signal role, `--width-power` forces ONE width across all power roles (legacy), `--width` forces everything. **Corner style** via `--corner`: `90` (Manhattan L, default), `45` (chamfer — avoids acid traps/reflections), `round` (chord-approximated fillet, `--round-radius`; native arcs don't commit on this build so it's segmented). **Obstacle-aware (v2/v3)**: each hop picks the L orientation (horizontal- vs vertical-first) that crosses the fewest already-placed **other-net** tracks + other-net pads; `--no-avoid` restores the v1 naive horizontal-first. **Hard clearance gate (#111/#119/#122)**: other-net **pads**, **vias**, **same-layer tracks** (crossing OR under-clearance parallel run — the R2 SPIHD×SPIWP shorts) and **board cutouts/slots** (max(clearance,8mil) band, Slot Region to Track) are a **veto, not a cost** — a hop that cannot clear them detours (`--multilayer`) or lands in diagnostics unrouted; route-short never draws what `pcb check`/native DRC would flag (judges are shared with `findClearanceViolations`). Still NOT a maze router (no push-shove/vias/rip-up) — **run after `auto-place`** so hops are short/clear, then `pcb drc`. `--dry-run` previews. **布线档选择见 [`design-flow.md`](./design-flow.md) P7 三档阶梯**:稀疏 → 本 `route-short`;**稠密默认 = ② 人机协作档(停手请用户点 EasyEDA 原生「布线→自动布线」)**;`pcb autoroute`(external Freerouting)仅全 headless 无人可点时兜底,**绝不顶替 ②**。**门禁(issue #97)**:`route-short`/`autoroute` 默认要求项目状态 `outline_confirmed` + `pre_route_passed`(经 `pcb stage confirm-outline` + `pcb layout-lint --gate`),否则拒绝执行(CLI 与 daemon 双层拦截,详见上方 Board outline 段的 stage-state 说明);**force 分级(#132)**:`--force <理由>` 只放行软缺口(机械骨架至少一项已确认;state 不可知=可能零确认,同样拒),零确认板需 `--force-unsafe <理由>`;CLI 与 daemon 同一分级(`forceUnsafe` 随 forceReason 传到 /action 层)。两者均仅本次执行有效、不落确认、入审计(被拒尝试记 force-refused),`--dry-run` 只出计划不触发门禁。
 - `easyeda pcb stackup` — **board stackup: copper layer count + inner-layer types** (`pcb.stackup.set` / read via `pcb layers`). `pcb stackup set --layers 4` sets the count (2|4|6|…|32, `eda.pcb_Layer.setTheNumberOfCopperLayers`); `--plane 15 --plane 16` / `--signal 15` set inner layers' type (SIGNAL↔PLANE/内电层, `modifyLayer` — only INNER layers accept a type change). Set the layer count BEFORE routing/pouring inner layers. **A net-bound 内电层 (PLANE) IS achievable via API** — verified recipe: pour the net on the inner layer **while it is still SIGNAL** (`pcb pour`/`power-planes`), THEN flip the type (`--plane 15`), THEN `pcb pour-rebuild`. The net-bound fill survives the flip and DRC stays clean (0 Plane-Zone/via clashes). Doing it in the other order (flip type first, then pour on a PLANE layer) is the path that breaks — the pour lands netless on L1. `power-planes` does this for you (`--gnd-plane`, on by default).
 - `easyeda pcb power-planes` — **4-layer power distribution (the proper fix for the 2-layer pour conflict)**. Ensures ≥4 copper layers, assigns GND + power nets to inner layers, **via-stitches every power/ground pad DOWN to its plane** (the connection point the inner pour needs — without it the inner pour is all isolated islands and deposits nothing), then pours each net on its inner layer, then **flips the GND inner layer to 内电层/PLANE** (`--gnd-plane`, on by default) and rebuilds. **Order matters: vias BEFORE the pour** (empty otherwise), and the plane-flip AFTER the pour (the verified pour-while-SIGNAL → flip → rebuild recipe keeps the fill and DRC clean). The power layer stays 信号层 so its pour is an ordinary positive plane — matching the common customer stackup **GND=内电层 / VCC(3V3)=信号层** (e.g. `esp32MiniRequire.md`). `--gnd-layer 15 --power-layer 16` (defaults); `--gnd-plane=false` keeps GND a plain signal-layer pour. **Validated on ceshi: DRC 31 → 0, No-Connection → 0** — dedicated planes solve what a shared 2-layer pour can't (two power nets stranding each other's pads). Run AFTER auto-place + outline-fit + route-short (signals). Two power nets sharing one plane layer re-create the conflict (warned) — give each its own inner layer on 6+ layers. `--dry-run` prints the net→layer plan. **State interop (#114/#117)**: the run records two verdicts into the workflow state — nets it deliberately ROUTED AS TRACKS (no plane left, `powerTracksNets`) and nets it poured onto a layer then flipped to PLANE (`planePouredNets`). The `post_route_checked` gate exempts both from `power-not-poured` blocking; the second matters because **PLANE-layer pours are invisible to `pcb.pour.list` after a `doc reload` (#110)** — without the record the gate would re-flag the GND the command just poured and suggest re-running it (deadlock, #117). Standalone `pcb check` (no state) degrades a GND finding to **INFO** whenever the board carries a net-unknown PLANE layer — treat `pcb drc` Connection=0 as the arbiter, do NOT re-pour.
@@ -408,6 +487,21 @@ v1 (`route-short` / `pour`) is mechanically correct but coarse. Planned quality 
   Go-side from placed copper; the silkscreen rule reads `pcb.silk.list` (text layer+mirror). See the
   `pcb check` bullet in **Read / inspect**. Absorbs the official DFM tool's geometry checks
   (`docs/marketplace-coverage.md`, HIGH item).
+- ✅ **布局质量多维打分 (#167, done)** — `pcb layout-score` 九维 + 归因、`pcb floorplan` 有序功能带、
+  `pcb dump` 离线 fixture、`easyeda spec validate/show` S0 契约化。见上方 **Layout adjustment** 三条。
+  论点:**能自动逼近的前提是先能量化打分 —— 你没法优化一个你测不出来的东西**,所以建设顺序是先
+  DETECT(打分)再 ACHIEVE(逼近)。
+- ✅ **#168 两条连接器规则 (done)** — `internal-on-edge` / `connector-plug-clearance` 已接进
+  `pcb check`(计数字段 `internalOnEdge` / `connectorPlugClearance`,因此也进 `--strict` 门)
+  并同时喂 `layout-score` 的 edge-io 维。真板验收(车机V2,166 器件)两条都命中 issue 原文描述的问题:
+  J1(PH2.0 电池座)离底边 119mil、J2↔J_VEH 中心距 13.00mm < 插头护套要求的 13.98mm。
+  同一轮验收还修掉一个误判:`USBLC6-2SC6`(ESD 二极管,名含 "usb")与 `SMAJ5.0A`(TVS,SMA 是**封装**名)
+  曾被器件名正则判成连接器,后者还查到了 SMA 射频接头的 14mm 护套宽 —— 现在**位号前缀优先于器件名**。
+- 🚧 **权重/阈值的金标准校准 (#167 第五层)** — `layout-score` 的九维权重与各维阈值目前全是**待校准初值**
+  (代码里逐个标了「待校准」)。闭环 = `pcb dump` 抓一批公认的好板成 fixture → `layout-score --from` 离线跑 →
+  好板某维掉分即判定该维的度量或权重错了,回改代码。
+- 🚧 **布局精修环 (ACHIEVE 侧)** — 打分报告已经暴露了「哪维最弱 + 哪几个器件拉低了它 + 每个扣多少分」
+  这条梯度(`weakest()` / `Contributors[].Penalty`),按维对症下确定性变换的精修环尚未落地。
 
 ### Board outline (板框)
 
