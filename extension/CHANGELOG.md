@@ -15,6 +15,14 @@ follow [SemVer](https://semver.org/).
   (可读部分在前,截断也留得住)、循环引用标 `[Circular]`、无可枚举属性直说
   ——替换 `actions.ts` 9 处 + `transport.ts` 1 处同款三元(共享出口覆盖 140 个
   `edaError` 调用点)。离线单测 10 条。
+- **`schematic.primitives.delete` 改为回读验证计数(#164)**:此前
+  `deleted[key] = ids.length` **直接来自请求数**,从不回读 —— 与 `page.clear`
+  修过的「把枚举数当删除数报」是同一个坑,只是没修到这里。于是 zone-draw 的
+  「删旧+重画」每轮都报干净、实则只加不减(车机V2 P5 累积到 56 个标签)。现在
+  删完重新枚举各类目:`deleted`/`total` 只计真正消失的,有幸存则按 #151 约定返回
+  `partial:true` + `survived` + warning(画布已变不抛错),CLI 侧 `sch prim-delete`
+  随之非零退出。**注意这不覆盖平台的持久化坑本身** —— 立即回读=0 而 `doc reload`
+  后复活的那一层,仍需 reload 复查(文案已写进 skill)。
 - **跨页 `primitiveId` 不再被误报「不存在」(#162)**:`getComponentOrThrow` 只调
   活动页作用域的 `get()`,查不到就抛 `No schematic component found` —— 但
   `delete` 走全页 `getAll`,**同一个 id 同一个窗口**,`replace` 说找不到、17 秒后

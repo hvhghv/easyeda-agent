@@ -15,6 +15,7 @@ import {
 	connectPinEndpoint,
 	getComponentOrThrow,
 	normalizeDeviceRef,
+	runAction,
 	schematicComponentsList,
 	serializeComponent,
 	summarizeActivePageConnectivity,
@@ -1057,6 +1058,68 @@ test('getComponentOrThrow: returns the component when it is on the active page',
 	try {
 		const c: any = await getComponentOrThrow('here');
 		assert.equal(c.getState_PrimitiveId(), 'here');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+// ─── #164: prim-delete must report VERIFIED deletions, never the request ─────
+
+/** eda stub whose text delete is a no-op (the platform behaviour issue #164 hit). */
+function edaWithUndeletableText(textIds: string[], wireIds: string[]) {
+	const alive = { texts: [...textIds], wires: [...wireIds] };
+	const prim = (id: string) => ({ getState_PrimitiveId: () => id }) as any;
+	const noopClass = () => ({ getAll: async () => [], delete: async () => true });
+	return {
+		sch_PrimitiveComponent: { getAll: async () => [], delete: async () => true },
+		sch_PrimitiveText: {
+			getAll: async () => alive.texts.map(prim),
+			delete: async () => true, // returns true, keeps the primitives
+		},
+		sch_PrimitiveWire: {
+			getAll: async () => alive.wires.map(prim),
+			delete: async (ids: string[]) => {
+				alive.wires = alive.wires.filter(id => !ids.includes(id));
+				return true;
+			},
+		},
+		sch_PrimitiveBus: noopClass(),
+		sch_PrimitiveArc: noopClass(),
+		sch_PrimitiveCircle: noopClass(),
+		sch_PrimitiveRectangle: noopClass(),
+		sch_PrimitivePolygon: noopClass(),
+		sch_SelectControl: { getAllSelectedPrimitives_PrimitiveId: async () => [] },
+	};
+}
+
+test('prim-delete: primitives that survive the delete are reported, not counted as deleted', async () => {
+	(globalThis as any).eda = edaWithUndeletableText(['t1', 't2'], ['w1']) as any;
+	try {
+		const res: any = await runAction('schematic.primitives.delete', { primitiveIds: ['t1', 't2', 'w1'] });
+		assert.equal(res.result.deleted.texts, 0, 'undeletable texts must not be counted as deleted');
+		assert.equal(res.result.deleted.wires, 1);
+		assert.equal(res.result.total, 1, 'total counts only what actually went away');
+		assert.equal(res.result.requested, 3);
+		assert.equal(res.result.partial, true);
+		assert.deepEqual(res.result.survived, { texts: ['t1', 't2'] });
+		assert.equal(res.result.survivedTotal, 2);
+		assert.deepEqual(res.result.deletedIds, { wires: ['w1'] });
+		assert.match(String(res.warnings?.[0] ?? ''), /survived/);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('prim-delete: a fully successful delete carries no partial flag', async () => {
+	(globalThis as any).eda = edaWithUndeletableText([], ['w1', 'w2']) as any;
+	try {
+		const res: any = await runAction('schematic.primitives.delete', { primitiveIds: ['w1', 'w2'] });
+		assert.equal(res.result.total, 2);
+		assert.equal(res.result.partial, undefined);
+		assert.equal(res.result.survived, undefined);
+		assert.equal(res.warnings, undefined);
 	}
 	finally {
 		delete (globalThis as any).eda;

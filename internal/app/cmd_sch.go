@@ -754,7 +754,15 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 					}
 					payload["primitiveIds"] = ids
 				}
-				return dispatch(cfg, "schematic.primitives.delete", window, payload, stdout, stderr)
+				res, err := dispatchCapture(cfg, "schematic.primitives.delete", window, payload, stdout)
+				if err != nil {
+					return err
+				}
+				// The handler reports a verified count now (#164): primitives that
+				// survived the delete come back as result.partial. Fail the command
+				// rather than let "ok:true" read as "they are gone" — that is exactly
+				// how zone-draw labels accumulated while every sweep looked clean.
+				return failOnSurvivingPrimitives(res, stderr)
 			},
 		}
 		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to delete (any type); omit to delete the current selection`)
@@ -1568,4 +1576,28 @@ The keepouts[] format is what sch autoconnect / autolayout consume.`,
 	sch.AddCommand(newSchGateCmd(cfg, &window, stdout, stderr))
 
 	return sch
+}
+
+// failOnSurvivingPrimitives turns a verified-partial `schematic.primitives.delete`
+// into a non-zero exit (issue #164).
+//
+// The handler now re-reads the page instead of echoing the requested count, so
+// a primitive class that accepts the delete call and keeps the primitive shows
+// up as result.partial + result.survived. Exiting 0 there would preserve the
+// original defect at the CLI layer: `sch prim-delete` reported a clean sweep
+// while the zone-draw labels it "removed" were still on the page (and came back
+// in full after a doc reload).
+func failOnSurvivingPrimitives(res *actionResult, stderr io.Writer) error {
+	if res == nil || res.Result == nil {
+		return nil
+	}
+	partial, _ := res.Result["partial"].(bool)
+	if !partial {
+		return nil
+	}
+	survived, _ := res.Result["survivedTotal"].(float64)
+	fmt.Fprintf(stderr, "✗ %d primitive(s) survived the delete — they are still on the page.\n", int(survived))
+	fmt.Fprintln(stderr, "  Re-read (sch text-list / sch check) before assuming anything was removed;")
+	fmt.Fprintln(stderr, "  if they persist across a `doc reload`, delete them in the EasyEDA UI (issue #164).")
+	return errActionFailed
 }

@@ -1348,6 +1348,36 @@ function warnText(label: string, err: unknown): string {
 // re-read to confirm rather than trust the return.
 const SCH_DELETE_BATCH = 50;
 
+/**
+ * Re-enumerate the page and report which of the requested ids are STILL there,
+ * grouped by the same kind keys the caller deleted under.
+ *
+ * A delete that returns true is not evidence: large batches silently no-op
+ * (SCH_DELETE_BATCH) and some primitive classes keep the primitive outright
+ * (issue #164 — zone-draw's text/rectangle labels reported deleted, then came
+ * back). Only a re-read can say what actually went away. Best-effort per kind:
+ * a class whose getAll throws is treated as "cannot verify", and its ids are
+ * NOT claimed as survivors.
+ */
+export async function survivingSchPrimitives(
+	idsByKey: Record<string, Array<string>>,
+): Promise<Record<string, Array<string>>> {
+	const out: Record<string, Array<string>> = {};
+	for (const [key, ids] of Object.entries(idsByKey)) {
+		if (!ids.length) continue;
+		const kind = SCH_PAGE_PRIMITIVE_KINDS.find(k => k.key === key);
+		try {
+			const live = kind ? await kind.getAll() : await eda.sch_PrimitiveComponent.getAll();
+			const alive = new Set((live ?? []).map(p => p.getState_PrimitiveId()));
+			out[key] = ids.filter(id => alive.has(id));
+		}
+		catch {
+			out[key] = []; // unverifiable → do not invent survivors
+		}
+	}
+	return out;
+}
+
 async function deleteSchGroup(key: string, ids: Array<string>): Promise<void> {
 	const kind = SCH_PAGE_PRIMITIVE_KINDS.find(k => k.key === key);
 	for (let i = 0; i < ids.length; i += SCH_DELETE_BATCH) {
@@ -1566,18 +1596,51 @@ const schematicPrimitivesDelete: Handler = async (payload) => {
 		}
 	}
 
+	// Verify by re-reading, never by counting what we asked for. The platform's
+	// delete returns true on batches it silently no-ops (SCH_DELETE_BATCH), and
+	// this handler used to report `deleted[key] = ids.length` straight from the
+	// REQUEST — the same "enumerated count reported as the deleted count" bug
+	// page.clear was already fixed for, and what let issue #164's zone-draw
+	// labels report a clean sweep while every one of them survived.
+	const survivedByKey = await survivingSchPrimitives(idsByKey);
 	const deleted: Record<string, number> = {};
+	const deletedIds: Record<string, Array<string>> = {};
 	let total = 0;
-	for (const [key, ids] of Object.entries(idsByKey)) { deleted[key] = ids.length; total += ids.length; }
+	let survivedTotal = 0;
+	for (const [key, ids] of Object.entries(idsByKey)) {
+		const survived = survivedByKey[key] ?? [];
+		const gone = ids.filter(id => !survived.includes(id));
+		deleted[key] = gone.length;
+		if (gone.length) deletedIds[key] = gone;
+		total += gone.length;
+		survivedTotal += survived.length;
+	}
+	const survived = Object.fromEntries(
+		Object.entries(survivedByKey).filter(([, ids]) => ids.length),
+	);
+	if (survivedTotal) {
+		warnings.push(
+			`${survivedTotal} primitive(s) survived the delete and are still on the page `
+			+ `(${Object.entries(survived).map(([k, v]) => `${k}:${v.length}`).join(', ')}). `
+			+ 'Re-read before assuming they are gone; some primitive classes accept the '
+			+ 'delete call and keep the primitive (issue #164).',
+		);
+	}
 
+	// #151 convention: the canvas already changed, so this is a structured
+	// partial success, not a throw — the caller gets the ids that actually went
+	// away plus the ones that did not.
 	return {
 		result: {
 			deleted,
 			total,
-			deletedIds: idsByKey,
+			requested: targets.length,
+			deletedIds,
+			...(survivedTotal ? { partial: true, survived, survivedTotal } : {}),
 			...(notFound.length ? { notFound } : {}),
 			...(warnings.length ? { warnings } : {}),
 		},
+		...(warnings.length ? { warnings } : {}),
 	};
 };
 
