@@ -1988,6 +1988,8 @@ external router (Freerouting) would route under the antenna. The result reports
 	pcb.AddCommand(newPcbZonesCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbSilkZoneOutlineCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbRouteCriticalCmd(cfg, &window, stdout, stderr))
+	// ── dump: 板级几何快照（金标准 fixture 的生成器，#167 LEARNING 层）─────────
+	pcb.AddCommand(newPcbDumpCmd(cfg, &window, stdout, stderr))
 	// ── autoroute: one-command Freerouting round-trip ────────────────────────
 	// export DSN → run an external Freerouting engine → import the routed SES → DRC.
 	// The engine is external (Freerouting needs Java 17+); decoupled via a command
