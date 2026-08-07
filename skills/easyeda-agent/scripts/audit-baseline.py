@@ -25,7 +25,10 @@ import json, sys, glob, os
 from collections import Counter, defaultdict
 from datetime import datetime
 
-files = sorted(glob.glob(os.path.expanduser("~/.easyeda-agent/audit/*.jsonl")))
+# 与 daemon 写侧同源:EASYEDA_AUDIT_DIR 覆写,否则 ~/.easyeda-agent/audit。
+# (写侧在 internal/daemon/audit.go;两边不一致会读出一个空日志。)
+audit_dir = os.environ.get("EASYEDA_AUDIT_DIR") or os.path.expanduser("~/.easyeda-agent/audit")
+files = sorted(glob.glob(os.path.join(audit_dir, "*.jsonl")))
 only = sys.argv[1] if len(sys.argv) > 1 else None
 if only:
     files = [f for f in files if only in f]

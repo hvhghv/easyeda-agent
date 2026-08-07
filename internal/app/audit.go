@@ -12,7 +12,24 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/daemon"
 )
+
+// defaultAuditDir mirrors the daemon's write-side resolution
+// (daemon.EnvAuditDir, else ~/.easyeda-agent/audit) so reads always land where
+// the writes went — an env override that only one side honoured would silently
+// show an empty log.
+func defaultAuditDir() string {
+	if dir := os.Getenv(daemon.EnvAuditDir); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+	}
+	return filepath.Join(home, ".easyeda-agent", "audit")
+}
 
 // newAuditCmd returns the "audit" subcommand group.
 func newAuditCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -39,11 +56,7 @@ func newAuditTailCmd(stdout, stderr io.Writer) *cobra.Command {
   easyeda audit tail --dir /path/to/audit`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dir == "" {
-				home, err := os.UserHomeDir()
-				if err != nil || home == "" {
-					home = os.Getenv("HOME")
-				}
-				dir = filepath.Join(home, ".easyeda-agent", "audit")
+				dir = defaultAuditDir()
 			}
 
 			lines, err := readLastLines(dir, n)

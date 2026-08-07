@@ -53,11 +53,7 @@ func newAuditExportCmd(stdout, stderr io.Writer) *cobra.Command {
   easyeda audit export --playbook --window <id> --name esp32-moves --project ceshi`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dir == "" {
-				home, err := os.UserHomeDir()
-				if err != nil || home == "" {
-					home = os.Getenv("HOME")
-				}
-				dir = filepath.Join(home, ".easyeda-agent", "audit")
+				dir = defaultAuditDir()
 			}
 			if day == "" {
 				day = time.Now().UTC().Format("2006-01-02")

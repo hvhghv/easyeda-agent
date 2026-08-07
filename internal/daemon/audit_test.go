@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,5 +68,63 @@ func TestAudit_NoClientIDOmitted(t *testing.T) {
 	}
 	if _, present := row["clientId"]; present {
 		t.Error("clientId must be omitted (omitempty) when the caller sent none")
+	}
+}
+
+// TestAudit_TestRunNeverWritesRealLog pins issue #159: a Server built without
+// an AuditDir must not append to the user's real ~/.easyeda-agent/audit while
+// under `go test`. Fixture rows (fake windows "w1"/"w2", project "motobox")
+// had been landing there and were later read back as genuine field failures.
+func TestAudit_TestRunNeverWritesRealLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(EnvAuditDir, "")
+
+	w := newAuditWriter("")
+	if !w.disabled {
+		t.Fatalf("newAuditWriter(\"\") under test = enabled writer at %q, want disabled", w.Dir())
+	}
+	w.Append(auditEntry{Timestamp: time.Now().UTC(), Action: "schematic.components.list"})
+
+	if _, err := os.Stat(filepath.Join(home, ".easyeda-agent")); !os.IsNotExist(err) {
+		t.Fatalf("test run created %s/.easyeda-agent (err=%v), want untouched", home, err)
+	}
+}
+
+// TestAudit_ServerWithoutAuditDirIsDisabled covers the actual regression path:
+// every `New(Options{})` in the daemon tests reaches Append via handleAction.
+func TestAudit_ServerWithoutAuditDirIsDisabled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(EnvAuditDir, "")
+
+	s := New(Options{})
+	s.audit.Append(auditEntry{Timestamp: time.Now().UTC(), Action: "pcb.via.create", WindowID: "w1"})
+
+	if _, err := os.Stat(filepath.Join(home, ".easyeda-agent")); !os.IsNotExist(err) {
+		t.Fatalf("New(Options{}) wrote an audit log under %s, want none", home)
+	}
+}
+
+// TestAudit_EnvDirOverride pins EASYEDA_AUDIT_DIR (same convention as
+// EASYEDA_WORKFLOW_DIR), and that an explicit dir still wins over it.
+func TestAudit_EnvDirOverride(t *testing.T) {
+	envDir := t.TempDir()
+	t.Setenv(EnvAuditDir, envDir)
+
+	w := newAuditWriter("")
+	if w.disabled || w.Dir() != envDir {
+		t.Fatalf("newAuditWriter(\"\") with %s set = %q (disabled=%v), want %q", EnvAuditDir, w.Dir(), w.disabled, envDir)
+	}
+
+	started := time.Date(2026, 8, 6, 4, 8, 49, 0, time.UTC)
+	w.Append(auditEntry{Timestamp: started, Action: "schematic.components.list"})
+	if _, err := os.ReadFile(w.Path(started)); err != nil {
+		t.Fatalf("env-dir writer did not append: %v", err)
+	}
+
+	explicit := t.TempDir()
+	if got := newAuditWriter(explicit).Dir(); got != explicit {
+		t.Fatalf("explicit dir = %q, want %q (must win over %s)", got, explicit, EnvAuditDir)
 	}
 }

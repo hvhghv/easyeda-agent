@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/protocol"
@@ -38,15 +39,39 @@ type auditEntry struct {
 	ErrorDetail string `json:"errorDetail,omitempty"`
 }
 
+// EnvAuditDir overrides the audit log root, mirroring EASYEDA_WORKFLOW_DIR
+// (internal/workflow). Set it to keep a run's audit trail out of the user's
+// real log — the daemon's own tests rely on this.
+const EnvAuditDir = "EASYEDA_AUDIT_DIR"
+
 // auditWriter serializes appends to one JSONL file per UTC day so log files
 // stay rotatable by date without a separate rotation process.
 type auditWriter struct {
 	mu  sync.Mutex
 	dir string
+	// disabled writers drop every entry. Only the in-test default fallback
+	// sets this — see newAuditWriter.
+	disabled bool
 }
 
+// newAuditWriter resolves the audit root: the explicit dir, else
+// EASYEDA_AUDIT_DIR, else ~/.easyeda-agent/audit.
+//
+// The last fallback is DISABLED under `go test` (issue #159). The audit log is
+// a first-class output that `easyeda audit` / audit-baseline.py read to judge
+// which actions are failing in the field; a test that constructs a Server
+// without an AuditDir used to append its fixtures — fake windows "w1"/"w2",
+// project "motobox" — straight into the user's real log, manufacturing failure
+// signals that a later investigation then chases (33 rows had accumulated).
+// Tests that actually exercise the writer pass an explicit t.TempDir().
 func newAuditWriter(dir string) *auditWriter {
 	if dir == "" {
+		dir = os.Getenv(EnvAuditDir)
+	}
+	if dir == "" {
+		if testing.Testing() {
+			return &auditWriter{disabled: true}
+		}
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
 			home = os.Getenv("HOME")
@@ -59,7 +84,7 @@ func newAuditWriter(dir string) *auditWriter {
 // Append writes one entry. Failures are best-effort: audit-log errors must
 // never break the dispatch path.
 func (a *auditWriter) Append(entry auditEntry) {
-	if a == nil {
+	if a == nil || a.disabled {
 		return
 	}
 	a.mu.Lock()
