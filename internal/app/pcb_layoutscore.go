@@ -148,6 +148,14 @@ type layoutScoreReport struct {
 
 	Dimensions []scoreDimension `json:"dimensions"`
 
+	// DimensionScores 是 id→分数的扁平映射，与 Dimensions 冗余，纯粹为了可断言：
+	// playbook 的 assert 用的是 `$.` 点路径（actions.md 里已有
+	// `{"$.score": ">=95"}` 的先例），点不进数组元素。有了它就能写
+	// `{"$.report.dimensionScores.tidy": ">=80"}`。
+	// **只收 scored/degraded 的维** —— skipped 的维不出现在这里，
+	// 断言时"这维没测"会表现为路径缺失而不是 0 分。
+	DimensionScores map[string]float64 `json:"dimensionScores,omitempty"`
+
 	ComponentCount int      `json:"componentCount"`
 	ScoredDims     int      `json:"scoredDims"`  // 参与加权的维数
 	SkippedDims    int      `json:"skippedDims"` // 因数据/意图缺失跳过的维数
@@ -402,6 +410,10 @@ func finalizeScoreReport(rep *layoutScoreReport) {
 		rep.ScoredDims++
 		sumW += d.Weight
 		sumWS += d.Weight * d.Score
+		if rep.DimensionScores == nil {
+			rep.DimensionScores = map[string]float64{}
+		}
+		rep.DimensionScores[d.ID] = d.Score
 	}
 	if sumW > 0 {
 		rep.Overall = math.Round(sumWS/sumW*10) / 10

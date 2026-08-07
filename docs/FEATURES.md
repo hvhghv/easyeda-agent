@@ -20,6 +20,29 @@ All but `system.health` are dispatched to the connector; `system.health` is
 answered by the daemon itself (daemon/connector liveness, no window required).
 (Run `make actions` for the authoritative list — this prose count can lag.)
 
+> **2026-08-08 — 布局质量从「合法性」升级到「好不好」(issues #167 / #168 / #153).**
+> 此前 PCB 侧只有 `pcb layout-lint` 一条**单标量**分（`100 −100×short −100×overlap
+> −20×offBoard −4×crossing −1×tight`），一处重叠就把分数打成 0 —— 其余维度的差异全被
+> 抹平，看不出布局到底好在哪差在哪。新增 **`pcb layout-score`**：九维各自 0-100
+> （partition / flow-order / edge-io / protection / tidy / compact / rf / routable /
+> clearance）+ 加权综合分 + **每维「是哪几个器件拉低了它」**的归因梯度。硬错
+> （短路/重叠/出板框）不再抹平分数，改为单列 `blocking` 一票否决。`layout-lint`
+> 保持不变，两者分工：**它是硬门（能不能布线），layout-score 是质量表（布得好不好）**。
+>
+> 三条贯穿设计的约定：① **「没测」≠「测了满分」** —— 数据/意图缺失的维标 `skipped`、
+> 不参与加权、必须给原因，报告摘要显式写「N skipped」；② 近似输入标 `degraded`
+> 并自曝（用渲染 bbox 当 courtyard 会让利用率系统性偏高；板框只有 AABB 时异形板的
+> 边距是错的）；③ verdict 单一产出点，只从 blocking 数和综合分推。
+>
+> 配套：**`pcb floorplan --spec`**（按 S0 `flow` 切有序功能带，带宽按器件面积分配，
+> 只读）、**`pcb refine`**（打分驱动精修环，**默认 dry-run**，按步回滚 + 不可动集合
+> + 位移预算）、**`pcb dump`**（板级几何快照，可 `--from` 离线重放打分）、
+> **`easyeda spec validate/show`**（S0 spec 首次有了 Go 类型与校验）。
+> `pcb check` 新增 #168 两条连接器规则：**internal-on-edge**（箱内连接器占板外沿）
+> 与 **connector-plug-clearance**（相邻对外口中心距 < 插头护套包络宽 —— 母座
+> footprint 不重叠不代表插头插得进去，查表 `internal/blocks/data/_plug_envelope.json`）。
+> 阈值大多仍是**待校准初值**，等金标准好板回归校准（#167 第五层）。
+
 > **2026-08-01 — `pcb layout-lint` 层感知 + 网络感知 (issue #141).** The overlap check
 > compared **unlayered** rendered bboxes, so a top part and a bottom part sharing an XY —
 > a legal top/bottom pass-through — counted as a collision; on the 166-part double-sided
