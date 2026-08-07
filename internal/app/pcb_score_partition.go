@@ -669,6 +669,21 @@ func (partitionScorer) score(ctx *scoreCtx) scoreDimension {
 		"spreadPenalty":     round2(spreadPenalty * scale),
 	}
 
+	// 模块粒度过粗的自曝（真板校准发现，车机V2 166 器件 / 5 页原理图）：
+	// 拿**原理图分页**当模块喂进来时，5 个模块的 10 对领地全部交错、worstOverlapRatio
+	// 打满 1.0，本维掉到 33 分 —— 但那块板的 flow-order 是满分，大格局明明是对的。
+	//
+	// 原因是粒度错配：原理图页是**画图的组织单位**，一页 20-50 个器件在一块 85×45mm
+	// 的密板上必然交织；#167 说的「功能分区」是设计者在**板面上**有意划出的域。
+	// 这一维测不出「该分几个区」，只能测「你声明的区互不互相穿插」——所以当所有模块对
+	// 都交错时，更可能是模块粒度给粗了，而不是板子摆坏了。把这句话说出来，
+	// 免得用户对着一个 33 分去重排一块布局本来合理的板。
+	if interleavable && len(pairs) == len(g.modules)*(len(g.modules)-1)/2 && worstRatio >= 0.99 {
+		degraded = append(degraded, fmt.Sprintf(
+			"every one of the %d module pairs interleaves at ~100%% — that usually means the module granularity is too coarse (e.g. schematic PAGES fed in as modules) rather than a badly placed board; declare finer functional domains via `pcb zones set` or spec modules[] and re-score",
+			len(pairs)))
+	}
+
 	if len(degraded) > 0 {
 		d.Status = dimDegraded
 		d.Reason = strings.Join(degraded, "; ")
