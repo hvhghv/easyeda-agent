@@ -370,12 +370,77 @@ type cpOptions struct {
 	// claim are placed INTO the rect; edge-must parts are exempt (the board
 	// edge is a harder constraint than the zone — an interface connector's
 	// zone is advisory only).
-	zones map[string]cpZoneClaim
+	zones      map[string]cpZoneClaim
 	mainPins   int
 	edgeMargin float64 // gap between an edge part's bbox and the board edge
 	partGap    float64 // clearance between any two parts / part-to-hole
 	board      *cpRect // REAL board-outline bbox; nil → fall back to the part-cloud union extent
 }
+
+// cpFollowRadius 是「原本贴着这个端子」的判据半径（mil）。
+//
+// 取 400mil ≈ 10mm：protection 维给保护件贴端子的预算是 250mil、去耦贴 IC 是
+// 100mil，400 比两者都宽 —— 宁可多跟一件（相对关系本来就该保持），也不要漏掉一个
+// 真正贴着端子的保护件。**待校准初值**：真板上若出现「跟着跑了但其实不相干」的件，
+// 收窄它；判读看 diag 里的 satellite:follows-edge-part 条目。
+const cpFollowRadius = 400.0
+
+// cpFollowRadiusGlobal 是「只能靠全局网(VCC/GND)判亲缘」时的跟随半径。
+//
+// 收到 150mil ≈ 3.8mm：纯去耦电容与它服务的 IC 引脚本来就该在 100mil 内
+// （protection 维的去耦预算），150 留一点余量。放宽到全局网是因为纯去耦没有任何
+// 本地网可认，但 GND 连着板上每一个件 —— 半径不收紧就会变成「谁动了都跟」。
+const cpFollowRadiusGlobal = 150.0
+
+// cpSpiralMaxRad 是全板合法化的螺旋搜索上限（mil）—— 原先写死在 spiralIn 里。
+const cpSpiralMaxRad = 2200.0
+
+// cpNeedsHugging 判断一个卫星是否**真有贴脚约束** —— 只有这类件值得「跟着端子走」。
+//
+// 判据刻意与 protection 维同口径（那一维只对这两类扣分）：
+//   - 保护件：保险丝 / TVS / ESD / 压敏，它们必须守在入口处；
+//   - 去耦电容：恰好 2 脚、一脚地一脚非地电源网 —— 与 findDecapTooFar 的筛选一致。
+//
+// 为什么要收窄：跟随一开始对**所有**卫星生效，真板实测把移动件数从 19 推到 46，
+// 而 protection 一分没涨 —— 被拖着跑的大多是没有贴脚约束的普通电阻电容，
+// 挪它们既无收益又平白扰动一块人工调过的板。稀疏板上看不出来（件少、都跟得上），
+// 密板上就是纯粹的噪声。
+func cpNeedsHugging(c cpComp) bool {
+	des := strings.ToUpper(strings.TrimSpace(c.designator))
+	dev := strings.ToLower(c.footprint)
+	if cpReProtection.MatchString(des) || cpReProtectionDev.MatchString(dev) {
+		return true
+	}
+	// 去耦：2 脚电容，一脚 GND、另一脚是非 GND 的全局(电源)网。
+	if !strings.HasPrefix(des, "C") {
+		return false
+	}
+	nets := map[string]bool{}
+	for _, p := range c.pads {
+		if n := strings.TrimSpace(p.net); n != "" {
+			nets[n] = true
+		}
+	}
+	if len(nets) != 2 {
+		return false
+	}
+	var hasGnd, hasPwr bool
+	for n := range nets {
+		switch {
+		case isGndNetName(n):
+			hasGnd = true
+		case isGlobalNet(n):
+			hasPwr = true
+		}
+	}
+	return hasGnd && hasPwr
+}
+
+var (
+	// 位号前缀：F=保险丝 D=二极管(含 TVS/ESD) RV/VR=压敏 TVS/ESD=显式命名
+	cpReProtection    = regexp.MustCompile(`(?i)^(?:F|D|RV|VR|TVS|ESD)[\d_]`)
+	cpReProtectionDev = regexp.MustCompile(`(?i)tvs|esd|smbj|smaj|pesd|usblc|fuse|pptc|\bptc\b|保险丝|压敏`)
+)
 
 func defaultCpOptions() cpOptions {
 	return cpOptions{mainPins: 8, edgeMargin: 45, partGap: 14}
@@ -458,8 +523,12 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 	}
 	// spiralIn finds the nearest non-clashing on-board spot for a hw×hh part,
 	// starting at (sx,sy), optionally constrained to zone rect z.
-	spiralIn := func(sx, sy, hw, hh float64, layer int, z *cpRect) (float64, float64, bool) {
-		for rad := 0.0; rad <= 2200; rad += 25 {
+	// spiralRadius 是从 seed 向外螺旋找第一个合法位的通用搜索。maxRad 决定它肯走
+	// 多远：全板合法化用 cpSpiralMaxRad（把件放下才是第一要务），而「跟着端子走」
+	// 只肯在端子附近找（见 cpFollowRadius）——跟随的价值是保住相对位置，跟到几百
+	// mil 外就失去意义了，还不如不跟。
+	spiralRadius := func(sx, sy, hw, hh float64, layer int, z *cpRect, maxRad float64) (float64, float64, bool) {
+		for rad := 0.0; rad <= maxRad; rad += 25 {
 			steps := 1
 			if rad > 0 {
 				steps = 24
@@ -480,6 +549,11 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 			}
 		}
 		return 0, 0, false
+	}
+	// spiralIn 是全板合法化用的那档：肯一路找到 cpSpiralMaxRad，因为「把件放下」
+	// 比「放得近」更要紧 —— 放不下就是 off-board。
+	spiralIn := func(sx, sy, hw, hh float64, layer int, z *cpRect) (float64, float64, bool) {
+		return spiralRadius(sx, sy, hw, hh, layer, z, cpSpiralMaxRad)
 	}
 
 	// Classify.
@@ -544,6 +618,10 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 	// off-board), and — when alongCenter != nil (the grouped user-facing path) —
 	// packs its along-edge center to alongCenter. Records the move + diag and adds
 	// it to the fixed set.
+	//
+	// edgeShift 记录每个 T2 件被挪动的量（primitiveId → dx,dy），T4 用它把
+	// 「原本贴着这个端子」的卫星一起带走。
+	edgeShift := map[string][2]float64{}
 	placeEdgePart := func(i int, edge apEdge, alongCenter *float64) {
 		c := comps[i]
 		cx, cy := c.bboxCenter()
@@ -589,6 +667,16 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		nx, ny := c.x+shiftX, c.y+shiftY
 		nr := cpRect{gx0 + shiftX - m, gy0 + shiftY - m, gx1 + shiftX + m, gy1 + shiftY + m}
 		addFixed(nr, c.layer)
+		// 记下这一档件被挪了多远，供 T4 的「跟随」用。
+		//
+		// 为什么需要：保护件(保险丝/TVS/ESD)的正确位置是**贴着它保护的那个端子**，
+		// 不是贴着主芯片。而 T2 把端子沿板边重新分组打包时，位移可能上百 mil ——
+		// 贴着它的保护件如果原地不动，就被甩下了。参考板实测：J1 被挪 609mil，
+		// F1/D1 原地不动，于是 protection 维从 100 掉到 33.8，两件各扣 25 分
+		// （F1 离 J1.1 614mil，预算 250mil）。
+		if math.Abs(shiftX) > 0.5 || math.Abs(shiftY) > 0.5 {
+			edgeShift[c.id] = [2]float64{shiftX, shiftY}
+		}
 		if math.Abs(shiftX) > 1 || math.Abs(shiftY) > 1 || delta != 0 {
 			moves = append(moves, apMove{ID: c.id, Designator: c.designator,
 				NewX: round1(nx), NewY: round1(ny), NewRot: c.rotation + delta, SetRot: delta != 0, Edge: edge.String()})
@@ -841,21 +929,143 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		return 0, 0, false
 	}
 
+	// followEdgeShift 是「跟着自己的端子走」的位移。
+	//
+	// 保护件（保险丝 / TVS / ESD）与端子去耦的正确位置是**贴着那个端子**，不是贴着
+	// 主芯片 —— 而 netSeed 只认 main/anchored 的 pad（T2 件动过、坐标 stale，被显式
+	// 排除），所以它永远把这类件往主芯片吸。参考板实测：J1 被 T2 挪了 609mil，
+	// 贴着它的 F1/D1 因为**当前位置仍合法**连重定位分支都进不去，就地被甩下，
+	// protection 维 100 → 33.8。
+	//
+	// 修法不是重新 seed（那会把件扔到芯片边上，丢掉人工摆好的相对关系），而是**跟随**：
+	// 端子平移多少，贴着它的件平移多少，相对位置原样保留，然后照常走合法化。
+	//
+	// 两条收敛判据，避免把整板拖着跑：
+	//   - 只认**非全局网**的伙伴。GND/VCC 连着所有东西，跟着它们走等于随机跟。
+	//   - 只认**原本就贴着**的（cpFollowRadius 内）。远处的同网件不是它的保护对象。
+	//
+	// 多个伙伴都动了时跟最近的那个 —— 最近的才是它真正服务的端口。
+	followEdgeShift := func(c cpComp) ([2]float64, bool) {
+		if len(edgeShift) == 0 {
+			return [2]float64{}, false
+		}
+		nets := func(localOnly bool) map[string]bool {
+			out := map[string]bool{}
+			for _, p := range c.pads {
+				n := strings.TrimSpace(p.net)
+				if n == "" || (localOnly && isGlobalNet(n)) {
+					continue
+				}
+				out[n] = true
+			}
+			return out
+		}
+		// 两轮：本地网宽半径，纯去耦（只有 VCC+GND，没有任何本地网）退回全局网但
+		// 收紧半径。**纯去耦恰恰是最需要跟着走的那一类**，一刀切「没有本地网就不跟」
+		// 会把它们全漏掉（参考板实测：C9/C2 就是这样被落下的）；但 GND 连着板上
+		// 所有东西，放宽到全局网后只有「就在旁边」才构成跟随关系，所以半径必须收窄。
+		try := func(cand map[string]bool, radius float64) ([2]float64, bool) {
+			if len(cand) == 0 {
+				return [2]float64{}, false
+			}
+			bestD := math.Inf(1)
+			var bestShift [2]float64
+			var found bool
+			for j, other := range comps {
+				if kinds[j] != cpEdgeMust && kinds[j] != cpUserFacing && kinds[j] != cpMainChip {
+					continue
+				}
+				sh, moved := edgeShift[other.id]
+				if !moved {
+					continue
+				}
+				// 距离用**共享网的最近焊盘对**，不是 bbox 中心距 —— 必须与
+				// protection 维同口径（它判的是 pad 中心到 pad 中心）。
+				// 大芯片上两者差很多：参考板实测 C9 到 U2 的中心距 366mil，
+				// 但 U2 的 3V3 焊盘就在 C9 旁边、在去耦预算内。用中心距判
+				// 「原本贴着」会把这类摆对了的去耦判成不相干，跟随就此漏掉。
+				d := math.Inf(1)
+				for _, op := range other.pads {
+					if !cand[strings.TrimSpace(op.net)] {
+						continue
+					}
+					for _, mp := range c.pads {
+						if strings.TrimSpace(mp.net) != strings.TrimSpace(op.net) {
+							continue
+						}
+						d = math.Min(d, math.Hypot(op.x-mp.x, op.y-mp.y))
+					}
+				}
+				if math.IsInf(d, 1) {
+					continue // 没有共享网的焊盘对
+				}
+				if d < bestD && d <= radius {
+					bestD, bestShift, found = d, sh, true
+				}
+			}
+			return bestShift, found
+		}
+		if sh, ok := try(nets(true), cpFollowRadius); ok {
+			return sh, true
+		}
+		return try(nets(false), cpFollowRadiusGlobal)
+	}
+
 	for _, i := range satIdx {
 		c := comps[i]
 		if !c.hasBBox {
 			continue
 		}
-		cx0, cy0 := c.bboxCenter()
+		// ocx/ocy 是**原始** bbox 中心 —— 所有 move 的换算基准（anchor 与 bbox 中心
+		// 的偏移是固定的，所以 newAnchor = c.x + (目标中心 − 原始中心)）。
+		// cx0/cy0 是**工作**中心，跟随平移会改它，绝不能拿它当基准，否则跟随的那段
+		// 位移会在最后的 move 里凭空消失。
+		ocx, ocy := c.bboxCenter()
+		cx0, cy0 := ocx, ocy
 		hw, hh := c.width()/2, c.height()/2
 		z, hasZone := zoneFor(c)
 		inZone := func(r cpRect) bool { return !hasZone || rectInsideZone(r, z.rect) }
+		// 端子搬家 → 贴着它的保护件/去耦跟着搬，相对关系原样保留。
+		//
+		// **只在跟得上时才跟**：跟过去的位置必须仍然合法。跟过去撞了就退回原位，
+		// 因为撞了之后 spiralIn 会把这件螺旋到更远处 —— 那比原地不动还糟。
+		//
+		// 这条守卫是真板逼出来的。稀疏板上无条件跟随是纯收益（参考板 protection
+		// 33.8 → 75.7）；但 166 器件的密板上跟过去几乎必然碰撞，无条件跟随让移动
+		// 件数从 19 涨到 50、protection 反而从 10.2 掉到 8.7。密板没有空位可跟，
+		// 硬跟只是把件甩得更散。
+		followed := false
+		if cpNeedsHugging(c) {
+			if sh, ok := followEdgeShift(c); ok {
+				fx, fy := cx0+sh[0], cy0+sh[1]
+				var zr *cpRect
+				if hasZone {
+					zr = &z.rect
+				}
+				// 只在端子附近找落点。找不到就放弃跟随，让它走原有逻辑 ——
+				// 硬跟会让 spiralIn 从跟随点一路螺旋到几百 mil 外，比原地不动更散
+				// （真板实测：无界跟随把移动件数从 19 推到 50，protection 反而更差）。
+				if px, py, okNear := spiralRadius(fx, fy, hw, hh, c.layer, zr, cpFollowRadius); okNear {
+					cx0, cy0 = px, py
+					followed = true
+				}
+			}
+		}
 		// Keep a well-placed satellite EXACTLY where it is (no gratuitous moves —
 		// don't disturb a hand-placed layout). Only relocate one that clashes —
 		// or one sitting outside its claimed functional zone (issue #126).
 		cur := cpRect{cx0 - hw - m, cy0 - hh - m, cx0 + hw + m, cy0 + hh + m}
 		if inside(cur) && !clashFixed(cur, c.layer) && inZone(cur) {
 			addFixed(cur, c.layer)
+			// 跟随位移落笔。没有这一步，跟随就只改了个内部变量而画布上什么都没变
+			// —— 而「当前位置仍合法」恰恰是 F1/D1 那类件走的分支。
+			if followed {
+				if dx, dy := cx0-ocx, cy0-ocy; math.Abs(dx) > 1 || math.Abs(dy) > 1 {
+					moves = append(moves, apMove{ID: c.id, Designator: c.designator,
+						NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String()})
+					diags = append(diags, apDiag{Designator: c.designator, Reason: "satellite:follows-edge-part"})
+				}
+			}
 			continue
 		}
 		// Must relocate. A pure satellite (decoupling cap / resistor) is seeded near
@@ -894,9 +1104,12 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		if hasZone {
 			diags = append(diags, apDiag{Designator: c.designator, Reason: "satellite:zoned:" + z.module})
 		}
-		dx, dy := px-cx0, py-cy0
+		dx, dy := px-ocx, py-ocy
 		if math.Abs(dx) > 1 || math.Abs(dy) > 1 {
 			moves = append(moves, apMove{ID: c.id, Designator: c.designator, NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String()})
+			if followed {
+				diags = append(diags, apDiag{Designator: c.designator, Reason: "satellite:follows-edge-part:relocated"})
+			}
 		}
 	}
 	return moves, diags

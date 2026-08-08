@@ -409,7 +409,7 @@ func (protectionScorer) score(ctx *scoreCtx) scoreDimension {
 		contributors = append(contributors, scoreContributor{
 			Designator: o.hit.Designator,
 			Penalty:    pen,
-			Detail: fmt.Sprintf("protection: %.0fmil (%.1fmm) from port pad %s on net %s, budget %.0fmil",
+			Detail: fmt.Sprintf("protection: %.1fmil (%.2fmm) from port pad %s on net %s, budget %.0fmil",
 				o.hit.Dist, o.hit.Dist*0.0254, o.hit.PortRef, o.hit.Net, pcbProtectMaxMil),
 		})
 		at := o.hit.At
@@ -428,7 +428,7 @@ func (protectionScorer) score(ctx *scoreCtx) scoreDimension {
 		detail := fmt.Sprintf("decoupling: over the %.0fmil budget (distance unavailable)", pcbDecapMaxMil)
 		if h, ok := decapDist[name]; ok {
 			sev = math.Max(pcbNearSevFloor, nearnessSeverity(h.Dist, pcbDecapMaxMil))
-			detail = fmt.Sprintf("decoupling: %.0fmil (%.1fmm) from the nearest %s IC pin, budget %.0fmil",
+			detail = fmt.Sprintf("decoupling: %.1fmil (%.2fmm) from the nearest %s IC pin, budget %.0fmil",
 				h.Dist, h.Dist*0.0254, h.Net, pcbDecapMaxMil)
 		}
 		sumDecapSev += sev
