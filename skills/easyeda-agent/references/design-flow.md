@@ -298,6 +298,11 @@ P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → 
   **签字时自动留质量快照**:`pcb stage confirm-layout` 会 best-effort 拉一次 layout-score,把综合分+
   逐维分+skipped 数记进 workflow 状态(`GateSummary.Quality`)——打分失败只警告绝不阻断签字;
   `--min-score` 显式给了才当门(默认 0 只记录,理由:尺子未校准不担硬门)。
+  **快照的消费侧在 `workflow status`**:普通 status 渲染上次快照(综合分+最弱三维+未测维数+记录时间,
+  没记过会明说);`--reconcile` 时还会实时重打分做**逐维 diff**——掉 ≥5 分的维标 ⚠ 提示
+  (「上次 confirm-layout 后 tidy 从 90 掉到 60——布局被谁动过?」),上次 scored 这次 skipped 报
+  「该维失去可测性」而不是当掉到 0 分;实时打分不可得时明说没做对比(没测≠没变)。
+  全部只提示不拦截——status 不是新的门。
   **精修**:tidy 类低分交 `pcb refine`(打分驱动、默认 dry-run、逐步回滚;唯一变换器 grid-snap,
   其余维和全部 blocking 报告会明确指回 place-constrained/手工)。
   **门禁的机械强制面(#97 后续,2026-07-12)**:① 状态**全局持久化**在 `~/.easyeda-agent/workflow/<project>.json`(换 cwd 跑 CLI 骗不过门;`EASYEDA_WORKFLOW_DIR` 可覆写);② **daemon 在 /action 派发层同样拦截** `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`(raw HTTP 调用也绕不过),且任何摆放/板框类 action(component.modify/move/arrange/align/add/delete/import_changes/outline.set/clear)成功后**自动失效下游确认**并在响应 warning 里报 `workflow stage invalidated`;③ `confirm-layout`/`confirm-outline` 会把签核**指纹绑定**到当时的器件坐标/旋转/层与板框几何——GUI 拖动、`debug.exec_js`、其它 agent 的门外改动,会在下一次 gate 时指纹失配 → 自动失效并指回该重确认的阶段。

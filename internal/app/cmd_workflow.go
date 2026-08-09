@@ -315,10 +315,18 @@ func newWorkflowStatusCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 		Short: "Show the workflow state; --reconcile re-syncs it with the live document",
 		Long: `Print the persisted stage state and the computed next step.
 
+Also renders the layout-quality snapshot confirm-layout recorded (#167):
+overall score, weakest dimensions, skipped-dimension count and timestamp.
+
 --reconcile additionally pulls the LIVE document (component count, outline,
 routed lines), re-verifies the confirmation fingerprints, auto-invalidates
 anything that drifted, and reports inconsistencies (e.g. routing that predates
-authorization). Use it whenever you (or anyone) edited outside the flow.`,
+authorization). It also re-scores the layout and diffs it per dimension
+against the stored quality snapshot — a dimension that dropped ≥5 points is
+flagged; one that went scored→skipped is reported as "lost measurability",
+never as a drop to 0 (没测≠没变). Quality findings are advisory only and
+never affect the exit code. Use it whenever you (or anyone) edited outside
+the flow.`,
 		Args: cobra.NoArgs,
 		Example: `  easyeda workflow status --project ceshi
   easyeda workflow status --project ceshi --reconcile`,
@@ -328,14 +336,19 @@ authorization). Use it whenever you (or anyone) edited outside the flow.`,
 			if err != nil {
 				return err
 			}
+			// 质量快照必须在 reconcile 前取:reconcileWorkflow 里的 InvalidateFrom
+			// 会把 st.Layout(连同快照)在内存里清掉,而 diff 的意义正是「与上次
+			// 签字时比」(#167 消费侧)。
+			prevQuality := stateQuality(st)
 			var facts workflowFacts
-			var notes []string
+			var notes, qualityNotes []string
 			if reconcile {
 				facts, err = pullWorkflowFacts(cfg, *window)
 				if err != nil {
 					return fmt.Errorf("reconcile needs a connected window: %w", err)
 				}
 				notes = reconcileWorkflow(cfg, *window, st, facts)
+				qualityNotes = reconcileQualityNotes(cfg, *window, prevQuality)
 			}
 			gate := checkRouteGate(st, false, false, "")
 			next, why := workflowNext(st, facts)
@@ -355,6 +368,7 @@ authorization). Use it whenever you (or anyone) edited outside the flow.`,
 				if reconcile {
 					out["facts"] = facts
 					out["reconcileNotes"] = notes
+					out["qualityNotes"] = qualityNotes
 				}
 				return enc.Encode(out)
 			}
@@ -366,11 +380,21 @@ authorization). Use it whenever you (or anyone) edited outside the flow.`,
 				}
 				fmt.Fprintf(stdout, "  %s %s\n", mark, s)
 			}
+			// 上次 confirm-layout 落的多维质量快照(#167 消费侧):没有也要说一行,
+			// 否则 write-only 的快照等于没有。
+			for _, l := range qualitySnapshotLines(prevQuality) {
+				fmt.Fprintf(stdout, "  %s\n", l)
+			}
 			if reconcile {
 				fmt.Fprintf(stdout, "  document: %d components, %d outline segment(s), %d routed line(s)\n",
 					facts.Components, facts.OutlineSegs, facts.RoutedLines)
 				for _, n := range notes {
 					fmt.Fprintf(stdout, "  ⚠️  %s\n", n)
+				}
+				// 快照 vs 实时的逐维 diff(行内自带 ⚠️/·/✓ 标记):只展示+提示,
+				// 不影响退出码 —— status 不是新的门。
+				for _, n := range qualityNotes {
+					fmt.Fprintf(stdout, "  %s\n", n)
 				}
 			}
 			if gate.Allowed {
