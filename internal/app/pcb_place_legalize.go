@@ -122,6 +122,18 @@ func legalizeConstrainedMoves(snap *boardSnapshot, moves []apMove) ([]apMove, []
 			diags = append(diags, apDiag{Designator: des, Reason:
 				"legalize:dropped: planned move introduces a blocking issue (overlap/short/off-board) and no legal spot within " +
 					fmt.Sprintf("%.0fmil — part left at its previous position", legalizeSpiralMaxRad)})
+			// 血缘级联：跟随者的落点是按这个伙伴的位移算的 —— 伙伴不去了，
+			// 跟随者停在半路只会离它的端口更远（真板实锤：J2 的 move 被弃，
+			// TVS/ESD 跟着幽灵位移搬走，protection 从贴身变 800+mil）。
+			// 连带弃掉，让它们留在原位 = 与伙伴保持原始贴身关系。
+			for _, fm := range kept {
+				if fm.FollowsID != "" && fm.FollowsID == m.ID && !dropped[fm.Designator] {
+					dropped[fm.Designator] = true
+					res.Dropped++
+					diags = append(diags, apDiag{Designator: fm.Designator, Reason: fmt.Sprintf(
+						"legalize:dropped: follows %s whose move was dropped — staying put preserves the original adjacency", des)})
+				}
+			}
 			virtual = buildVirtualComps(snap, activeMoves(kept, dropped))
 		}
 	}

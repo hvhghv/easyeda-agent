@@ -888,9 +888,16 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 			satIdx = append(satIdx, i)
 		}
 	}
-	// Biggest satellites first (they need the most room).
+	// 贴脚约束件（保护件/去耦，cpNeedsHugging）优先落子，其余按大件先行。
+	// 为什么：跟随的落点合法位是**先到先得**的 —— 端子搬家后它旁边的空间有限，
+	// 普通卫星先占掉就轮不到真正必须贴身的保护件（真板实锤：TVS/ESD 的跟随
+	// 目标 400mil 内找不到合法位，被螺旋推到 678mil 外，protection 直接崩）。
 	sort.Slice(satIdx, func(a, b int) bool {
 		ca, cb := comps[satIdx[a]], comps[satIdx[b]]
+		ha, hb := cpNeedsHugging(ca), cpNeedsHugging(cb)
+		if ha != hb {
+			return ha
+		}
 		return ca.width()*ca.height() > cb.width()*cb.height()
 	})
 	// Net-aware seed source: pads of the FIXED, NON-MOVED parts (mains + anchored).
@@ -953,9 +960,60 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 	//   - 只认**原本就贴着**的（cpFollowRadius 内）。远处的同网件不是它的保护对象。
 	//
 	// 多个伙伴都动了时跟最近的那个 —— 最近的才是它真正服务的端口。
-	followEdgeShift := func(c cpComp) ([2]float64, bool) {
+	// nearestPortOwnerIdx 按**打分器同规则**选保护件的伙伴：measureProtection 对
+	// 每个保护件取「非地共享网上最近的端子焊盘」，伙伴就是那个焊盘的拥有者。
+	// 端子判定同样复用打分器的 isPortIdent。无半径——打分器量距离也没有半径，
+	// 伙伴远近改变的是扣多少分，不改变「它是参照物」这件事。
+	nearestPortOwnerIdx := func(c cpComp) (int, [2]float64, bool) {
+		bestD := math.Inf(1)
+		best := -1
+		var bestPad [2]float64
+		for j, other := range comps {
+			if other.id == c.id || !isPortIdent(other.designator, other.footprint, "") {
+				continue
+			}
+			for _, op := range other.pads {
+				onet := strings.TrimSpace(op.net)
+				if onet == "" || isGndNetName(onet) {
+					continue
+				}
+				for _, mp := range c.pads {
+					if strings.TrimSpace(mp.net) != onet {
+						continue
+					}
+					if d := math.Hypot(op.x-mp.x, op.y-mp.y); d < bestD {
+						bestD, best = d, j
+						bestPad = [2]float64{op.x, op.y}
+					}
+				}
+			}
+		}
+		return best, bestPad, best >= 0
+	}
+
+	// followEdgeShift 返回 (刚性位移, 伙伴焊盘终位, 有终位, 要跟)。伙伴焊盘终位
+	// 只在保护件的归因对齐路径给出 —— 刚性跟随落不下时，落点搜索退回以它为
+	// 圆心（protection 维量的就是到这个 pad 的距离，贴不回原相对位置时贴 pad
+	// 本身是次优但同口径的目标）。
+	followEdgeShift := func(c cpComp) ([2]float64, [2]float64, bool, string, bool) {
+		none := [2]float64{}
 		if len(edgeShift) == 0 {
-			return [2]float64{}, false
+			return none, none, false, "", false
+		}
+		// 保护件走**归因对齐**路径（#21）：伙伴 = 打分器会归因的那个端口件，
+		// 不是「最近的动过的边缘件」。真板实锤过错位：TVS_VBUS/ESD1 按原始最近
+		// pad 对跟了 J_VEH 的位移，而 protection 维按 J2.A4B9 归因 —— 连接器组
+		// 换边重排后两者分道扬镳，保住的距离不是被打分的那段距离。三种结局：
+		//   伙伴动了 → 跟它的位移（pad 刚性随件动，打分距离原样保留）；
+		//   伙伴没动 → 不跟（被保护的端口就在原地，跟别人只会拉远）；
+		//   没有端口伙伴（如纯地 TVS）→ 落到下面的泛化路径。
+		if isProtectionIdent(c.designator, c.footprint, "") {
+			if j, pad, ok := nearestPortOwnerIdx(c); ok {
+				if sh, moved := edgeShift[comps[j].id]; moved {
+					return sh, [2]float64{pad[0] + sh[0], pad[1] + sh[1]}, true, comps[j].id, true
+				}
+				return none, none, false, "", false
+			}
 		}
 		nets := func(localOnly bool) map[string]bool {
 			out := map[string]bool{}
@@ -972,12 +1030,13 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		// 收紧半径。**纯去耦恰恰是最需要跟着走的那一类**，一刀切「没有本地网就不跟」
 		// 会把它们全漏掉（参考板实测：C9/C2 就是这样被落下的）；但 GND 连着板上
 		// 所有东西，放宽到全局网后只有「就在旁边」才构成跟随关系，所以半径必须收窄。
-		try := func(cand map[string]bool, radius float64) ([2]float64, bool) {
+		try := func(cand map[string]bool, radius float64) ([2]float64, string, bool) {
 			if len(cand) == 0 {
-				return [2]float64{}, false
+				return [2]float64{}, "", false
 			}
 			bestD := math.Inf(1)
 			var bestShift [2]float64
+			var bestID string
 			var found bool
 			for j, other := range comps {
 				if kinds[j] != cpEdgeMust && kinds[j] != cpUserFacing && kinds[j] != cpMainChip {
@@ -1008,15 +1067,16 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 					continue // 没有共享网的焊盘对
 				}
 				if d < bestD && d <= radius {
-					bestD, bestShift, found = d, sh, true
+					bestD, bestShift, bestID, found = d, sh, other.id, true
 				}
 			}
-			return bestShift, found
+			return bestShift, bestID, found
 		}
-		if sh, ok := try(nets(true), cpFollowRadius); ok {
-			return sh, true
+		if sh, id, ok := try(nets(true), cpFollowRadius); ok {
+			return sh, none, false, id, true
 		}
-		return try(nets(false), cpFollowRadiusGlobal)
+		sh, id, ok := try(nets(false), cpFollowRadiusGlobal)
+		return sh, none, false, id, ok
 	}
 
 	for _, i := range satIdx {
@@ -1043,8 +1103,9 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		// 件数从 19 涨到 50、protection 反而从 10.2 掉到 8.7。密板没有空位可跟，
 		// 硬跟只是把件甩得更散。
 		followed := false
+		followsID := ""
 		if cpNeedsHugging(c) {
-			if sh, ok := followEdgeShift(c); ok {
+			if sh, pad, hasPad, partnerID, ok := followEdgeShift(c); ok {
 				fx, fy := cx0+sh[0], cy0+sh[1]
 				var zr *cpRect
 				if hasZone {
@@ -1053,9 +1114,24 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 				// 只在端子附近找落点。找不到就放弃跟随，让它走原有逻辑 ——
 				// 硬跟会让 spiralIn 从跟随点一路螺旋到几百 mil 外，比原地不动更散
 				// （真板实测：无界跟随把移动件数从 19 推到 50，protection 反而更差）。
-				if px, py, okNear := spiralRadius(fx, fy, hw, hh, c.layer, zr, cpFollowRadius); okNear {
+				//
+				// 有伙伴 pad（保护件的归因对齐路径）时取**双候选之近者**：刚性
+				// 跟随点周边 vs 伙伴焊盘终位周边，各 spiral 一次，选离 pad 更近
+				// 的落点。真板实锤过单候选的陷阱：刚性跟随的 spiral 在盘缘
+				//（400mil）"成功"落位，看似跟上了，量到 pad 却是 678mil ——
+				// protection 维量的就是到这个 pad 的距离，落点必须按它择优。
+				px, py, okNear := spiralRadius(fx, fy, hw, hh, c.layer, zr, cpFollowRadius)
+				if hasPad {
+					if p2x, p2y, ok2 := spiralRadius(pad[0], pad[1], hw, hh, c.layer, zr, cpFollowRadius); ok2 {
+						if !okNear || math.Hypot(p2x-pad[0], p2y-pad[1]) < math.Hypot(px-pad[0], py-pad[1]) {
+							px, py, okNear = p2x, p2y, true
+						}
+					}
+				}
+				if okNear {
 					cx0, cy0 = px, py
 					followed = true
+					followsID = partnerID
 				}
 			}
 		}
@@ -1070,7 +1146,8 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 			if followed {
 				if dx, dy := cx0-ocx, cy0-ocy; math.Abs(dx) > 1 || math.Abs(dy) > 1 {
 					moves = append(moves, apMove{ID: c.id, Designator: c.designator,
-						NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String()})
+						NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String(),
+						FollowsID: followsID})
 					diags = append(diags, apDiag{Designator: c.designator, Reason: "satellite:follows-edge-part"})
 				}
 			}
@@ -1114,7 +1191,7 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		}
 		dx, dy := px-ocx, py-ocy
 		if math.Abs(dx) > 1 || math.Abs(dy) > 1 {
-			moves = append(moves, apMove{ID: c.id, Designator: c.designator, NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String()})
+			moves = append(moves, apMove{ID: c.id, Designator: c.designator, NewX: round1(c.x + dx), NewY: round1(c.y + dy), Edge: kinds[i].String(), FollowsID: followsID})
 			if followed {
 				diags = append(diags, apDiag{Designator: c.designator, Reason: "satellite:follows-edge-part:relocated"})
 			}

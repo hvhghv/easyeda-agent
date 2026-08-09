@@ -204,6 +204,11 @@ type apMove struct {
 	Edge       string  `json:"edge"`
 	TargetNet  string  `json:"targetNet"`
 	Via        string  `json:"via,omitempty"` // "local" | "power" | "chain:<designator>"
+	// FollowsID 记录跟随血缘：这个 move 的落点是跟着哪个件（primitiveId）的
+	// 位移算出来的。合法化弃掉伙伴的 move 时必须连带弃掉跟随者 —— 否则跟随者
+	// 停在「伙伴本要去而没去」的半路上（真板实锤：J2 的 move 被弃，TVS/ESD
+	// 却已跟着幽灵位移搬走，protection 从贴身变成 800+mil）。
+	FollowsID string `json:"followsId,omitempty"`
 }
 
 // apDiag records a satellite the planner could not place (and why), so the CLI

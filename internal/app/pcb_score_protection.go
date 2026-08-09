@@ -120,12 +120,19 @@ var protectPortDeviceRe = regexp.MustCompile(
 
 // isProtectionPart 判定一个封装是不是保护器件。
 func isProtectionPart(c boardComp) bool {
-	if protectStrongDesRe.MatchString(strings.TrimSpace(c.Designator)) {
+	return isProtectionIdent(c.Designator, c.Device, c.Name)
+}
+
+// isProtectionIdent 是判定的字符串形式 —— 规划器（place-constrained 的跟随伙伴
+// 选择）与打分器必须用**同一个**判定，否则两边对「谁是保护件」各说各话，跟随
+// 保住的距离不是打分器量的那段距离（#21 真板实锤：跟了 J_VEH、按 J2 归因）。
+func isProtectionIdent(des, device, name string) bool {
+	if protectStrongDesRe.MatchString(strings.TrimSpace(des)) {
 		return true
 	}
 	// Device 优先（placed 件的 Name 常是 "={Manufacturer Part}" 模板，见 boardComp），
 	// 但两个都查——模板串本来也命中不了关键词，多查一次没有代价。
-	return protectDeviceRe.MatchString(c.Device) || protectDeviceRe.MatchString(c.Name)
+	return protectDeviceRe.MatchString(device) || protectDeviceRe.MatchString(name)
 }
 
 // isPortPart 判定一个封装是不是对外端子/入口。
@@ -134,13 +141,18 @@ func isProtectionPart(c boardComp) bool {
 // 于是这颗 ESD 阵列拿自己当参照物、距离恒为 0、永远满分——正是硬约定 1（「没测」不能
 // 伪装成「测了满分」）要堵的那种洞。
 func isPortPart(c boardComp) bool {
-	if isProtectionPart(c) {
+	return isPortIdent(c.Designator, c.Device, c.Name)
+}
+
+// isPortIdent 同 isProtectionIdent —— 字符串形式，供规划器复用同一判定。
+func isPortIdent(des, device, name string) bool {
+	if isProtectionIdent(des, device, name) {
 		return false
 	}
-	if protectPortDesRe.MatchString(strings.TrimSpace(c.Designator)) {
+	if protectPortDesRe.MatchString(strings.TrimSpace(des)) {
 		return true
 	}
-	return protectPortDeviceRe.MatchString(c.Device) || protectPortDeviceRe.MatchString(c.Name)
+	return protectPortDeviceRe.MatchString(device) || protectPortDeviceRe.MatchString(name)
 }
 
 // ---------------------------------------------------------------------------

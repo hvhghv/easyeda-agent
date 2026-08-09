@@ -138,6 +138,36 @@ func TestLegalize_PreexistingBlockingIsNotOurProblem(t *testing.T) {
 	}
 }
 
+func TestLegalize_DroppedPartnerCascadesToFollowers(t *testing.T) {
+	// 幽灵跟随(#21 真板实锤):J2 的 move 被合法化弃掉,跟着它规划的 TVS/ESD
+	// 却停在「伙伴本要去而没去」的半路 —— protection 从贴身变 800+mil。
+	// 血缘级联:伙伴被弃,跟随者连坐,哪怕跟随者自己的 move 完全合法 ——
+	// 留在原位才保得住与伙伴的原始贴身关系。
+	snap := legalizeTestSnap()
+	moves := []apMove{
+		// J1 的目标在板外深处(距板框 700mil > 螺旋上限 600):无解,必被弃。
+		{ID: "j1", Designator: "J1", NewX: 1700, NewY: -500},
+		// C9 跟着 J1 规划;它自己的落点完全合法。
+		{ID: "c9", Designator: "C9", NewX: 400, NewY: -700, FollowsID: "j1"},
+	}
+	out, diags, res := legalizeConstrainedMoves(snap, moves)
+	if res.Dropped != 2 {
+		t.Fatalf("dropped=%d, want both the partner and its follower", res.Dropped)
+	}
+	if len(out) != 0 {
+		t.Fatalf("follower move survived its partner's drop: %+v", out)
+	}
+	cascaded := false
+	for _, d := range diags {
+		if d.Designator == "C9" && strings.Contains(d.Reason, "follows J1") {
+			cascaded = true
+		}
+	}
+	if !cascaded {
+		t.Errorf("cascade drop must be named in diags, got %v", diags)
+	}
+}
+
 func TestLegalize_NilSnapshotPassesThroughHonestly(t *testing.T) {
 	moves := []apMove{{ID: "c9", Designator: "C9", NewX: 1, NewY: 2}}
 	out, diags, res := legalizeConstrainedMoves(nil, moves)
