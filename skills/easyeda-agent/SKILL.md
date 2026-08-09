@@ -51,7 +51,7 @@ EasyEDA tooling.
 | 停点 | 触发 | 要点 |
 |---|---|---|
 | ① S0 方案书 | 进 S1 前 | 架构/叠层/地策略/接口取向每条摊选项+坑+推荐让用户拍板;**必须落成磁盘文件**才算过门,不能停在对话里 |
-| ② sch→PCB 前 | 原理图完成 | 逐页 **`easyeda sch gate --strict --doc <page>` 出 `verdict=pass`**(一条命令跑完 layout-lint→check→bridge-check→drc 四关,顺序与阻塞判据固定在代码里,别自己拼)+ pin→net 黄金表对齐(gate 判不了「接对没有」,只判「接得合不合法」);**`verdict=blocked` 是检查器没跑成,不是板子有问题——先修 health/doc 再重跑,别去改电路**;DRC 聚合 WARN 必须审阅并报告；**多页/多模块板还需确认分区框+区名标注已画**(`sch zones status` 看认领、`sch zone-draw` 补画——手工摆放路径不会像 `autolayout --apply` 那样自动画,容易漏) → design-flow S5 |
+| ② sch→PCB 前 | 原理图完成 | 逐页 **`easyeda sch gate --strict --doc <page>` 出 `verdict=pass`**(一条命令跑完 layout-lint→check→bridge-check→drc 四关,顺序与阻塞判据固定在代码里,别自己拼)+ pin→net 黄金表对齐(gate 判不了「接对没有」,只判「接得合不合法」);**`verdict=blocked` 是检查器没跑成,不是板子有问题——先修 health/doc 再重跑,别去改电路**;DRC 聚合 WARN 必须审阅并报告；**多页/多模块板还需确认分区框+区名标注已画**(`sch zones status` 看认领、`sch zone-draw` 补画——手工摆放路径不会像 `autolayout --apply` 那样自动画,容易漏)**+每模块电路说明已放**(`sch note` 放、`sch text-list` 核——分区框只命名,说明才让人读懂) → design-flow S5 |
 | ③ 发板/交付前 | 导出制造 | 交付摘要说清偏差(降级决策/遗留 WARN) |
 | P2 摆放前 | 布局起手 | 先问单/双面布局 + 焊接工艺;立即用 `pcb stage set-assembly` 落盘,手焊默认 `min-gap=40mil`/大焊盘通道 `60mil` |
 | P2 边缘接口件 | 端子/USB/SD/排针/按键/IPEX | 朝向 + 边序 = 装配体验,agent 猜不了,**必须用户确认**;先 `blocks show` 读块 placement 摊给用户 |
@@ -69,6 +69,7 @@ EasyEDA tooling.
 | 布线档 | 按 layout-lint ratsnest 密度选 | 稀疏(交叉<100)→ `route-short`;**稠密 → 请用户点原生自动布线(默认)**;全 headless 才 Freerouting(`pcb autoroute`,兜底,**不顶替默认**)。交出去前先跑 ↓P7 迷你清单 |
 | 摆放优先级 | 孔 → 边缘件 → 主芯片+RF → 卫星件 | 只有卫星件交 auto-place;孔最先放 + 锁定 |
 | 图纸 / 板框 | A4 / compact | 无尺寸信息时 compact;compact 时主芯片按**紧凑网格**播种(模块中心距≈包络+300~400mil,别撒 2000mil 外),摆位/判尺寸**只信 `pcb list --include-bbox` 实测 bbox**(含 courtyard,常比封装大 40%+),不猜标称 → design-flow P1/P2 |
+| 原理图组织 | **功能分区+电路说明默认必做**:≥2 个功能模块就分区(`sch zones set`→`sch zone-draw`;`autolayout --apply` 自动画);模块多/页挤 → **分页**(每页一个功能域:电源/主控/接口…,跨页 `net_port` 同名同网);**每模块配 1~3 行电路说明**(`sch note`:作用+关键参数,如「LDO: 5V→3V3 1A」「BOOT: GPIO0 拉低进烧录」) | 用户反馈:成品图没分区没说明=可读性差。单页单模块小板可免分页,但**区名框+电路说明仍要画**;说明文字放模块框下/旁,不压电路(放完 `sch layout-lint` 核) → design-flow S1–S3 · schematic-layout-conventions.md |
 | GND 内层 | `power-planes --gnd-plane` → 终态 PLANE | SIGNAL 铺→翻 PLANE→rebuild,不停在 SIGNAL |
 | `pour-fit --replace` | **true(会清跨层同网 pour)** | 顶/底 GND pour 要显式 `--replace=false` |
 | 线宽档(net-class) | 按角色:信号=live默认 / 支线(3V3/1V8)10 / 主干(+5V)15 / 大电流(VBUS/VIN)20mil | `pcb net-classes` 查当前表;`route-short` 自动按角色给宽;偏细电源线被 `pcb check` **width-under-spec** 逮(§7.8) |
