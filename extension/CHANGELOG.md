@@ -4,7 +4,51 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.21.7] - 2026-08-09
+
+### Added
+- **`sch note` —— 电路说明文本(纯 CLI,zone-draw 同款内部 exec_js 惯例)**。
+  用户反馈:agent 产出的原理图常一页塞满、无分区框、无文字说明,电气对但交付
+  可读性差。Skill 布局默认升级为「分页分区+电路说明」三件套:S1 分页(每页一个
+  功能域)、S2 分区框+区名(`sch zones set`→`zone-draw`)、S3 **每模块 1~3 行电路
+  说明**(`sch note --text "LDO: 5V→3V3 1A\n输入/输出各 100nF" --x … --y …`,
+  `\n` 换行,字号默认 10/灰色低于区名标签)。创建后回读 primitiveId 验证 + 显式
+  save;`sch text-list` 枚举、`sch prim-delete` 清理。真机验证(ceshi):多行内容
+  完整落盘读回。约束落点:SKILL.md 档位默认表+停点② · design-flow S3 过门条件 ·
+  schematic-layout-conventions §1.5(含合格说明正反例)。
+
+### Fixed
+- **`attrs_backfill` 灌库占位 `Designator` 键灭掉全板位号 —— 根因修复(此前误诊为平台行为)**。
+  一块 166 器件的板 `pcb import-changes` 后位号 166/166 全变占位符(`U?`/`C?`/`RF?`),
+  最初归因于平台导入——**错**。真机控制变量二分(ceshi 六件小板)钉死真凶:裸
+  `eda.pcb_Document.importChanges()` + 手动点「应用修改」位号全对(平台无辜,还顺带
+  给两侧铸造 `uniqueId`);毁位号的是我们自己的 `pcb.component.attrs_backfill`
+  (import-changes 自动跑):**器件库记录的 otherProperty 自带 `Designator: "C?"`
+  (库自己的占位位号),merge「填空值」把它灌进实例,平台把 otherProperty.Designator
+  同步成图元位号** —— 安静板上单独跑一次 sync-attrs 即 100% 复现,与时序无关,每件
+  变成各自库记录的占位前缀。修法三件套:merge **剔除平台投影键**(`Designator` /
+  `Unique ID` / `Name` / `Add into BOM` / `Manufacturer*` / `Supplier*` —— 它们存在
+  顶层图元状态里,写进 otherProperty 要么被同步成状态(毁位号)要么被静默丢弃(报告
+  年年撒谎「6/6 backfilled」且永不幂等));同一 modify **显式回传当前位号**兜底;
+  **清洗**老版本已漏进实例的占位 Designator 键。修后实测:全流程 E2E 位号全真、
+  sync-attrs 幂等(第二轮 0/6)、真实属性照常回填(Value/Tolerance/Voltage Rating)。
+- **`pcb.components.list` 补 `uniqueId` + CLI `pcb sync-designators` 存量修复**。
+  位号是这套工具链几乎所有规则的输入 —— S0 spec 模块归属、保护件前缀(F*/D*/TVS*)、
+  去耦判定、`pcb check` 定位、BOM,位号一丢它们不是失灵,而是静默按错误分类算出一份
+  看着正常的报告。被旧版毁过的板用 `easyeda pcb sync-designators` 修:按 `uniqueId`
+  (`gge*`,平台首次 sch→PCB 导入时铸造、**跨文档同一命名空间**,实测 166/166 匹配;
+  primitiveId 每个文档各 mint 一套对不上)从原理图回填,**只动占位符位号**(PCB 手工
+  设过的真实位号绝不覆盖),每笔写入回读验证(平台 modify 有静默 no-op 前科),修完
+  立落 `pcb.save` 检查点;`import-changes` 之后自动殿后跑(排在 attrs 同步**之后**,
+  任何整包 otherProperty 写入若再毁位号都能当场修回),`--no-sync-designators` 可关。
+  原理图侧位号也是占位符的件单独归类提示「先标注原理图」,不再误报成 unmatched。
+- **`tagComponentPages` 页级隔离 + 前台必恢复**。此前中途任一页 `openDocument` 失败
+  会整体 abort 且跳过前台恢复 —— 前台留在随机原理图页,随后的 PCB 批量写全落错前台。
+  现在单页失败只跳过该页,`finally` 无条件恢复调用前的前台文档。
+- **`pcb.import_changes` 后续同步只在 `confirm=applied` 时执行**(CLI 侧)。#124 语义:
+  importChanges 的 promise 会在「确认导入信息」弹框**刚打开**时就 resolve true ——
+  `imported=true` 不等于器件已落地。此前 CLI 拿它当门,弹框未确认时照跑同步、读到
+  导入前的板面、静默空跑;现在未确认落地会明确警告并指引手动补跑。
 
 ### Added
 - **`schematic.export.image` —— 选区/整页导出 SVG·PNG·PDF(#166)**。

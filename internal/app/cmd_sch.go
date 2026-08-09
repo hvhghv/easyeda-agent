@@ -1648,6 +1648,9 @@ the selection). Without --ids it exports the whole active page.`,
 	sch.AddCommand(newSchZonesCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchZoneDrawCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchZonePlanCmd(cfg, &window, stdout, stderr))
+	// 电路说明文本:分区框(zone-draw)只给模块命名,note 给模块配「作用+关键参数」
+	// 的一两行说明 —— 原理图布局默认约定的另一半。
+	sch.AddCommand(newSchNoteCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchAlignCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchDistributeCmd(cfg, &window, stdout, stderr))
 	// S5 校验门:把 layout-lint / check / bridge-check / drc 收成一条固定流水线。

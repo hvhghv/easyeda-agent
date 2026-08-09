@@ -233,6 +233,13 @@ async function readActivePageConnectivitySummary(): Promise<SchematicConnectivit
 function serializePcbComponent(component: PcbComponent): Record<string, unknown> {
 	return {
 		primitiveId: component.getState_PrimitiveId(),
+		// uniqueId is the SAME namespace the schematic side reports (serializeComponent
+		// already exposes it): a component keeps one `gge*` id across both documents,
+		// minted by the platform at first sch→PCB import. primitiveId does NOT — each
+		// document mints its own — so uniqueId is the only reliable schematic↔PCB join
+		// key. `pcb sync-designators` uses it to repair placeholder designators
+		// (U? / C? / RF?) on boards wiped by the old attrs_backfill Designator-key bug.
+		uniqueId: component.getState_UniqueId(),
 		designator: component.getState_Designator(),
 		name: component.getState_Name(),
 		layer: component.getState_Layer(),
@@ -765,20 +772,33 @@ const schematicRename: Handler = async (payload) => {
 // (page tagging is best-effort — autoconnect degrades to a generic switch hint).
 async function tagComponentPages(): Promise<Map<string, { pageUuid: string; pageName: string }>> {
 	const byId = new Map<string, { pageUuid: string; pageName: string }>();
+	let current: Awaited<ReturnType<typeof eda.dmt_SelectControl.getCurrentDocumentInfo>> | undefined;
 	try {
-		const current = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+		current = await eda.dmt_SelectControl.getCurrentDocumentInfo();
 		const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
 		for (const page of pages) {
-			await eda.dmt_EditorControl.openDocument(page.uuid);
-			// getAll() with no allPages flag returns only the ACTIVE page's parts.
-			for (const c of await eda.sch_PrimitiveComponent.getAll()) {
-				byId.set(c.getState_PrimitiveId(), { pageUuid: page.uuid, pageName: page.name });
+			// Per-page isolation: one unloadable page must not abort the others —
+			// and, via the finally below, must never skip the foreground restore
+			// (callers write to the PCB right after this; leaving a random
+			// schematic page foregrounded would land those writes wrong).
+			try {
+				await eda.dmt_EditorControl.openDocument(page.uuid);
+				// getAll() with no allPages flag returns only the ACTIVE page's parts.
+				for (const c of await eda.sch_PrimitiveComponent.getAll()) {
+					byId.set(c.getState_PrimitiveId(), { pageUuid: page.uuid, pageName: page.name });
+				}
 			}
+			catch { /* skip this page, keep tagging the rest */ }
 		}
-		// Restore the page the caller was on.
-		if (current?.uuid) await eda.dmt_EditorControl.openDocument(current.uuid);
 	}
 	catch { /* best-effort: leave the map as-is */ }
+	finally {
+		// Restore the page the caller was on — unconditionally.
+		try {
+			if (current?.uuid) await eda.dmt_EditorControl.openDocument(current.uuid);
+		}
+		catch { /* nothing left to do */ }
+	}
 	return byId;
 }
 
@@ -7005,6 +7025,23 @@ const pcbComponentAttrsBackfill: Handler = async (payload) => {
 		}
 	}
 
+	// PROJECTED-STATE keys must NEVER be merged in from the library record: the
+	// platform projects them from top-level primitive state (designator,
+	// uniqueId, name, addIntoBom, manufacturerId, supplierId), it does not store
+	// them in otherProperty. Two failure modes, both live-verified:
+	//   - `Designator`: the library record carries its own PLACEHOLDER ("C?"),
+	//     and the platform syncs otherProperty.Designator INTO the primitive's
+	//     designator on modify — one sync-attrs run wiped 166/166 real
+	//     designators to U?/C?/RF? (each part flipping to its own library's
+	//     placeholder prefix); deterministic on a quiet 6-part board.
+	//   - The rest: writes are silently DROPPED (never appear in the next
+	//     getState_OtherProperty), so merging them re-"fills" the same keys
+	//     every run — a lying report and wasted writes, never a real backfill.
+	const projectedStateKeys = new Set([
+		'Designator', 'Unique ID', 'Name', 'Add into BOM',
+		'Manufacturer', 'Manufacturer Part', 'Supplier', 'Supplier Part',
+	]);
+
 	const updated: Array<{ designator: string; lcsc: string; filledKeys: Array<string> }> = [];
 	const unresolved: Array<string> = [];
 	for (const { comp, designator, lcsc } of parts) {
@@ -7016,6 +7053,7 @@ const pcbComponentAttrsBackfill: Handler = async (payload) => {
 		const filled: Array<string> = [];
 		const merged: Record<string, unknown> = { ...current };
 		for (const [key, value] of Object.entries(source)) {
+			if (projectedStateKeys.has(key)) continue;
 			if (value === undefined || value === null || value === '') continue;
 			const existing = current[key];
 			if (!overwrite && existing !== undefined && existing !== null && existing !== '') continue;
@@ -7023,9 +7061,18 @@ const pcbComponentAttrsBackfill: Handler = async (payload) => {
 			merged[key] = value;
 			filled.push(key);
 		}
+		// Scrub a placeholder Designator that an OLDER backfill already leaked into
+		// the instance — leaving it in place would re-wipe the designator on any
+		// future whole-otherProperty write.
+		if (typeof merged['Designator'] === 'string' && merged['Designator'].includes('?')) {
+			delete merged['Designator'];
+			filled.push('Designator (stale placeholder removed)');
+		}
 		if (!filled.length) continue;
 		try {
-			await eda.pcb_PrimitiveComponent.modify(comp.getState_PrimitiveId(), { otherProperty: merged });
+			// Re-assert the real designator in the same call — belt and braces so
+			// this write can never be the one that resets it.
+			await eda.pcb_PrimitiveComponent.modify(comp.getState_PrimitiveId(), { designator, otherProperty: merged });
 			updated.push({ designator, lcsc, filledKeys: filled.sort() });
 		}
 		catch { /* best-effort per component; report only successful fills */ }

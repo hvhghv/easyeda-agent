@@ -371,7 +371,7 @@ so in a single-design project you can just run 'easyeda pcb new-board'.`,
 	// pcb.import_changes — the schematic→PCB bridge (components arrive here).
 	{
 		var schematicUUID string
-		var noEnsureBoard, noRecompute, noSyncAttrs bool
+		var noEnsureBoard, noRecompute, noSyncAttrs, noSyncDesignators bool
 		c := &cobra.Command{
 			Use:   "import-changes",
 			Short: "Sync the schematic netlist/components into the active PCB",
@@ -385,7 +385,14 @@ otherProperty VALUES empty on the PCB side (Value/Voltage Rating/Tolerance/
 Datasheet/… all "") — blanking the 器件标准化 panel's columns. After a
 successful import this command therefore auto-runs the attrs sync
 (schematic pages → PCB, empty-value keys only); disable with --no-sync-attrs
-or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.`,
+or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.
+
+After the attrs sync this command ALSO runs the designator repair
+(` + "`easyeda pcb sync-designators`" + `, matched by uniqueId — the one id both
+documents share). The import itself lands real designators; the repair is a
+rear-guard for boards damaged by the old attrs-backfill Designator-key bug
+(166/166 wiped to U?/C? on a real board) and for any future whole-otherProperty
+write that resets them. Disable with --no-sync-designators.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda pcb import-changes
   easyeda pcb import-changes --schematic <uuid>`,
@@ -404,9 +411,33 @@ or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.`,
 				if err != nil {
 					return err
 				}
-				if imported, _ := res.Result["imported"].(bool); imported && !noSyncAttrs {
+				imported, _ := res.Result["imported"].(bool)
+				confirmState, _ := res.Result["confirm"].(string)
+				// #124 语义陷阱：importChanges 的 promise 会在「确认导入信息」弹框
+				// **刚打开时**就 resolve true——imported=true 不等于器件已落地。只有
+				// confirm=applied（连接器确认点击了「应用修改」且弹框已关闭）才说明
+				// 落地了；其余状态下跑后续同步读到的是导入前的板面，会静默空跑一遍
+				// 然后在用户手动点击后原样复现问题。
+				landed := imported && confirmState == "applied"
+				if imported && !landed {
+					fmt.Fprintf(stderr, "⚠ import resolved but the apply was NOT confirmed (confirm=%s) — if you click 应用修改 by hand, run `easyeda pcb sync-attrs` and `easyeda pcb sync-designators` afterwards\n", confirmState)
+				}
+				// attrs 在前、位号在后：attrs_backfill 的 Designator 键泄漏 bug 已在
+				// 连接器根治，但位号回填殿后仍是第二道防线——任何整包 otherProperty
+				// 写入若再毁位号，殿后的回填都能当场修回。
+				if landed && !noSyncAttrs {
 					if err := syncSchAttrsToPcb(cfg, window, false, stderr); err != nil {
 						fmt.Fprintf(stderr, "⚠ attrs sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-attrs`\n", err)
+					}
+				}
+				if landed && !noSyncDesignators {
+					if rep, err := runSyncDesignators(cfg, window, false, stderr); err != nil {
+						fmt.Fprintf(stderr, "⚠ designator sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-designators`\n", err)
+					} else if rep.Repaired > 0 || len(rep.Unmatched) > 0 || len(rep.SchUnannotated) > 0 || len(rep.Failed) > 0 {
+						fmt.Fprintf(stderr, "designators: %s\n", rep.Summary)
+						for _, f := range rep.Failed {
+							fmt.Fprintf(stderr, "  ❌ %s\n", f)
+						}
 					}
 				}
 				return nil
@@ -416,6 +447,8 @@ or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.`,
 		c.Flags().BoolVar(&noEnsureBoard, "no-ensure-board", false, "do not auto-create a Board link if missing")
 		c.Flags().BoolVar(&noRecompute, "no-recompute-ratline", false, "skip ratline recomputation")
 		c.Flags().BoolVar(&noSyncAttrs, "no-sync-attrs", false, "skip the automatic schematic→PCB attribute backfill after import")
+		c.Flags().BoolVar(&noSyncDesignators, "no-sync-designators", false,
+			"skip the automatic designator repair after import (the platform leaves every\ndesignator as a U?/C? placeholder; see `easyeda pcb sync-designators`)")
 		pcb.AddCommand(c)
 	}
 
@@ -1984,6 +2017,7 @@ external router (Freerouting) would route under the antenna. The result reports
 		pcb.AddCommand(c)
 	}
 	// ── stage-snapshot: recording/demo stage capture (snapshot + data bundle) ──
+	pcb.AddCommand(newPcbSyncDesignatorsCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbStageSnapshotCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbStageCmd(cfg, &window, stdout, stderr))
 	pcb.AddCommand(newPcbZonesCmd(cfg, &window, stdout, stderr))
