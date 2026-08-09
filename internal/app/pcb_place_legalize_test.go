@@ -81,9 +81,12 @@ func TestLegalize_RotationInducedOverlapIsCaught(t *testing.T) {
 	// C36 事故微缩版:平移目标本身不压件,但同一 move 带了 90° 转向,长条件
 	// bbox 换形后扫到 U1。平移-only 的虚拟态看不见这种冲突 —— 旋转感知必须看见。
 	snap := legalizeTestSnap()
-	// C9 长边 120,转 90° 后在 y 向展开。落点放在 U1 正上方,间距按未旋转的
-	// 40 高算安全、按旋转后的 120 高算相撞。
-	moves := []apMove{{ID: "c9", Designator: "C9", NewX: 400, NewY: -330, NewRot: 90, SetRot: true}}
+	// C9 的焊盘在 ±45 x 偏移,转 90° 后展开到 ±45 y 偏移。落点 (370,-350):
+	// 不转时两盘在 (325,-350)/(415,-350),离 U1 的盘(370,-400)都不挨;
+	// 转 90° 后一盘落到 (370,-395),与 U1 的盘(360..380×-410..-390)相叠。
+	// 平移-only 的虚拟态看不见这种冲突 —— 旋转感知必须看见(本体代理口径:
+	// 重叠/间距按焊盘并集判,所以冲突必须做到盘级)。
+	moves := []apMove{{ID: "c9", Designator: "C9", NewX: 370, NewY: -350, NewRot: 90, SetRot: true}}
 	out, _, res := legalizeConstrainedMoves(snap, moves)
 	if res.Adjusted+res.Dropped == 0 {
 		t.Fatalf("rotation-induced overlap went unseen (adjusted=%d dropped=%d out=%+v)", res.Adjusted, res.Dropped, out)

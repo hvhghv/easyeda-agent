@@ -223,6 +223,29 @@ func analyzeSolderAccess(comps []pcbLComp, accessMil float64) []pcbLAccessFindin
 // connector could not derive width/height from the pad shape (polygon pads) —
 // a sizeless pad is skipped rather than guessed at, so the short check never
 // invents contact it cannot measure.
+// circleLikePad 判定一个焊盘按圆处理：w≈h（1mil 容差）。dump 数据没有形状字段，
+// 圆盘与方盘同形 —— 按圆判偏容忍（见 padShorts 的圆盘感知注释）。
+func circleLikePad(p pcbLPad) bool {
+	return math.Abs(p.W-p.H) < 1
+}
+
+// padsTouchCircleAware 在至少一方是圆形焊盘时做真实几何接触判定：
+// 双圆 = 圆心距 < 半径和；圆-矩 = 矩形上离圆心最近的点落进圆内。
+// 只在矩形模型已判相交后调用（这里只负责把「假角铜」的误报滤掉）。
+func padsTouchCircleAware(pa, pb pcbLPad, ra, rb layoutBBox) bool {
+	ca, cb := circleLikePad(pa), circleLikePad(pb)
+	if ca && cb {
+		return math.Hypot(pb.X-pa.X, pb.Y-pa.Y) < (pa.W+pb.W)/2
+	}
+	circle, rect := pa, rb
+	if cb {
+		circle, rect = pb, ra
+	}
+	nx := math.Max(rect.MinX, math.Min(circle.X, rect.MaxX))
+	ny := math.Max(rect.MinY, math.Min(circle.Y, rect.MaxY))
+	return math.Hypot(circle.X-nx, circle.Y-ny) < circle.W/2
+}
+
 func padCopperRect(p pcbLPad) (layoutBBox, bool) {
 	if p.W <= 0 || p.H <= 0 {
 		return layoutBBox{}, false
@@ -279,6 +302,14 @@ func padShorts(as, bs []pcbLPad) []pcbLShort {
 			if !ov {
 				continue
 			}
+			// 圆盘感知：w≈h 的焊盘（圆盘/方盘同形，dump 只有 w/h）按圆判接触 ——
+			// 圆-圆看圆心距，圆-矩看矩形最近点到圆心。矩形模型把圆盘的四个角
+			// 也当铜 —— 挨着安装孔环的 LED 矩形盘被判成跨网短路（庐山派K230
+			// 校准实锤两条假短路，D4.1↔hole4.1 角碰环）。真方盘的纯角接触极
+			// 罕见且有活体 DRC 兜底，这里宁可错放不错杀。
+			if (circleLikePad(pa) || circleLikePad(pb)) && !padsTouchCircleAware(pa, pb, ra, rb) {
+				continue
+			}
 			out = append(out, pcbLShort{
 				A: padLabel(pa), NetA: pa.Net,
 				B: padLabel(pb), NetB: pb.Net,
@@ -320,6 +351,43 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 		padsByRef[p.Designator] = append(padsByRef[p.Designator], p)
 	}
 
+	// 本体代理（courtyard proxy）：重叠/间距判定用**焊盘并集**，退化才用渲染 bbox。
+	//
+	// 渲染 bbox 含丝印和位号文字，实测比本体大 40%+ —— 拿它当 courtyard 在专业
+	// 密板上是误报风暴：五块公认好板校准（2026-08-10），实战派S3 被报 104 处
+	// "component-overlap"（C83↔C84 1.9×83mil 这种丝印级贴边）、RK3568 报 143 处、
+	// 三块板 clearance 维直接归零 —— 好板掉分优先怀疑度量，这就是那个度量错误。
+	// 焊盘并集是从下方逼近本体（引脚式封装的盘略伸出本体、BGA/QFN 略缩），
+	// 判「装配冲突」宁可错放不错杀 —— 真正的铜接触另有 padShorts 兜底，真正的
+	// 本体大幅相撞焊盘并集同样会相交。
+	bodyOf := func(c pcbLComp) layoutBBox {
+		ps := padsByRef[c.Designator]
+		if len(ps) == 0 {
+			return *c.BBox
+		}
+		bb := layoutBBox{MinX: math.Inf(1), MinY: math.Inf(1), MaxX: math.Inf(-1), MaxY: math.Inf(-1)}
+		any := false
+		for _, p := range ps {
+			r, ok := padCopperRect(p)
+			if !ok {
+				continue
+			}
+			any = true
+			bb.MinX = math.Min(bb.MinX, r.MinX)
+			bb.MinY = math.Min(bb.MinY, r.MinY)
+			bb.MaxX = math.Max(bb.MaxX, r.MaxX)
+			bb.MaxY = math.Max(bb.MaxY, r.MaxY)
+		}
+		if !any {
+			return *c.BBox
+		}
+		return bb
+	}
+	bodyByRef := make(map[string]layoutBBox, len(withBBox))
+	for _, c := range withBBox {
+		bodyByRef[c.Designator] = bodyOf(c)
+	}
+
 	// 1. Overlap + tight spacing (pairwise) — LAYER-AWARE. Bodies only collide
 	//    when they are assembled on the SAME side; a top part and a bottom part
 	//    sharing an XY is an ordinary top/bottom pass-through and used to be the
@@ -344,7 +412,7 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 			if side == 0 {
 				side = b.Layer
 			}
-			ox, oy, ov := overlapExtent(*a.BBox, *b.BBox)
+			ox, oy, ov := overlapExtent(bodyByRef[a.Designator], bodyByRef[b.Designator])
 			// Copper contact is the electrical truth and outranks the geometric
 			// one — check it regardless of assembly side. Pads are looked up by
 			// designator, so two parts sharing one (or both unnamed) are skipped
@@ -361,7 +429,7 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 					OvX: round2(ox), OvY: round2(oy)})
 				continue
 			}
-			if gap := rectGap(*a.BBox, *b.BBox); gap < minGapMil {
+			if gap := rectGap(bodyByRef[a.Designator], bodyByRef[b.Designator]); gap < minGapMil {
 				rep.TightPairs = append(rep.TightPairs, pcbLFinding{
 					Type: "spacing", A: la, B: lb, Side: sideName(side), Gap: round2(gap)})
 			}
