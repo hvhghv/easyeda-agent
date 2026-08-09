@@ -223,7 +223,13 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 
 		// #153 的硬护栏：新增 finding 就回滚，哪怕分数涨了。
 		// 分数是启发式，check finding 是会进 Gerber 的真问题。
+		// -1 = check 读失败（countGateableFindings 的契约）：**无法复核 = 保守
+		// 回滚**。旧实现漏了这条 —— FindingsAfter=-1 > FindingsBefore 恒为假，
+		// 读不到 check 的那一步会静默通过护栏（审计④实测抓到的文档-实现不符）。
 		switch {
+		case step.FindingsBefore < 0 || step.FindingsAfter < 0:
+			step.Reason = fmt.Sprintf("rolled back: pcb check unreadable (before=%d after=%d) — cannot verify the step did no harm, rolling back conservatively", step.FindingsBefore, step.FindingsAfter)
+			step.RolledBack = true
 		case step.FindingsAfter > step.FindingsBefore:
 			step.Reason = fmt.Sprintf("rolled back: pcb check findings rose %d → %d", step.FindingsBefore, step.FindingsAfter)
 			step.RolledBack = true
