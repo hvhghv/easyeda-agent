@@ -44,6 +44,11 @@ go test ./internal/app/ -run TestLayoutScore_GoldenBoards -v   # 等价
 
 ## 加一块真板（这才是校准）
 
+**哪些板可以入库（先看这条再 dump）**：只有**开源/官方参考板**（oshwhub 公开工程、
+官方对标板）可以把 dump 提交进本目录；**商业设计一律不入库**——本地跑
+`EASYEDA_BENCH_BOARD=<dump路径> go test -run TestLayoutBenchmark` 走环境变量通道
+（`pcb_layout_benchmark_test.go` 的约定，两处约定以此段为准）。
+
 真板 dump 需要 EasyEDA 打开对应工程、PCB 在**前台**（`pcb.outline.get` 在后台返
 null，板框读不到 → 所有「到板边」的维会降级或跳过）。
 

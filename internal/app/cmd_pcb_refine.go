@@ -149,6 +149,15 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 	rep.ScoreBefore = before.Overall
 	cur := before
 
+	// blocking(短路/重叠/出板框)不归精修管——refine 的变换器全是维度微调,
+	// 修不了布局合法性问题。不拦着跑(grid-snap 在带 blocking 的板上照样无害),
+	// 但必须显眼说出来:否则「refine OK」会被读成「板子没问题」,而它带着短路。
+	if n := len(before.Blocking); n > 0 {
+		rep.Blocking = n
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf(
+			"board has %d blocking issue(s) (short/overlap/off-board) that refine does NOT fix — clear them first with `pcb place-constrained` / manual moves, then re-run `pcb layout-score` (refine only polishes dimension scores)", n))
+	}
+
 	for round := range opts.MaxRounds {
 		weak := cur.weakest(0)
 		if len(weak) == 0 {
@@ -291,6 +300,9 @@ func refineSummary(rep *refineReport) string {
 		rep.ScoreBefore, rep.ScoreAfter, rep.Rounds, rep.MovedParts)
 	if rep.Converged {
 		b.WriteString(", converged")
+	}
+	if rep.Blocking > 0 {
+		fmt.Fprintf(&b, "; ⛔ %d blocking issue(s) remain UNTOUCHED (refine does not fix shorts/overlaps/off-board)", rep.Blocking)
 	}
 	rolled := 0
 	for _, s := range rep.Steps {

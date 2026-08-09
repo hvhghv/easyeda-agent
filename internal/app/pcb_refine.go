@@ -111,8 +111,12 @@ type refineReport struct {
 	Immovable   int          `json:"immovableParts"`
 	DryRun      bool         `json:"dryRun"`
 	Converged   bool         `json:"converged"`
-	Summary     string       `json:"summary"`
-	Warnings    []string     `json:"warnings,omitempty"`
+	// Blocking = layout-score 的一票否决项(短路/重叠/出板框)在**精修开始时**的数量。
+	// refine 的变换器都修不了它们(它做的是维度微调,不是布局合法化)——非零时报告
+	// 必须显眼地说出来,否则「refine OK」会被误读成「板子没问题」。
+	Blocking int      `json:"blockingIssues,omitempty"`
+	Summary  string   `json:"summary"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

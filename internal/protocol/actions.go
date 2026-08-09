@@ -1208,8 +1208,8 @@ func AllActions() []ActionSpec {
 			Domain:      DomainPcb,
 			Phase:       2,
 			NeedsWindow: true,
-			Description: "Read the current board outline: outline (polyline 类型=板框 count) + legacy segment/arc counts + bounding box (from the polyline's rendered extent).",
-			Outputs:     []string{"outline", "segments", "arcs", "bbox"},
+			Description: "Read the current board outline: outline (polyline 类型=板框 count) + legacy segment/arc counts + bounding box (from the polyline's rendered extent) + the TRUE polygon `points` (#167: the polyline's CENTER-LINE vertices = the milled board edge; the bbox is the rendered extent and includes the outline's line width — measured 5 mil larger per side at 10 mil width). Single closed polyline only; multiple polylines / arcs degrade to bbox with outlineFormat unset (consumers fall back and mark themselves degraded).",
+			Outputs:     []string{"outline", "segments", "arcs", "bbox", "points", "outlineFormat"},
 		},
 		{
 			Name:             "pcb.outline.clear",

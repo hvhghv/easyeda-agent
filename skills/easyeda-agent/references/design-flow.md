@@ -295,6 +295,11 @@ P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → 
   `--only tidy,compact --all` 只深挖两维;`--min-score 75` 才会让分数不达标非零退出(不设则只有 blocking 才非零)。
   **权重和阈值是待校准初值**,好板某维掉分优先怀疑度量而不是板子——用 `pcb dump` 把好板存成 fixture、
   `layout-score --from` 离线复现,再回改代码。
+  **签字时自动留质量快照**:`pcb stage confirm-layout` 会 best-effort 拉一次 layout-score,把综合分+
+  逐维分+skipped 数记进 workflow 状态(`GateSummary.Quality`)——打分失败只警告绝不阻断签字;
+  `--min-score` 显式给了才当门(默认 0 只记录,理由:尺子未校准不担硬门)。
+  **精修**:tidy 类低分交 `pcb refine`(打分驱动、默认 dry-run、逐步回滚;唯一变换器 grid-snap,
+  其余维和全部 blocking 报告会明确指回 place-constrained/手工)。
   **门禁的机械强制面(#97 后续,2026-07-12)**:① 状态**全局持久化**在 `~/.easyeda-agent/workflow/<project>.json`(换 cwd 跑 CLI 骗不过门;`EASYEDA_WORKFLOW_DIR` 可覆写);② **daemon 在 /action 派发层同样拦截** `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`(raw HTTP 调用也绕不过),且任何摆放/板框类 action(component.modify/move/arrange/align/add/delete/import_changes/outline.set/clear)成功后**自动失效下游确认**并在响应 warning 里报 `workflow stage invalidated`;③ `confirm-layout`/`confirm-outline` 会把签核**指纹绑定**到当时的器件坐标/旋转/层与板框几何——GUI 拖动、`debug.exec_js`、其它 agent 的门外改动,会在下一次 gate 时指纹失配 → 自动失效并指回该重确认的阶段。
 - **任意阶段切入 / 会话恢复(workflow 命令族)**:换了模型、丢了上下文、或用户手改了板子,都不需要重走流程——
   1. `easyeda workflow status --reconcile`:拉实况(器件数/板框/已布线数)+ 校验指纹,自动失效漂移的确认,报告不一致(如「有走线但从未过门」);

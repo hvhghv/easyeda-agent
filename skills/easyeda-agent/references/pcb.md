@@ -359,6 +359,12 @@ subset; `--dry-run` prints the per-corner plan. Save after placing; delete via
 
 ### Layout adjustment (deterministic — EasyEDA exposes no align/grid API)
 
+- `easyeda pcb refine` — **打分驱动的布局精修环(#167 #153)**。读 `pcb layout-score` 逐维归因,
+  对最弱维下确定性变换,每步后复核,`pcb check` 新增 finding 或综合分下降即**回滚该步**。
+  **默认 dry-run,`--apply` 才落笔**;护栏:不可动集合(锁定件+已签字 tier1/2)、
+  `--max-shift` 超限剔除不截断、回读证实才算 restored。当前唯一变换器 grid-snap→tidy
+  (`--grid` 默认 5mil);**blocking(重叠/短路/出板框)不归它管**——先
+  `place-constrained`/手工清掉再精修。真机环实测:65.2[blocked]→清 blocking→refine→78.6[good]。
 - `pcb.align` — `mode = left | right | top | bottom | centerX | centerY` (y-up: `top` = larger y), aligned to the group extent.
 - `pcb.distribute` — even center spacing, `axis = x | y`, extremes fixed.
 - `pcb.grid_snap` — round component anchors to `grid` (mil; SMD 25, THT 50).
@@ -499,11 +505,21 @@ v1 (`route-short` / `pour`) is mechanically correct but coarse. Planned quality 
   J1(PH2.0 电池座)离底边 119mil、J2↔J_VEH 中心距 13.00mm < 插头护套要求的 13.98mm。
   同一轮验收还修掉一个误判:`USBLC6-2SC6`(ESD 二极管,名含 "usb")与 `SMAJ5.0A`(TVS,SMA 是**封装**名)
   曾被器件名正则判成连接器,后者还查到了 SMA 射频接头的 14mm 护套宽 —— 现在**位号前缀优先于器件名**。
-- 🚧 **权重/阈值的金标准校准 (#167 第五层)** — `layout-score` 的九维权重与各维阈值目前全是**待校准初值**
-  (代码里逐个标了「待校准」)。闭环 = `pcb dump` 抓一批公认的好板成 fixture → `layout-score --from` 离线跑 →
-  好板某维掉分即判定该维的度量或权重错了,回改代码。
-- 🚧 **布局精修环 (ACHIEVE 侧)** — 打分报告已经暴露了「哪维最弱 + 哪几个器件拉低了它 + 每个扣多少分」
-  这条梯度(`weakest()` / `Contributors[].Penalty`),按维对症下确定性变换的精修环尚未落地。
+- 🚧 **权重/阈值的金标准校准 (#167 第五层)** — 回归**框架**已就位(`internal/app/testdata/boards/`
+  正负对照 fixture 对 + `make layout-calibrate`,好板不掉分/坏板仍报警,离线可跑),但 fixture
+  目前全是**合成板**(参考板满分是同义反复)——真板校准(oshwhub 公认好板 `pcb dump` 进
+  fixture、人工核定期望值)尚未发生,九维权重与阈值仍是**待校准初值**。真板入库判据:
+  开源/官方参考板可入 testdata,**商业设计一律走 `EASYEDA_BENCH_BOARD` 环境变量不入库**。
+- ✅ **布局精修环 (ACHIEVE 侧,`pcb refine`,#167 #153) — 骨架已落地,变换器 1/9 维**。
+  读 `layout-score` 逐维归因,对最弱维下**确定性**变换,每步后复核:任一步让 `pcb check`
+  新增 finding 或综合分下降就**回滚该步**(逐步回滚,好步不被坏步连累)。**默认 dry-run,
+  `--apply` 才落笔**(与本仓多数命令相反,刻意的——批量搬件,#153 实测一个"无害"对齐曾
+  静默制造 3 条压焊盘丝印)。三条护栏默认开:不可动集合(锁定件+已签字 tier1/2)、位移预算
+  超限**剔除不截断**、回读证实才算 restored。**当前唯一变换器 = grid-snap → tidy 维**
+  (#153 实测零副作用);其余八维照实报告「无对症自动手段,`layout-score --only <dim> --all`
+  列出器件后手工修」——**blocking(重叠/短路/出板框)不归 refine 管**,先走
+  `place-constrained`/手工清掉再精修。真机闭环实测(ceshi):65.2[blocked] →
+  place-constrained 清 blocking → refine → 78.6[good]。
 
 ### Board outline (板框)
 
@@ -540,7 +556,10 @@ per-run and audited — nothing is confirmed by a force.
 - `pcb.outline.set` — set the outline from a closed polygon `points` (`[[x,y],…]`, mil,
   y-up). Replaces any existing outline; reports `allInside`/`outside` (components out of
   the board). **Confirm first** (redraws the board edge).
-- `pcb.outline.get` — current outline (segment/arc count + bbox).
+- `pcb.outline.get` — current outline (segment/arc count + bbox + **真多边形 `points`/`outlineFormat`**,#167)。
+  `points` 是板框折线**中心线**点集 = 铣刀走的真板边;`bbox` 是**渲染范围含线宽**(实测 10mil 线宽每边大 5mil)。
+  异形板(Type-C 凸出/缺口/铣槽)上「到板边距离」必须用 `points`——AABB 会把贴着凸出部真边的件误判成离边很远。
+  单条闭合折线才解析;多条/含弧退化为 bbox 并标 `degraded`(消费方 layout-score edge-io/internal-on-edge 自动回落)。
 - `pcb.outline.clear` — remove the outline.
 
 **The agent generates the `points`** for the wanted shape. Curves are **line-segment

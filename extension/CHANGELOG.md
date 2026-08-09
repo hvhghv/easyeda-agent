@@ -4,6 +4,16 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`pcb.outline.get` 返回板框真多边形 `points` + `outlineFormat`(#167)**。此前只有
+  AABB bbox:异形板(Type-C 凸出/缺口/铣槽)上「到板边距离」按 AABB 算是错的——贴着
+  凸出部真边的件会被读成离边很远。`points` 取板框折线的**中心线**点集(= 铣刀路径,
+  真板边);bbox 是**渲染范围含线宽**(实测 10mil 线宽每边大 5mil)。单条闭合折线才
+  解析;多条/含弧线报 ambiguous 并退化为 bbox(消费方 `layout-score` edge-io /
+  `pcb check` internal-on-edge 自动回落且标 degraded)。
+
 ## [0.21.7] - 2026-08-09
 
 ### Added
