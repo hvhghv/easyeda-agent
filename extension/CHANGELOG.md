@@ -4,15 +4,54 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.22.0] - 2026-08-10
+
+PCB 布局能力重构版(#167/#168/#153):多维打分 → 精修 → 确认门的闭环 + 规划器
+合法化 + 五块嘉立创开源真板校准。
 
 ### Added
-- **`pcb.outline.get` 返回板框真多边形 `points` + `outlineFormat`(#167)**。此前只有
-  AABB bbox:异形板(Type-C 凸出/缺口/铣槽)上「到板边距离」按 AABB 算是错的——贴着
-  凸出部真边的件会被读成离边很远。`points` 取板框折线的**中心线**点集(= 铣刀路径,
-  真板边);bbox 是**渲染范围含线宽**(实测 10mil 线宽每边大 5mil)。单条闭合折线才
-  解析;多条/含弧线报 ambiguous 并退化为 bbox(消费方 `layout-score` edge-io /
-  `pcb check` internal-on-edge 自动回落且标 degraded)。
+- **`pcb layout-score` —— 布局质量九维打分(#167 DETECT 层)**。partition/flow-order/
+  edge-io/protection/tidy/compact/rf/routable/clearance 九维各 0-100 + 逐器件归因
+  (penalty=「先动谁」),硬错(短路/重叠/出板框)单列 blocking 一票否决不进加权。
+  三条硬约定:skipped=「没测」≠满分;verdict 单一产出点(计数与判定绝不分家);
+  归因恒等式 Σpenalty=100−该维分。`--spec` 解锁 flow-order 与 internal 连接器判定;
+  `--from <dump>` 离线复现;默认只有 blocking 非零退出(`--min-score` 显式给才当门)。
+- **`pcb refine` —— 打分驱动的精修环(#167 ACHIEVE 层,#153 护栏)**。读逐维归因对
+  最弱维下确定性变换,每步复核:check finding 上升/分数下降/check 读不到都回滚该步
+  (逐步回滚,回读证实才算 restored)。默认 dry-run;不可动集合(锁定件+已签字
+  tier1/2)、位移预算超限剔除不截断。blocking 不归它管 —— 开跑即报 ⛔ 指路。
+- **`pcb floorplan` / `easyeda spec validate·show` —— S0 spec 类型化(#167 KNOWLEDGE
+  层)**。flow/flowAxis/modules[].kind/interfaces[].{edge,facing,internal,plugWidthMm}
+  受控词表校验,拼错枚举从静默失灵变 ERROR;floorplan 按 flow 切有序带(只读)。
+- **place-constrained 合法化阶段**:规划完用 layout-score/lint 同一纯核对虚拟落子
+  复算 blocking,新引入的重叠/短路/出板框就地螺旋重定位、无解弃子(保原位),弃伙伴
+  连带弃跟随者(FollowsID 血缘)。落点统一吸 5mil 锚点格。**车机真板 benchmark:
+  规划器首次全面反超人类基线(综合 53.8→64.3,阻塞 1→0,protection +16.9)**。
+- **保护件归因对齐**:跟随伙伴=打分器同规则选出的端口件(isProtectionIdent/
+  isPortIdent 共享);伙伴没动就不跟;落点按「离伙伴焊盘更近」双候选择优。
+- **#168 两条连接器规则**:internal-on-edge / connector-plug-clearance 进 `pcb check`
+  (+插头护套包络表 `_plug_envelope.json`),与 edge-io 维共用判定;位号优先于器件名
+  (USBLC6/SMAJ 不再被误判成连接器)。
+- **`workflow status` 消费质量快照**:confirm-layout 落的多维快照渲染 + `--reconcile`
+  逐维退化对比(掉 ≥5 分标 ⚠;scored→skipped 报「失去可测性」绝不当 0 分)。
+- **金标准校准体系(#167 LEARNING 层)**:`make layout-calibrate` 正负对照 fixture +
+  **五块开源真板入库**(实战派ESP32-S3 [maxBlocking=0 旗舰锚点]/庐山派K230/
+  RK3568四层/MIPI扩展板/BBClaw),好板不掉分+blocking 不误报回归机械可查。
+- **`pcb.outline.get` 返回板框真多边形 `points` + `outlineFormat`(#167,连接器侧)**。
+  异形板「到板边距离」不再按 AABB 错算;`points`=折线中心线(铣刀路径=真板边),
+  bbox 是渲染范围含线宽。多条/含弧退化 bbox 并自述原因(消费方自动回落标 degraded)。
+
+### Fixed
+- **五板校准修掉的六处度量失真**:渲染 bbox 当 courtyard(实战派S3 曾被误报 104 条
+  overlap → 重叠/间距改**焊盘并集**本体代理);圆盘按矩形算(角上假铜误报短路 →
+  圆-圆/圆-矩真实几何);clearance 阈值拿错规则(4mm 板框类值当装配间距 → >20mil
+  退回 7.87mil 规范下限)+ 密度归一渐近曲线(好板 86-95,负对照仍必响);同网集堆叠
+  豁免(装配选项/并联不可能跨网短路);连接器壳下垫件豁免(焊盘不接触只有并集相交);
+  板框内切割误当外边界护栏(MIPI utilization 曾 1679%)。blocking 误报 267→11,
+  好板综合分聚拢 59.9~67.7,BBClaw 哨兵全程无误杀。
+- **refine 环 check 读失败保守回滚**:countGateableFindings 返 -1 时旧护栏恒放行,
+  现按「无法复核=回滚」处理;refine 环本体补 8 个假 daemon E2E(dry-run/apply/
+  回滚/回读漂移/tier 保护/中途失败)。
 
 ## [0.21.7] - 2026-08-09
 
