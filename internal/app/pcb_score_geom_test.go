@@ -4,6 +4,7 @@ package app
 // 全部是纯结构体字面量喂纯函数，不连 daemon、不读磁盘（照 pcb_check_dfm2_test.go 的范式）。
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -286,8 +287,15 @@ func TestScoreGeom_ClearanceTightPairDropsBelowGoodBand(t *testing.T) {
 
 // 越多越低，且多到一定程度必须掉到任何合理门限之下。
 func TestScoreGeom_ClearanceScoreFallsWithPairCount(t *testing.T) {
-	comps := sgTwoComps()
-	outline := sgTestOutline(600, 800)
+	// 12 件的板让严重度比例落在渐近曲线的活跃区(2 件板配 3/5 对会双双饱和到
+	// 100 扣分,单调性在平台期分不出高下 —— 而 2 件板上 5 对本来就是物理不可能
+	// 的合成态)。新契约(2026-08-10 五板定标)是**密度归一**:同样的对数,板越
+	// 小越严重。
+	comps := make([]boardComp, 0, 12)
+	for i := range 12 {
+		comps = append(comps, sgTestComp(fmt.Sprintf("R%d", i+1), float64(100+i*80), 100, 40))
+	}
+	outline := sgTestOutline(1200, 800)
 	one := sgScoreClearance(sgTestCtx(comps, outline, sgTightLayout(8, 1))).Score
 	three := sgScoreClearance(sgTestCtx(comps, outline, sgTightLayout(8, 3))).Score
 	five := sgScoreClearance(sgTestCtx(comps, outline, sgTightLayout(8, 5))).Score
@@ -295,7 +303,7 @@ func TestScoreGeom_ClearanceScoreFallsWithPairCount(t *testing.T) {
 		t.Fatalf("score must fall monotonically with tight-pair count: 1=%.1f 3=%.1f 5=%.1f", one, three, five)
 	}
 	if five > 40 {
-		t.Errorf("5 touching pairs still scored %.1f — that is above plausible gates", five)
+		t.Errorf("5 touching pairs on a 12-part board still scored %.1f — that much violation density must not read as fine", five)
 	}
 }
 
@@ -310,8 +318,11 @@ func TestScoreGeom_ClearanceSeverityScales(t *testing.T) {
 	if hard >= soft {
 		t.Fatalf("a touching pair must cost more than a marginal one: touching=%.1f marginal=%.1f", hard, soft)
 	}
-	if soft > 75 {
-		t.Errorf("even a marginal violation must stay out of the good band, got %.1f", soft)
+	// 新契约:边缘违规必须**响**(≥ 最小扣分,不得读成满分),但允许留在
+	// good 档 —— 密度归一后单对边缘违规的合理读数(旧"必跌出 75"口径见
+	// sgTightDensityGain 注释里的五板定标背景)。
+	if soft > 100-5 {
+		t.Errorf("a marginal violation must still register (min penalty), got %.1f", soft)
 	}
 }
 

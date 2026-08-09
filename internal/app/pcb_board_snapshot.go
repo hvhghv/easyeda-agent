@@ -155,6 +155,33 @@ func (o *boardOutline) width() float64  { return o.BBox.MaxX - o.BBox.MinX }
 func (o *boardOutline) height() float64 { return o.BBox.MaxY - o.BBox.MinY }
 
 // area 是板面积：有多边形用鞋带公式，否则 AABB 面积。
+// sanitizeOutline 是多边形可信度护栏：闭合折线的鞋带面积远小于其 bbox 面积
+// （<50%）说明这条折线不是外板框 —— 典型是板内开槽/切割的**内轮廓**被当成了
+// 唯一边界（MIPI 屏扩展板真机实锤：polygon 面积 59k mil² vs 器件总面积 997k，
+// utilization 1679%，compact 被打到谷底）。降级回 bbox 并如实记 partial。
+// fetch 与 `--from` 回放两条入口都要过它 —— 坏 polygon 可能已经落在旧 dump 里。
+func (s *boardSnapshot) sanitizeOutline() {
+	o := s.Outline
+	if o == nil || len(o.Points) < 3 {
+		return
+	}
+	bbA := o.width() * o.height()
+	if bbA <= 0 {
+		return
+	}
+	var sum float64
+	for i := range o.Points {
+		j := (i + 1) % len(o.Points)
+		sum += o.Points[i][0]*o.Points[j][1] - o.Points[j][0]*o.Points[i][1]
+	}
+	if polyA := math.Abs(sum) / 2; polyA < bbA*0.5 {
+		o.Points = nil
+		o.Source = "bbox"
+		o.Format = "implausible-polygon-area"
+		s.note("outline polygon area is <50%% of its bbox (likely an inner cutout, not the board edge) — demoted to the AABB")
+	}
+}
+
 func (o *boardOutline) area() float64 {
 	if len(o.Points) >= 3 {
 		var s float64
@@ -251,9 +278,14 @@ type boardSnapshot struct {
 	Silk         []pcbSilkText `json:"silk,omitempty"`
 	CopperLayers int           `json:"copperLayers,omitempty"`
 	Rules        *boardRules   `json:"rules,omitempty"`
-	Partial      []string      `json:"partial,omitempty"`
-	CapturedAt   string        `json:"capturedAt,omitempty"`
-	Project      string        `json:"project,omitempty"`
+	// RoutedLines 是抓取时板上已布铜线段数（pcb.line.list 计数）。指针三态：
+	// nil = 旧 dump/没读到（未知），0 = 真没布线。routable 维用它对**成品板**
+	// 诚实 —— ratsnest 交叉不知道板子已经布完了，五块开源好板校准实锤该维在
+	// 成品板上恒 26~40（布线自由度早已被真实走线兑现，量表系统性偏低）。
+	RoutedLines *int     `json:"routedLines,omitempty"`
+	Partial     []string `json:"partial,omitempty"`
+	CapturedAt  string   `json:"capturedAt,omitempty"`
+	Project     string   `json:"project,omitempty"`
 }
 
 // boardRules 是 pcbRules 的可序列化投影（pcbRules 字段不导出，进不了 fixture）。
@@ -571,6 +603,15 @@ func fetchBoardSnapshot(cfg *appConfig, window string, opts boardSnapshotOpts) (
 	if ores, oerr := requestAction(cfg, "pcb.outline.get", window, nil); oerr == nil && ores != nil {
 		snap.Outline = parseBoardOutline(ores.Result)
 	}
+	snap.sanitizeOutline()
+	// 已布线段计数（best-effort）：routable 维靠它识别成品板。读不到保持 nil
+	//（未知），与「真没布线」(0) 区分。
+	if lres, lerr := requestAction(cfg, "pcb.line.list", window, nil); lerr == nil && lres != nil {
+		if raw, ok := mnav(lres.Result, "lines").([]any); ok {
+			n := len(raw)
+			snap.RoutedLines = &n
+		}
+	}
 	if snap.Outline == nil {
 		snap.note("board outline unavailable (is the PCB the foreground document?) — edge/off-board dimensions skipped")
 	} else if snap.Outline.Source != "polygon" {
@@ -641,5 +682,7 @@ func loadBoardSnapshotFile(r io.Reader) (*boardSnapshot, error) {
 	if err := dec.Decode(&snap); err != nil {
 		return nil, fmt.Errorf("parse board snapshot: %w", err)
 	}
+	// 坏 polygon 可能已经落在旧 dump 里 —— 回放路径同样要过护栏。
+	snap.sanitizeOutline()
 	return &snap, nil
 }

@@ -25,7 +25,7 @@ package app
 //     直接判门挂，而旧 score 里一个 tight pair 只扣 1 分 —— 于是出现「score 95
 //     分照样 FAIL」这种没法判读的报告（记忆里"计数与判定分离处必查一致性"那条教训
 //     的同一个坑）。这里用一个**固定进入代价**修掉：只要越过了装配间距门限，这一
-//     维就先扣 sgTightEntryPenalty，把分数直接压到 good 档以下，再按每对的缺口深浅
+//     维按**密度归一**的严重度比例扣分（2026-08-10 五板定标,见常量注释),再按每对的缺口深浅
 //     加扣。分数低 ⟺ 门会挂，两者不再打架。
 //
 // ── 不重复扣分 ─────────────────────────────────────────────────────────────
@@ -77,14 +77,16 @@ const (
 	sgCrossBudget = 60.0
 	sgRatsBudget  = 40.0
 
-	// 装配间距：进入代价 + 每对代价。见文件头 §3 —— 进入代价存在的唯一目的就是让
-	// 「分数」和「门」同号。25 分的取值使得**任何**一处违规都把这一维压到 75 以下
-	// （good 档下沿），符合 layout-lint 门"有 tight pair 就 FAIL"的既有口径。
-	// 待校准：如果真板上发现 25 分太重（例如高密板普遍有一两处贴装边缘对），调这
-	// 个常量而不是回去改门。
-	sgTightEntryPenalty = 25.0
-	// 每对按缺口深浅加扣的上限（gap=0 时扣满）。待校准初值。
-	sgTightPairPenalty = 10.0
+	// 装配间距：**密度归一**的严重度比例（2026-08-10 用 5 块嘉立创开源板定标，
+	// 取代旧的「进入代价 25 + 每对 10」——旧曲线在 405 件的庐山派K230 上被十几
+	// 对合法紧凑贴装直接压到 0,文件头 §3 预言的"真板发现 25 分太重"就是它)。
+	// 扣分 = 100 × (1 − e^(−gain × Σ每对严重度/器件数))。实测锚点(修完本体
+	// 代理后):K230 ~90,实战派S3 ~93,RK3568 ~84,BBClaw 100,负对照(1对
+	// 4mil/16件)~86.6(金标准上限 87 仍然响)。
+	sgTightDensityGain = 7.0
+	// 只要存在 tight pair,扣分下限——保证「响了」(负对照的反应断言)且不被
+	// 密度稀释成四舍五入的 0。
+	sgTightMinPenalty = 5.0
 	// 每个被四面围死、烙铁进不去的器件（#99）扣多少。比一对间距过近更重：间距近
 	// 只是难焊，四面围死是**返修不可能**。待校准初值。
 	sgAccessPenalty = 15.0
@@ -137,6 +139,16 @@ func (sgRoutableScorer) score(ctx *scoreCtx) scoreDimension {
 	if l.SignalNets == 0 {
 		return skipDimension(dimRoutable, ctx.opts,
 			"board has no multi-pad signal net (power/GND are poured, not routed) — routability is not measurable")
+	}
+
+	// 成品板声明：板上已有大量真实走线时，ratsnest 交叉量的前提（"这些线还没布"）
+	// 不成立 —— 布线自由度已被走线兑现，交叉数系统性高估难度（五块开源好板校准
+	// 实锤:成品板该维恒 26~40）。分数照算（跨板相对比较仍有意义），但必须降级
+	// 声明，绝不能让读者把成品好板的 30 分读成"布局很难布"。
+	if rl := ctx.snap.RoutedLines; rl != nil && *rl > 0 {
+		d.Status = dimDegraded
+		d.Reason = sgAppendReason(d.Reason, fmt.Sprintf(
+			"board is already routed (%d track segment(s)) — ratsnest crossings overstate difficulty on a finished board; treat this dimension as relative, not absolute", *rl))
 	}
 
 	nets := float64(l.SignalNets)
@@ -494,17 +506,28 @@ func (sgClearanceScorer) score(ctx *scoreCtx) scoreDimension {
 	// 只吃 TightPairs 和 AccessBlocked。Overlaps/Shorts/OutsideOutline 是 Blocking
 	// 的活，这里碰它们就成了同一个缺陷罚三遍。
 	pairCost := make([]float64, len(l.TightPairs))
-	var pairSum float64
+	var sevSum float64
 	for i, p := range l.TightPairs {
 		// 缺口深浅：gap=0（贴住）扣满，gap 接近门限则接近 0。
 		sev := math.Max(0, math.Min(1, (l.MinGapMil-p.Gap)/l.MinGapMil))
-		pairCost[i] = sgTightPairPenalty * sev
-		pairSum += pairCost[i]
+		pairCost[i] = sev
+		sevSum += sev
 	}
 	tightPen := 0.0
 	if len(l.TightPairs) > 0 {
-		// 固定进入代价：见文件头 §3 —— 让「这一维的分」和「layout-lint 的门」同号。
-		tightPen = sgTightEntryPenalty + pairSum
+		// 密度归一：同样 12 对紧密,在 405 件的密板上是工艺常态,在 16 件的小板
+		// 上是布局事故 —— 除以器件数才是同一把尺(常量注释里有 5 板定标锚点)。
+		// 注意与 layout-lint 门的分工:门(我们自己流程的 gate)仍是「有 tight
+		// pair 就 FAIL」的严格口径;这一维是**跨板可比的量表**,允许专业密板带
+		// 少量贴装边缘对而不归零。
+		// 渐近曲线 100×(1−e^(−gain×ratio)):小比例区与线性等价(真板锚点见常量
+		// 注释),大比例平滑饱和 —— 线性版在合成小板(2~6 件,比例≈1)上直接爆
+		// 到 100 扣分,1 对和 5 对分不出高下,单调性断言当场抓住。
+		ratio := sevSum / float64(withBBox)
+		tightPen = 100 * (1 - math.Exp(-sgTightDensityGain*ratio))
+		if tightPen < sgTightMinPenalty {
+			tightPen = sgTightMinPenalty
+		}
 	}
 	accessPen := sgAccessPenalty * float64(len(l.AccessBlocked))
 	d.Score = clampScore(100 - tightPen - accessPen)
@@ -543,17 +566,17 @@ func (sgClearanceScorer) score(ctx *scoreCtx) scoreDimension {
 	// ── 归因 ────────────────────────────────────────────────────────────────
 	pen := map[string]float64{}
 	why := map[string]string{}
-	// 每对的扣分（含均摊到该对头上的那份进入代价）在两端器件之间对半分：挪走任何
-	// 一个都能解决这对，所以两个都是同等嫌疑人。
+	// 整个 tightPen 按每对严重度占比分摊（全员 sev=0 时平摊），每对的份额在两端
+	// 器件之间对半分：挪走任何一个都能解决这对，所以两个都是同等嫌疑人。
 	for i, p := range l.TightPairs {
-		var shareOfEntry float64
+		var pairShare float64
 		switch {
-		case pairSum > 0:
-			shareOfEntry = sgTightEntryPenalty * pairCost[i] / pairSum
-		default: // 所有对都刚好卡在门限上（sev=0）：进入代价平摊
-			shareOfEntry = sgTightEntryPenalty / float64(len(l.TightPairs))
+		case sevSum > 0:
+			pairShare = tightPen * pairCost[i] / sevSum
+		default: // 所有对都刚好卡在门限上（sev=0）：平摊
+			pairShare = tightPen / float64(len(l.TightPairs))
 		}
-		half := (pairCost[i] + shareOfEntry) / 2
+		half := pairShare / 2
 		detail := func(other string) string {
 			return fmt.Sprintf("与 %s 间距 %.1fmil < %.1fmil（%s 面）", other, p.Gap, l.MinGapMil, p.Side)
 		}

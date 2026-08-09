@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -130,6 +131,19 @@ type pcbLayoutReport struct {
 	Overlaps       []pcbLFinding `json:"overlaps"`
 	OutsideOutline []pcbLFinding `json:"outsideOutline"`
 	TightPairs     []pcbLFinding `json:"tightSpacing"`
+	// AltFitStacks 是同网集堆叠对：两件焊盘数相同、非空网名多重集完全一致且
+	// 本体相交/贴住 —— 官方板的装配选项惯例（同位放两个 fit 选项只焊一个）或
+	// 刻意并联。同网集意味着**不可能**造成跨网短路，装配上也是有意为之，所以
+	// 单列 INFO 而不是 overlap/tight（五块嘉立创开源板校准实锤:MIPI 的
+	// R1↔R3/R2↔R4、RK3568 的并联电容对全是这类,把好板压成 [blocked]）。
+	// 盘级跨网接触仍由 Shorts 兜底(同网集不代表逐盘对齐,交叉贴装照样抓)。
+	AltFitStacks []pcbLFinding `json:"altFitStacks,omitempty"`
+	// UnderShellPairs 是「连接器壳下垫件」对：一方位号是连接器/卡座
+	// (J/CN/CON/USB/CARD/SIM/SD/TF/DC),双方**焊盘互不接触**,只有焊盘并集
+	// (含壳体投影内的空腔)相交 —— 卡座/USB 壳体抬高、下方腔体里放小被动件是
+	// 专业惯例(五板校准实锤:K230 的 CARD1↔R57/L6、实战派S3 的 C13↔J1)。
+	// 单列 INFO(需人工核对壳下净高),不算 blocking。焊盘真接触仍是 overlap。
+	UnderShellPairs []pcbLFinding `json:"underShellPairs,omitempty"`
 	// Shorts is cross-net copper contact (pad↔pad), a strictly worse finding
 	// than a geometric overlap: the board is electrically wrong, not just tight.
 	Shorts []pcbLShort `json:"shorts,omitempty"`
@@ -227,6 +241,71 @@ func analyzeSolderAccess(comps []pcbLComp, accessMil float64) []pcbLAccessFindin
 // 圆盘与方盘同形 —— 按圆判偏容忍（见 padShorts 的圆盘感知注释）。
 func circleLikePad(p pcbLPad) bool {
 	return math.Abs(p.W-p.H) < 1
+}
+
+// connectorishDes 判定位号是不是连接器/卡座类 —— UnderShellPairs 的"壳"方判据。
+// 只看位号前缀(数据里最稳的信号,器件名常是未解析模板)。
+var connectorishDesRe = regexp.MustCompile(`(?i)^(?:J|CN|CON|USB|CARD|SIM|SD|TF|DC|FPC)[\d_]`)
+
+func connectorishDes(des string) bool {
+	return connectorishDesRe.MatchString(strings.TrimSpace(des))
+}
+
+// anyPadPairTouch 判两件是否存在任意一对焊盘铜相交（不看网名——这里判的是
+// 物理接触，不是短路）。圆形焊盘走真实圆几何,与 padShorts 同口径(矩形模型的
+// "角铜"假接触会把安装孔环旁的件误判成 overlap)。
+func anyPadPairTouch(as, bs []pcbLPad) bool {
+	for _, pa := range as {
+		ra, ok := padCopperRect(pa)
+		if !ok {
+			continue
+		}
+		for _, pb := range bs {
+			rb, ok := padCopperRect(pb)
+			if !ok {
+				continue
+			}
+			_, _, ov := overlapExtent(ra, rb)
+			if !ov {
+				continue
+			}
+			if (circleLikePad(pa) || circleLikePad(pb)) && !padsTouchCircleAware(pa, pb, ra, rb) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// sameNetSetStack 判定两件是否「同网集堆叠/贴邻」：焊盘数相同、双方全部焊盘都
+// 有网名、且网名多重集完全一致。这是装配选项(fit-option)与刻意并联的网表指纹
+// —— 见 AltFitStacks 字段注释。任一侧有无网焊盘(机械件/散热盘)不豁免。
+func sameNetSetStack(as, bs []pcbLPad) bool {
+	if len(as) == 0 || len(as) != len(bs) {
+		return false
+	}
+	na := map[string]int{}
+	for _, p := range as {
+		n := strings.TrimSpace(p.Net)
+		if n == "" {
+			return false
+		}
+		na[n]++
+	}
+	for _, p := range bs {
+		n := strings.TrimSpace(p.Net)
+		if n == "" {
+			return false
+		}
+		na[n]--
+	}
+	for _, v := range na {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // padsTouchCircleAware 在至少一方是圆形焊盘时做真实几何接触判定：
@@ -423,13 +502,30 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 			if !sameAssemblySide(a.Layer, b.Layer) {
 				continue // opposite sides: bodies pass through each other legally
 			}
+			altFit := ov && sameNetSetStack(padsByRef[la], padsByRef[lb])
+			if altFit {
+				rep.AltFitStacks = append(rep.AltFitStacks, pcbLFinding{
+					Type: "alt-fit-stack", A: la, B: lb, Side: sideName(side),
+					OvX: round2(ox), OvY: round2(oy)})
+				continue
+			}
 			if ov {
+				if (connectorishDes(la) || connectorishDes(lb)) &&
+					!anyPadPairTouch(padsByRef[la], padsByRef[lb]) {
+					rep.UnderShellPairs = append(rep.UnderShellPairs, pcbLFinding{
+						Type: "under-shell", A: la, B: lb, Side: sideName(side),
+						OvX: round2(ox), OvY: round2(oy)})
+					continue
+				}
 				rep.Overlaps = append(rep.Overlaps, pcbLFinding{
 					Type: "overlap", A: la, B: lb, Side: sideName(side),
 					OvX: round2(ox), OvY: round2(oy)})
 				continue
 			}
 			if gap := rectGap(bodyByRef[a.Designator], bodyByRef[b.Designator]); gap < minGapMil {
+				if sameNetSetStack(padsByRef[la], padsByRef[lb]) {
+					continue // 同网集贴邻(并联电容排):有意为之,不算装配过近
+				}
 				rep.TightPairs = append(rep.TightPairs, pcbLFinding{
 					Type: "spacing", A: la, B: lb, Side: sideName(side), Gap: round2(gap)})
 			}
