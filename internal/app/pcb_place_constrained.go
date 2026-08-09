@@ -259,20 +259,28 @@ func classifyCP(c cpComp, mainPins int) cpClass {
 			return cls
 		}
 	}
+	// 位号优先于器件名（与 pcb check 的连接器判定同口径，2f45269 的学费在这边
+	// 没同步过来）：USBLC6("usb")/SMAJ("sma") 这类保护件的**器件名**撞连接器
+	// 关键词，曾被下面的正则钉到板边 —— 离被保护端口 1000+mil，真板 protection
+	// 40→7 的直接根因。位号已表明不是连接器的件（C/R/L/D/Q/F/TVS/ESD…前缀），
+	// 绝不走 edge/user-facing 的器件名正则；保护件落卫星档后由 cpNeedsHugging
+	// 贴到它保护的端口旁。显式块 hint（上面）不受此限 —— 块数据是真源。
+	vetoedByDesignator := nonConnectorDesRe.MatchString(des)
+
 	// A connector/module footprint, OR a Jxx designator that isn't a plain header
 	// resistor — treat as edge-must.
-	if cpReModule.MatchString(fp) {
+	if !vetoedByDesignator && cpReModule.MatchString(fp) {
 		return cpEdgeMust
 	}
 	// Jxx connectors are edge-must, but NOT JPxx (a jumper/link — belongs by its net,
 	// not at a board edge). A J-prefix with a connector-ish footprint also qualifies.
-	if cpReEdgeConn.MatchString(fp) || (strings.HasPrefix(des, "J") && !strings.HasPrefix(des, "JP")) {
+	if (!vetoedByDesignator && cpReEdgeConn.MatchString(fp)) || (strings.HasPrefix(des, "J") && !strings.HasPrefix(des, "JP")) {
 		return cpEdgeMust
 	}
-	if cpReSwitch.MatchString(fp) || strings.HasPrefix(des, "SW") {
+	if (!vetoedByDesignator && cpReSwitch.MatchString(fp)) || strings.HasPrefix(des, "SW") {
 		return cpUserFacing
 	}
-	if cpReLED.MatchString(fp) || strings.HasPrefix(des, "LED") {
+	if (!vetoedByDesignator && cpReLED.MatchString(fp)) || strings.HasPrefix(des, "LED") {
 		return cpUserFacing
 	}
 	// Main chip by distinct-pin count (crystals are few-pin but anchor near their IC
