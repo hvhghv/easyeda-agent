@@ -60,9 +60,10 @@ func benchSnapshotToCpComps(snap *boardSnapshot) []cpComp {
 	return out
 }
 
-// benchApplyMoves 把规划器的 anchor 移动**离线**套回快照：整件平移，bbox 与焊盘
-// 跟着走。旋转变更也记下来，但不重算 bbox —— 规划器只对 2 脚件和边缘连接器改朝向，
-// 而这个基准比的是位置质量；假装能算出旋转后的渲染 bbox 反而会引入假数据。
+// benchApplyMoves 把规划器的 anchor 移动**离线**套回快照。几何投影走合法化器的
+// applyMoveToVComp —— 同一套旋转感知近似（90° 整数倍转 bbox 四角取 AABB、焊盘
+// 跟转、90/270 换 W/H），基准的判定和合法化的判定才不会各说各话。仍是近似：
+// 渲染 bbox 里的丝印文字实际不随件转，旋转件的 overlap/间距差值要打个小折扣。
 func benchApplyMoves(snap *boardSnapshot, moves []apMove) *boardSnapshot {
 	byID := map[string]apMove{}
 	for _, m := range moves {
@@ -78,25 +79,19 @@ func benchApplyMoves(snap *boardSnapshot, moves []apMove) *boardSnapshot {
 			out.Components = append(out.Components, c)
 			continue
 		}
-		dx, dy := m.NewX-c.X, m.NewY-c.Y
+		v := applyMoveToVComp(c, m)
 		nc := c
 		nc.X, nc.Y = m.NewX, m.NewY
 		if m.SetRot {
 			nc.Rotation = m.NewRot
 		}
-		if c.BBox != nil {
-			nb := *c.BBox
-			nb.MinX += dx
-			nb.MaxX += dx
-			nb.MinY += dy
-			nb.MaxY += dy
+		if v.bbox != nil {
+			nb := *v.bbox
 			nc.BBox = &nb
 		}
-		nc.Pads = make([]boardPad, len(c.Pads))
-		for i, p := range c.Pads {
-			p.X += dx
-			p.Y += dy
-			nc.Pads[i] = p
+		nc.Pads = make([]boardPad, len(v.pads))
+		for i, p := range v.pads {
+			nc.Pads[i] = boardPad{Number: p.Number, Net: p.Net, Layer: p.Layer, X: p.X, Y: p.Y, W: p.W, H: p.H}
 		}
 		out.Components = append(out.Components, nc)
 	}
@@ -180,18 +175,25 @@ func TestLayoutBenchmark_PlannerVsExisting(t *testing.T) {
 			if len(moves) == 0 {
 				t.Fatalf("planner produced no moves for %d components — it is not exercising the board at all", len(cps))
 			}
+			// 生产路径同款合法化(#167 遗留②):新引入的重叠/短路/出板框
+			// 就地重定位或弃子。基准量的是「跑完整条规划管线」的结果。
+			var legal legalizeResult
+			moves, lDiags, legal := legalizeConstrainedMoves(b.snap, moves)
+			diags = append(diags, lDiags...)
+			if legal.Adjusted+legal.Dropped > 0 {
+				t.Logf("合法化: %d 件重定位, %d 件弃子", legal.Adjusted, legal.Dropped)
+			}
 			after := analyzeLayoutScore(benchApplyMoves(b.snap, moves), b.s0, opts)
 
-			// 结论可信度自查。benchApplyMoves 是**纯平移**：它不重算旋转后的渲染
-			// bbox（那需要平台的排版引擎，离线算只能是猜）。所以规划器一旦改朝向，
-			// 被改的那些件的几何就失真了，overlap / 间距类的对比要打折扣。
-			//
-			// 把这个比例报出来而不是藏着 —— 一份「规划器制造了 N 处重叠」的结论，
-			// 如果 N 里有一半来自我自己的 bbox 近似，那它就不是结论而是噪声。
+			// 结论可信度自查。benchApplyMoves 现在走合法化器同款旋转感知投影
+			// （90° 整数倍转 bbox 四角取 AABB、焊盘跟转）——比早期纯平移强得多，
+			// 但仍是近似：渲染 bbox 里的丝印文字实际不随件转，平台的真实排版
+			// 引擎离线拿不到。把比例报出来而不是藏着 —— 旋转件的 overlap/间距
+			// 差值要打个小折扣。
 			rotated := benchRotatedCount(b.snap, moves)
 			if rotated > 0 {
-				t.Logf("⚠️  规划器改了 %d/%d 件的朝向；本基准按纯平移套用坐标，"+
-					"这些件的渲染 bbox 未重算 —— overlap/间距类的差值对它们不可信",
+				t.Logf("⚠️  规划器改了 %d/%d 件的朝向；虚拟套用按旋转 AABB 近似"+
+					"（丝印不随转）—— 这些件的 overlap/间距差值有少量噪声",
 					rotated, len(moves))
 			}
 
@@ -226,12 +228,22 @@ func TestLayoutBenchmark_PlannerVsExisting(t *testing.T) {
 				t.Logf("%-24s %8.1f %8.1f %+8.1f", dimLabelOf(id), bs, as, as-bs)
 			}
 
-			// 唯一的硬断言：规划器不得把板子摆出板框。这条是真回归判据 ——
-			// 「偏散板」可以慢慢改，把件甩出板外是坏掉。
-			offBoardBefore, offBoardAfter := countBlockingType(before, "off-board"), countBlockingType(after, "off-board")
-			if offBoardAfter > offBoardBefore {
-				t.Errorf("planner pushed %d more part(s) outside the board outline (%d → %d) — that is a regression, not a style difference",
-					offBoardAfter-offBoardBefore, offBoardBefore, offBoardAfter)
+			// 硬断言（合法化落地后从「不得新增 off-board」升级为「不得新增任何
+			// blocking」）：规划管线不得制造新的硬错 —— 重叠/跨网短路/出板框
+			// 任何一种冒出来都是回归，不是风格差异。「偏散板」可以慢慢改，
+			// 制造硬错是坏掉。key 用合法化器同一套 blockingKeySet 与既有布局
+			// 做差（板上本来就有的不算），判定不可能与生产路径各说各话。
+			minGap := b.snap.Rules.toPcbRules().clearanceMil
+			bc, bp := b.snap.toLayoutComps()
+			baseL := analyzePcbLayout(bc, bp, outlineBBoxOf(b.snap), minGap)
+			baseKeys := blockingKeySet(&baseL)
+			afterSnap := benchApplyMoves(b.snap, moves)
+			ac, ap := afterSnap.toLayoutComps()
+			afterL := analyzePcbLayout(ac, ap, outlineBBoxOf(afterSnap), minGap)
+			for key := range blockingKeySet(&afterL) {
+				if !baseKeys[key] {
+					t.Errorf("planner pipeline introduced a NEW blocking issue: %s — that is a regression, not a style difference", key)
+				}
 			}
 		})
 	}

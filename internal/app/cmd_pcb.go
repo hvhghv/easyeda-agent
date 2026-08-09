@@ -2348,6 +2348,18 @@ A SEED — verify with 'pcb layout-lint'. --dry-run prints the plan.
 				}
 				moves, diags := planConstrainedPlace(comps, holes, opt)
 
+				// 合法化阶段(#167):用 layout-score/lint 同一个纯核对虚拟落子
+				// 复算 blocking,新引入的重叠/短路/出板框就地重定位或弃子。
+				// 快照拿不到时如实报 skipped —— 不能假装检查过。
+				legal := legalizeResult{}
+				if snap, serr := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{withRules: true}); serr == nil {
+					var lDiags []apDiag
+					moves, lDiags, legal = legalizeConstrainedMoves(snap, moves)
+					diags = append(diags, lDiags...)
+				} else {
+					diags = append(diags, apDiag{Reason: "legalize:skipped: board snapshot unavailable (" + serr.Error() + ") — planned moves were NOT re-checked for overlap/short/off-board"})
+				}
+
 				applied := 0
 				var failures []map[string]any
 				if !dryRun {
@@ -2378,6 +2390,7 @@ A SEED — verify with 'pcb layout-lint'. --dry-run prints the plan.
 					"planned": len(moves), "applied": applied,
 					"boardEdges": boardSrc, "zones": zoneSrc,
 					"moves": moves, "diags": diags, "failures": failures,
+					"legalize": legal,
 				}
 				if opt.board != nil {
 					out["board"] = map[string]any{"x0": opt.board.x0, "y0": opt.board.y0, "x1": opt.board.x1, "y1": opt.board.y1}
