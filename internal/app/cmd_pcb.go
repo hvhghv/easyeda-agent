@@ -386,12 +386,12 @@ successful import this command therefore auto-runs the attrs sync
 (schematic pages → PCB, empty-value keys only); disable with --no-sync-attrs
 or re-run standalone via ` + "`easyeda pcb sync-attrs`" + `.
 
-The platform's import ALSO leaves every designator as a placeholder (U? / C? /
-RF?) even though the schematic has real ones — measured 166/166 on a real board.
-Designators feed module membership, protection-part prefixes, decoupling
-detection and the BOM, so this command repairs them right after the import
-(matched by uniqueId, the one id both documents share); disable with
---no-sync-designators or re-run via ` + "`easyeda pcb sync-designators`" + `.`,
+After the attrs sync this command ALSO runs the designator repair
+(` + "`easyeda pcb sync-designators`" + `, matched by uniqueId — the one id both
+documents share). The import itself lands real designators; the repair is a
+rear-guard for boards damaged by the old attrs-backfill Designator-key bug
+(166/166 wiped to U?/C? on a real board) and for any future whole-otherProperty
+write that resets them. Disable with --no-sync-designators.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda pcb import-changes
   easyeda pcb import-changes --schematic <uuid>`,
@@ -411,19 +411,32 @@ detection and the BOM, so this command repairs them right after the import
 					return err
 				}
 				imported, _ := res.Result["imported"].(bool)
-				// 位号回填必须排在 attrs 同步**之前**：位号是更基础的键，很多下游
-				// 规则（模块归属、保护件前缀、去耦判定、BOM）都按它索引，先把它修对
-				// 再谈属性。平台的导入会把位号全留成 U?/C? 占位符（实测 166/166）。
-				if imported && !noSyncDesignators {
-					if rep, err := runSyncDesignators(cfg, window, false, stderr); err != nil {
-						fmt.Fprintf(stderr, "⚠ designator sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-designators`\n", err)
-					} else if rep.Repaired > 0 || len(rep.Unmatched) > 0 {
-						fmt.Fprintf(stderr, "designators: %s\n", rep.Summary)
-					}
+				confirmState, _ := res.Result["confirm"].(string)
+				// #124 语义陷阱：importChanges 的 promise 会在「确认导入信息」弹框
+				// **刚打开时**就 resolve true——imported=true 不等于器件已落地。只有
+				// confirm=applied（连接器确认点击了「应用修改」且弹框已关闭）才说明
+				// 落地了；其余状态下跑后续同步读到的是导入前的板面，会静默空跑一遍
+				// 然后在用户手动点击后原样复现问题。
+				landed := imported && confirmState == "applied"
+				if imported && !landed {
+					fmt.Fprintf(stderr, "⚠ import resolved but the apply was NOT confirmed (confirm=%s) — if you click 应用修改 by hand, run `easyeda pcb sync-attrs` and `easyeda pcb sync-designators` afterwards\n", confirmState)
 				}
-				if imported && !noSyncAttrs {
+				// attrs 在前、位号在后：attrs_backfill 的 Designator 键泄漏 bug 已在
+				// 连接器根治，但位号回填殿后仍是第二道防线——任何整包 otherProperty
+				// 写入若再毁位号，殿后的回填都能当场修回。
+				if landed && !noSyncAttrs {
 					if err := syncSchAttrsToPcb(cfg, window, false, stderr); err != nil {
 						fmt.Fprintf(stderr, "⚠ attrs sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-attrs`\n", err)
+					}
+				}
+				if landed && !noSyncDesignators {
+					if rep, err := runSyncDesignators(cfg, window, false, stderr); err != nil {
+						fmt.Fprintf(stderr, "⚠ designator sync after import failed (import itself succeeded): %v — retry with `easyeda pcb sync-designators`\n", err)
+					} else if rep.Repaired > 0 || len(rep.Unmatched) > 0 || len(rep.SchUnannotated) > 0 || len(rep.Failed) > 0 {
+						fmt.Fprintf(stderr, "designators: %s\n", rep.Summary)
+						for _, f := range rep.Failed {
+							fmt.Fprintf(stderr, "  ❌ %s\n", f)
+						}
 					}
 				}
 				return nil

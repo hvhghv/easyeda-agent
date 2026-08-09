@@ -1,36 +1,40 @@
 package app
 
-// pcb_sync_designators.go — 修复 `pcb import-changes` 之后 PCB 器件位号变成占位符
-// （`U?` / `C?` / `RF?`）的问题。
+// pcb_sync_designators.go — 修复 PCB 器件位号变成占位符（`U?` / `C?` / `RF?`）的问题。
 //
-// ── 现象与实测 ─────────────────────────────────────────────────────────────
+// ── 事故与根因（真机二分定位，2026-08-09）───────────────────────────────────
 //
-// 在一块 166 器件的真板上把 PCB 清空后重新 `import-changes`：器件、封装、
-// manufacturerId、supplierId 全部正确落到 PCB 上，**唯独位号 166/166 全是
-// 占位符**。原理图侧位号完好（0 个带 `?`），所以不是设计的问题，是导入这一步
-// 没把位号带过来。
+// 一块 166 器件的真板在 `pcb import-changes` 后位号 166/166 全变占位符。最初
+// 归因于平台导入行为——**错了**。真机控制变量实验（ceshi 六件小板）钉死了根因：
 //
-// 后果比看上去严重：位号是这套工具链几乎所有规则的输入 —— 模块归属（S0 spec 的
-// modules[].parts 按位号写）、保护件识别（F*/D*/TVS* 前缀）、去耦判定、
-// `pcb check` 的 finding 定位、BOM。位号一丢，这些规则要么全部失灵，要么更糟：
-// 静默地按错误的分类算出一份看起来正常的报告。
+//   - 裸 `eda.pcb_Document.importChanges()` + 手动点「应用修改」→ 位号全对。
+//     平台的导入一直是对的，还顺带给两侧铸造 uniqueId（gge*）。
+//   - 元凶是我们自己的 `pcb.component.attrs_backfill`（import-changes 会自动跑）：
+//     器件库记录的 otherProperty 里带着 `Designator: "C?"`（库自己的占位位号），
+//     merge「填空值」把它灌进实例，平台把 otherProperty.Designator 同步成图元
+//     位号 → 一板位号当场全灭，每件变成各自库记录的占位前缀（U?/C?/RF?）。
+//     安静板上单独跑一次 sync-attrs 即 100% 复现，与时序无关。
+//
+// 根因已在连接器侧根治（attrs_backfill 剔除身份键 + 同一 modify 显式回传位号）。
+// 本文件是**殿后防线 + 存量修复**：老版本毁过的板用它修回来；未来任何整包
+// otherProperty 写入若再毁位号，排在最后的它也能当场修回。
+//
+// 位号的分量：模块归属（S0 spec 的 modules[].parts）、保护件前缀（F*/D*/TVS*）、
+// 去耦判定、`pcb check` 定位、BOM 全按位号索引。位号一丢，这些规则不是失灵，
+// 而是静默按错误分类算出一份看起来正常的报告。
 //
 // ── 为什么用 uniqueId 修 ───────────────────────────────────────────────────
 //
-// 原理图和 PCB 是两个文档，各自 mint 自己的 primitiveId，互相对不上。但平台给
-// 每个器件分配的 `uniqueId`（`gge*`）**跨文档共用同一套命名空间** —— 实测在这块
-// 166 器件的板上 166/166 完全匹配。它就是唯一可靠的 schematic↔PCB 连接键。
+// 原理图和 PCB 是两个文档，各自 mint 自己的 primitiveId，互相对不上。但平台在
+// 首次 sch→PCB 导入时给每个器件铸造的 `uniqueId`（`gge*`）**跨文档共用同一套
+// 命名空间**——实测 166/166 完全匹配。它就是唯一可靠的 schematic↔PCB 连接键。
+// （API 手放且从未导入过的原理图器件 uniqueId 为空——首次导入才铸造。）
 //
-// 原理图侧的 `serializeComponent` 一直在返回 uniqueId；PCB 侧此前没有，本次补上。
-//
-// ── 修不了什么（诚实边界）─────────────────────────────────────────────────
-//
-// 这是**兜底修复**，不是根因修复：位号为什么没被 importChanges 带过来，属于平台
-// 行为，我们看不到也改不了它的内部。所以这里做的是「导入后立刻把位号补回去」，
-// 而不是「让导入不丢位号」。真正的根因需要平台侧确认（值得提 issue）。
+// ── 约束 ──────────────────────────────────────────────────────────────────
 //
 // 只回填**占位符位号**（含 `?`）。已经有真实位号的器件一律不碰 —— 用户可能在 PCB
 // 侧手工改过位号，那是他的决定，不该被原理图静默覆盖。
+// 每笔写入都回读验证（平台的 modify 有静默 no-op 前科），只有读回一致才计 Repaired。
 
 import (
 	"encoding/json"
@@ -49,9 +53,11 @@ type syncDesignatorsResult struct {
 	Matched       int      `json:"matched"`
 	Repaired      int      `json:"repaired"`
 	Unmatched     []string `json:"unmatched,omitempty"`
+	SchUnannotated []string `json:"schematicUnannotated,omitempty"`
 	Failed        []string `json:"failed,omitempty"`
 	SchematicSeen int      `json:"schematicComponents"`
 	DryRun        bool     `json:"dryRun,omitempty"`
+	Saved         bool     `json:"saved,omitempty"`
 	Summary       string   `json:"summary"`
 }
 
@@ -97,19 +103,30 @@ func fetchPcbDesignators(cfg *appConfig, window string) ([]pcbDesignatorRow, err
 	return out, nil
 }
 
+// schDesignators 是原理图侧按 uniqueId 索引的位号表。Real 只收真实位号；
+// Placeholder 收「有 uniqueId 但位号本身还是占位符」的件 —— 这类件修不了，
+// 但必须与「原理图里根本找不到」区分开，否则会把用户引向错误的排查方向
+// （前者该去标注原理图，后者该查两份文档是否同源）。
+type schDesignators struct {
+	Real        map[string]string
+	Placeholder map[string]string
+	Seen        int
+}
+
 // fetchSchematicUniqueIDs 读**全部页**的 uniqueId → 位号。
 //
 // allPages + tagPages 一起给：allPages 让 getAll 跨页取，tagPages 让连接器先把
 // 每一页都激活一遍。后者不是可有可无的 —— 平台的页是懒加载的，没被本会话打开过
 // 的页在 getAll(allPages) 里根本不出现（这个坑在多页板上吃过一次）。
-func fetchSchematicUniqueIDs(cfg *appConfig, window string) (map[string]string, int, error) {
+func fetchSchematicUniqueIDs(cfg *appConfig, window string) (schDesignators, error) {
+	sd := schDesignators{Real: map[string]string{}, Placeholder: map[string]string{}}
 	res, err := requestAction(cfg, "schematic.components.list", window,
 		map[string]any{"allPages": true, "tagPages": true})
 	if err != nil {
-		return nil, 0, fmt.Errorf("list schematic components: %w", err)
+		return sd, fmt.Errorf("list schematic components: %w", err)
 	}
 	raw, _ := mnav(res.Result, "components").([]any)
-	out := make(map[string]string, len(raw))
+	sd.Seen = len(raw)
 	for _, ri := range raw {
 		cm, ok := ri.(map[string]any)
 		if !ok {
@@ -117,11 +134,16 @@ func fetchSchematicUniqueIDs(cfg *appConfig, window string) (map[string]string, 
 		}
 		uid := strings.TrimSpace(asString(cm["uniqueId"]))
 		des := strings.TrimSpace(asString(cm["designator"]))
-		if uid != "" && des != "" && !isPlaceholderDesignator(des) {
-			out[uid] = des
+		if uid == "" || des == "" {
+			continue
+		}
+		if isPlaceholderDesignator(des) {
+			sd.Placeholder[uid] = des
+		} else {
+			sd.Real[uid] = des
 		}
 	}
-	return out, len(raw), nil
+	return sd, nil
 }
 
 // runSyncDesignators 执行回填。
@@ -166,28 +188,34 @@ func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Wr
 		return rep, fmt.Errorf("%s", rep.Summary)
 	}
 
-	schByUID, schSeen, err := fetchSchematicUniqueIDs(cfg, window)
+	sch, err := fetchSchematicUniqueIDs(cfg, window)
 	if err != nil {
 		return rep, err
 	}
-	rep.SchematicSeen = schSeen
+	rep.SchematicSeen = sch.Seen
 
 	type fix struct{ pid, des, uid string }
 	var fixes []fix
 	for _, r := range broken {
-		des, ok := schByUID[r.UID]
-		if !ok || r.UID == "" {
-			label := r.UID
-			if label == "" {
-				label = r.Des + "(no uniqueId)"
-			}
-			rep.Unmatched = append(rep.Unmatched, label)
+		if des, ok := sch.Real[r.UID]; ok && r.UID != "" {
+			fixes = append(fixes, fix{pid: r.PID, des: des, uid: r.UID})
 			continue
 		}
-		fixes = append(fixes, fix{pid: r.PID, des: des, uid: r.UID})
+		if schDes, ok := sch.Placeholder[r.UID]; ok && r.UID != "" {
+			// 原理图侧同 uniqueId 的件位号也还是占位符——不是匹配问题，是原理图
+			// 本身没标注。修不了，但要指对方向。
+			rep.SchUnannotated = append(rep.SchUnannotated, fmt.Sprintf("%s (schematic: %s)", r.UID, schDes))
+			continue
+		}
+		label := r.UID
+		if label == "" {
+			label = r.Des + " (no uniqueId)"
+		}
+		rep.Unmatched = append(rep.Unmatched, label)
 	}
 	sort.Slice(fixes, func(i, j int) bool { return fixes[i].des < fixes[j].des })
 	sort.Strings(rep.Unmatched)
+	sort.Strings(rep.SchUnannotated)
 	rep.Matched = len(fixes)
 
 	if dryRun {
@@ -195,6 +223,7 @@ func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Wr
 		return rep, nil
 	}
 
+	written := make(map[string]string, len(fixes)) // pid → 期望位号
 	for _, f := range fixes {
 		if f.pid == "" {
 			rep.Failed = append(rep.Failed, f.des+" (no primitiveId)")
@@ -208,13 +237,53 @@ func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Wr
 			rep.Failed = append(rep.Failed, fmt.Sprintf("%s: %v", f.des, aerr))
 			continue
 		}
-		rep.Repaired++
+		written[f.pid] = f.des
+	}
+
+	// 回读验证：平台的写 API 有「返回成功但没落」的前科（delete 静默 no-op、
+	// 位号唯一性避让都可能改写结果）。只有读回一致的才算修好。
+	if len(written) > 0 {
+		verify, verr := fetchPcbDesignators(cfg, window)
+		if verr != nil {
+			// 读失败不равно写失败：如实报出去，别把 Repaired 归零冤枉写入。
+			fmt.Fprintf(stderr, "⚠ post-write verification read failed: %v — repairs were issued but are unverified\n", verr)
+			rep.Repaired = len(written)
+		} else {
+			byPID := make(map[string]string, len(verify))
+			for _, r := range verify {
+				byPID[r.PID] = r.Des
+			}
+			for pid, want := range written {
+				if got := byPID[pid]; got == want {
+					rep.Repaired++
+				} else {
+					rep.Failed = append(rep.Failed, fmt.Sprintf("%s: write reported ok but read back %q", want, got))
+				}
+			}
+			sort.Strings(rep.Failed)
+		}
+	}
+
+	// 修好了就立刻落一个已知良好检查点——回填结果不该只活在 autosave 的
+	// debounce 窗口里（窗口期内崩溃/重载会整批回退）。best-effort。
+	if rep.Repaired > 0 {
+		if _, serr := requestAction(cfg, "pcb.save", window, nil); serr == nil {
+			rep.Saved = true
+		} else {
+			fmt.Fprintf(stderr, "⚠ pcb.save checkpoint after repair failed: %v — repairs live in memory until the next save\n", serr)
+		}
 	}
 
 	rep.Summary = fmt.Sprintf("repaired %d/%d placeholder designator(s) from %d schematic component(s)",
-		rep.Repaired, rep.Placeholder, schSeen)
+		rep.Repaired, rep.Placeholder, sch.Seen)
 	if len(rep.Unmatched) > 0 {
 		rep.Summary += fmt.Sprintf("; %d unmatched", len(rep.Unmatched))
+	}
+	if len(rep.SchUnannotated) > 0 {
+		rep.Summary += fmt.Sprintf("; %d unannotated in the schematic", len(rep.SchUnannotated))
+	}
+	if len(rep.Failed) > 0 {
+		rep.Summary += fmt.Sprintf("; %d failed", len(rep.Failed))
 	}
 	return rep, nil
 }
@@ -224,19 +293,22 @@ func newPcbSyncDesignatorsCmd(cfg *appConfig, window *string, stdout, stderr io.
 	c := &cobra.Command{
 		Use:   "sync-designators",
 		Short: "Repair placeholder PCB designators (U? / C?) from the schematic, matched by uniqueId",
-		Long: "`pcb import-changes` lands components, footprints and supplier ids correctly but\n" +
-			"leaves every designator as a placeholder (`U?` / `C?` / `RF?`) — measured 166/166 on a\n" +
-			"real board whose schematic had zero placeholder designators.\n\n" +
-			"That matters more than it looks: designators feed almost every rule in this\n" +
-			"toolchain — S0 spec module membership, protection-part prefixes (F*/D*/TVS*),\n" +
-			"decoupling detection, `pcb check` finding locations, the BOM. Losing them doesn't\n" +
-			"just disable those rules, it can make them classify silently wrong.\n\n" +
-			"This repairs them by matching on `uniqueId`, which the platform keeps in ONE\n" +
-			"namespace across both documents (primitiveId does not — each document mints its\n" +
-			"own). Only PLACEHOLDER designators are touched: a real designator you set by hand\n" +
-			"on the PCB is a decision, and is never overwritten by the schematic.\n\n" +
-			"`pcb import-changes` runs this automatically; use this command standalone to repair\n" +
-			"a board that was imported before the fix.",
+		Long: "Repairs PCB designators that were wiped to placeholders (`U?` / `C?` / `RF?`).\n\n" +
+			"Root cause (found by controlled real-machine bisection): the OLD attrs backfill\n" +
+			"merged the device library's own placeholder `Designator` key (\"C?\") into each\n" +
+			"instance's otherProperty, and the platform syncs that key into the primitive's\n" +
+			"designator — wiping 166/166 on a real board. The leak is fixed in the connector;\n" +
+			"this command repairs boards damaged by older versions and stands rear-guard\n" +
+			"after every `pcb import-changes`.\n\n" +
+			"Designators feed almost every rule in this toolchain — S0 spec module membership,\n" +
+			"protection-part prefixes (F*/D*/TVS*), decoupling detection, `pcb check` finding\n" +
+			"locations, the BOM. Losing them doesn't just disable those rules, it can make\n" +
+			"them classify silently wrong.\n\n" +
+			"Matching key: `uniqueId` — the platform keeps it in ONE namespace across both\n" +
+			"documents (primitiveId does not; each document mints its own). Only PLACEHOLDER\n" +
+			"designators are touched: a real designator you set by hand on the PCB is a\n" +
+			"decision, and is never overwritten by the schematic. Every write is verified by\n" +
+			"read-back; repaired boards get an immediate `pcb.save` checkpoint.",
 		Example: "  easyeda pcb sync-designators --project ceshi\n" +
 			"  easyeda pcb sync-designators --dry-run    # 先看会改多少\n" +
 			"  easyeda pcb sync-designators --json",
@@ -249,9 +321,13 @@ func newPcbSyncDesignatorsCmd(cfg *appConfig, window *string, stdout, stderr io.
 			if asJSON {
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(map[string]any{"syncDesignators": rep})
+				if eerr := enc.Encode(map[string]any{"syncDesignators": rep}); eerr != nil {
+					return eerr
+				}
+			} else {
+				renderSyncDesignators(rep, stdout)
 			}
-			renderSyncDesignators(rep, stdout)
+			// 失败必须以非零退出码暴露——JSON 模式也一样（gate 脚本靠退出码）。
 			if len(rep.Failed) > 0 {
 				return fmt.Errorf("%d designator write(s) failed", len(rep.Failed))
 			}
@@ -279,8 +355,24 @@ func renderSyncDesignators(rep syncDesignatorsResult, w io.Writer) {
 		}
 		fmt.Fprintln(w)
 	}
+	if len(rep.SchUnannotated) > 0 {
+		n := len(rep.SchUnannotated)
+		show := rep.SchUnannotated
+		if n > 6 {
+			show = show[:6]
+		}
+		fmt.Fprintf(w, "⚠️  %d 个器件在原理图里也还是占位位号（先标注原理图再重跑）: %s",
+			n, strings.Join(show, " "))
+		if n > 6 {
+			fmt.Fprintf(w, " …+%d", n-6)
+		}
+		fmt.Fprintln(w)
+	}
 	for _, f := range rep.Failed {
 		fmt.Fprintf(w, "❌ %s\n", f)
+	}
+	if rep.Saved {
+		fmt.Fprintln(w, "✓ pcb.save checkpoint written")
 	}
 	fmt.Fprintf(w, "%s\n", rep.Summary)
 }
