@@ -1,0 +1,36 @@
+{
+ "kind": "reference",
+ "title": "BBClaw开源AI语音终端(用户开源设计,69件)",
+ "note": [
+  "来源:用户自己的开源发布设计(2026-08-10 真机 dump,真多边形板框)。",
+  "中等密度双面板锚点:0 blocking + clearance/compact 双满分,五轮校准全程分数纹丝不动 ——",
+  "它是「修正不误杀正常板」的哨兵,任何让它掉分的度量改动都要先怀疑改动本身。",
+  "实测:overall 67.7,tidy 85/edge-io 80/rf 100。maxBlocking=0。"
+ ],
+ "noSpec": true,
+ "minOverall": 58,
+ "maxBlocking": 0,
+ "minDimension": {
+  "clearance": 90,
+  "compact": 90,
+  "edge-io": 70,
+  "partition": 27,
+  "protection": 23,
+  "rf": 90,
+  "routable": 19,
+  "tidy": 75
+ },
+ "requireScored": [
+  "partition",
+  "edge-io",
+  "protection",
+  "tidy",
+  "compact",
+  "rf",
+  "routable",
+  "clearance"
+ ],
+ "expectSkipped": [
+  "flow-order"
+ ]
+}

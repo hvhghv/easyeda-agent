@@ -1,0 +1,38 @@
+{
+ "kind": "reference",
+ "title": "立创·庐山派K230-CanMV开发板(官方开源,405件)",
+ "note": [
+  "来源:嘉立创开源硬件平台官方开发板(用户工程 立创·庐山派K230-CanMV开发板_copy,2026-08-10 真机 dump)。",
+  "高密官方量产板,是「专业密板不被误报」的主锚点 —— 第一轮校准它被误报 15 条 blocking/clearance 0 分,",
+  "本体代理+圆几何+壳下垫件豁免修完后 blocking 2(异网堆叠残留,需 BOM fit 数据分辨)。",
+  "已知弱维(度量侧问题,不是板子问题):edge-io 16(板框含 ARC 降级 AABB,凸出连接器读距失真,",
+  "待弧线解析);partition 37(无 spec 推断粒度过粗);routable 37(成品板,ratsnest 高估)。",
+  "下限=实测−10(真板噪声余量,README SOP)。实测:overall 59.9,clearance 95/compact 67/protection 72/rf 100/tidy 68。"
+ ],
+ "noSpec": true,
+ "minOverall": 50,
+ "maxBlocking": 4,
+ "minDimension": {
+  "clearance": 85,
+  "compact": 56,
+  "edge-io": 6,
+  "partition": 27,
+  "protection": 62,
+  "rf": 90,
+  "routable": 27,
+  "tidy": 58
+ },
+ "requireScored": [
+  "partition",
+  "edge-io",
+  "protection",
+  "tidy",
+  "compact",
+  "rf",
+  "routable",
+  "clearance"
+ ],
+ "expectSkipped": [
+  "flow-order"
+ ]
+}

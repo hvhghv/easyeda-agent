@@ -1,0 +1,35 @@
+{
+ "kind": "reference",
+ "title": "瑞芯微RK3568四层板(官方开源工艺示范,362件)",
+ "note": [
+  "来源:嘉立创免费四层工艺官方示范工程(用户工程 _copy,2026-08-10 真机 dump)。",
+  "四层高密板锚点(362件):第一轮 143 条误报 blocking → 5(残留为异网堆叠/晶振电容贴装,需人工判)。",
+  "无天线件,rf 必须 skipped —— 「没测≠满分」的真板样本。",
+  "实测:overall 63.3,clearance 86/compact 100/edge-io 70/protection 70。"
+ ],
+ "noSpec": true,
+ "minOverall": 53,
+ "maxBlocking": 7,
+ "minDimension": {
+  "clearance": 76,
+  "compact": 90,
+  "edge-io": 60,
+  "partition": 29,
+  "protection": 60,
+  "routable": 27,
+  "tidy": 32
+ },
+ "requireScored": [
+  "partition",
+  "edge-io",
+  "protection",
+  "tidy",
+  "compact",
+  "routable",
+  "clearance"
+ ],
+ "expectSkipped": [
+  "flow-order",
+  "rf"
+ ]
+}

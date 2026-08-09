@@ -1,0 +1,37 @@
+{
+ "kind": "reference",
+ "title": "立创·3.1寸MIPI屏幕扩展板(官方开源,34件)",
+ "note": [
+  "来源:嘉立创官方开源扩展板(用户工程 _copy,2026-08-10 真机 dump)。",
+  "结构件形态板锚点(大板少件,形态由屏幕接口决定):它是「板框内切割被当外边界」护栏的",
+  "发现者(polygon 面积 59k vs bbox,utilization 曾 1679%、compact 10 → 护栏后 97)。",
+  "blocking 4 = R1↔R3/R2↔R4/R5↔R6 异网 fit-option 堆叠(官方板装配选项惯例,需 BOM 分辨,诚实保留)。",
+  "protection 28 弱:板上 ESD 离它保护的 FPC 口确实远(小板走线短,官方取舍),暂按实测定标。",
+  "实测:overall 65.5,clearance 93/compact 97/edge-io 100。"
+ ],
+ "noSpec": true,
+ "minOverall": 55,
+ "maxBlocking": 6,
+ "minDimension": {
+  "clearance": 83,
+  "compact": 87,
+  "edge-io": 90,
+  "partition": 45,
+  "protection": 18,
+  "routable": 16,
+  "tidy": 56
+ },
+ "requireScored": [
+  "partition",
+  "edge-io",
+  "protection",
+  "tidy",
+  "compact",
+  "routable",
+  "clearance"
+ ],
+ "expectSkipped": [
+  "flow-order",
+  "rf"
+ ]
+}

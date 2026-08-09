@@ -147,6 +147,16 @@ exact 数字」；那种写法在这里是毒药：度量本来就是要被校�
 |---|---|---|
 | `reference-4stage-compact` | reference | 合成参考板。POWER→MCU→RF→ANT 四段流向，16 器件，2000×1150mil 四层板；九维各 100 分、0 阻塞项 |
 | `degraded-4stage-compact` | degraded | 同一块板注入十三处缺陷的负对照；九维全部 < 100，1 条阻塞项 |
+| `lckfb-szpi-esp32s3` | reference | **旗舰真板锚点**：立创·实战派ESP32-S3 官方开源(180件)，maxBlocking=0 —— 本体代理口径的活证据(曾被误报 104 条) |
+| `lckfb-k230-canmv` | reference | 立创·庐山派K230 官方开源(405件)高密锚点；已知弱维(edge-io ARC 板框/partition 无 spec)在 note 里逐条说明 |
+| `lckfb-rk3568-4layer` | reference | 瑞芯微RK3568 四层官方示范(362件)；无天线件 → rf 必须 skipped(「没测≠满分」真板样本) |
+| `lckfb-mipi-3in1-adapter` | reference | 立创·MIPI屏扩展板 官方开源(34件)结构件形态板；「内切割当外边界」护栏的发现者 |
+| `bbclaw-ai-voice-terminal` | reference | 用户开源设计(69件)；全程校准分数纹丝不动的「不误杀」哨兵，maxBlocking=0 |
+
+**真板参考没有逐块配 degraded 负对照**（与合成板约定的差异，刻意的）：逐维「度量
+还响不响」由合成负对照 `degraded-4stage-compact` 全权把守；真板的职责是「好板不
+掉分 + blocking 不误报回归」，五块板的阈值下限就是那条断言。给 405 件的真板逐维
+注入缺陷再人工核定，成本远超收益。
 
 两块板的详细说明（维持分数的几何关系 / 注入了哪些缺陷 ↔ 该响哪一维）在各自的
 `.expect.json` 的 `note` 字段里。改 fixture 前先读那一段，否则会莫名其妙掉分。

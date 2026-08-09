@@ -1,0 +1,38 @@
+{
+ "kind": "reference",
+ "title": "立创·实战派ESP32-S3开发板(官方开源,180件)",
+ "note": [
+  "来源:嘉立创官方开源开发板(记忆里的官方对标基准三板之一,2026-08-10 真机 dump)。",
+  "**旗舰锚点:maxBlocking=0。** 第一轮它被误报 104 条 component-overlap(渲染 bbox 丝印级贴边),",
+  "是「渲染框当 courtyard」度量错误的最大受害者;修完 0 blocking [fair] —— 这条 0 是**本体代理",
+  "口径的活证据**,任何让它重新冒 blocking 的改动都要先自证不是误报回归。",
+  "已知弱维:tidy 41(官方板丝印字号/旋转多样,阈值仍待商榷);partition 40(无 spec);routable 40(成品板)。",
+  "实测:overall 64.7,clearance 94/compact 93/protection 81/rf 100。"
+ ],
+ "noSpec": true,
+ "minOverall": 55,
+ "maxBlocking": 0,
+ "minDimension": {
+  "clearance": 83,
+  "compact": 83,
+  "edge-io": 22,
+  "partition": 30,
+  "protection": 71,
+  "rf": 90,
+  "routable": 29,
+  "tidy": 31
+ },
+ "requireScored": [
+  "partition",
+  "edge-io",
+  "protection",
+  "tidy",
+  "compact",
+  "rf",
+  "routable",
+  "clearance"
+ ],
+ "expectSkipped": [
+  "flow-order"
+ ]
+}
