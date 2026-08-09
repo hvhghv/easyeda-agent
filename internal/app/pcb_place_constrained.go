@@ -1112,10 +1112,33 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 			}
 		}
 	}
-	return moves, diags
+	return snapMovesToAnchorGrid(moves), diags
 }
 
 func round1(v float64) float64 { return math.Round(v*10) / 10 }
+
+// cpAnchorGrid is the anchor grid every planned target lands on, in mil — the
+// same 5-mil grid `pcb refine`'s grid-snap transform enforces and `pcb
+// layout-score`'s tidy dimension measures against.
+const cpAnchorGrid = 5.0
+
+// snapMovesToAnchorGrid rounds every planned target anchor to the 5-mil grid.
+//
+// Without this the planner UNDOES the refine loop: targets are derived from
+// live (possibly off-grid) source anchors plus real-valued pad geometry, so
+// they land off-grid (live: 854.1 on ceshi), tidy drops back to 25 right after
+// a refine pass had just fixed it, and every place-constrained run costs an
+// extra refine round. Snapping at plan time shifts a target by ≤2.5 mil —
+// #153 measured grid-snap at this magnitude as zero-side-effect (check
+// findings unchanged) — and keeps "planned position" == "final position",
+// which the plan/apply parity contract depends on.
+func snapMovesToAnchorGrid(moves []apMove) []apMove {
+	for i := range moves {
+		moves[i].NewX = math.Round(moves[i].NewX/cpAnchorGrid) * cpAnchorGrid
+		moves[i].NewY = math.Round(moves[i].NewY/cpAnchorGrid) * cpAnchorGrid
+	}
+	return moves
+}
 
 // cpDeviceName returns the string classifyCP pattern-matches on. A PLACED part's
 // `name` is frequently the UNRESOLVED EasyEDA template "={Manufacturer Part}"
