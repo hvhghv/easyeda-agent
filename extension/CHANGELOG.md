@@ -6,6 +6,22 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`pcb.components.list` 补 `uniqueId` —— 修 import-changes 之后位号全变 `U?` 的问题**。
+  把一块 166 器件的板清空后重新 `pcb import-changes`:器件、封装、manufacturerId、
+  supplierId 全部正确落盘,**唯独位号 166/166 全是占位符**(`U?` / `C?` / `RF?`),
+  而原理图侧位号完好(0 个带 `?`)。位号是这套工具链几乎所有规则的输入 ——
+  S0 spec 的模块归属、保护件前缀(F*/D*/TVS*)、去耦判定、`pcb check` 的 finding
+  定位、BOM,位号一丢它们要么失灵,要么更糟:静默按错误分类算出一份看着正常的报告。
+
+  修法是**兜底回填**而非根因修复(位号为什么没被平台带过来看不到也改不了):原理图与
+  PCB 是两个文档、各自 mint 自己的 primitiveId 互相对不上,但平台给每个器件的
+  `uniqueId`(`gge*`)**跨文档共用同一套命名空间** —— 实测 166/166 完全匹配,它是唯一
+  可靠的 schematic↔PCB 连接键。原理图侧 `serializeComponent` 一直在返回它,
+  这次给 PCB 侧的 `serializePcbComponent` 补上,CLI 的 `easyeda pcb sync-designators`
+  据此回填(`import-changes` 之后自动跑,`--no-sync-designators` 可关)。
+  **只回填占位符位号**;PCB 上手工设过的真实位号是用户的决定,绝不被原理图覆盖。
+
 ### Added
 - **`schematic.export.image` —— 选区/整页导出 SVG·PNG·PDF(#166)**。
   `easyeda sch export-image --ids '[...]' --out block.svg` 把**指定图元**单独渲染出来

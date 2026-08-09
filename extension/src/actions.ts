@@ -233,6 +233,12 @@ async function readActivePageConnectivitySummary(): Promise<SchematicConnectivit
 function serializePcbComponent(component: PcbComponent): Record<string, unknown> {
 	return {
 		primitiveId: component.getState_PrimitiveId(),
+		// uniqueId is the SAME namespace the schematic side reports (serializeComponent
+		// already exposes it): a component keeps one `gge*` id across both documents.
+		// primitiveId does NOT — each document mints its own — so uniqueId is the only
+		// reliable schematic↔PCB join key. `pcb sync-designators` uses it to repair the
+		// placeholder designators importChanges leaves behind (U? / C? / RF?).
+		uniqueId: component.getState_UniqueId(),
 		designator: component.getState_Designator(),
 		name: component.getState_Name(),
 		layer: component.getState_Layer(),
