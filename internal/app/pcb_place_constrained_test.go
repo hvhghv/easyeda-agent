@@ -415,12 +415,12 @@ func TestEdgeRoleOf(t *testing.T) {
 		des, name string
 		want      string
 	}{
-		{"J1", "conn.usb_c", "user-facing"},         // USB → user plugs in
+		{"J1", "conn.usb_c", "user-facing"}, // USB → user plugs in
 		{"J2", "KF301-5.0-2P terminal", "user-facing"},
 		{"J4", "screw terminal", "user-facing"},
-		{"U1", "esp32-s3-wroom-1", "any"},           // radio module → any edge
-		{"ANT1", "ipex u.fl antenna", "any"},        // RF antenna → any edge
-		{"C1", "cap.100nf", ""},                     // not an edge part
+		{"U1", "esp32-s3-wroom-1", "any"},    // radio module → any edge
+		{"ANT1", "ipex u.fl antenna", "any"}, // RF antenna → any edge
+		{"C1", "cap.100nf", ""},              // not an edge part
 		{"R1", "res.10k", ""},
 	}
 	for _, c := range cases {
@@ -500,5 +500,44 @@ func TestConstrainedPlaceGroupsNetAware(t *testing.T) {
 	}
 	if j1.Edge != "left" || j2.Edge != "left" {
 		t.Errorf("net-aware: connectors tied to a LEFT partner must group on left; got J1=%q J2=%q", j1.Edge, j2.Edge)
+	}
+}
+
+// TestConstrainedPlaceSatelliteAvoidsMatingCorridor:插拔通道禁布进规划器。
+// T2 落位 KF301(块声明开口 -y)后,其开口面前方 250mil 的走廊被 addFixed 成
+// 占用 —— 原本停在走廊里的卫星必须被规划到走廊外,而不是原地「合法」留下。
+// 走廊占用只挡规划:断言的是卫星的落点,不出现针对走廊本身的 move。
+func TestConstrainedPlaceSatelliteAvoidsMatingCorridor(t *testing.T) {
+	comps := []cpComp{
+		// KF301 在 2000×2000 板上离底边最近 → T2 贴底边(edgeMargin 300)。
+		// 落位后 bbox {800,300,1200,500},开口 -y 朝外 → 板内走廊 {800,50,1200,300}。
+		mkCP("J1", "KF301-5.0-2P terminal", 1, 1000, 500, 400, 200, 2),
+		// 卫星电容原本停在走廊正中(950..1050 × 130..170),位置本身完全合法 ——
+		// 没有走廊占用它会被「勿扰好布局」分支原地保留。
+		mkCP("C1", "cap.100nf", 1, 1000, 150, 60, 40, 2),
+	}
+	opt := defaultCpOptions()
+	opt.edgeMargin = 300 // 让走廊有 250mil 留在板内(贴死板边时走廊会被裁没)
+	opt.partGap = 10
+	board := cpRect{0, 0, 2000, 2000}
+	opt.board = &board
+	moves, _ := planConstrainedPlace(comps, nil, opt)
+	byDes := map[string]apMove{}
+	for _, m := range moves {
+		byDes[m.Designator] = m
+	}
+	j1, ok := byDes["J1"]
+	if !ok || j1.NewY != 400 {
+		t.Fatalf("precondition: J1 must snap to the bottom edge at y=400 (bbox {800,300,1200,500}); got %+v", j1)
+	}
+	corridor := cpRect{800, 50, 1200, 300}
+	c1, moved := byDes["C1"]
+	if !moved {
+		t.Fatalf("C1 sits inside J1's mating corridor — the planner must relocate it, not keep it 'legally' in place")
+	}
+	// 落点(bbox 中心 = anchor,mkCP 两者重合)撑开半宽半高后不得再压走廊。
+	final := cpRect{c1.NewX - 30, c1.NewY - 20, c1.NewX + 30, c1.NewY + 20}
+	if final.overlaps(corridor) {
+		t.Errorf("C1 relocated to %+v which still overlaps the mating corridor %+v", final, corridor)
 	}
 }

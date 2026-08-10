@@ -434,6 +434,11 @@ subset; `--dry-run` prints the per-corner plan. Save after placing; delete via
   **插接面贴边规则(器件特性)**:Type-C/USB/SD 类水平插拔件在 300mil 边带内但**缩在板内 >25mil** →
   edge-io 扣分点名(`plug-face-not-flush` WARN,按缩进深度线性);齐平与**外突板框都合法** ——
   off-board 判据用**焊盘**不用 bbox,正是为了放行插接面外突这种正常设计。
+  **插拔通道禁布(mating corridor,器件特性)**:卧贴插口的开口面前方 250mil(v1 待校准)×本体宽的走廊里
+  不得有同面器件 —— 器件挡道 = 插头物理进不来。方向只认块库 `openings` 声明(贴边无声明推定朝外,
+  走廊在板外自动裁掉不报;判不出方向绝不猜)。`pcb check` 计数 `connectorMatingBlocked`(WARN),
+  edge-io 维按遮挡件扣分(10/件封顶 30),**归因落在遮挡件**(连接器贴边定死,动遮挡件才是解法);
+  `pcb place-constrained` T2 落位后把走廊记为占用,T4 卫星不会再被规划进去(只挡规划,不产生 move)。
   **`layout-lint` 与 `layout-score` 不互相取代**:前者是**硬门**(能不能布线,`--gate` 落 `pre_route_passed`),
   后者是**质量表**(布得好不好,诊断视角,不落任何 workflow 确认)。几何维**复用** layout-lint 的纯核
   (`analyzePcbLayout`),同一个量只准有一个算法。权重与阈值全是**待校准初值**,校准闭环 = `pcb dump` 出好板 fixture

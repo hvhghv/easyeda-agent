@@ -684,6 +684,36 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		nx, ny := c.x+shiftX, c.y+shiftY
 		nr := cpRect{gx0 + shiftX - m, gy0 + shiftY - m, gx1 + shiftX + m, gy1 + shiftY + m}
 		addFixed(nr, c.layer)
+		// 插拔通道占用（mating corridor）：开口方向已知（块库声明）的连接器，
+		// 落位后其开口面前方 pcbMatingCorridorDepthMil 内是插头的必经之路 ——
+		// 把这条走廊 addFixed 成占用（层=该件层），T4 卫星就不会被规划进去。
+		// **只挡规划，不产生 move**：addFixed 本来就只是占用格。开口朝板外的
+		// 正常姿态下走廊大多被板框裁没（裁空就不占），留在板内的那截（边距
+		// 缩进 / 开口沿边）才是真占用 —— 与 connectorMatingCorridor 同一裁剪
+		// 口径，打分骂什么，规划器就避什么。
+		if lox, loy, ok := connOpeningFor(c.footprint); ok {
+			owx, owy := rotate2d(lox, loy, c.rotation+delta)
+			if cdx, cdy, ok2 := matingAxisDir(owx, owy); ok2 {
+				fx0, fy0 := gx0+shiftX, gy0+shiftY
+				fx1, fy1 := gx1+shiftX, gy1+shiftY
+				var cr cpRect
+				switch {
+				case cdx > 0:
+					cr = cpRect{fx1, fy0, fx1 + pcbMatingCorridorDepthMil, fy1}
+				case cdx < 0:
+					cr = cpRect{fx0 - pcbMatingCorridorDepthMil, fy0, fx0, fy1}
+				case cdy > 0:
+					cr = cpRect{fx0, fy1, fx1, fy1 + pcbMatingCorridorDepthMil}
+				default: // cdy < 0
+					cr = cpRect{fx0, fy0 - pcbMatingCorridorDepthMil, fx1, fy0}
+				}
+				cr.x0, cr.y0 = math.Max(cr.x0, bx0), math.Max(cr.y0, by0)
+				cr.x1, cr.y1 = math.Min(cr.x1, bx1), math.Min(cr.y1, by1)
+				if cr.x1-cr.x0 >= 1 && cr.y1-cr.y0 >= 1 {
+					addFixed(cr, c.layer)
+				}
+			}
+		}
 		// 记下这一档件被挪了多远，供 T4 的「跟随」用。
 		//
 		// 为什么需要：保护件(保险丝/TVS/ESD)的正确位置是**贴着它保护的那个端子**，

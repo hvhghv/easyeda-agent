@@ -251,6 +251,143 @@ func TestIsBoardConnector(t *testing.T) {
 	}
 }
 
+// ── connector-mating-blocked（插拔通道禁布）─────────────────────────────────
+
+// 走廊几何：块库声明了开口方向（kf301 局部 -y）才算得出走廊；旋转参与换算。
+func TestConnectorMatingCorridor_BlockDeclaredDirection(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			// 板中的 KF301：bbox x[1800,2200] y[1100,1300]，rot 0 → 开口 -y。
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 1200, 400, 200, "VOUT", "GND"),
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	if len(conns) != 1 {
+		t.Fatalf("want 1 connector, got %d", len(conns))
+	}
+	cor, ok := connectorMatingCorridor(conns[0], snap.Outline)
+	if !ok {
+		t.Fatal("a block-declared opening must yield a corridor")
+	}
+	want := layoutBBox{MinX: 1800, MinY: 1100 - pcbMatingCorridorDepthMil, MaxX: 2200, MaxY: 1100}
+	if cor != want {
+		t.Fatalf("corridor = %+v, want %+v (in front of the -y opening face, bbox-wide)", cor, want)
+	}
+
+	// 转 90°（CCW）后局部 -y 指向世界 +x → 走廊在 bbox 右侧。
+	snap.Components[0].Rotation = 90
+	conns = collectBoardConnectors(snap, nil)
+	cor, ok = connectorMatingCorridor(conns[0], snap.Outline)
+	if !ok {
+		t.Fatal("rotated connector must still yield a corridor")
+	}
+	want = layoutBBox{MinX: 2200, MinY: 1100, MaxX: 2200 + pcbMatingCorridorDepthMil, MaxY: 1300}
+	if cor != want {
+		t.Fatalf("rot-90 corridor = %+v, want %+v (opening now faces +x)", cor, want)
+	}
+}
+
+// 贴边件没有块声明 → 按「朝板外」推定,通道在板外 —— 不产出板上走廊。
+// 这正是绝大多数摆对了的边缘连接器:它们永远不会因此被误报。
+func TestConnectorMatingCorridor_EdgePresumedOutwardNoCorridor(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			// Type-C 贴底边(edgeGap 0),块库没有它的开口声明。
+			mkBoardConn("USB1", "TYPE-C-31-M-12", 1, 2000, 140, 360, 280, "VBUS", "GND"),
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	if _, ok := connectorMatingCorridor(conns[0], snap.Outline); ok {
+		t.Fatal("an edge connector without a declared opening is presumed to face off-board — no on-board corridor")
+	}
+}
+
+// 非贴边、又没有块声明(板中 FPC 座/卡座) → 方向判不了,绝不猜。
+func TestConnectorMatingCorridor_UnknownDirectionRefusesToGuess(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			mkBoardConn("J9", "WEIRD-FPC-CONN-8P", 1, 2000, 1200, 300, 100, "SIG", "GND"),
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	if _, ok := connectorMatingCorridor(conns[0], snap.Outline); ok {
+		t.Fatal("no block declaration and not on the rim — direction is unknowable, must not guess")
+	}
+}
+
+// 走廊裁剪到板框:开口贴着板边朝外时走廊全在板外,裁完退化 → ok=false。
+func TestConnectorMatingCorridor_ClippedAwayOffBoard(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			// KF301 齐贴底边:bbox y[0,200],开口 -y → 走廊 y[-250,0] 全在板外。
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 100, 400, 200, "VOUT", "GND"),
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	if cor, ok := connectorMatingCorridor(conns[0], snap.Outline); ok {
+		t.Fatalf("a flush outward-facing opening has its whole corridor off-board — must clip to nothing, got %+v", cor)
+	}
+	// 因此也不可能有遮挡 finding。
+	if got := findConnectorMatingBlocked(conns, snap.Components, snap.Outline); len(got) != 0 {
+		t.Fatalf("no corridor → no blockers: %+v", got)
+	}
+}
+
+// 遮挡判定:走廊里的器件每件一条 WARN,归因落在**遮挡件**(动它才能解决)。
+func TestFindConnectorMatingBlocked(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			// 板中 KF301,走廊 {1800, 850, 2200, 1100}。
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 1200, 400, 200, "VOUT", "GND"),
+			// C1 的焊盘并集(20×20 @ (2000,1000))正落在走廊里。
+			mkBoardConn("C1", "0402 100nF", 1, 2000, 1000, 40, 20, "VOUT", "GND"),
+			// C2 在走廊外 —— 不报。
+			mkBoardConn("C2", "0402 100nF", 1, 3000, 1000, 40, 20, "3V3", "GND"),
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	got := findConnectorMatingBlocked(conns, snap.Components, snap.Outline)
+	if len(got) != 1 {
+		t.Fatalf("mating-blocked = %d, want 1 (C1 only): %+v", len(got), got)
+	}
+	f := got[0]
+	if f.Type != "connector-mating-blocked" || f.Level != "WARN" {
+		t.Errorf("unexpected shape: %+v", f)
+	}
+	if f.Designator != "C1" {
+		t.Errorf("attribution must land on the BLOCKER (moving it is the fix); got %q", f.Designator)
+	}
+	if !strings.Contains(f.Message, "J1") {
+		t.Errorf("message must name the connector whose corridor is blocked: %s", f.Message)
+	}
+	if len(f.Primitives) != 2 {
+		t.Errorf("both the blocker and the connector should be addressable: %+v", f.Primitives)
+	}
+	if !strings.Contains(f.Message, "规范 §3.5") {
+		t.Errorf("finding must cite the design-rules section: %s", f.Message)
+	}
+}
+
+// 异面器件不遮挡:插头路径在 Z 向被板厚隔开(与 plug-clearance 的收窄同理)。
+func TestFindConnectorMatingBlocked_DifferentSideDoesNotBlock(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 1200, 400, 200, "VOUT", "GND"),
+			mkBoardConn("C1", "0402 100nF", 2, 2000, 1000, 40, 20, "VOUT", "GND"), // bottom side
+		},
+	}
+	conns := collectBoardConnectors(snap, nil)
+	if got := findConnectorMatingBlocked(conns, snap.Components, snap.Outline); len(got) != 0 {
+		t.Fatalf("a bottom-side part cannot block a top-side plug path: %+v", got)
+	}
+}
+
 // 同号并联焊盘（USB-C 双取向）只算一个引脚位 —— 排式连接器的胶壳宽跟位数走。
 func TestConnectorPinsDedupes(t *testing.T) {
 	c := boardComp{Designator: "J1", Pads: []boardPad{

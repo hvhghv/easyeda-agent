@@ -41,6 +41,15 @@ const (
 	// 2mm 来自「护套通常比母座每侧宽 1mm 左右」的粗经验，**待校准初值**；用到它的
 	// finding 一律带 `plug-width=fallback` 标记，让人知道这条是估出来的。
 	pcbPlugFallbackMarginMil = 2.0 * mmToMil
+
+	// pcbMatingCorridorDepthMil 是插拔通道（mating corridor）的纵深：卧贴插口的
+	// 开口面前方这么深的一条走廊里不能有器件，否则插头进不来。
+	//
+	// v1 用固定 250mil ≈ 6.35mm，**待校准初值**——它是「插头本体插入段 + 手指/
+	// 护套余量」的下限估计，不是从包络表推的：包络表（_plug_envelope.json）记的是
+	// 插头**宽**（沿板边方向），不是插入**深**，拿宽换算深是张冠李戴。等包络表
+	// 补上 depth 字段后再按件取值。
+	pcbMatingCorridorDepthMil = 250.0
 )
 
 // ---------------------------------------------------------------------------
@@ -454,6 +463,177 @@ func findConnectorPlugClearance(conns []boardConnector, o *boardOutline) []pcbCh
 			}
 		}
 		out = append(out, f)
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// 规则③ connector-mating-blocked —— 插拔通道禁布（mating corridor）
+// ---------------------------------------------------------------------------
+
+// matingAxisDir 把世界系开口向量吸附到主轴（±1,0 / 0,±1）。
+//
+// 旋转几乎总是 90° 的倍数，向量本来就在轴上；万一遇到斜置件（45° 旋转），取分量
+// 更大的轴——走廊是轴对齐矩形，斜向走廊 v1 不做。两分量近乎相等（|差|<0.1）时
+// 判不出主轴，老实返回 false，别猜。
+func matingAxisDir(wx, wy float64) (dx, dy float64, ok bool) {
+	ax, ay := math.Abs(wx), math.Abs(wy)
+	if ax < 0.1 && ay < 0.1 {
+		return 0, 0, false // 零向量：块声明解析失败
+	}
+	if math.Abs(ax-ay) < 0.1 {
+		return 0, 0, false // 45° 斜置：主轴不明，不猜
+	}
+	if ax > ay {
+		if wx > 0 {
+			return 1, 0, true
+		}
+		return -1, 0, true
+	}
+	if wy > 0 {
+		return 0, 1, true
+	}
+	return 0, -1, true
+}
+
+// connectorMatingCorridor 计算一个连接器的**板上**插拔通道矩形。
+//
+// 卧贴（水平插拔）插口的器件特性：插头从开口面沿开口方向水平进入，开口前方
+// depth（pcbMatingCorridorDepthMil）纵深、连接器 bbox 宽（垂直开口轴）的一条
+// 走廊里放了器件，插头就物理进不来——footprint 不重叠 ≠ 插得进去，这与规则②
+// 的插头护套是同一类「板上几何里不存在的三维实体」。
+//
+// 开口方向的取法分三档，**判不了绝不猜**：
+//  1. 块库声明（connOpeningFor，局部向量 → rotate2d 换算世界向量）——唯一可信源。
+//  2. 没有声明但**贴边**（外沿带内）：按「朝板外」推定——此时通道在板外，
+//     板上没有走廊可言，直接 ok=false（这正是绝大多数正确摆放的边缘连接器：
+//     它们的通道被板框天然裁掉，永远不会产生误报）。
+//  3. 非贴边又没有声明（板中的 FPC 座 / 内部 Type-C / 卡座）：铜箔几何里根本
+//     没有开口方向这个信息，ok=false——宁可漏报，不拿猜的方向去骂人。
+//
+// 走廊裁剪到板框 AABB 内（多边形裁剪 v1 不做：AABB 只会把走廊裁**小**，方向是
+// 保守的）；裁完退化（任一边 <1mil）= 通道全在板外，ok=false。
+func connectorMatingCorridor(b boardConnector, o *boardOutline) (layoutBBox, bool) {
+	if b.comp.BBox == nil {
+		return layoutBBox{}, false // 没 bbox 连开口面在哪都定不了
+	}
+	lox, loy, declared := connOpeningFor(b.comp.Device)
+	if !declared {
+		// 贴边推定朝外 → 通道在板外，不产出板上走廊；非贴边 → 判不了方向。
+		// 两条路殊途同归都是 false，但语义不同，分开写免得后人合并成一句后
+		// 顺手给非贴边件加个「朝最近边」的猜测——那正是这条规则明令禁止的。
+		return layoutBBox{}, false
+	}
+	wx, wy := rotate2d(lox, loy, b.comp.Rotation)
+	dx, dy, ok := matingAxisDir(wx, wy)
+	if !ok {
+		return layoutBBox{}, false
+	}
+	bb := *b.comp.BBox
+	var cor layoutBBox
+	switch {
+	case dx > 0:
+		cor = layoutBBox{MinX: bb.MaxX, MinY: bb.MinY, MaxX: bb.MaxX + pcbMatingCorridorDepthMil, MaxY: bb.MaxY}
+	case dx < 0:
+		cor = layoutBBox{MinX: bb.MinX - pcbMatingCorridorDepthMil, MinY: bb.MinY, MaxX: bb.MinX, MaxY: bb.MaxY}
+	case dy > 0:
+		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MaxY, MaxX: bb.MaxX, MaxY: bb.MaxY + pcbMatingCorridorDepthMil}
+	default: // dy < 0
+		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MinY - pcbMatingCorridorDepthMil, MaxX: bb.MaxX, MaxY: bb.MinY}
+	}
+	if o != nil {
+		cor.MinX = math.Max(cor.MinX, o.BBox.MinX)
+		cor.MinY = math.Max(cor.MinY, o.BBox.MinY)
+		cor.MaxX = math.Min(cor.MaxX, o.BBox.MaxX)
+		cor.MaxY = math.Min(cor.MaxY, o.BBox.MaxY)
+	}
+	if cor.MaxX-cor.MinX < 1 || cor.MaxY-cor.MinY < 1 {
+		return layoutBBox{}, false // 走廊全在板外（贴边朝外的正常姿态）
+	}
+	return cor, true
+}
+
+// compBodyBBox 是遮挡判定用的器件本体代理：**焊盘并集**优先，退化才用渲染 bbox。
+//
+// 选焊盘并集而不是渲染 bbox 的理由与 layout-lint 的 bodyOf 完全相同：渲染 bbox
+// 含丝印和位号文字，实测比本体大 40%+，拿它判「三维实体挡道」会把丝印级贴边的
+// 邻件全骂成遮挡（好板校准时 lint 吃过 104 处误报的亏）。焊盘并集从下方逼近本体
+// ——宁可漏报一个壳体略宽于焊盘的件，不误报一排摆对了的去耦电容。
+// 焊盘矩形按轴对齐 W×H 取（与 padCopperRect 同口径，忽略 pad 自身旋转——
+// 旋转焊盘的 AABB 介于两者之间，误差远小于丝印那 40%）。
+func compBodyBBox(c boardComp) (layoutBBox, bool) {
+	bb := layoutBBox{MinX: math.Inf(1), MinY: math.Inf(1), MaxX: math.Inf(-1), MaxY: math.Inf(-1)}
+	any := false
+	for _, p := range c.Pads {
+		if p.W <= 0 || p.H <= 0 {
+			continue
+		}
+		any = true
+		bb.MinX = math.Min(bb.MinX, p.X-p.W/2)
+		bb.MinY = math.Min(bb.MinY, p.Y-p.H/2)
+		bb.MaxX = math.Max(bb.MaxX, p.X+p.W/2)
+		bb.MaxY = math.Max(bb.MaxY, p.Y+p.H/2)
+	}
+	if any {
+		return bb, true
+	}
+	if c.BBox != nil {
+		return *c.BBox, true
+	}
+	return layoutBBox{}, false
+}
+
+// bboxIntersects 是 layoutBBox 的开区间相交判定（贴边相切不算相交——走廊边界
+// 上恰好压线的件按「刚好让开」处理，与 cpRect.overlaps 的排他边界同口径）。
+func bboxIntersects(a, b layoutBBox) bool {
+	return a.MinX < b.MaxX && b.MinX < a.MaxX && a.MinY < b.MaxY && b.MinY < a.MaxY
+}
+
+// findConnectorMatingBlocked 报告「器件挡在卧贴插口的插拔通道里」。
+//
+// 每个遮挡件一条 finding，级别恒 WARN——走廊方向只可能来自块库声明（见
+// connectorMatingCorridor），是三档置信度里的可信档，不需要像规则①那样按来源
+// 分级。**归因落在遮挡件**（Designator = 遮挡件）：连接器是贴边定死的，动它
+// 代价大；动遮挡件才是解法，精修环按 Designator 派活必须拿到该动的那个。
+//
+// 只比同装配面：异面器件的插头路径在 Z 向被板厚隔开（与规则②的收窄③同理）；
+// 任一侧 Layer 未知（0）时不过滤——未知不等于不同面。
+func findConnectorMatingBlocked(conns []boardConnector, comps []boardComp, o *boardOutline) []pcbCheckFinding {
+	var out []pcbCheckFinding
+	for _, b := range conns {
+		cor, ok := connectorMatingCorridor(b, o)
+		if !ok {
+			continue
+		}
+		for _, c := range comps {
+			if c.Designator == b.comp.Designator || (c.ID != "" && c.ID == b.comp.ID) {
+				continue // 自己不算挡自己
+			}
+			if c.Layer != 0 && b.comp.Layer != 0 && c.Layer != b.comp.Layer {
+				continue
+			}
+			body, hasBody := compBodyBBox(c)
+			if !hasBody || !bboxIntersects(body, cor) {
+				continue
+			}
+			cx, cy := c.center()
+			f := pcbCheckFinding{
+				Type: "connector-mating-blocked", Level: "WARN",
+				Designator: c.Designator, // 归因给遮挡件——动它才能解决
+				Message: fmt.Sprintf(
+					"%s sits in the mating corridor of %s (the %.0fmil-deep zone in front of its block-declared opening) — "+
+						"a horizontally-mated plug cannot enter with the part in the way; move %s clear of the corridor",
+					c.Designator, b.comp.Designator, pcbMatingCorridorDepthMil, c.Designator,
+				) + docRule("3.5", "插拔通道禁布 — 开口前方是插头的必经之路"),
+				At: &pcbXY{X: round2(cx), Y: round2(cy)},
+			}
+			for _, id := range []string{c.ID, b.comp.ID} {
+				if id != "" {
+					f.Primitives = append(f.Primitives, id)
+				}
+			}
+			out = append(out, f)
+		}
 	}
 	return out
 }

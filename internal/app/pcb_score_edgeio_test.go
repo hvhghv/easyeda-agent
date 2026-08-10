@@ -260,6 +260,75 @@ func TestEdgeIOScorer_FallbackPlugWidthDegrades(t *testing.T) {
 	}
 }
 
+// 插拔通道被遮挡:按遮挡件数扣分,归因落在**遮挡件**(连接器贴边定死,动遮挡件
+// 才是解法),Σ 归因仍等于本维扣掉的总分。
+//
+// 场景:KF301 在底边带内但缩进 150mil(开口 -y 朝外,不触发 opening/plug-face
+// 罚则 —— KF301 刻意不在 plug-face 正则里),走廊 = 板内 {1800,0,2200,150};
+// C1 的焊盘并集落在走廊里。
+func TestEdgeIOScorer_MatingCorridorBlockedChargesBlocker(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 250, 400, 200, "VOUT", "GND"),
+			mkBoardConn("C1", "0402 100nF", 1, 2000, 80, 40, 20, "VOUT", "GND"),
+		},
+	}
+	d := edgeIOScore(snap, nil)
+	if want := 100 - edgeIOMatingBlockedPenalty; d.Score != want {
+		t.Fatalf("score = %v, want %v (%+v)", d.Score, want, d.Contributors)
+	}
+	assertContribSum(t, d)
+	if len(d.Contributors) != 1 || d.Contributors[0].Designator != "C1" {
+		t.Fatalf("the penalty must land on the BLOCKER C1: %+v", d.Contributors)
+	}
+	if got := d.Metrics["matingBlocked"]; got != 1 {
+		t.Errorf("matingBlocked = %v, want 1", got)
+	}
+	var flagged bool
+	for _, f := range d.Findings {
+		if f.Type == "connector-mating-blocked" && f.Designator == "C1" {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Error("expected a connector-mating-blocked finding attributed to C1")
+	}
+}
+
+// 封顶:遮挡件再多,扣分停在 edgeIOMatingBlockedCap —— 走廊里塞了一排件是同一个
+// 病灶(走廊选址错了),不该把一维扣穿;超出封顶的件仍出 finding(可见),只是
+// 不再重复扣分,Σ 归因 = 实际扣分的恒等式必须保住。
+func TestEdgeIOScorer_MatingCorridorPenaltyCapped(t *testing.T) {
+	snap := &boardSnapshot{
+		Outline: testOutline(),
+		Components: []boardComp{
+			mkBoardConn("J1", "KF301-5.0-2P", 1, 2000, 250, 400, 200, "VOUT", "GND"),
+			mkBoardConn("C1", "0402 100nF", 1, 1850, 80, 40, 20, "VOUT", "GND"),
+			mkBoardConn("C2", "0402 100nF", 1, 1950, 80, 40, 20, "VOUT", "GND"),
+			mkBoardConn("C3", "0402 100nF", 1, 2050, 80, 40, 20, "VOUT", "GND"),
+			mkBoardConn("C4", "0402 100nF", 1, 2150, 80, 40, 20, "VOUT", "GND"),
+		},
+	}
+	d := edgeIOScore(snap, nil)
+	if want := 100 - edgeIOMatingBlockedCap; d.Score != want {
+		t.Fatalf("score = %v, want %v (capped) (%+v)", d.Score, want, d.Contributors)
+	}
+	assertContribSum(t, d)
+	if got := d.Metrics["matingBlocked"]; got != 4 {
+		t.Errorf("matingBlocked = %v, want 4 — findings past the cap stay visible", got)
+	}
+	n := 0
+	for _, f := range d.Findings {
+		if f.Type == "connector-mating-blocked" {
+			n++
+		}
+	}
+	if n != 4 {
+		t.Errorf("all 4 blockers must produce findings even when the penalty is capped; got %d", n)
+	}
+}
+
 // 这一维要真的挂在打分骨架上（注册 + 参与 analyzeLayoutScore），否则报告里会静静
 // 少一维："dimension not implemented yet"。
 func TestEdgeIOScorer_WiredIntoReport(t *testing.T) {

@@ -56,6 +56,14 @@ const (
 	edgeIOPlugFaceMaxPenalty = 15.0
 	// 插接面允许的贴边容差(mil):板边线有线宽、封装 bbox 有丝印,±25mil 内视为齐平。
 	edgeIOPlugFaceFlushTolMil = 25.0
+
+	// 插拔通道被遮挡:每个遮挡件扣这么多,封顶 edgeIOMatingBlockedCap。
+	// **待校准初值**:单件 10 与「启发式内部件占外沿」(6)和「开口平行板边」(7.5)
+	// 同量级 —— 方向可信(块库声明)但后果可绕(动一个小件就能解),不该到插头
+	// 打架(18)那一档;封顶 30 = 三件,再多也是同一个病灶(走廊选址错了),
+	// 不该把一维扣穿。归因落在**遮挡件**:连接器贴边是定死的,动遮挡件才是解法。
+	edgeIOMatingBlockedPenalty = 10.0
+	edgeIOMatingBlockedCap     = 30.0
 )
 
 // edgeIOPlugFaceRe 圈定「插头从板外水平进入」的器件:插接面必须齐边/外突。
@@ -225,6 +233,24 @@ func (edgeIOScorer) score(ctx *scoreCtx) scoreDimension {
 	}
 	d.Findings = append(d.Findings, findConnectorPlugClearance(conns, o)...)
 
+	// ── ④ connector-mating-blocked（插拔通道禁布）────────────────────────────
+	// 走廊方向只可能来自块库声明（可信档），所以 finding 恒 WARN、扣分不分级。
+	// 逐遮挡件扣、封顶 —— budget 记账保证 Σ(contributor.Penalty) 恒等于本维
+	// 实际扣掉的分（超出封顶的遮挡件仍出 finding，但不再重复扣分）。
+	matingFindings := findConnectorMatingBlocked(conns, ctx.snap.Components, o)
+	matingBudget := edgeIOMatingBlockedCap
+	for _, f := range matingFindings {
+		p := edgeIOMatingBlockedPenalty
+		if p > matingBudget {
+			p = matingBudget
+		}
+		if p > 0 {
+			charge(f.Designator, p, "blocks the mating corridor of a plug-in connector")
+			matingBudget -= p
+		}
+	}
+	d.Findings = append(d.Findings, matingFindings...)
+
 	// ── 汇总 ────────────────────────────────────────────────────────────────
 	total := 0.0
 	var contribs []scoreContributor
@@ -265,6 +291,7 @@ func (edgeIOScorer) score(ctx *scoreCtx) scoreDimension {
 		"internalOnEdge":     float64(len(internalFindings)),
 		"internalOnEdgeSpec": float64(internalSpecN),
 		"plugConflicts":      float64(len(conflicts)),
+		"matingBlocked":      float64(len(matingFindings)),
 		"plugWidthFallback":  float64(plugFallback),
 		"plugWidthUnknown":   float64(plugUnknown),
 		"edgeBandMil":        pcbConnEdgeBandMil,
