@@ -44,6 +44,12 @@ type PlugEnvelope struct {
 	PlugMarginMM      float64  `json:"plug_margin_mm"`
 	Confidence        string   `json:"confidence"` // datasheet | measured | estimated
 	Reason            string   `json:"reason"`
+	// InsertDepthMM 是插头进入方向需要的板上通道纵深(mating-corridor 消费,
+	// 替代 250mil 固定值;只对内部卧贴安装有意义)。0 = 未声明,消费方回落默认。
+	InsertDepthMM float64 `json:"insert_depth_mm"`
+	// OverhangMM 是贴边安装时插接面外突板框的推荐量(place-constrained T2 用
+	// -overhang 当边距自动外突;车机 J2 Type-C 实测收敛 ≈1mm)。0 = 齐平。
+	OverhangMM float64 `json:"overhang_mm"`
 }
 
 // WidthMM 返回该类别在给定引脚数下的插拔包络宽（mm）。

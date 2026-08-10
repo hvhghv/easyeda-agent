@@ -1,6 +1,16 @@
 package blocks
 
-import "encoding/json"
+import (
+	_ "embed"
+	"encoding/json"
+)
+
+// connectorOpeningsRaw 是独立声明表(与 _plug_envelope 同例:`_` 前缀被块加载器
+// 跳过,须显式 embed)。块内 openings 依旧有效,两处合并 —— 没有电路块可挂的
+// 器件(耳机口/FPC/HDMI)落这张表,声明必须带真板实测证据(见文件 _doc)。
+//
+//go:embed data/_connector_openings.json
+var connectorOpeningsRaw []byte
 
 // ConnectorOpening declares, for a footprint, which way its opening (the wire-entry
 // / plug face) points in the footprint's LOCAL (rotation-0) frame. This is a
@@ -23,6 +33,16 @@ func LoadConnectorOpenings() ([]ConnectorOpening, error) {
 		return nil, err
 	}
 	var out []ConnectorOpening
+	var standalone struct {
+		Openings []ConnectorOpening `json:"openings"`
+	}
+	if json.Unmarshal(connectorOpeningsRaw, &standalone) == nil {
+		for _, o := range standalone.Openings {
+			if o.Match != "" && o.Local != "" {
+				out = append(out, o)
+			}
+		}
+	}
 	for _, b := range all {
 		var raw struct {
 			Openings []ConnectorOpening `json:"openings"`

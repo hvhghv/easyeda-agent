@@ -97,11 +97,11 @@ func TestEdgeIOScorer_GroupedPortsScoreFull(t *testing.T) {
 	if d.Score != 100 {
 		t.Fatalf("a clean I/O edge must score 100; got %v (%+v)", d.Score, d.Contributors)
 	}
-	if d.Status != dimDegraded {
-		t.Errorf("status = %s — the Type-C opening direction is unverifiable, that has to show as degraded", d.Status)
-	}
-	if !strings.Contains(d.Reason, "opening") {
-		t.Errorf("reason must name the missing input: %s", d.Reason)
+	// 2026-08-10 起 Type-C 开口方向已由 _connector_openings.json 声明(六板实测
+	// 反推),bottom 边 rot0 的 local -y 朝外可验证 —— 三个口全可判,不再降级。
+	// (KF301 本就有声明。)这是数据把「不可判」补成「可判」的预期行为变化。
+	if d.Status != dimScored {
+		t.Errorf("status = %s — all three openings are now block-declared and verified outward, want scored (%s)", d.Status, d.Reason)
 	}
 	if got := d.Metrics["edgeConcentration"]; got != 1 {
 		t.Errorf("edgeConcentration = %v, want 1 (all three ports on one edge)", got)
@@ -129,6 +129,7 @@ func TestEdgeIOScorer_ScatterInwardAndOffEdge(t *testing.T) {
 		},
 	}
 	snap.Components[1].Rotation = 180 // KF301 局部开口 -y，转 180° 后朝 +y = 板内
+	snap.Components[2].Rotation = 270 // 左边 Type-C:local -y 转 270° 后朝 -x = 板外(开口惯例已声明,不转会吃 sideways 扣分)
 	d := edgeIOScore(snap, nil)
 	if want := 100 - 20.0 - 15.0 - 12.0; d.Score != want {
 		t.Fatalf("score = %v, want %v (%+v)", d.Score, want, d.Contributors)
@@ -363,6 +364,8 @@ func TestEdgeIOScorer_PlugFaceMustBeFlushOrProtrude(t *testing.T) {
 	flush := mkBoardConn("USB1", "TYPE-C-31-M-12", 1, 3990, 200, 20, 180, "VBUS", "GND")
 	inset := mkBoardConn("USB2", "TYPE-C-31-M-12", 1, 3840, 800, 60, 180, "VBUS2", "GND")   // bbox 右缘 3870 → 缩 130mil
 	protr := mkBoardConn("USB3", "TYPE-C-31-M-12", 1, 4030, 1400, 120, 180, "VBUS3", "GND") // bbox 越框 60mil
+	// 开口惯例已声明(local -y):右边缘件转 90° 朝外,免得 sideways 扣分混进本测试的断言
+	flush.Rotation, inset.Rotation, protr.Rotation = 90, 90, 90
 	// 外突件的焊盘保持在板内(真实 Type-C 的贴装脚在板上) —— off-board 不该报它。
 	for i := range protr.Pads {
 		protr.Pads[i].X = 3980

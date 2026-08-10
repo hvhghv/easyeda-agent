@@ -1,0 +1,42 @@
+{
+ "_doc": [
+  "连接器开口方向声明表 —— connOpeningFor 的补充数据源(块内 openings 之外)。",
+  "",
+  "为什么单列一张表:openings 原生长在块文件里(kf301 在 xl1509 块),但 PJ 耳机口/",
+  "FPC/HDMI 这类器件没有对应的电路块可挂 —— 与 _plug_envelope.json 同例,`_` 前缀",
+  "文件被块加载器跳过、由 opening.go 显式 embed 合并。",
+  "",
+  "**每一条都来自真板实测反推,不是猜的**(2026-08-10,六板校准:车机V2/庐山派K230/",
+  "实战派S3/RK3568/MIPI扩展板/BBClaw):取板上已摆对的贴边插拔件,世界开口方向 =",
+  "指向最近板边,按 -rotation 转回封装局部坐标;多实例/多封装族一致才收录。",
+  "反推脚本与逐件证据见各条 reason。剔除的假阳性:SIM-E-MFF2(焊接式 eSIM 芯片,",
+  "不是插槽,无开口可言)。"
+ ],
+ "openings": [
+  {
+   "match": "type-c",
+   "local": "-y",
+   "reason": "三个独立 Type-C 封装族六板实测全部 local=-y(立创库 Type-C 绘制惯例:rotation 0 插接面朝下):TYPEC-304-ACP16(实战派S3 USB1 rot90 贴+x边)、TYPEC-304-BCP16(RK3568 USB6 rot0 贴-y边)、USB-TYPE-C-019(K230 U1 rot-90 贴-x边)、USB3.1TYPE-C16P(车机 J2 rot0 贴-y边,外突40.7mil)。通配 type-c 子串,四族证据一致方敢通配。"
+  },
+  {
+   "match": "usb-303wsd",
+   "local": "-y",
+   "reason": "Micro-USB 母座 USB-303WSD-BRY:RK3568 USB7 rot180 贴+y边(gap 2.4mil) → 反推 local=-y,与 Type-C 家族同惯例。"
+  },
+  {
+   "match": "pj-320",
+   "local": "-x",
+   "reason": "3.5mm 耳机口 PJ-320A:K230 AUDIO1 rot0 贴-x边(gap 2.8mil) → local=-x。官方板单实例但 gap 近零,插孔朝边的姿态无歧义。"
+  },
+  {
+   "match": "fpc-05f",
+   "local": "+y",
+   "reason": "FPC 翻盖座 FPC-05F 族:K230 FPC3/FPC4(22P rot270 贴+x边)与 FPC1(6P rot180 贴-y边)三实例两封装一致 → local=+y(排线从 rotation 0 的 +y 侧插入)。"
+  },
+  {
+   "match": "hdmi-001c",
+   "local": "+x",
+   "reason": "HDMI-001C:RK3568 USB8 rot90 贴+y边且外突 135.7mil(插接面出板,姿态无歧义) → local=+x。单实例官方板。"
+  }
+ ]
+}

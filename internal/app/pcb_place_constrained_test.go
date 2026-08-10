@@ -541,3 +541,32 @@ func TestConstrainedPlaceSatelliteAvoidsMatingCorridor(t *testing.T) {
 		t.Errorf("C1 relocated to %+v which still overlaps the mating corridor %+v", final, corridor)
 	}
 }
+
+// 插拔类的 T2 外突(用户点名的器件特性收尾):包络表声明了 overhang_mm 的类别
+// (Type-C 1mm=车机 J2 实测收敛),贴边边距 = -overhang → 插接面自动出板框。
+// off-board 判焊盘不判 bbox,外突不触发出板告警。
+func TestConstrainedPlacePlugFaceOverhang(t *testing.T) {
+	comps := []cpComp{
+		// Type-C 靠近底边(local -y 开口已由 _connector_openings 声明,rot0 朝外)。
+		mkCP("USB1", "TYPE-C-31-M-12", 1, 1000, 300, 360, 280, 4),
+	}
+	opt := defaultCpOptions()
+	board := cpRect{0, 0, 2000, 2000}
+	opt.board = &board
+	moves, _ := planConstrainedPlace(comps, nil, opt)
+	var usb *apMove
+	for i := range moves {
+		if moves[i].Designator == "USB1" {
+			usb = &moves[i]
+		}
+	}
+	if usb == nil {
+		t.Fatal("USB1 must be seated by T2 (it sits 160mil inboard, plug-face wants flush-or-protrude)")
+	}
+	// 包络表 type-c overhang_mm=1.0 → 39.37mil。落位后 bbox 底缘应出板框 ≈39mil。
+	bottomAfter := usb.NewY - 140 // mkCP anchor=bbox 中心,半高 140
+	protrude := 0.0 - bottomAfter
+	if protrude < 30 || protrude > 50 {
+		t.Fatalf("plug face should protrude ~39mil past the bottom edge, got %.1fmil (NewY=%.1f)", protrude, usb.NewY)
+	}
+}

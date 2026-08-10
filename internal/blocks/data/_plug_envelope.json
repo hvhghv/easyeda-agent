@@ -1,151 +1,275 @@
 {
-  "_doc": [
-    "连接器「插拔包络宽」查找表 —— #168② connector-plug-clearance 的唯一数据源。",
-    "",
-    "为什么需要它：PCB 上能看到的只有母座的 footprint/铜箔，而装配时真正打架的是",
-    "**插头护套 + 线缆 overmold**，它常比母座本体宽好几毫米（USB Type-C 母座 ~8.9mm，",
-    "粗线插头护套 12-14mm）。所以 footprint 不重叠 ≠ 插头插得进去 —— layout-lint 的",
-    "overlap 和 pcb check 现有规则全都抓不到这一类，它们只看铜箔和 courtyard。",
-    "",
-    "语义：plug_width_mm / pitch 公式给出的是「插拔包络宽」＝ 插拔这个口时侧向占用的",
-    "宽度，取 **插头护套宽与母座本体宽的较大者**。这样定义保证包络永远不会比 footprint",
-    "还窄（否则查到表反而比 bbox 兜底更宽松，规则会被数据削弱）。",
-    "",
-    "两种声明方式：",
-    "  1) 固定宽（Type-C / USB-A / DC 座 / IPEX…）：直接给 plug_width_mm。",
-    "  2) 排式连接器（XH/PH/螺钉端子/排针）：宽度随脚数变，给 pitch_mm + plug_margin_mm，",
-    "     宽度 = pitch_mm × (pins − 1) + plug_margin_mm；pins 由消费侧从真实焊盘数得到。",
-    "",
-    "匹配：对已放置器件的 device 名（manufacturerId 优先）做**小写子串**匹配，与",
-    "opening.json 里 ConnectorOpening.match 同范式。多条命中时**最长 key 赢**，避免",
-    "泛 key(\"usb\") 抢走专 key(\"usb-c\")。",
-    "",
-    "confidence 的口径（诚实标注，别把估算当规格书）：",
-    "  datasheet = 抄自厂商尺寸图 / 接口规范；",
-    "  measured  = 我们拿真件卡尺量过；",
-    "  estimated = 按常见款式估的初值，**待用真插头校准**。",
-    "",
-    "文件名 `_` 前缀：块加载器（blocks.Load）按约定跳过 `_` 开头的文件，所以这张表不会",
-    "被当成一个电路块；它由 plug.go 用显式 go:embed 单独读取（目录 embed 会排除 `_` 文件）。"
-  ],
-  "schema_version": 1,
-  "envelopes": [
-    {
-      "match": "type-c",
-      "aliases": ["typec", "type c", "usb-c", "usbc", "usb_c", "usb type-c"],
-      "name": "USB Type-C 母座",
-      "receptacle_width_mm": 8.94,
-      "plug_width_mm": 13.0,
-      "confidence": "estimated",
-      "reason": "母座本体宽 8.94mm 出自 USB Type-C 规范的 receptacle 外形（datasheet 级）；插头端取常见 3A/5A 粗线缆 overmold 12-14mm 的中值 13mm —— 这一半是估算，未逐款卡尺量。#168 的 box-v2 rev-a 正是这个场景：三口中心距 12-13mm，按母座 ~9mm 判都过，按插头护套判才打架。"
-    },
-    {
-      "match": "usb-a",
-      "aliases": ["usba", "usb_a", "type-a", "typea", "usb type-a", "usb-af", "usb af"],
-      "name": "USB Type-A 母座",
-      "receptacle_width_mm": 13.2,
-      "plug_width_mm": 18.0,
-      "confidence": "estimated",
-      "reason": "母座金属壳 13.2×5.7mm 出自 USB 2.0 规范 Type-A receptacle 外形（datasheet 级）；A 型插头带屏蔽壳与线缆 overmold 常见 16-20mm，取中值 18mm —— 估算，待校准。"
-    },
-    {
-      "match": "micro-usb",
-      "aliases": ["microusb", "micro usb", "micro_usb", "micro-b", "mk5p", "mk-5p"],
-      "name": "Micro-USB(B) 母座",
-      "receptacle_width_mm": 7.5,
-      "plug_width_mm": 11.0,
-      "confidence": "estimated",
-      "reason": "Micro-B 插头金属舌宽 6.85mm 出自 USB Micro 规范；连上线缆 overmold 后常见 10-12mm，取 11mm。母座本体 ~7.5mm 为常见款估值 —— 整条 estimated。"
-    },
-    {
-      "match": "dc-005",
-      "aliases": ["dc005", "dc_005", "dc jack", "dc-jack", "dcjack", "5.5x2.1", "5.5*2.1", "dc电源座", "dc座"],
-      "name": "DC 电源插孔 5.5/2.1",
-      "receptacle_width_mm": 9.0,
-      "plug_width_mm": 12.0,
-      "confidence": "estimated",
-      "reason": "DC-005 本体 9.0×14.5mm 取自常见厂商尺寸图；5.5/2.1 圆头插头带线护套直径常见 10-13mm，取 12mm —— 插头侧 estimated。"
-    },
-    {
-      "match": "xh2.54",
-      "aliases": ["xh-2.54", "xh 2.54", "xh254", "jst-xh", "jst xh", "xhp-"],
-      "name": "XH2.54 线对板连接器(JST XH 兼容)",
-      "pitch_mm": 2.54,
-      "plug_margin_mm": 4.8,
-      "confidence": "estimated",
-      "reason": "JST XH 胶壳 XHP-n 外形长 ≈ 2.5×n + 2.35mm（厂商规格书），折成「最外两脚间距 + 余量」即 2.54×(n−1) + 约 4.85mm，取 4.8mm。国产兼容胶壳尺寸略有出入，标 estimated；线束从胶壳尾部出线，侧向不再额外占宽。"
-    },
-    {
-      "match": "ph2.0",
-      "aliases": ["ph-2.0", "ph 2.0", "ph20", "jst-ph", "jst ph", "phr-"],
-      "name": "PH2.0 线对板连接器(JST PH 兼容)",
-      "pitch_mm": 2.0,
-      "plug_margin_mm": 4.0,
-      "confidence": "estimated",
-      "reason": "JST PH 胶壳 PHR-n 外形长 ≈ 2.0×n + 1.9mm（厂商规格书）→ 2.0×(n−1) + 3.9mm，取 4.0mm。box-v2 的 J1 备份电池座就是 PH2.0-3P（3P → 2.0×2 + 4.0 = 8.0mm）。国产兼容件有偏差，标 estimated。"
-    },
-    {
-      "match": "kf301",
-      "aliases": ["kf-301", "kf301-5.0", "kf301-5.08"],
-      "name": "KF301 螺钉接线端子(5.0/5.08 间距)",
-      "pitch_mm": 5.0,
-      "plug_margin_mm": 5.0,
-      "confidence": "datasheet",
-      "reason": "KF301-5.0-nP 本体长 = 5.0×n mm（厂商尺寸图：2P=10.0 / 3P=15.0 / 4P=20.0），即 pitch×(n−1) + 5.0mm。螺钉端子没有可拔插护套，包络就是端子本体 —— 接线是从正面进、螺丝刀从上方拧，侧向不额外占宽；但**上方**要留螺丝刀净空，这条规则测不到（见 limits）。"
-    },
-    {
-      "match": "kf128",
-      "aliases": ["kf-128", "kf128-2.54", "kf128-3.5"],
-      "name": "KF128 螺钉接线端子(2.54/3.5 间距)",
-      "pitch_mm": 2.54,
-      "plug_margin_mm": 4.5,
-      "confidence": "estimated",
-      "reason": "KF128-2.54 本体长常见 2.54×(n−1) + 约 4.5mm（2P ≈ 7.0mm），来自常见电商尺寸图而非官方规格书 → estimated。3.5mm 间距款用同一条会低估约 1mm/脚，待拆成独立条目。"
-    },
-    {
-      "match": "kf2edg",
-      "aliases": ["kf-2edg", "2edg", "kf2edgk", "plug-in terminal"],
-      "name": "KF2EDG 拔插式接线端子(3.81/5.08 间距)",
-      "pitch_mm": 3.81,
-      "plug_margin_mm": 6.0,
-      "confidence": "estimated",
-      "reason": "拔插式端子的**公头**（带压线钳口）比板上母座更宽，常见 3.81 间距公头长 ≈ 3.81×(n−1) + 6mm。取 6.0mm 余量为估算值；5.08 间距款会低估，待拆条目。"
-    },
-    {
-      "match": "hdr-2.54",
-      "aliases": ["hdr2.54", "hdr_2.54", "header-2.54", "pin-header-2.54", "sip-2.54", "sip2-2.54", "dupont", "杜邦"],
-      "name": "2.54mm 排针 / 杜邦母头",
-      "pitch_mm": 2.54,
-      "plug_margin_mm": 3.2,
-      "confidence": "estimated",
-      "reason": "2.54 杜邦母头胶壳宽 ≈ 2.54×n + 0.7mm（常见 DuPont housing）→ 2.54×(n−1) + 3.24mm，取 3.2mm。单排估算；双排（2×n）排针的胶壳另有厚度方向尺寸，这张表不区分排数 —— 已知偏保守偏窄。"
-    },
-    {
-      "match": "ipex",
-      "aliases": ["u.fl", "ufl", "mhf1", "mhf-1", "mhf"],
-      "name": "IPEX/U.FL 同轴座(MHF1)",
-      "receptacle_width_mm": 2.6,
-      "plug_width_mm": 4.0,
-      "confidence": "estimated",
-      "reason": "MHF1 母座 2.6×2.6mm 出自厂商规格书；插头金属壳 ø≈3.0mm，接 1.13mm 同轴线后侧向占用按 4.0mm 估。真正的约束更多在**上方净空**（要用专用拔取工具），侧向这一条只是下限 —— estimated。"
-    },
-    {
-      "match": "sma",
-      "aliases": ["sma-kwe", "sma座", "rp-sma"],
-      "name": "SMA 射频座",
-      "receptacle_width_mm": 8.0,
-      "plug_width_mm": 14.0,
-      "confidence": "estimated",
-      "reason": "SMA 六角对边 8.0mm（IEC 60169-15 规范）；拧紧要 8mm 扳手，按扳手回转所需侧向净空取 14mm —— 装配可达性估算值，不是零件尺寸，待用真扳手校准。"
-    },
-    {
-      "match": "micro-sd",
-      "aliases": ["microsd", "micro sd", "tf-card", "tf card", "tf卡", "push-push", "pushpush"],
-      "name": "Micro-SD / TF 卡座(push-push)",
-      "receptacle_width_mm": 14.0,
-      "plug_width_mm": 14.0,
-      "confidence": "estimated",
-      "reason": "卡本身只有 11.0mm 宽（SD 规范），但插拔时手指要捏住卡座出口，侧向包络按卡座本体 ~14.0mm 取（常见 push-push 座 14×14.5mm 估值）。这里刻意取 max(卡宽, 座宽)：包络比 footprint 还窄的话，查到表反而比 bbox 兜底更宽松。"
-    }
-  ]
+ "_doc": [
+  "连接器「插拔包络宽」查找表 —— #168② connector-plug-clearance 的唯一数据源。",
+  "",
+  "为什么需要它：PCB 上能看到的只有母座的 footprint/铜箔，而装配时真正打架的是",
+  "**插头护套 + 线缆 overmold**，它常比母座本体宽好几毫米（USB Type-C 母座 ~8.9mm，",
+  "粗线插头护套 12-14mm）。所以 footprint 不重叠 ≠ 插头插得进去 —— layout-lint 的",
+  "overlap 和 pcb check 现有规则全都抓不到这一类，它们只看铜箔和 courtyard。",
+  "",
+  "语义：plug_width_mm / pitch 公式给出的是「插拔包络宽」＝ 插拔这个口时侧向占用的",
+  "宽度，取 **插头护套宽与母座本体宽的较大者**。这样定义保证包络永远不会比 footprint",
+  "还窄（否则查到表反而比 bbox 兜底更宽松，规则会被数据削弱）。",
+  "",
+  "两种声明方式：",
+  "  1) 固定宽（Type-C / USB-A / DC 座 / IPEX…）：直接给 plug_width_mm。",
+  "  2) 排式连接器（XH/PH/螺钉端子/排针）：宽度随脚数变，给 pitch_mm + plug_margin_mm，",
+  "     宽度 = pitch_mm × (pins − 1) + plug_margin_mm；pins 由消费侧从真实焊盘数得到。",
+  "",
+  "匹配：对已放置器件的 device 名（manufacturerId 优先）做**小写子串**匹配，与",
+  "opening.json 里 ConnectorOpening.match 同范式。多条命中时**最长 key 赢**，避免",
+  "泛 key(\"usb\") 抢走专 key(\"usb-c\")。",
+  "",
+  "confidence 的口径（诚实标注，别把估算当规格书）：",
+  "  datasheet = 抄自厂商尺寸图 / 接口规范；",
+  "  measured  = 我们拿真件卡尺量过；",
+  "  estimated = 按常见款式估的初值，**待用真插头校准**。",
+  "",
+  "文件名 `_` 前缀：块加载器（blocks.Load）按约定跳过 `_` 开头的文件，所以这张表不会",
+  "被当成一个电路块；它由 plug.go 用显式 go:embed 单独读取（目录 embed 会排除 `_` 文件）。",
+  "",
+  "2026-08-10 扩展两个可选字段(缺省 0 = 不声明,消费方回落默认):",
+  "  insert_depth_mm  插头进入方向需要的板上通道纵深 —— mating-corridor 用它替代",
+  "                   250mil 固定值(只对内部卧贴安装有意义;贴边件通道在板外)。",
+  "                   取插头金属壳/卡体的插入段长度,不含线缆弯折空间(那是外壳设计)。",
+  "  overhang_mm      贴边安装时插接面外突板框的推荐量 —— place-constrained T2 用",
+  "                   -overhang 当边距(自动外突)。车机 J2 Type-C 实测收敛 ≈1mm。"
+ ],
+ "schema_version": 1,
+ "envelopes": [
+  {
+   "match": "type-c",
+   "aliases": [
+    "typec",
+    "type c",
+    "usb-c",
+    "usbc",
+    "usb_c",
+    "usb type-c"
+   ],
+   "name": "USB Type-C 母座",
+   "receptacle_width_mm": 8.94,
+   "plug_width_mm": 13.0,
+   "confidence": "estimated",
+   "reason": "母座本体宽 8.94mm 出自 USB Type-C 规范的 receptacle 外形（datasheet 级）；插头端取常见 3A/5A 粗线缆 overmold 12-14mm 的中值 13mm —— 这一半是估算，未逐款卡尺量。#168 的 box-v2 rev-a 正是这个场景：三口中心距 12-13mm，按母座 ~9mm 判都过，按插头护套判才打架。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 6.5,
+   "overhang_mm": 1.0
+  },
+  {
+   "match": "usb-a",
+   "aliases": [
+    "usba",
+    "usb_a",
+    "type-a",
+    "typea",
+    "usb type-a",
+    "usb-af",
+    "usb af"
+   ],
+   "name": "USB Type-A 母座",
+   "receptacle_width_mm": 13.2,
+   "plug_width_mm": 18.0,
+   "confidence": "estimated",
+   "reason": "母座金属壳 13.2×5.7mm 出自 USB 2.0 规范 Type-A receptacle 外形（datasheet 级）；A 型插头带屏蔽壳与线缆 overmold 常见 16-20mm，取中值 18mm —— 估算，待校准。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 12.0,
+   "overhang_mm": 1.5
+  },
+  {
+   "match": "micro-usb",
+   "aliases": [
+    "microusb",
+    "micro usb",
+    "micro_usb",
+    "micro-b",
+    "mk5p",
+    "mk-5p"
+   ],
+   "name": "Micro-USB(B) 母座",
+   "receptacle_width_mm": 7.5,
+   "plug_width_mm": 11.0,
+   "confidence": "estimated",
+   "reason": "Micro-B 插头金属舌宽 6.85mm 出自 USB Micro 规范；连上线缆 overmold 后常见 10-12mm，取 11mm。母座本体 ~7.5mm 为常见款估值 —— 整条 estimated。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 5.5,
+   "overhang_mm": 1.0
+  },
+  {
+   "match": "dc-005",
+   "aliases": [
+    "dc005",
+    "dc_005",
+    "dc jack",
+    "dc-jack",
+    "dcjack",
+    "5.5x2.1",
+    "5.5*2.1",
+    "dc电源座",
+    "dc座"
+   ],
+   "name": "DC 电源插孔 5.5/2.1",
+   "receptacle_width_mm": 9.0,
+   "plug_width_mm": 12.0,
+   "confidence": "estimated",
+   "reason": "DC-005 本体 9.0×14.5mm 取自常见厂商尺寸图；5.5/2.1 圆头插头带线护套直径常见 10-13mm，取 12mm —— 插头侧 estimated。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 9.0,
+   "overhang_mm": 0.0
+  },
+  {
+   "match": "xh2.54",
+   "aliases": [
+    "xh-2.54",
+    "xh 2.54",
+    "xh254",
+    "jst-xh",
+    "jst xh",
+    "xhp-"
+   ],
+   "name": "XH2.54 线对板连接器(JST XH 兼容)",
+   "pitch_mm": 2.54,
+   "plug_margin_mm": 4.8,
+   "confidence": "estimated",
+   "reason": "JST XH 胶壳 XHP-n 外形长 ≈ 2.5×n + 2.35mm（厂商规格书），折成「最外两脚间距 + 余量」即 2.54×(n−1) + 约 4.85mm，取 4.8mm。国产兼容胶壳尺寸略有出入，标 estimated；线束从胶壳尾部出线，侧向不再额外占宽。"
+  },
+  {
+   "match": "ph2.0",
+   "aliases": [
+    "ph-2.0",
+    "ph 2.0",
+    "ph20",
+    "jst-ph",
+    "jst ph",
+    "phr-"
+   ],
+   "name": "PH2.0 线对板连接器(JST PH 兼容)",
+   "pitch_mm": 2.0,
+   "plug_margin_mm": 4.0,
+   "confidence": "estimated",
+   "reason": "JST PH 胶壳 PHR-n 外形长 ≈ 2.0×n + 1.9mm（厂商规格书）→ 2.0×(n−1) + 3.9mm，取 4.0mm。box-v2 的 J1 备份电池座就是 PH2.0-3P（3P → 2.0×2 + 4.0 = 8.0mm）。国产兼容件有偏差，标 estimated。"
+  },
+  {
+   "match": "kf301",
+   "aliases": [
+    "kf-301",
+    "kf301-5.0",
+    "kf301-5.08"
+   ],
+   "name": "KF301 螺钉接线端子(5.0/5.08 间距)",
+   "pitch_mm": 5.0,
+   "plug_margin_mm": 5.0,
+   "confidence": "datasheet",
+   "reason": "KF301-5.0-nP 本体长 = 5.0×n mm（厂商尺寸图：2P=10.0 / 3P=15.0 / 4P=20.0），即 pitch×(n−1) + 5.0mm。螺钉端子没有可拔插护套，包络就是端子本体 —— 接线是从正面进、螺丝刀从上方拧，侧向不额外占宽；但**上方**要留螺丝刀净空，这条规则测不到（见 limits）。"
+  },
+  {
+   "match": "kf128",
+   "aliases": [
+    "kf-128",
+    "kf128-2.54",
+    "kf128-3.5"
+   ],
+   "name": "KF128 螺钉接线端子(2.54/3.5 间距)",
+   "pitch_mm": 2.54,
+   "plug_margin_mm": 4.5,
+   "confidence": "estimated",
+   "reason": "KF128-2.54 本体长常见 2.54×(n−1) + 约 4.5mm（2P ≈ 7.0mm），来自常见电商尺寸图而非官方规格书 → estimated。3.5mm 间距款用同一条会低估约 1mm/脚，待拆成独立条目。"
+  },
+  {
+   "match": "kf2edg",
+   "aliases": [
+    "kf-2edg",
+    "2edg",
+    "kf2edgk",
+    "plug-in terminal"
+   ],
+   "name": "KF2EDG 拔插式接线端子(3.81/5.08 间距)",
+   "pitch_mm": 3.81,
+   "plug_margin_mm": 6.0,
+   "confidence": "estimated",
+   "reason": "拔插式端子的**公头**（带压线钳口）比板上母座更宽，常见 3.81 间距公头长 ≈ 3.81×(n−1) + 6mm。取 6.0mm 余量为估算值；5.08 间距款会低估，待拆条目。"
+  },
+  {
+   "match": "hdr-2.54",
+   "aliases": [
+    "hdr2.54",
+    "hdr_2.54",
+    "header-2.54",
+    "pin-header-2.54",
+    "sip-2.54",
+    "sip2-2.54",
+    "dupont",
+    "杜邦"
+   ],
+   "name": "2.54mm 排针 / 杜邦母头",
+   "pitch_mm": 2.54,
+   "plug_margin_mm": 3.2,
+   "confidence": "estimated",
+   "reason": "2.54 杜邦母头胶壳宽 ≈ 2.54×n + 0.7mm（常见 DuPont housing）→ 2.54×(n−1) + 3.24mm，取 3.2mm。单排估算；双排（2×n）排针的胶壳另有厚度方向尺寸，这张表不区分排数 —— 已知偏保守偏窄。"
+  },
+  {
+   "match": "ipex",
+   "aliases": [
+    "u.fl",
+    "ufl",
+    "mhf1",
+    "mhf-1",
+    "mhf"
+   ],
+   "name": "IPEX/U.FL 同轴座(MHF1)",
+   "receptacle_width_mm": 2.6,
+   "plug_width_mm": 4.0,
+   "confidence": "estimated",
+   "reason": "MHF1 母座 2.6×2.6mm 出自厂商规格书；插头金属壳 ø≈3.0mm，接 1.13mm 同轴线后侧向占用按 4.0mm 估。真正的约束更多在**上方净空**（要用专用拔取工具），侧向这一条只是下限 —— estimated。"
+  },
+  {
+   "match": "sma",
+   "aliases": [
+    "sma-kwe",
+    "sma座",
+    "rp-sma"
+   ],
+   "name": "SMA 射频座",
+   "receptacle_width_mm": 8.0,
+   "plug_width_mm": 14.0,
+   "confidence": "estimated",
+   "reason": "SMA 六角对边 8.0mm（IEC 60169-15 规范）；拧紧要 8mm 扳手，按扳手回转所需侧向净空取 14mm —— 装配可达性估算值，不是零件尺寸，待用真扳手校准。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 8.0,
+   "overhang_mm": 0.0
+  },
+  {
+   "match": "micro-sd",
+   "aliases": [
+    "microsd",
+    "micro sd",
+    "tf-card",
+    "tf card",
+    "tf卡",
+    "push-push",
+    "pushpush"
+   ],
+   "name": "Micro-SD / TF 卡座(push-push)",
+   "receptacle_width_mm": 14.0,
+   "plug_width_mm": 14.0,
+   "confidence": "estimated",
+   "reason": "卡本身只有 11.0mm 宽（SD 规范），但插拔时手指要捏住卡座出口，侧向包络按卡座本体 ~14.0mm 取（常见 push-push 座 14×14.5mm 估值）。这里刻意取 max(卡宽, 座宽)：包络比 footprint 还窄的话，查到表反而比 bbox 兜底更宽松。 | depth/overhang 2026-08-10 补:估算档,来源见 _doc(overhang type-c=车机J2实测)。",
+   "insert_depth_mm": 10.0,
+   "overhang_mm": 0.5
+  },
+  {
+   "match": "pj-320",
+   "aliases": [
+    "pj320",
+    "pj-3",
+    "3.5mm",
+    "audio-jack",
+    "耳机座"
+   ],
+   "name": "3.5mm 耳机插座",
+   "receptacle_width_mm": 6.0,
+   "plug_width_mm": 10.0,
+   "pitch_mm": null,
+   "plug_margin_mm": null,
+   "insert_depth_mm": 14.0,
+   "overhang_mm": 0.0,
+   "confidence": "estimated",
+   "reason": "3.5mm 插头本体直径 ~8-10mm、插入段(三段式插针)~14mm。K230 AUDIO1 实板佐证贴边安装。"
+  }
+ ]
 }

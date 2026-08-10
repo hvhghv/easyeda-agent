@@ -656,7 +656,13 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		// 判据下既不算错也不被挪。
 		margin := opt.edgeMargin
 		if edgeIOPlugFaceRe.MatchString(c.footprint) {
+			// 齐平;包络表声明了 overhang_mm 的类别(Type-C 1mm=车机 J2 实测)则
+			// **负边距自动外突** —— 插接面出板框是这类器件的正确姿态,off-board
+			// 判焊盘不判 bbox,外突不会触发出板告警。
 			margin = 0
+			if env, ok := blocks.MatchPlugEnvelope(c.footprint); ok && env.OverhangMM > 0 {
+				margin = -env.OverhangMM * mmToMil
+			}
 		}
 		alreadyGood := best <= margin+30 && curScore > 15
 		clearlyWrong := curScore < -30 && score > 30

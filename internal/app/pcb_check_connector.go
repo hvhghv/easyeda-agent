@@ -530,16 +530,22 @@ func connectorMatingCorridor(b boardConnector, o *boardOutline) (layoutBBox, boo
 		return layoutBBox{}, false
 	}
 	bb := *b.comp.BBox
+	// 走廊纵深:包络表按器件类别声明的 insert_depth_mm 优先(插头金属壳/卡体的
+	// 插入段长度,datasheet/估算档,见 _plug_envelope _doc),没声明回落 250mil。
+	depth := pcbMatingCorridorDepthMil
+	if env, ok := blocks.MatchPlugEnvelope(b.comp.Device); ok && env.InsertDepthMM > 0 {
+		depth = env.InsertDepthMM * mmToMil
+	}
 	var cor layoutBBox
 	switch {
 	case dx > 0:
-		cor = layoutBBox{MinX: bb.MaxX, MinY: bb.MinY, MaxX: bb.MaxX + pcbMatingCorridorDepthMil, MaxY: bb.MaxY}
+		cor = layoutBBox{MinX: bb.MaxX, MinY: bb.MinY, MaxX: bb.MaxX + depth, MaxY: bb.MaxY}
 	case dx < 0:
-		cor = layoutBBox{MinX: bb.MinX - pcbMatingCorridorDepthMil, MinY: bb.MinY, MaxX: bb.MinX, MaxY: bb.MaxY}
+		cor = layoutBBox{MinX: bb.MinX - depth, MinY: bb.MinY, MaxX: bb.MinX, MaxY: bb.MaxY}
 	case dy > 0:
-		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MaxY, MaxX: bb.MaxX, MaxY: bb.MaxY + pcbMatingCorridorDepthMil}
+		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MaxY, MaxX: bb.MaxX, MaxY: bb.MaxY + depth}
 	default: // dy < 0
-		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MinY - pcbMatingCorridorDepthMil, MaxX: bb.MaxX, MaxY: bb.MinY}
+		cor = layoutBBox{MinX: bb.MinX, MinY: bb.MinY - depth, MaxX: bb.MaxX, MaxY: bb.MinY}
 	}
 	if o != nil {
 		cor.MinX = math.Max(cor.MinX, o.BBox.MinX)
