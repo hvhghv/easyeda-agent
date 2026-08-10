@@ -199,7 +199,7 @@ func (sgRoutableScorer) score(ctx *scoreCtx) scoreDimension {
 	why := map[string]string{}
 	sgAttributeCrossings(ctx, l, crossPen*scale, pen, why)
 	sgAttributeRatsnest(ctx, ratsPen*scale, pen, why)
-	d.Contributors = sgContributors(pen, why, &d)
+	d.Contributors = sgContributors(pen, why, &d, ctx.opts.keepAll)
 
 	d.Findings = sgRoutableFindings(l, crossPen, ratsPen, ratsPerSpan)
 	return d
@@ -384,7 +384,7 @@ func sgAttributeRatsnest(ctx *scoreCtx, total float64, pen map[string]float64, w
 
 // sgContributors 把扣分表变成排好序、截断过的归因列表。截断时把这件事写进 Reason，
 // 否则读者会以为看到的是全集。
-func sgContributors(pen map[string]float64, why map[string]string, d *scoreDimension) []scoreContributor {
+func sgContributors(pen map[string]float64, why map[string]string, d *scoreDimension, keepAll bool) []scoreContributor {
 	out := make([]scoreContributor, 0, len(pen))
 	for des, p := range pen {
 		// 0.05 以下是分摊出来的浮点尘埃，不是"拉低了这一维"的器件。
@@ -394,7 +394,7 @@ func sgContributors(pen map[string]float64, why map[string]string, d *scoreDimen
 		out = append(out, scoreContributor{Designator: des, Penalty: round2(p), Detail: why[des]})
 	}
 	out = sortContributors(out)
-	if len(out) > sgMaxContributors {
+	if !keepAll && len(out) > sgMaxContributors {
 		hidden := len(out) - sgMaxContributors
 		out = out[:sgMaxContributors]
 		d.Reason = sgAppendReason(d.Reason,
@@ -592,7 +592,7 @@ func (sgClearanceScorer) score(ctx *scoreCtx) scoreDimension {
 		why[a.Designator] = sgAppendReason(why[a.Designator],
 			fmt.Sprintf("四面被围，最宽一侧仅 %.1fmil < %.1fmil 烙铁通道", a.BestGap, l.AccessMil))
 	}
-	d.Contributors = sgContributors(pen, why, &d)
+	d.Contributors = sgContributors(pen, why, &d, ctx.opts.keepAll)
 
 	d.Findings = sgClearanceFindings(l)
 	return d

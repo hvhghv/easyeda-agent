@@ -34,6 +34,7 @@ func newPcbLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 		gridMil  float64
 		minGap   float64
 		showAll  bool
+		partCSV  []string
 	)
 	c := &cobra.Command{
 		Use:   "layout-score",
@@ -67,6 +68,9 @@ func newPcbLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 				skip:     csvSet(skip),
 				minGap:   minGap,
 				gridMil:  gridMil,
+				// --all / --part 时各维保留全量归因(routable 这类默认在数据层
+				// 截到前 12,不保全 --all 是谎言、--part 查不到榜外器件)。
+				keepAll: showAll || len(partCSV) > 0,
 			}
 			var err error
 			if opts.weights, err = parseWeightOverrides(weights); err != nil {
@@ -125,13 +129,24 @@ func newPcbLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 			rep := analyzeLayoutScore(snap, s0, opts)
 
 			if asJSON {
+				out := map[string]any{"report": rep}
+				if len(partCSV) > 0 {
+					focus := make([]partFocus, 0, len(partCSV))
+					for _, p := range partCSV {
+						focus = append(focus, buildPartFocus(&rep, snap, p))
+					}
+					out["partFocus"] = focus
+				}
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
-				if err := enc.Encode(map[string]any{"report": rep}); err != nil {
+				if err := enc.Encode(out); err != nil {
 					return err
 				}
 			} else {
 				renderLayoutScore(rep, showAll, stdout)
+				for _, p := range partCSV {
+					renderPartFocus(buildPartFocus(&rep, snap, p), stdout)
+				}
 			}
 
 			// 退出码语义：只有明确设了 --min-score 才把「分数不够」当失败；
@@ -155,6 +170,7 @@ func newPcbLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 	c.Flags().Float64Var(&gridMil, "grid", 0, "tidiness grid in mil (default 5 — catches the sub-mil drift auto-place leaves)")
 	c.Flags().Float64Var(&minGap, "min-gap", 0, "assembly spacing in mil (default: the board's live clearance rule)")
 	c.Flags().BoolVar(&showAll, "all", false, "list every contributor and finding instead of the top few")
+	c.Flags().StringSliceVar(&partCSV, "part", nil, "聚焦器件(CSV 位号):逐维汇总它的直接扣分/关联提及/blocking/几何现状 —— 整体打分后点名要优化的器件用这个视角")
 	return c
 }
 

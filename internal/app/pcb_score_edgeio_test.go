@@ -285,3 +285,39 @@ func TestEdgeIOScorer_WiredIntoReport(t *testing.T) {
 		t.Errorf("with an outline and two connectors this dimension is scorable; got skipped (%s)", d.Reason)
 	}
 }
+
+// 插接面贴边(器件特性,用户校准点名):Type-C/USB/SD 类水平插拔件在边带内但
+// 缩在板内 → 扣分点名;齐平与**外突**(bbox 越过板框)都合法 —— off-board 判据
+// 用焊盘不用 bbox,正是为了放行外突的插接面。
+func TestEdgeIOScorer_PlugFaceMustBeFlushOrProtrude(t *testing.T) {
+	// 板 4000×2400。三个 Type-C:齐边 / 缩 130mil / 外突 60mil。
+	flush := mkBoardConn("USB1", "TYPE-C-31-M-12", 1, 3990, 200, 20, 180, "VBUS", "GND")
+	inset := mkBoardConn("USB2", "TYPE-C-31-M-12", 1, 3840, 800, 60, 180, "VBUS2", "GND")   // bbox 右缘 3870 → 缩 130mil
+	protr := mkBoardConn("USB3", "TYPE-C-31-M-12", 1, 4030, 1400, 120, 180, "VBUS3", "GND") // bbox 越框 60mil
+	// 外突件的焊盘保持在板内(真实 Type-C 的贴装脚在板上) —— off-board 不该报它。
+	for i := range protr.Pads {
+		protr.Pads[i].X = 3980
+	}
+	snap := &boardSnapshot{Outline: testOutline(), Components: []boardComp{flush, inset, protr}}
+	d := edgeIOScore(snap, nil)
+
+	pen := map[string]float64{}
+	for _, c := range d.Contributors {
+		pen[c.Designator] += c.Penalty
+	}
+	if pen["USB2"] == 0 {
+		t.Fatalf("USB2 sits 130mil inboard — the plug face rule must charge it, got %+v", d.Contributors)
+	}
+	if pen["USB1"] != 0 || pen["USB3"] != 0 {
+		t.Errorf("flush (USB1) and protruding (USB3) mating faces are the part's NATURE and must not be charged, got %+v", d.Contributors)
+	}
+	var flagged bool
+	for _, f := range d.Findings {
+		if f.Type == "plug-face-not-flush" && strings.Contains(f.Message, "USB2") {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Error("expected a plug-face-not-flush finding naming USB2")
+	}
+}

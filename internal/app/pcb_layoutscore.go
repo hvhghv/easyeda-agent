@@ -291,6 +291,10 @@ type layoutScoreOpts struct {
 	weights  map[string]float64 // 覆盖默认权重（--weight dim=val）
 	minGap   float64            // 传给 layout-lint 纯核的装配间距
 	gridMil  float64            // 齐整度的落格网格（#153 实测建议 5mil）
+	// keepAll 让各维保留**全量**归因不做数据层截断（--all / --part 时置位）。
+	// 没有它,routable 这类在 scorer 内截到前 12 的维会让 --all 变成谎言、
+	// --part 查不到榜外器件。
+	keepAll bool
 }
 
 // analyzeLayoutScore 是纯核：吃快照 + 意图，出多维分数表。无 I/O，可离线单测，

@@ -22,6 +22,7 @@ package app
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -46,7 +47,26 @@ const (
 	edgeIOInternalHeurPenalty = 6.0
 	// 开口平行板边（既没朝外也没朝内，多半是转错了 90°）—— 半档。
 	edgeIOOpeningSidewaysPenalty = 7.5
+
+	// 水平插拔件(Type-C/USB/SD/SIM…)的插接面没贴到板边 —— 器件特性:插头从板外
+	// 水平进入,插接面必须与板边齐平甚至**外突**(突出板框方便插接是正常设计,
+	// off-board 判据用焊盘而非 bbox 正是为了放行它)。在 300mil 边带内但缩在
+	// 板内 200mil,外壳开孔也够不着 —— 和「压根不贴边」是同一性质,只是程度轻。
+	// 按缩进深度线性升到本上限(真板校准:车机 J2 Type-C 缩 250mil = 该响)。
+	edgeIOPlugFaceMaxPenalty = 15.0
+	// 插接面允许的贴边容差(mil):板边线有线宽、封装 bbox 有丝印,±25mil 内视为齐平。
+	edgeIOPlugFaceFlushTolMil = 25.0
 )
+
+// edgeIOPlugFaceRe 圈定「插头从板外水平进入」的器件:插接面必须齐边/外突。
+// 刻意不含排针/螺钉端子(排针可板中作调试口,端子的线缆可弯折进入)。
+var edgeIOPlugFaceRe = regexp.MustCompile(`(?i)type-?c|micro-?usb|mini-?usb|\busb\b|micro-?sd|sd[-_ ]?card|tf[-_ ]?card|push-?push|\bsim\b|rj45|hdmi`)
+
+// plugFaceConnector 判定一个连接器是否属于水平插拔类(器件名/型号驱动,位号
+// veto 已由 collectBoardConnectors 的判读链路处理)。
+func plugFaceConnector(b boardConnector) bool {
+	return edgeIOPlugFaceRe.MatchString(b.comp.Device) || edgeIOPlugFaceRe.MatchString(b.comp.Name)
+}
 
 type edgeIOScorer struct{}
 
@@ -123,8 +143,24 @@ func (edgeIOScorer) score(ctx *scoreCtx) scoreDimension {
 			fmt.Sprintf("%s is an external port but sits %.0fmil (%.2fmm) inboard of the %s edge — an enclosure cannot open a hole to it there",
 				b.comp.Designator, round2(b.edgeGapMil), round2(b.edgeGapMil/mmToMil), b.edge.String())))
 	}
+	plugFaceN := 0
 	for _, e := range []apEdge{edgeLeft, edgeRight, edgeTop, edgeBottom} {
 		for _, b := range onEdge[e] {
+			// 插接面贴边(器件特性):水平插拔件在边带内仍缩在板内 —— 插不了。
+			// 齐平(±容差)与**外突(负 gap)都合法**;缩进按深度线性扣。
+			if plugFaceConnector(b) && b.edgeGapMil > edgeIOPlugFaceFlushTolMil {
+				plugFaceN++
+				frac := (b.edgeGapMil - edgeIOPlugFaceFlushTolMil) / (pcbConnEdgeBandMil - edgeIOPlugFaceFlushTolMil)
+				if frac > 1 {
+					frac = 1
+				}
+				p := round2(edgeIOPlugFaceMaxPenalty * frac)
+				charge(b.comp.Designator, p,
+					"mating face sits %.0fmil inboard of the %s edge — a plug-in connector must be flush with (or protrude past) the board edge", round2(b.edgeGapMil), e.String())
+				d.Findings = append(d.Findings, edgeIOFinding("plug-face-not-flush", "WARN", b,
+					fmt.Sprintf("%s is a plug-in connector (Type-C/USB/SD class) sitting %.0fmil (%.2fmm) inboard of the %s edge — the mating face must be flush with or protrude past the board edge to be pluggable (protruding is normal for this part class; the off-board check judges pads, not the body, precisely to allow it)",
+						b.comp.Designator, round2(b.edgeGapMil), round2(b.edgeGapMil/mmToMil), e.String())))
+			}
 			if e != dominant {
 				strayN++
 				charge(b.comp.Designator, edgeIOStrayEdgePenalty,

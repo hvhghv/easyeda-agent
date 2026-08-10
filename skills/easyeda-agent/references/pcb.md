@@ -424,9 +424,16 @@ subset; `--dry-run` prints the per-corner plan. Save after placing; delete via
   flag:`--spec <s0.json>`(解锁意图类维度;spec 有 ERROR 直接拒,WARN 打 stderr)、
   `--from <dump.json>`(离线重放,不连编辑器)、`--json`、`--min-score N`(不达标非零退出;**不设则只有 blocking 才非零**)、
   `--only/--skip <id,…>`(**拼错维度名直接报错**,不静默变成"一维都没算")、`--weight dim=val`(可重复)、
-  `--grid <mil>`(齐整度落格网格,默认 **5**)、`--min-gap <mil>`(默认取板载 live clearance 规则)、`--all`(列全部归因)。
+  `--grid <mil>`(齐整度落格网格,默认 **5**)、`--min-gap <mil>`(默认取板载 live clearance 规则)、`--all`(列全部归因)、
+  **`--part J2,U1`(器件聚焦视角)**——整体归因是「维→器件」,这个是反向的「器件→全维度」汇总:该件的
+  直接扣分、**关联提及**(TVS 离 J2 太远扣的是 TVS 的分但提及 J2——动哪个由人定)、blocking、几何现状
+  (坐标/装配面/离板边距离)。**推荐工作流 = 整体打分 → 用户点名要优化的器件 → `--part` 聚焦**。
+  位号匹配带词边界(C1 不误配 C10);`--all`/`--part` 时各维保留全量归因(routable 默认数据层截前 12)。
   默认每维只列前 3 个归因、且 ≥90 分的维不展开。归因 `penalty` 是**可比的扣分量**(不是布尔标记),
   `Σ 归因 = 100 − 该维分数` 是恒等式 —— 先动哪个器件涨多少分是可预测的。
+  **插接面贴边规则(器件特性)**:Type-C/USB/SD 类水平插拔件在 300mil 边带内但**缩在板内 >25mil** →
+  edge-io 扣分点名(`plug-face-not-flush` WARN,按缩进深度线性);齐平与**外突板框都合法** ——
+  off-board 判据用**焊盘**不用 bbox,正是为了放行插接面外突这种正常设计。
   **`layout-lint` 与 `layout-score` 不互相取代**:前者是**硬门**(能不能布线,`--gate` 落 `pre_route_passed`),
   后者是**质量表**(布得好不好,诊断视角,不落任何 workflow 确认)。几何维**复用** layout-lint 的纯核
   (`analyzePcbLayout`),同一个量只准有一个算法。权重与阈值全是**待校准初值**,校准闭环 = `pcb dump` 出好板 fixture
