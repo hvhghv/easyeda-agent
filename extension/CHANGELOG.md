@@ -4,6 +4,35 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.23.0] - 2026-08-10
+
+插拔类器件特性版(用户在车机真板复测中逐条点名):打分骂什么、规划器就修什么,
+两边口径锁死不分家。全部真机验证(车机 J2 Type-C 从缩板内 129mil → 齐边 →
+外突 40.7mil,板 74.0→75.4 [good] 0 blocking)。
+
+### Added
+- **`pcb layout-score --part J2,U1` —— 器件聚焦视角**。整体归因是「维→器件」,
+  用户真实工作流是反向的(整体打分 → 点名要优化的器件):聚焦卡汇总该件的直接
+  扣分、**关联提及**(TVS 离 J2 太远,扣的是 TVS 的分但提及 J2 —— 动哪个由人定)、
+  blocking、几何现状(坐标/装配面/离板边距离)。位号词边界匹配(C1 不误配 C10)。
+  顺带修掉 `--all` 的数据层谎言:routable 在 scorer 内截前 12,现在 `--all`/
+  `--part` 时各维保留全量归因。
+- **插接面贴边规则(plug-face-not-flush,edge-io 维)**。Type-C/USB/SD/耳机口
+  (PJ-3xx/3.5mm)类**水平插拔件**的器件特性:插头从板外水平进入,插接面必须与
+  板边齐平甚至**外突**(off-board 判据用焊盘不用 bbox,正是为了放行外突)。
+  此前 300mil 边带内一律算"在边"——车机 J2 缩板内 129mil 读成无异常,实际
+  插不了。缩进按深度线性扣(≤25mil 容差齐平,外突负 gap 合法)。
+- **插拔通道禁布(connector-mating-blocked)**。内部卧贴插口(FPC/内部 Type-C/
+  卡座)开口**前方** 250mil×口宽的通道里不许压器件 —— 压了插头进不来。开口
+  方向只认块库 openings 声明(判不了绝不猜);贴边件通道在板外天然免检。
+  check 规则(WARN)+ edge-io 扣分(归因落**遮挡件**,每件 10 封顶 30)+
+  规划器 T2 落位后把通道登记为占用区(卫星永不被规划进通道)。
+
+### Fixed
+- **T2 贴边对插拔类器件边距=0 齐平**。规划器原统一留 45mil 边距、且
+  「edgeMargin+30 内算就位」—— 插拔件永远差一截还不被挪(车机 J2 缩板内的
+  规划侧根因)。插拔类(与 plug-face 规则同一正则)贴边边距=0,就位判据同步收紧。
+
 ## [0.22.0] - 2026-08-10
 
 PCB 布局能力重构版(#167/#168/#153):多维打分 → 精修 → 确认门的闭环 + 规划器
