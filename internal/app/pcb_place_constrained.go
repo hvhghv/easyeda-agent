@@ -649,7 +649,16 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		pcx, pcy, ux0, uy0, ux1, uy1 := connGeom(c, 0)
 		ix, iy := edgeInteriorDir(edge)
 		curScore := (pcx-(ux0+ux1)/2)*ix + (pcy-(uy0+uy1)/2)*iy
-		alreadyGood := best <= opt.edgeMargin+30 && curScore > 15
+		// 插接面器件特性(Type-C/USB/SD/耳机口,与 edge-io 的 plug-face 规则同一
+		// 正则):插头从板外水平进入,插接面必须与板边**齐平**(0 边距;外突量待
+		// 块库声明后可为负)。通用 45mil 边距对它们 = 永远插不进去 —— 车机 J2
+		// (Type-C)缩板内 129mil 正是这么来的:在旧「edgeMargin+30 内算就位」的
+		// 判据下既不算错也不被挪。
+		margin := opt.edgeMargin
+		if edgeIOPlugFaceRe.MatchString(c.footprint) {
+			margin = 0
+		}
+		alreadyGood := best <= margin+30 && curScore > 15
 		clearlyWrong := curScore < -30 && score > 30
 		_, _, blockOriented := connOpeningFor(c.footprint)
 		// Geometry after the chosen rotation (about the anchor).
@@ -657,13 +666,13 @@ func planConstrainedPlace(comps []cpComp, holes []cpHole, opt cpOptions) ([]apMo
 		var shiftX, shiftY float64
 		switch edge {
 		case edgeLeft:
-			shiftX = (bx0 + opt.edgeMargin) - gx0
+			shiftX = (bx0 + margin) - gx0
 		case edgeRight:
-			shiftX = (bx1 - opt.edgeMargin) - gx1
+			shiftX = (bx1 - margin) - gx1
 		case edgeBottom:
-			shiftY = (by0 + opt.edgeMargin) - gy0
+			shiftY = (by0 + margin) - gy0
 		case edgeTop:
-			shiftY = (by1 - opt.edgeMargin) - gy1
+			shiftY = (by1 - margin) - gy1
 		}
 		if alongCenter != nil { // grouped: pack the along-edge center
 			if edge.vertical() {

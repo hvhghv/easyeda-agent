@@ -59,8 +59,10 @@ const (
 )
 
 // edgeIOPlugFaceRe 圈定「插头从板外水平进入」的器件:插接面必须齐边/外突。
-// 刻意不含排针/螺钉端子(排针可板中作调试口,端子的线缆可弯折进入)。
-var edgeIOPlugFaceRe = regexp.MustCompile(`(?i)type-?c|micro-?usb|mini-?usb|\busb\b|micro-?sd|sd[-_ ]?card|tf[-_ ]?card|push-?push|\bsim\b|rj45|hdmi`)
+// 含耳机口(PJ-3xx/3.5mm,用户校准点名)。刻意不含排针/螺钉端子(排针可板中作
+// 调试口,端子的线缆可弯折进入)。place-constrained 的 T2 贴边用同一正则
+// (这类件边距=0 齐平) —— 打分骂什么,规划器就修什么,两边不许口径分家。
+var edgeIOPlugFaceRe = regexp.MustCompile(`(?i)type-?c|micro-?usb|mini-?usb|\busb\b|micro-?sd|sd[-_ ]?card|tf[-_ ]?card|push-?push|\bsim\b|rj45|hdmi|pj-?3\d*|3\.?5mm|earphone|headphone|audio[-_ ]?jack`)
 
 // plugFaceConnector 判定一个连接器是否属于水平插拔类(器件名/型号驱动,位号
 // veto 已由 collectBoardConnectors 的判读链路处理)。
