@@ -75,7 +75,7 @@ EasyEDA tooling.
 | `pour-fit --replace` | **true(会清跨层同网 pour)** | 顶/底 GND pour 要显式 `--replace=false` |
 | 线宽档(net-class) | 按角色:信号=live默认 / 支线(3V3/1V8)10 / 主干(+5V)15 / 大电流(VBUS/VIN)20mil | `pcb net-classes` 查当前表;`route-short` 自动按角色给宽;偏细电源线被 `pcb check` **width-under-spec** 逮(§7.8) |
 | 电源走铺铜 | **2层 `power-pour` / 4层 `power-planes`** | 电源走铜面不走细线(#1 DRC 源);别拿细线穿焊盘阵布电源,裸电源网被 `pcb check` **power-not-poured** 逮 |
-| 布局质量档 | **门=`layout-lint --gate`(唯一);质量表=`pcb layout-score --spec <s0>`(诊断,不落确认)** | 只有一个门,别跑成两个。layout-score 九维各 0-100+逐器件归因;**默认不设 `--min-score`**(只有 blocking=短路/重叠/出板框才非零退出),要当门用才显式给(建议 75=good 档下沿)。带 `--spec` 才解锁 flow-order 与 internal 连接器判定,否则这两维 **skipped(「没测」≠「满分」)** → design-flow P6 |
+| 布局质量档 | **门=`layout-lint --gate`(唯一);质量表=`pcb layout-score --spec <s0>`(诊断,不落确认)** | 只有一个门,别跑成两个。layout-score 九维各 0-100+逐器件归因;**默认不设 `--min-score`**(只有 blocking=短路/重叠/出板框才非零退出),要当门用才显式给(建议 75=good 档下沿)。带 `--spec` 才解锁 flow-order 与 internal 连接器判定,否则这两维 **skipped(「没测」≠「满分」)** → design-flow P6。原理图侧对应 **`sch layout-score`**(五维:标签折叠/标签反向/外围贴核心/长链挤压/版面整洁)——同样诊断视角,**每条归因带填好真实位号坐标的 fix 命令,照抄执行即可修**;门仍是 `sch layout-lint`+`sch check` |
 
 ### P7 交自动布线前必做两步(常被遗忘,已实测踩坑)
 

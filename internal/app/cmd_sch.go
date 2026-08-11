@@ -1660,6 +1660,9 @@ the selection). Without --ids it exports the whole active page.`,
 	sch.AddCommand(newSchNoteCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchAlignCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchDistributeCmd(cfg, &window, stdout, stderr))
+	// 布局质量打分(诊断视角,不是门):折叠/反向/贴核心/长链可识别,归因带可
+	// 执行 fix 命令。门仍是 layout-lint + check。
+	sch.AddCommand(newSchLayoutScoreCmd(cfg, &window, stdout, stderr))
 	// S5 校验门:把 layout-lint / check / bridge-check / drc 收成一条固定流水线。
 	// 四个单命令原样保留(专家 + 局部复查),但主干路径走 gate。
 	sch.AddCommand(newSchGateCmd(cfg, &window, stdout, stderr))
