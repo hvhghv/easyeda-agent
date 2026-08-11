@@ -4661,6 +4661,21 @@ async function appliedRotation(desired: number): Promise<number> {
 	return (await detectRotationNegation()) ? (((360 - desired) % 360) + 360) % 360 : desired;
 }
 
+// Per-op timeout for connect_pin's platform mutations. The EasyEDA API
+// intermittently DROPS a create request without ever resolving OR rejecting
+// (same failure mode as schematicExportImage's SCH_EXPORT_TIMEOUT_MS — "platform
+// drops the request without rejecting", leaving a stuck progress toast). With no
+// per-call timeout the handler's `await` hangs forever; the daemon then kills the
+// REQUEST at its ~18s dispatch budget with "connector did not respond", so a
+// batch (block-apply autoconnect) freezes ~18s on that one pin → the user sees
+// the layout progress stall at ~99% (observed ≈<1/400 connect_pin calls). Racing
+// each mutation against this timeout converts the rare indefinite hang into a
+// fast, clean rejection that flows into the existing wire-retry / rollback path,
+// so the batch keeps moving and no half-built stub lands late. Kept well under
+// the daemon's dispatch budget so the caller gets a structured error, not a raw
+// dispatch timeout: worst realistic case (one wire retry + flag) ≈ 3×7s < 18s.
+const CONNECT_PIN_OP_TIMEOUT_MS = 7000;
+
 const schematicPowerConnectPin: Handler = async (payload) => {
 	const pinX = requireNumber(payload, 'pinX');
 	const pinY = requireNumber(payload, 'pinY');
@@ -4737,7 +4752,11 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 	for (let attempt = 0; attempt < 2 && !wire; attempt++) {
 		if (attempt > 0) await new Promise((r) => setTimeout(r, 250));
 		try {
-			wire = await eda.sch_PrimitiveWire.create([pinGX, pinGY, endX, endY]);
+			wire = await withTimeout(
+				eda.sch_PrimitiveWire.create([pinGX, pinGY, endX, endY]),
+				CONNECT_PIN_OP_TIMEOUT_MS,
+				`Stub-wire create did not settle within ${CONNECT_PIN_OP_TIMEOUT_MS}ms — the platform dropped the request without rejecting (the stuck-at-99% hang). Failing this attempt so the retry/caller can re-issue instead of hanging until the dispatch timeout.`,
+			);
 			wireErr = undefined;
 		}
 		catch (err) {
@@ -4762,10 +4781,20 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 	let flag;
 	try {
 		if (kind in NET_FLAG_KINDS) {
-			flag = await eda.sch_PrimitiveComponent.createNetFlag(NET_FLAG_KINDS[kind], net, endX, endY, applied);
+			// Promise.resolve() collapses the API's overloaded union-of-promises
+			// (Promise<A>|Promise<B>) into a single Promise<A|B> that withTimeout<T> accepts.
+			flag = await withTimeout(
+				Promise.resolve(eda.sch_PrimitiveComponent.createNetFlag(NET_FLAG_KINDS[kind], net, endX, endY, applied)),
+				CONNECT_PIN_OP_TIMEOUT_MS,
+				`Netflag create did not settle within ${CONNECT_PIN_OP_TIMEOUT_MS}ms — the platform dropped the request without rejecting (the stuck-at-99% hang). Rolling back the stub wire and failing fast so the caller can retry this pin.`,
+			);
 		}
 		else if (kind in NET_PORT_KINDS) {
-			flag = await eda.sch_PrimitiveComponent.createNetPort(NET_PORT_KINDS[kind], net, endX, endY, applied);
+			flag = await withTimeout(
+				Promise.resolve(eda.sch_PrimitiveComponent.createNetPort(NET_PORT_KINDS[kind], net, endX, endY, applied)),
+				CONNECT_PIN_OP_TIMEOUT_MS,
+				`Netport create did not settle within ${CONNECT_PIN_OP_TIMEOUT_MS}ms — the platform dropped the request without rejecting (the stuck-at-99% hang). Rolling back the stub wire and failing fast so the caller can retry this pin.`,
+			);
 		}
 		else {
 			throw new ActionError(

@@ -4,6 +4,21 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.23.1] - 2026-08-11
+
+### Fixed
+- **原理图布局「卡进度到 99%」间歇挂死 —— `connect_pin` 平台变异调用补单步超时。**
+  根因:EasyEDA 平台 API 偶发**吞掉创建请求但既不 resolve 也不 reject**(与
+  `schematicExportImage` 早已用 `withTimeout` 兜的 SCH_EXPORT「platform drops the
+  request without rejecting → stuck progress toast」同一失效模式)。`schematic.power.connect_pin`
+  的三个平台调用(`sch_PrimitiveWire.create` / `createNetFlag` / `createNetPort`)**没套超时**,
+  那句 `await` 就永久挂住;daemon 只能在 ~18s dispatch 预算处以「connector did not respond」
+  杀掉该请求,于是 `block-apply` 批量按脚布线时某一脚冻 18s → 用户看到布局进度卡在 ~99%
+  (audit 实测 ≈<1/400 次 connect_pin;挂住的那次有时还迟到落盘留下 `$…N…` 孤儿网)。修复:
+  三个变异调用各 `withTimeout(7000ms)`(远低于 18s dispatch,`Promise.resolve` 归一重载联合类型),
+  超时即快速 reject → 流入已有的 wire 重试 / rollback 路径,batch 立即继续、不再冻 18s、不留迟到孤儿。
+  连接器 107 单测全过。**注意:平台偶发假死本身仍在,本修复是把「无限挂死」降级为「快速干净失败可重试」。**
+
 ## [0.23.0] - 2026-08-10
 
 插拔类器件特性版(用户在车机真板复测中逐条点名):打分骂什么、规划器就修什么,
