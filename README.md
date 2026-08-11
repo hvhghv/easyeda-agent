@@ -197,7 +197,7 @@ codex mcp add easyeda-agent \
 
 均以 typed CLI 子命令暴露(`easyeda <domain> <verb>`),每项都在固定的 ESP32-S3 回归板上真机验证过。
 
-**原理图** — 完整功能地图(已支持 40+ 子命令按功能域 + 待支持路线)见 **[docs/schematic-features.md](docs/schematic-features.md)**;摘要:
+**原理图** — 完整功能地图(已支持 40+ 子命令按功能域 + 待支持路线)见 **[docs/cli/schematic.md](docs/cli/schematic.md)**(CLI 功能索引:[docs/cli/](docs/cli/README.md));摘要:
 - **器件与库**:从立创/LCSC 库按 uuid 放**真实器件**、换型号(`replace`)、符号/封装重绑、C 号确定性解析(`resolve-lcsc`);`modify` 属性 **merge 语义**(只 patch 顶层字段不再清空自定义属性,#175)。
 - **连线**:`connect`/`autoconnect`(**打分器**自选方向——碰撞/穿件/图签/fanout 全几何成本,netport **竖排折叠惩罚**让密集引脚列标签保持水平)/`disconnect` 成对删;电源/地标志自动补偿旋转存储的坑。
 - **布局与可读性三件套**:模块感知**自动布局**(template/official 双引擎)、对齐/等距/刚体平移;**分页 reconcile + 数据驱动分区框(`zone-plan`/`zone-draw`,校验压图签/贴边全 0 才许画)+ 每模块电路说明(`note`)**——多器件页未分区会被 `sch check` 的 missing-partition 机械拦下。

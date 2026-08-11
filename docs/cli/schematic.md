@@ -18,7 +18,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 换型号 | `sch replace` | 换库器件,pinDiff 非空提示需重接线 |
 | 符号/封装重绑 | `sch rebind-symbol` / `rebind-footprint` | 五步 rebind(modify→delete→create→restore) |
 | C 号解析 | `sch resolve-lcsc` | 已放置器件 → 真实 LCSC C 号(确定性,绝不模糊兜底);dry-run 默认 |
-| 属性修改 | `sch modify` | 位置/位号/BOM 标志/自定义属性;**merge 语义**:只 patch 顶层字段(如 supplierId)时自动保留全部 otherProperty 并回报 `propertiesPreserved`(#175 修复,曾静默清空) |
+| 属性修改 | `sch modify` | 位置/位号/BOM 标志/自定义属性;**merge 语义**:只 patch 顶层字段(如 supplierId)时自动保留全部 otherProperty 并回报 `propertiesPreserved`(#175) |
 | 删除 | `sch delete` / `sch prim-delete` / `sch clear` | 按 id 删器件 / 删任意图元(含文本、图形)/ 整页清空(dry-run 可数) |
 
 ### 2. 连线与网络
@@ -81,8 +81,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 
 ## 附:易混命令辨析(AI 选型速查)
 
-同族命令的边界与参数差异——**每条都来自 agent 真实误用**(2026-08-11 一次会话踩 5 次),
-读这张表可以一次选对:
+同族命令的边界与参数差异——**每条都来自 agent 真实误用记录**,读这张表可以一次选对:
 
 | 你想做 | 用这个 | 别用/别混 | 参数注意 |
 |---|---|---|---|
@@ -109,7 +108,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 (每次调用传全 ids,布局动作也不知道组的存在),UI 里用户手工编的组 CLI 读不出,
 后续 align/autolayout/单件 modify 会拆散用户确认过的模块。
 
-**平台墙(真机探测 2026-08-11,EasyEDA Pro 3.2.121)**:`eda.*` 无通用编组 API
+**平台墙(真机探测,EasyEDA Pro 3.2.121)**:`eda.*` 无通用编组 API
 (`api search group` 仅 pcb_Drc 等长组);`sch_PrimitiveComponent` 实例遍历全部 70 个
 方法/属性,**零 group/parent 字段**——UI 原生组对扩展 API 完全不可见。
 
@@ -130,7 +129,7 @@ documentUuid 持久化(同 zones claims 的 workflow-state 模式):
 block-apply 无模板时的 fallback 从「per-row 等分栅格」升级为:
 **等分只定核心芯片位置;外围件贴自家核心上下排布**,件的轴向顺服务引脚的出线方向
 (块 `internal_nets` 可推导「谁服务谁」),相邻件间距 ≥117(两个相向水平 netport 标签的实测最小距)。
-ceshi 真机已按此手工验证:标签 10/10 自然水平、框贴合、可读性达标。
+真机已按此规则验证:标签全部自然水平、框贴合、可读性达标。
 
 ### 4. 分区框 content 纳入 note/flag
 
