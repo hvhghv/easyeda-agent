@@ -93,6 +93,13 @@ const (
 	schScoreRowMinGap = 117.0
 	// fix 命令里 connect 的建议 offset(与 skill 默认一致)。
 	schScoreConnectOffset = 24
+	// 核心件资格的最小 bbox 面积:核心只能是"大件"(IC/模块/连接器)。live 误报
+	// 根因之一:U2 的核心兜底选到了电容 C5,把全板核心自己的引脚标签判了反向。
+	schScoreCoreMinArea = 1500.0
+	// 宿主导线匹配:pin 与 wire 端点都吸在 5-unit 格上,1.0 只容浮点残差。
+	schScoreWireEndpointEps = 1.0
+	// 宿主导线追踪的最大段深(connect_pin 短桩通常 1 段,留裕量给折线 stub)。
+	schScoreWireTraceDepth = 4
 	// 每条命中的扣分。
 	schScoreFoldedPenalty   = 15.0
 	schScoreReversedPenalty = 20.0
@@ -172,18 +179,35 @@ func schScoreVerdict(rep *schLayoutScoreReport) string {
 // 共享推导:宿主 / 核心 / 电源网
 // ---------------------------------------------------------------------------
 
+// schScoreInputs 是纯核除 comps 外的可选输入 —— 都是 best-effort:缺了降级到
+// 几何/全页兜底,不缺时判定更准。
+type schScoreInputs struct {
+	// Wires 是页面导线段(components.list includeWires 的 buildWireSegments 产物)。
+	// 有它时宿主 pin 走「netport anchor == wire 一端,wire 另一端 == pin」的电气
+	// 匹配优先,几何最近兜底 —— live 抓到过几何最近判错宿主(LED_CTRL 的 fix 指到
+	// U2:29,实际挂在 R3:1 的 stub 上)。
+	Wires []wireSegment
+	// ModuleOf 是 位号(大写)→模块名(来自 sch zones claims)。有它时核心在本模块
+	// 内推导,防止跨模块误归因(POWER 模块的 C1/C2/C3 被建议搬到 U2 旁)。
+	ModuleOf map[string]string
+}
+
 // schScoreScene 是五个维度共用的一次性推导结果。
 type schScoreScene struct {
 	comps   []layoutComp
 	parts   []layoutComp // componentType==part 且有 bbox
 	markers []layoutComp // isSchMarker 且 anchor 可用
-	// hostPart[markerIdx] = parts 下标(-1 = 没找到宿主);hostPin 是对应最近 pin。
+	in      schScoreInputs
+	// hostPart[markerIdx] = parts 下标(-1 = 没找到宿主);hostPin 是对应 pin。
 	hostPart map[int]int
 	hostPin  map[int]layoutPin
-	// partNets[partIdx] = 该件通过 markers 挂到的非电源网集合。
+	// partNets[partIdx] = 该件通过 markers 挂到的**信号网**(非电源)集合。
 	partNets map[int]map[string]bool
-	// largest = bbox 面积最大的 part 下标(-1 = 无 part),核心推导的兜底。
-	largest int
+	// partPowerOnly[partIdx] = 挂了 ≥1 个标记且全是电源/地网(典型去耦电容)。
+	// 无分区认领时这类件推不出可信的信号核心,proximity 豁免而不是硬绑最大件。
+	partPowerOnly map[int]bool
+	// largestEligible = 面积最大的**核心资格**件下标(-1 = 无);全页兜底参照。
+	largestEligible int
 }
 
 // isPowerNetName:电源/地网不构成"信号伙伴"关系,核心推导要排除。
@@ -220,14 +244,22 @@ func bboxArea(b *layoutBBox) float64 {
 	return (b.MaxX - b.MinX) * (b.MaxY - b.MinY)
 }
 
+// coreEligible:核心参照只能是"大件"—— 排除 R/C/L 前缀与小 bbox 件。live 回炉
+// 教训:兜底不设资格线时,U2 的核心被推成了电容 C5。
+func coreEligible(c layoutComp) bool {
+	return !isPassivePart(c) && bboxArea(c.BBox) >= schScoreCoreMinArea
+}
+
 // buildSchScoreScene 做一次全部共享推导。
-func buildSchScoreScene(comps []layoutComp) *schScoreScene {
+func buildSchScoreScene(comps []layoutComp, in schScoreInputs) *schScoreScene {
 	s := &schScoreScene{
-		comps:    comps,
-		hostPart: map[int]int{},
-		hostPin:  map[int]layoutPin{},
-		partNets: map[int]map[string]bool{},
-		largest:  -1,
+		comps:           comps,
+		in:              in,
+		hostPart:        map[int]int{},
+		hostPin:         map[int]layoutPin{},
+		partNets:        map[int]map[string]bool{},
+		partPowerOnly:   map[int]bool{},
+		largestEligible: -1,
 	}
 	for _, c := range comps {
 		if c.ComponentType == schLayoutPartType && c.BBox != nil {
@@ -236,8 +268,11 @@ func buildSchScoreScene(comps []layoutComp) *schScoreScene {
 	}
 	var maxArea float64
 	for i := range s.parts {
-		if a := bboxArea(s.parts[i].BBox); s.largest < 0 || a > maxArea {
-			s.largest, maxArea = i, a
+		if !coreEligible(s.parts[i]) {
+			continue
+		}
+		if a := bboxArea(s.parts[i].BBox); s.largestEligible < 0 || a > maxArea {
+			s.largestEligible, maxArea = i, a
 		}
 	}
 	for _, c := range comps {
@@ -245,41 +280,166 @@ func buildSchScoreScene(comps []layoutComp) *schScoreScene {
 			s.markers = append(s.markers, c)
 		}
 	}
-	// 宿主 pin:marker anchor(= stub 远端)最近的 part pin,距离 ≤ 60。
+	powerHosted := map[int]bool{}
 	for mi, m := range s.markers {
-		best, bestDist := -1, math.Inf(1)
-		var bestPin layoutPin
-		for pi, p := range s.parts {
-			for _, pin := range p.Pins {
-				d := math.Hypot(pin.X-m.X, pin.Y-m.Y)
-				if d < bestDist {
-					best, bestDist, bestPin = pi, d, pin
-				}
-			}
+		// 第一优先:导线端点匹配(anchor → stub wire → pin,电气事实)。
+		best, bestPin, ok := s.hostByWireTrace(m)
+		if !ok {
+			// 兜底:几何最近 pin ≤ 60。
+			best, bestPin, ok = s.hostByNearestPin(m)
 		}
-		if best >= 0 && bestDist <= schScoreHostPinMaxDist {
-			s.hostPart[mi] = best
-			s.hostPin[mi] = bestPin
-			if !isPowerNetName(m.Net) {
-				if s.partNets[best] == nil {
-					s.partNets[best] = map[string]bool{}
-				}
-				s.partNets[best][m.Net] = true
-			}
-		} else {
+		if !ok {
 			s.hostPart[mi] = -1
+			continue
+		}
+		s.hostPart[mi] = best
+		s.hostPin[mi] = bestPin
+		if isPowerNetName(m.Net) {
+			powerHosted[best] = true
+			continue
+		}
+		if s.partNets[best] == nil {
+			s.partNets[best] = map[string]bool{}
+		}
+		s.partNets[best][m.Net] = true
+	}
+	for pi, hasPower := range powerHosted {
+		if hasPower && len(s.partNets[pi]) == 0 {
+			s.partPowerOnly[pi] = true
 		}
 	}
 	return s
 }
 
-// coreOf 推导 partIdx 的「核心件」:与它共享非电源网的最大件;退而求其次,全部
-// part 中 bbox 最大者(自己是最大者且无共网伙伴时无核心)。返回 parts 下标或 -1。
-func (s *schScoreScene) coreOf(partIdx int) int {
+// hostByNearestPin:marker anchor(= stub 远端)最近的 part pin,距离 ≤ 60。
+func (s *schScoreScene) hostByNearestPin(m layoutComp) (int, layoutPin, bool) {
+	best, bestDist := -1, math.Inf(1)
+	var bestPin layoutPin
+	for pi, p := range s.parts {
+		for _, pin := range p.Pins {
+			if d := math.Hypot(pin.X-m.X, pin.Y-m.Y); d < bestDist {
+				best, bestDist, bestPin = pi, d, pin
+			}
+		}
+	}
+	if best >= 0 && bestDist <= schScoreHostPinMaxDist {
+		return best, bestPin, true
+	}
+	return -1, layoutPin{}, false
+}
+
+// hostByWireTrace 从 marker anchor 沿导线段追到 part pin:anchor 落在某 wire 段
+// 一端,顺着共享端点 BFS(限深),任一到达端点与某 pin 重合(≤1 unit)即为宿主。
+// 这是电气事实优先于几何最近 —— live 抓到几何最近把 LED_CTRL 的宿主判成 U2:29,
+// 实际 stub 挂在 R3:1(密脚区里别件的 pin 可能比真宿主更近)。
+func (s *schScoreScene) hostByWireTrace(m layoutComp) (int, layoutPin, bool) {
+	if len(s.in.Wires) == 0 {
+		return -1, layoutPin{}, false
+	}
+	near := func(x0, y0, x1, y1 float64) bool {
+		return math.Hypot(x0-x1, y0-y1) <= schScoreWireEndpointEps
+	}
+	type pt struct{ x, y float64 }
+	frontier := []pt{{m.X, m.Y}}
+	visited := []pt{{m.X, m.Y}}
+	seen := func(p pt) bool {
+		for _, v := range visited {
+			if near(p.x, p.y, v.x, v.y) {
+				return true
+			}
+		}
+		return false
+	}
+	for depth := 0; depth < schScoreWireTraceDepth && len(frontier) > 0; depth++ {
+		var next []pt
+		for _, f := range frontier {
+			for _, w := range s.in.Wires {
+				var other pt
+				switch {
+				case near(w.X0, w.Y0, f.x, f.y):
+					other = pt{w.X1, w.Y1}
+				case near(w.X1, w.Y1, f.x, f.y):
+					other = pt{w.X0, w.Y0}
+				default:
+					continue
+				}
+				// 端点是否落在某个 part pin 上?
+				for pi, p := range s.parts {
+					for _, pin := range p.Pins {
+						if near(pin.X, pin.Y, other.x, other.y) {
+							return pi, pin, true
+						}
+					}
+				}
+				if !seen(other) {
+					visited = append(visited, other)
+					next = append(next, other)
+				}
+			}
+		}
+		frontier = next
+	}
+	return -1, layoutPin{}, false
+}
+
+// moduleFor 返回 partIdx 的分区认领模块名(无认领 = false)。
+func (s *schScoreScene) moduleFor(partIdx int) (string, bool) {
+	if len(s.in.ModuleOf) == 0 {
+		return "", false
+	}
+	mod, ok := s.in.ModuleOf[strings.ToUpper(s.parts[partIdx].Designator)]
+	return mod, ok
+}
+
+// largestEligibleIn 返回模块内面积最大的核心资格件(-1 = 模块内无大件)。
+func (s *schScoreScene) largestEligibleIn(module string) int {
+	best, bestArea := -1, 0.0
+	for pi, p := range s.parts {
+		if mod, ok := s.moduleFor(pi); !ok || mod != module {
+			continue
+		}
+		if !coreEligible(p) {
+			continue
+		}
+		if a := bboxArea(p.BBox); best < 0 || a > bestArea {
+			best, bestArea = pi, a
+		}
+	}
+	return best
+}
+
+// isLocalTop:partIdx 自己就是参照系里最大的核心资格件(有认领 = 本模块内,无
+// 认领 = 全页)。核心自己的引脚标签朝外扇出是正常拓扑,reversed 判定豁免它。
+func (s *schScoreScene) isLocalTop(partIdx int) bool {
+	if mod, ok := s.moduleFor(partIdx); ok {
+		return s.largestEligibleIn(mod) == partIdx
+	}
+	return s.largestEligible == partIdx
+}
+
+// coreOf 推导 partIdx 的「核心件」。候选一律要过 coreEligible(核心只能是大件)。
+//
+//   - 有分区认领且本件被认领:核心只在**本模块内**找 —— 先共信号网最大件,退模块
+//     内最大件;模块内没大件就判"无核心"(绝不跨模块兜底,那正是把 POWER 电容
+//     建议搬去 U2 旁的 live 误报)。
+//   - 无认领(或本件未认领):先共**信号**网(电源网已在 partNets 录入时排除)最大
+//     件;退全页最大大件,并把 degraded=true 交给归因文案声明"未分区,按全页最大
+//     件推核心"。
+//
+// 返回 (parts 下标或 -1, 是否全页兜底降级)。
+func (s *schScoreScene) coreOf(partIdx int) (int, bool) {
+	mod, claimed := s.moduleFor(partIdx)
+	sameScope := func(other int) bool {
+		if !claimed {
+			return true
+		}
+		om, ok := s.moduleFor(other)
+		return ok && om == mod
+	}
 	nets := s.partNets[partIdx]
 	best, bestArea := -1, 0.0
 	for other, otherNets := range s.partNets {
-		if other == partIdx {
+		if other == partIdx || !coreEligible(s.parts[other]) || !sameScope(other) {
 			continue
 		}
 		shared := false
@@ -297,12 +457,18 @@ func (s *schScoreScene) coreOf(partIdx int) int {
 		}
 	}
 	if best >= 0 {
-		return best
+		return best, false
 	}
-	if s.largest >= 0 && s.largest != partIdx {
-		return s.largest
+	if claimed {
+		if top := s.largestEligibleIn(mod); top >= 0 && top != partIdx {
+			return top, false
+		}
+		return -1, false // 模块内无核心:不跨模块兜底
 	}
-	return -1
+	if s.largestEligible >= 0 && s.largestEligible != partIdx {
+		return s.largestEligible, true
+	}
+	return -1, false
 }
 
 // designatorPrefix 取位号的前导字母段("R12"→"R","LED1"→"LED")。
@@ -330,9 +496,10 @@ func snap5(v float64) float64 { return math.Round(v/5) * 5 }
 // 纯核:五维打分
 // ---------------------------------------------------------------------------
 
-// analyzeSchLayoutScore 是纯核(无 I/O),表驱动测试直接喂 layoutComp。
-func analyzeSchLayoutScore(comps []layoutComp) schLayoutScoreReport {
-	s := buildSchScoreScene(comps)
+// analyzeSchLayoutScore 是纯核(无 I/O),表驱动测试直接喂 layoutComp;
+// wires/claims 是可选输入,缺了降级(见 schScoreInputs)。
+func analyzeSchLayoutScore(comps []layoutComp, in schScoreInputs) schLayoutScoreReport {
+	s := buildSchScoreScene(comps, in)
 	rep := schLayoutScoreReport{ComponentCount: len(comps)}
 
 	if len(s.parts) == 0 {
@@ -416,7 +583,7 @@ func (s *schScoreScene) suggestDirection(markerIdx int) string {
 		return "right"
 	}
 	hx, _ := bboxCenter(*s.parts[host].BBox)
-	if core := s.coreOf(host); core >= 0 {
+	if core, _ := s.coreOf(host); core >= 0 {
 		cx, _ := bboxCenter(*s.parts[core].BBox)
 		if math.Abs(cx-hx) >= schScoreCoreDXMin {
 			if cx > hx {
@@ -479,7 +646,13 @@ func scoreReversedLabels(s *schScoreScene) schScoreDimension {
 		if host < 0 {
 			continue
 		}
-		core := s.coreOf(host)
+		if s.isLocalTop(host) {
+			// 宿主自己就是全页/本模块最大件(核心本尊):它的引脚标签朝外扇出
+			// 是正常拓扑,不拿去和外围小件比方向 —— live 误报回炉修(U2 的
+			// IO0 netport 被判"背向核心 C5")。
+			continue
+		}
+		core, _ := s.coreOf(host)
 		if core < 0 {
 			continue
 		}
@@ -519,26 +692,37 @@ func scoreReversedLabels(s *schScoreScene) schScoreDimension {
 }
 
 // ── 维度 3:proximity(外围贴核心)──────────────────────────────────────────
-// 每个 R/C/L 无源小件到其核心件(共非电源网最大件,兜底全页最大件)的 bbox 边距:
-// ≤150 满分,≥500 记 0,线性衰减;维度分 = 平均 ×100。归因给不满分的件,建议
-// 目标区取核心件上/下方(y 按当前相对位置就近取上或下)。
+// 每个 R/C/L 无源小件到其核心件(见 coreOf:认领内 > 共信号网 > 全页兜底)的
+// bbox 边距:≤150 满分,≥500 记 0,线性衰减;维度分 = 平均 ×100。归因给不满分
+// 的件,建议目标区取核心件上/下方(y 按当前相对位置就近取上或下)。
+//
+// 两类豁免(live 误报回炉修,POWER 模块的 C1/C2/C3 被建议搬到 U2 旁):
+//   - 只挂电源/地网的件(去耦电容):无认领时推不出可信信号核心,豁免不硬绑;
+//   - 认领模块内无核心大件、或全页无大件:无参照,豁免。
+//
+// 全页兜底(degraded)算分照旧,但归因文案声明"未分区,按全页最大件推核心"。
 func scoreProximity(s *schScoreScene) schScoreDimension {
 	d := schScoreDimension{ID: schDimProximity, Title: schScoreDimTitles[schDimProximity],
 		Status: schDimScored, Weight: schScoreDimWeights[schDimProximity]}
 	type miss struct {
-		partIdx int
-		core    int
-		dist    float64
-		ratio   float64
+		partIdx  int
+		core     int
+		dist     float64
+		ratio    float64
+		degraded bool
 	}
 	var total float64
-	var n int
+	var n, exemptPowerOnly int
 	var misses []miss
 	for pi, p := range s.parts {
 		if !isPassivePart(p) {
 			continue
 		}
-		core := s.coreOf(pi)
+		if _, claimed := s.moduleFor(pi); !claimed && s.partPowerOnly[pi] {
+			exemptPowerOnly++
+			continue // 只共电源网:无信号核心可信推导,豁免
+		}
+		core, degraded := s.coreOf(pi)
 		if core < 0 {
 			continue
 		}
@@ -554,12 +738,16 @@ func scoreProximity(s *schScoreScene) schScoreDimension {
 		total += ratio
 		n++
 		if ratio < 1 {
-			misses = append(misses, miss{pi, core, dist, ratio})
+			misses = append(misses, miss{pi, core, dist, ratio, degraded})
 		}
 	}
 	if n == 0 {
+		reason := "页面无可评的 R/C/L 无源件(或无核心大件可参照)"
+		if exemptPowerOnly > 0 {
+			reason = fmt.Sprintf("%d 个无源件只挂电源/地网(去耦类)且页面未分区认领 — 无信号核心可信推导,全部豁免;要评它们先 `sch zones set` 落模块认领", exemptPowerOnly)
+		}
 		d.Status = schDimSkipped
-		d.Reason = "页面无可评的 R/C/L 无源件(或无核心件可参照)"
+		d.Reason = reason
 		return d
 	}
 	d.Score = clampScore(total / float64(n) * 100)
@@ -574,13 +762,17 @@ func scoreProximity(s *schScoreScene) schScoreDimension {
 			side = "下"
 		}
 		tx := snap5(cx)
+		caveat := ""
+		if m.degraded {
+			caveat = "(未分区,按全页最大件推核心,建议先 sch zones set 落认领再复核)"
+		}
 		d.Attributions = append(d.Attributions, schScoreAttribution{
 			Dimension: schDimProximity,
 			Target:    p.Designator,
 			Penalty:   math.Round((1-m.ratio)*100/float64(n)*10) / 10,
 			At:        &checkPoint{X: round2(p.X), Y: round2(p.Y)},
-			Message: fmt.Sprintf("%s 距核心 %s 边距 %.0f(>%.0f 开始扣分)— 建议移到 %s %s方 (%g,%g) 附近后重连",
-				p.Designator, core.Designator, m.dist, schScoreProximityFull, core.Designator, side, tx, ty),
+			Message: fmt.Sprintf("%s 距核心 %s 边距 %.0f(>%.0f 开始扣分)— 建议移到 %s %s方 (%g,%g) 附近后重连%s",
+				p.Designator, core.Designator, m.dist, schScoreProximityFull, core.Designator, side, tx, ty, caveat),
 			Fix: fmt.Sprintf("easyeda sch modify --id %s --patch '{\"x\":%g,\"y\":%g}'", p.ID, tx, ty),
 		})
 	}
@@ -747,8 +939,9 @@ func newSchLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 		Short: "Score schematic layout readability (folded/reversed labels, proximity, chains) with executable fixes",
 		Long: "原理图布局质量五维打分(诊断视角,不是门 —— 门仍是 layout-lint + check):\n\n" +
 			"  folded-labels    netport 竖排折叠(判据与 sch check 的 folded-net-label 同源)\n" +
-			"  reversed-labels  netport 朝向背离宿主件→核心件方向(视觉折返)\n" +
-			"  proximity        R/C/L 无源件到核心件的边距(≤150 满分,≥500 记 0)\n" +
+			"  reversed-labels  netport 朝向背离宿主件→核心件方向(视觉折返;核心自身的标签豁免)\n" +
+			"  proximity        R/C/L 无源件到核心件的边距(≤150 满分,≥500 记 0)。核心只认大件,\n" +
+			"                   有 sch zones 认领时在本模块内推导;未分区且只挂电源网的去耦件豁免\n" +
 			"  stub-tidiness    小件+两端标记的长链跨度 >250;同排净距 <117 的标签挤压\n" +
 			"  frame-fit        说明文字压电路;分区框几何不可得时 skipped(≠满分)\n\n" +
 			"每条归因带 fix 字段:已填好真实位号/坐标的可执行命令,照抄运行即可修复。\n" +
@@ -758,8 +951,10 @@ func newSchLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 			"  easyeda sch layout-score --min-score 75   # 当门用(不建议;门是 layout-lint)",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// includeWires:宿主 pin 判定的电气匹配输入(anchor→stub→pin),
+			// 缺了自动退几何最近 —— 与 autoconnect 同一 wires payload/解析。
 			res, err := requestAction(cfg, "schematic.components.list", *window,
-				map[string]any{"includeBBox": true, "includePins": true})
+				map[string]any{"includeBBox": true, "includePins": true, "includeWires": true})
 			if err != nil {
 				return err
 			}
@@ -767,7 +962,15 @@ func newSchLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 			if perr != nil {
 				return perr
 			}
-			rep := analyzeSchLayoutScore(comps)
+			in := schScoreInputs{Wires: buildWireSegments(res.Result)}
+			// 分区认领(best-effort):有 claims 时核心在本模块内推导。读不到只
+			// 降级为全页兜底(归因文案会自带"未分区"声明),不阻断诊断。
+			if moduleOf, cerr := loadSchModuleClaims(cfg, *window); cerr != nil {
+				fmt.Fprintf(stderr, "sch layout-score: zone claims unavailable (%v) — 核心按全页最大件兜底\n", cerr)
+			} else {
+				in.ModuleOf = moduleOf
+			}
+			rep := analyzeSchLayoutScore(comps, in)
 			rep.MinScore = minScore
 
 			if asJSON {
@@ -789,6 +992,33 @@ func newSchLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 	c.Flags().Float64Var(&minScore, "min-score", 0, "fail (non-zero exit) when the weighted overall falls below this; unset = always exit 0")
 	c.Flags().BoolVar(&showAll, "all", false, "list every attribution instead of the top few per dimension")
 	return c
+}
+
+// loadSchModuleClaims 把当前页的 sch zones claims(workflow state 按 documentUuid
+// 存的 模块→位号 认领)摊平成 位号(大写)→模块名,给核心推导做模块围栏。
+// 空表返回 nil(= 未分区,coreOf 走全页兜底 + degraded 声明)。
+func loadSchModuleClaims(cfg *appConfig, window string) (map[string]string, error) {
+	pinnedCfg, win, docUUID, err := pinZonePage(cfg, window)
+	if err != nil {
+		return nil, err
+	}
+	zones, _, err := loadSchZoneClaimsForPage(pinnedCfg, win, docUUID)
+	if err != nil {
+		return nil, err
+	}
+	if len(zones) == 0 {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for module, claim := range zones {
+		if claim == nil {
+			continue
+		}
+		for _, desig := range claim.Parts {
+			out[strings.ToUpper(desig)] = module
+		}
+	}
+	return out, nil
 }
 
 const schScoreTopN = 3

@@ -82,7 +82,7 @@ func TestSchLayoutScoreFoldedNetportCaught(t *testing.T) {
 		lsMarker("np-led", "netport", "LED_CTRL", 940, 440,
 			layoutBBox{MinX: 934.5, MinY: 424.5, MaxX: 945.5, MaxY: 455.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimFolded)
 	if d.Status != schDimScored || len(d.Attributions) != 1 {
 		t.Fatalf("folded: want scored + 1 attribution, got status=%s attrs=%d", d.Status, len(d.Attributions))
@@ -108,7 +108,7 @@ func TestSchLayoutScoreHorizontalNetportNotFolded(t *testing.T) {
 		lsMarker("np-io0", "netport", "IO0", 850, 240,
 			layoutBBox{MinX: 819.5, MinY: 234.5, MaxX: 850.5, MaxY: 245.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimFolded)
 	if d.Score != 100 || len(d.Attributions) != 0 {
 		t.Fatalf("horizontal netport falsely flagged as folded: score=%v attrs=%d", d.Score, len(d.Attributions))
@@ -126,7 +126,7 @@ func TestSchLayoutScoreReversedNetport(t *testing.T) {
 		lsMarker("np-en", "netport", "EN", 660, 475,
 			layoutBBox{MinX: 629.5, MinY: 469.5, MaxX: 660.5, MaxY: 480.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimReversed)
 	if len(d.Attributions) != 1 || d.Score != 100-schScoreReversedPenalty {
 		t.Fatalf("reversed: want 1 hit score %v, got attrs=%d score=%v",
@@ -154,7 +154,7 @@ func TestSchLayoutScoreNetportFacingCoreClean(t *testing.T) {
 		lsMarker("np-en", "netport", "EN", 740, 475,
 			layoutBBox{MinX: 739.5, MinY: 469.5, MaxX: 770.5, MaxY: 480.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimReversed)
 	if d.Score != 100 || len(d.Attributions) != 0 {
 		t.Fatalf("facing-core netport falsely flagged reversed: score=%v attrs=%d", d.Score, len(d.Attributions))
@@ -174,7 +174,7 @@ func TestSchLayoutScoreProximity(t *testing.T) {
 			layoutBBox{MinX: 1515.5, MinY: 460, MaxX: 1536.5, MaxY: 470},
 			layoutPin{Number: "1", X: 1516, Y: 465}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimProximity)
 	if d.Status != schDimScored {
 		t.Fatalf("proximity skipped unexpectedly: %s", d.Reason)
@@ -210,7 +210,7 @@ func TestSchLayoutScoreLongChain(t *testing.T) {
 		lsMarker("np-b", "netport", "LED_DRIVE_CTRL", 361, 475,
 			layoutBBox{MinX: 360.5, MinY: 469.5, MaxX: 480.5, MaxY: 480.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimTidiness)
 	if len(d.Attributions) != 1 || d.Attributions[0].Target != "R5" {
 		t.Fatalf("long chain: want 1 attribution on R5, got %+v", d.Attributions)
@@ -234,7 +234,7 @@ func TestSchLayoutScoreRowCrowding(t *testing.T) {
 		lsMarker("np-x", "netport", "SIG_A", 551, 475,
 			layoutBBox{MinX: 550.5, MinY: 469.5, MaxX: 581.5, MaxY: 480.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimTidiness)
 	found := false
 	for _, a := range d.Attributions {
@@ -252,7 +252,7 @@ func TestSchLayoutScoreRowCrowding(t *testing.T) {
 func TestSchLayoutScoreFrameFitSkippedIsNotFullMarks(t *testing.T) {
 	// 无 text 几何时 frame-fit 必须显式 skipped(带原因),不参与加权,也不出现
 	// 在 dimensionScores —— 「没测」绝不冒充「满分」。
-	rep := analyzeSchLayoutScore([]layoutComp{ceshiU2(), ceshiR3()})
+	rep := analyzeSchLayoutScore([]layoutComp{ceshiU2(), ceshiR3()}, schScoreInputs{})
 	d := dimOf(t, rep, schDimFrameFit)
 	if d.Status != schDimSkipped || d.Reason == "" {
 		t.Fatalf("frame-fit: want skipped with reason, got status=%s reason=%q", d.Status, d.Reason)
@@ -273,7 +273,7 @@ func TestSchLayoutScoreFrameFitTextOverPart(t *testing.T) {
 			layoutBBox{MinX: 950, MinY: 456, MaxX: 1010, MaxY: 466}),
 	}
 	// text 不是 marker,lsMarker 只是借壳造图元;componentType 才是判据。
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimFrameFit)
 	if d.Status != schDimScored || len(d.Attributions) != 1 || d.Attributions[0].Target != "R3" {
 		t.Fatalf("text-over-part: want scored + 1 attribution on R3, got status=%s attrs=%+v", d.Status, d.Attributions)
@@ -293,7 +293,7 @@ func TestSchLayoutScoreOverallWeightingAndVerdict(t *testing.T) {
 		lsMarker("np-led", "netport", "LED_CTRL", 940, 440,
 			layoutBBox{MinX: 934.5, MinY: 424.5, MaxX: 945.5, MaxY: 455.5}),
 	}
-	rep := analyzeSchLayoutScore(comps)
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	if rep.Overall != 95.7 {
 		t.Fatalf("overall = %v, want 95.7", rep.Overall)
 	}
@@ -309,7 +309,7 @@ func TestSchLayoutScoreOverallWeightingAndVerdict(t *testing.T) {
 }
 
 func TestSchLayoutScoreEmptyPageUnscored(t *testing.T) {
-	rep := analyzeSchLayoutScore(nil)
+	rep := analyzeSchLayoutScore(nil, schScoreInputs{})
 	if rep.Verdict != "unscored" || rep.ScoredDims != 0 {
 		t.Fatalf("empty page: want unscored/0, got %q/%d", rep.Verdict, rep.ScoredDims)
 	}
@@ -329,6 +329,109 @@ func TestSchScoreVerdictBands(t *testing.T) {
 		if got := schScoreVerdict(&rep); got != tc.want {
 			t.Fatalf("verdict(%v) = %q, want %q", tc.overall, got, tc.want)
 		}
+	}
+}
+
+// ── live 回炉修的三类误报回归(ceshi 真机验收发现)──────────────────────────
+
+func TestSchLayoutScoreCoreTopLabelsExemptFromReversed(t *testing.T) {
+	// live 误报 1:「U2 的 IO0 netport 背向核心 C5(朝右,核心在左)」—— 全板核心
+	// U2 的核心兜底选到了电容 C5。修法:核心候选排除无源/小件;宿主自己就是最大
+	// 件时其标签豁免 reversed(核心引脚朝外扇出是正常拓扑)。
+	comps := []layoutComp{
+		ceshiU2(),
+		// U2 的 IO0 netport,挂 U2:30 (915,470),朝右伸(背离左侧的 C5)。
+		lsMarker("np-io0-u2", "netport", "IO0", 945, 470,
+			layoutBBox{MinX: 944.5, MinY: 464.5, MaxX: 975.5, MaxY: 475.5}),
+		// C5(电容)与 U2 共 IO0 网 —— 修前它会被推成 U2 的"核心"。
+		lsPart("c5", "C5", 700, 470,
+			layoutBBox{MinX: 689.5, MinY: 465.5, MaxX: 710.5, MaxY: 474.5},
+			layoutPin{Number: "1", X: 710, Y: 470}),
+		// C5 自己的 IO0 netport 朝右(面向 U2,正确),不产生任何命中。
+		lsMarker("np-io0-c5", "netport", "IO0", 740, 470,
+			layoutBBox{MinX: 739.5, MinY: 464.5, MaxX: 770.5, MaxY: 475.5}),
+	}
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
+	d := dimOf(t, rep, schDimReversed)
+	if d.Score != 100 || len(d.Attributions) != 0 {
+		t.Fatalf("core's own netport must be exempt from reversed: score=%v attrs=%+v", d.Score, d.Attributions)
+	}
+}
+
+func TestSchLayoutScoreModuleInternalCore(t *testing.T) {
+	// live 误报 2:C1/C2/C3 是 POWER 模块(核心 U1=AMS1117),却被绑到全页最大件
+	// U2 并建议搬家 —— 会拆散电源模块。修法:有 sch zones 认领时核心只在本模块内找。
+	comps := []layoutComp{
+		ceshiU2(),
+		lsPart("u1", "U1", 200, 470,
+			layoutBBox{MinX: 170, MinY: 445, MaxX: 230, MaxY: 495},
+			layoutPin{Number: "2", X: 230, Y: 470}),
+		// C1 紧贴 U1(边距 29.5),但距 U2 有 564 —— 修前按 U2 算会被归因搬家。
+		lsPart("c1", "C1", 270, 470,
+			layoutBBox{MinX: 259.5, MinY: 465.5, MaxX: 280.5, MaxY: 474.5},
+			layoutPin{Number: "1", X: 260, Y: 470}),
+	}
+	in := schScoreInputs{ModuleOf: map[string]string{"U1": "POWER", "C1": "POWER", "U2": "MCU"}}
+	rep := analyzeSchLayoutScore(comps, in)
+	d := dimOf(t, rep, schDimProximity)
+	if d.Status != schDimScored || d.Score != 100 || len(d.Attributions) != 0 {
+		t.Fatalf("claimed C1 must score against module core U1 (gap 29.5), got status=%s score=%v attrs=%+v",
+			d.Status, d.Score, d.Attributions)
+	}
+}
+
+func TestSchLayoutScorePowerOnlyCapExemptWithoutClaims(t *testing.T) {
+	// live 误报 2 的无认领半边:ceshi 当前无 claims(画完框就 clear 了),C1 只挂
+	// 电源/地网 —— 推不出可信信号核心,必须豁免而不是硬绑 U2。
+	comps := []layoutComp{
+		ceshiU2(),
+		lsPart("c1", "C1", 1526, 465,
+			layoutBBox{MinX: 1515.5, MinY: 460, MaxX: 1536.5, MaxY: 470},
+			layoutPin{Number: "1", X: 1516, Y: 465}),
+		lsMarker("nf-gnd", "netflag", "GND", 1526, 445,
+			layoutBBox{MinX: 1516.5, MinY: 425.5, MaxX: 1535.5, MaxY: 445.5}),
+	}
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
+	d := dimOf(t, rep, schDimProximity)
+	if len(d.Attributions) != 0 {
+		t.Fatalf("power-only cap must not be attributed against U2: %+v", d.Attributions)
+	}
+	if d.Status != schDimSkipped || !strings.Contains(d.Reason, "电源") {
+		t.Fatalf("power-only exemption must surface as an explicit skip reason, got status=%s reason=%q", d.Status, d.Reason)
+	}
+}
+
+func TestSchLayoutScoreHostPinPrefersWireMatch(t *testing.T) {
+	// live 误报 3:LED_CTRL 折叠条目的 fix 指到 U2:29,实际 stub 挂在 R3:1 ——
+	// 密脚区里别件的 pin 几何上更近。修法:导线端点匹配第一优先(anchor→stub→pin),
+	// 几何最近只作兜底。
+	u2 := ceshiU2()
+	u2.Pins = append(u2.Pins, layoutPin{Number: "29", X: 938, Y: 435}) // 距 anchor 5.4 的诱饵 pin
+	comps := []layoutComp{
+		u2,
+		lsPart("r3", "R3", 960, 460,
+			layoutBBox{MinX: 949.5, MinY: 455.5, MaxX: 970.5, MaxY: 464.5},
+			layoutPin{Number: "1", X: 940, Y: 460}, // live 实测:R3 pin1 在 (940,460),距 anchor 20
+			layoutPin{Number: "2", X: 970, Y: 460}),
+		lsMarker("np-led", "netport", "LED_CTRL", 940, 440,
+			layoutBBox{MinX: 934.5, MinY: 424.5, MaxX: 945.5, MaxY: 455.5}),
+	}
+	// 无导线输入:几何兜底会被诱饵骗到 U2:29(记录旧行为,证明 wire 匹配改变结论)。
+	repGeom := analyzeSchLayoutScore(comps, schScoreInputs{})
+	geomFix := dimOf(t, repGeom, schDimFolded).Attributions[0].Fix
+	if !strings.Contains(geomFix, "U2:29") {
+		t.Fatalf("fixture no longer reproduces the geometric-nearest trap: %q", geomFix)
+	}
+	// 有 stub 导线 (940,440)→(940,460):电气匹配定宿主 R3:1。
+	rep := analyzeSchLayoutScore(comps, schScoreInputs{
+		Wires: []wireSegment{{X0: 940, Y0: 440, X1: 940, Y1: 460, Net: "LED_CTRL"}},
+	})
+	fix := dimOf(t, rep, schDimFolded).Attributions[0].Fix
+	if !strings.Contains(fix, "disconnect --pin R3:1") || !strings.Contains(fix, "--x 940 --y 460") {
+		t.Fatalf("wire-traced host must be R3:1 @(940,460), got fix %q", fix)
+	}
+	if strings.Contains(fix, "U2:29") {
+		t.Fatalf("decoy pin U2:29 must lose to the wired pin: %q", fix)
 	}
 }
 
