@@ -436,6 +436,17 @@ These are planned and **not implemented** today.
   query relevance, package, JLC-basic-part status, and stock.
 - **立创商城比对选型 / LCSC mall comparison selection** — compare candidate parts by
   price / stock / specs to pick the optimal one. Not built.
+- **🔖 接插件逐脚丝印 / connector per-pin silk — `easyeda pcb silk-pins`(P9,未建).**
+  端子 / 排针 / 接插件应**逐脚自动标注**电气特性,让用户拿到板一眼知每脚是什么(电源/地/TX/RX…)
+  以辅助接线。今天**没有 CLI 自动做**——手工丝印踩过坑:把多脚写成一整行长句
+  (`LCD 1:GND 2:3V3…`)、不与焊盘逐一对齐、长句远离焊盘只能读不能辅助接线、字号密度挤器件。
+  设计标准(实现即校验门):① 接口名只留短标题(`LCD`/`PROG`/`MIC`…);② **每脚单独短标签、严格按焊盘物理顺序**;
+  ③ 优先用**网络简称**(`G`/`3V3`/`5V`/`TX`/`RX`/`SCL`/`SDA`/`RST`/`BL`,从连到该脚的网名取);
+  ④ 不写脚号冒号(除非编号有装配意义);⑤ 横向排针→横向逐脚、纵向→纵向,顺序与实物观察方向一致;
+  ⑥ 标签对准各自焊盘、在器件外壳遮挡区之外;⑦ 普通器件只留位号;⑧ 不压焊盘/器件/出框、装配后可见(铁律 11)。
+  **实现落点**:新子命令 `easyeda pcb silk-pins`(或扩展 `pcb silk`)从 netlist 取每脚网名简称 + 焊盘坐标/排布方向逐脚落字,
+  复用块的 `silk` map(块数据已有逐脚标注,如 LED 阴极 K)。**根本教训**:校验门要**同时查几何(没压焊盘)+ 语义
+  (标签数=引脚数、逐脚对齐、无长句)**——上一版只验了几何、漏了语义可用性。归属 design-flow **P9**。
 - **✅ PCB 布局智能补完 — `place-constrained` 4 真缺陷全部 DONE(2026-07-11).** 复评官方
   「PCB自动化工具」v2.5.1 确认其「模块化布局」是 netlist 连通性聚类、解决不了角色感知 floorplan
   的 5 条痛点(板框/类型优先级/朝向/板边距/天线)——都是我们自己代码补的。ceshi 真机逐条验证:
