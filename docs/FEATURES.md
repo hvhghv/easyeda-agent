@@ -436,6 +436,19 @@ These are planned and **not implemented** today.
   query relevance, package, JLC-basic-part status, and stock.
 - **立创商城比对选型 / LCSC mall comparison selection** — compare candidate parts by
   price / stock / specs to pick the optimal one. Not built.
+- **🧲 组内布局计算 / `sch group tidy`(未建,判据已实战校准 2026-08-12).**
+  基于持久化编组做**组内自动整理**:`--pattern power-updown` 把组内双电源旗电容
+  竖放成"上电源/下地"行业画法(ceshi POWER/MCU 组手工验证,96.0 excellent)。
+  实战趟出的判据(实现即规则):① pin 半距按**实测**不按假设(0402/0805 符号
+  ±20,且同规格不同库件存在镜像——C1/C6 需 rot90 而 C2/C3/C4 需 rot270,必须
+  rot 后重读 pin 实位);② **带信号 netport 的件保持横放**(长条标竖放即折叠,
+  按旗类型分流);③ **标签文字朝外**(电源旗文字在符号上方、GND 在下方——当前
+  connect 产出的文字"内折"在旗与器件之间,需按 orientation 真值表甩向外侧,用户
+  点名);④ mutation 后必须 fresh 读再连(rot 后立即 connect 吃 stale pin 位曾致
+  两根 stub 同点起步被平台共线合并成贯穿桥=真短路,gate 兜住;显式坐标绕开)——
+  这也指向 **schematic 侧 mutation-后-stale 的统一修复**(zone-draw / group-move
+  / connect 三处已实证,应做 settle/double-read 通用防线)。组内 layout-lint 兜底
+  不重叠;组间由分区框隔离 ⇒ 全局无重叠。
 - **🔖 接插件逐脚丝印 / connector per-pin silk — `easyeda pcb silk-pins`(P9,未建).**
   端子 / 排针 / 接插件应**逐脚自动标注**电气特性,让用户拿到板一眼知每脚是什么(电源/地/TX/RX…)
   以辅助接线。今天**没有 CLI 自动做**——手工丝印踩过坑:把多脚写成一整行长句
