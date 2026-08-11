@@ -253,6 +253,17 @@ func findPartialGroups(groups []*schGroup, selected []string) []*schGroup {
 // float tails without ever bridging distinct grid points.
 const schGroupEps = 0.5
 
+// schGroupNearTol is the LOOSE tolerance of the expansion-completeness precheck.
+// Live 2026-08-12: a stub wire that an earlier HALF-MOVE had stranded sat 10
+// units off its pin (line start 820 vs pin R1:1 at 810, folded-back vertex list
+// [820,475 835,475 845,475 835,475]) — it electrically touches nothing, so the
+// eps-based tree classes (member/foreign) both miss it, the expansion leaves it
+// behind, and the next move half-carries the group AGAIN, compounding the
+// damage. Any wire that comes within this distance of a member pin without
+// attaching (schGroupEps) is treated as such residue and hard-rejects the move.
+// 12 covers the observed 10-unit displacement with margin.
+const schGroupNearTol = 12.0
+
 // schGroupWire is one wire polyline with its live primitiveId (pulled via the
 // debug.exec_js hatch — the components.list `wires` payload carries segments
 // but drops the primitiveId, and group-move must name the wire to move it).
@@ -274,14 +285,27 @@ type groupExpandInput struct {
 	Flags      []schGroupFlag
 }
 
+// groupSuspect is one wire flagged by the completeness precheck: it GRAZES a
+// member pin (within schGroupNearTol) without electrically attaching (within
+// schGroupEps) — the signature of residue from an earlier half-move. Endpoints
+// + the grazed pin go into the rejection report so the cleanup is actionable.
+type groupSuspect struct {
+	WireID         string
+	X0, Y0, X1, Y1 float64 // wire's first/last polyline vertex
+	PinX, PinY     float64 // the member pin it grazes
+}
+
 // groupExpansion is the discovered attachment set. SharedTrees counts wire
 // trees that touch BOTH a member pin and a non-member pin — real inter-part
 // wiring, not a stub; moving it rigidly would tear the far connection, so it is
-// skipped and reported.
+// skipped and reported. Suspects (see groupSuspect) mean the expansion is
+// INCOMPLETE and the move must be refused: a partial move is exactly the
+// failure mode groups exist to prevent.
 type groupExpansion struct {
 	WireIDs     []string
 	FlagIDs     []string
 	SharedTrees int
+	Suspects    []groupSuspect
 }
 
 func pointsClose(ax, ay, bx, by, eps float64) bool {
@@ -407,6 +431,24 @@ func expandGroupAttachments(in groupExpandInput) groupExpansion {
 	var out groupExpansion
 	for _, t := range trees {
 		if !t.member {
+			// Completeness precheck: a tree that ATTACHES to no member pin but
+			// GRAZES one (within schGroupNearTol) is residue of an earlier
+			// half-move — silently leaving it behind is how the damage compounds.
+			for _, wi := range t.wires {
+				w := in.Wires[wi]
+				for _, p := range in.MemberPins {
+					if pointOnPolyline(p[0], p[1], w.Points, schGroupNearTol) {
+						last := len(w.Points)
+						out.Suspects = append(out.Suspects, groupSuspect{
+							WireID: w.ID,
+							X0:     w.Points[0], Y0: w.Points[1],
+							X1: w.Points[last-2], Y1: w.Points[last-1],
+							PinX: p[0], PinY: p[1],
+						})
+						break
+					}
+				}
+			}
 			continue
 		}
 		if t.foreign {
@@ -427,6 +469,7 @@ func expandGroupAttachments(in groupExpandInput) groupExpansion {
 	}
 	sort.Strings(out.WireIDs)
 	sort.Strings(out.FlagIDs)
+	sort.Slice(out.Suspects, func(i, j int) bool { return out.Suspects[i].WireID < out.Suspects[j].WireID })
 	return out
 }
 
@@ -579,12 +622,68 @@ func expandSchGroupForMove(cfg *appConfig, window, groupRef string) (*schGroupMo
 		return nil, fmt.Errorf("group %s has stale member(s) not on the active page: %s — `sch group remove --group %s --members %s` (or `sch group list` to inspect)",
 			describeSchGroup(g), strings.Join(missing, ","), g.ID, strings.Join(missing, ","))
 	}
-	in.Wires, err = fetchSchWirePolylines(pinned, win, docUUID)
+	in.Wires, err = fetchSchWirePolylinesStable(pinned, win, docUUID)
 	if err != nil {
 		return nil, fmt.Errorf("discover member attachments: %w", err)
 	}
 	set.Expansion = expandGroupAttachments(in)
+	// Completeness precheck — refuse over half-move. A wire that grazes a member
+	// pin without attaching is residue of an earlier half-move (live 2026-08-12:
+	// a stranded stub 10 units off R1:1 was left behind by the expansion on every
+	// pass, so each move stranded it further and parked its flag on other parts).
+	// Moving anyway would half-carry the group again; the ONLY safe answer is to
+	// stop and have the residue cleaned first.
+	if len(set.Expansion.Suspects) > 0 {
+		var lines, ids []string
+		for _, s := range set.Expansion.Suspects {
+			ids = append(ids, s.WireID)
+			lines = append(lines, fmt.Sprintf("  wire %s [%g,%g → %g,%g] grazes member pin (%g,%g) without attaching",
+				s.WireID, s.X0, s.Y0, s.X1, s.Y1, s.PinX, s.PinY))
+		}
+		return nil, fmt.Errorf(`group %s expansion is INCOMPLETE — %d wire(s) sit within %g units of a member pin but are NOT electrically attached (likely residue of an earlier half-move):
+%s
+refusing to move — a half-moved group is exactly what groups exist to prevent. Clean up first:
+  easyeda sch prim-delete --ids %s   # remove the stray stub(s)
+  easyeda sch check                  # audit dangling wires / stray flags
+then re-connect the affected pin(s) (`+"`sch connect`"+`) and retry`,
+			describeSchGroup(g), len(set.Expansion.Suspects), schGroupNearTol,
+			strings.Join(lines, "\n"), strings.Join(ids, ","))
+	}
 	return set, nil
+}
+
+// fetchSchWirePolylinesStable reads the wire list until two consecutive reads
+// agree on the id set. A group-move recreates every stub wire/flag (new
+// primitiveIds); an IMMEDIATELY following expansion can catch the platform's
+// snapshot mid-churn and see only PART of the new wires — live 2026-08-12: the
+// return leg of a +100/-100 pair expanded 2+2+2 instead of 2+4+4, leaving two
+// stubs+flags stranded at the old offset (dangling wires + a marker parked on
+// another part). Two agreeing reads prove the snapshot has settled; still
+// unstable after the retry budget = refuse to expand (a half-moved group is the
+// exact failure mode groups exist to prevent).
+func fetchSchWirePolylinesStable(cfg *appConfig, window, docUUID string) ([]schGroupWire, error) {
+	const attempts = 4
+	var prevKey string
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(350 * time.Millisecond)
+		}
+		cur, err := fetchSchWirePolylines(cfg, window, docUUID)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(cur))
+		for _, w := range cur {
+			ids = append(ids, w.ID)
+		}
+		sort.Strings(ids)
+		key := strings.Join(ids, ",")
+		if prevKey != "" && key == prevKey {
+			return cur, nil
+		}
+		prevKey = key
+	}
+	return nil, fmt.Errorf("wire list is still churning after %d reads (platform snapshot settling after a recent mutation) — wait a moment and rerun", attempts)
 }
 
 // ── layout-action guards ────────────────────────────────────────────────────

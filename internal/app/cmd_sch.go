@@ -948,6 +948,16 @@ unit — internal relative layout is untouched, only the whole assembly shifts b
 There is no EasyEDA grouping API to persist against (probed 3.2.121: zero
 group/parent surface), so --group reads easyeda-agent's own page-scoped store.
 
+--group runs a COMPLETENESS PRECHECK and refuses over half-moving: a wire that
+sits NEAR a member pin (within 12 units) without electrically attaching is the
+signature of residue from an earlier half-move — a stranded stub recreated a
+few units off its pin (seen live: line start 820 vs pin 810, folded-back vertex
+list). Such residue attaches to nothing, so a naive expansion would leave it
+behind and every later move would strand it further (dangling wires, flags
+parked on other parts). On detection the move is REJECTED with the offending
+wire ids + coordinates; clean up first (` + "`sch prim-delete --ids <wireId>`" + `, audit
+with ` + "`sch check`" + `), re-connect the pin, then retry.
+
 Components translate via a plain position modify (same primitiveId survives).
 Wires have no modify-in-place, so each is deleted and recreated at the shifted
 endpoints (net/color/width/lineType preserved) — a wire's primitiveId CHANGES;

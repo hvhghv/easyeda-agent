@@ -288,6 +288,82 @@ func TestExpandGroupAttachmentsMultiPinFanout(t *testing.T) {
 	}
 }
 
+// ── completeness precheck: half-move residue detection ──────────────────────
+
+func TestExpandGroupAttachmentsPathologicalResidueRejected(t *testing.T) {
+	// EXACT live geometry (2026-08-12 半搬事故残骸): member pin R1:1 at (810,475);
+	// the stranded stub's line is [820,475 835,475 845,475 835,475] — a
+	// folded-back 4-vertex polyline whose start sits 10 units OFF the pin. It
+	// attaches to nothing (eps=0.5 misses it), so the old expansion silently
+	// left it behind → half-move. The completeness precheck must flag it.
+	in := groupExpandInput{
+		MemberPins: [][2]float64{{810, 475}},
+		Wires: []schGroupWire{
+			{ID: "w-sick", Points: []float64{820, 475, 835, 475, 845, 475, 835, 475}},
+		},
+		Flags: []schGroupFlag{{ID: "f-sick", X: 845, Y: 475}},
+	}
+	got := expandGroupAttachments(in)
+	if len(got.WireIDs) != 0 || len(got.FlagIDs) != 0 {
+		t.Fatalf("residue must not be silently included: %+v", got)
+	}
+	if len(got.Suspects) != 1 || got.Suspects[0].WireID != "w-sick" {
+		t.Fatalf("residue must be flagged as a suspect: %+v", got.Suspects)
+	}
+	s := got.Suspects[0]
+	if s.PinX != 810 || s.PinY != 475 || s.X0 != 820 || s.Y0 != 475 {
+		t.Fatalf("suspect must carry the grazed pin + wire endpoints: %+v", s)
+	}
+}
+
+func TestExpandGroupAttachmentsResidueBesideHealthyStub(t *testing.T) {
+	// A healthy stub AND a residue wire on the same member: the healthy one
+	// expands normally, the residue still flags — one suspect per wire.
+	in := groupExpandInput{
+		MemberPins: [][2]float64{{810, 475}, {810, 455}},
+		Wires: []schGroupWire{
+			{ID: "w-ok", Points: []float64{810, 455, 850, 455}},
+			{ID: "w-sick", Points: []float64{820, 475, 835, 475}},
+		},
+		Flags: []schGroupFlag{{ID: "f-ok", X: 850, Y: 455}},
+	}
+	got := expandGroupAttachments(in)
+	if strings.Join(got.WireIDs, ",") != "w-ok" || strings.Join(got.FlagIDs, ",") != "f-ok" {
+		t.Fatalf("healthy stub must still expand: %+v", got)
+	}
+	if len(got.Suspects) != 1 || got.Suspects[0].WireID != "w-sick" {
+		t.Fatalf("residue must be flagged exactly once: %+v", got.Suspects)
+	}
+}
+
+func TestExpandGroupAttachmentsCleanScenesHaveNoSuspects(t *testing.T) {
+	// Attached stubs (exact pin contact) and genuinely-far wires must never
+	// trip the precheck — only the graze-without-attach band (0.5, 12] does.
+	cases := []struct {
+		name string
+		in   groupExpandInput
+	}{
+		{"attached stub", groupExpandInput{
+			MemberPins: [][2]float64{{100, 100}},
+			Wires:      []schGroupWire{{ID: "w1", Points: []float64{100, 100, 140, 100}}},
+		}},
+		{"far unrelated wire", groupExpandInput{
+			MemberPins: [][2]float64{{100, 100}},
+			Wires:      []schGroupWire{{ID: "w-far", Points: []float64{500, 500, 540, 500}}},
+		}},
+		{"shared tree stays a warning, not a suspect", groupExpandInput{
+			MemberPins: [][2]float64{{100, 100}},
+			OtherPins:  [][2]float64{{200, 100}},
+			Wires:      []schGroupWire{{ID: "w1", Points: []float64{100, 100, 200, 100}}},
+		}},
+	}
+	for _, tc := range cases {
+		if got := expandGroupAttachments(tc.in); len(got.Suspects) != 0 {
+			t.Errorf("%s: unexpected suspects %+v", tc.name, got.Suspects)
+		}
+	}
+}
+
 // ── move-set flattening ─────────────────────────────────────────────────────
 
 func TestSchGroupMoveSetAllIDs(t *testing.T) {
