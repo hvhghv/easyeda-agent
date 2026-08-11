@@ -1,8 +1,9 @@
 package app
 
 // cmd_sch_zone_move_test.go — `sch zone move` 纯函数表驱动单测(契约 §2):
-// 展开集组装(组去重/散件纳入/跨区组拒绝/框图元排除/文本纳入判定)+
-// 目的地预检几何(出界/压图签/压他区)+ 文本搬移 JS。
+// 展开集组装(组去重/散件纳入/跨区组拒绝/全区一份展开:区内直连线随区搬、
+// 跨区布线留原地/框图元排除/文本纳入判定)+ 目的地预检几何(出界/压图签/
+// 压他区)+ 文本搬移 JS + 重画前 settle 的 (id+bbox) 指纹判定。
 
 import (
 	"strings"
@@ -139,7 +140,7 @@ func TestPartitionZoneMoveUnits(t *testing.T) {
 	}
 }
 
-// ── buildZoneLooseInputs:散件的临时单件组输入 ──────────────────────────────
+// ── buildZoneMoveExpandInput:全区一份的展开输入 ────────────────────────────
 
 func zmComp(id, desig, ctype string, pins ...[2]float64) layoutComp {
 	c := layoutComp{ID: id, Designator: desig, ComponentType: ctype}
@@ -152,7 +153,7 @@ func zmComp(id, desig, ctype string, pins ...[2]float64) layoutComp {
 	return c
 }
 
-func TestBuildZoneLooseInputs(t *testing.T) {
+func TestBuildZoneMoveExpandInput(t *testing.T) {
 	comps := []layoutComp{
 		zmComp("idR1", "R1", "part", [2]float64{100, 200}, [2]float64{100, 160}),
 		zmComp("idU1", "U1", "part", [2]float64{300, 200}),
@@ -160,49 +161,45 @@ func TestBuildZoneLooseInputs(t *testing.T) {
 		zmComp("idSheet", "", "sheet"), // sheet 不入 pin 池
 	}
 	wires := []schGroupWire{{ID: "w1", Points: []float64{100, 200, 100, 260}}}
-	inputs, missing := buildZoneLooseInputs([]string{"R1", "R9"}, comps, wires)
+	in, missing := buildZoneMoveExpandInput([]string{"R1", "r1", " R9 "}, comps, wires)
 	if strings.Join(missing, ",") != "R9" {
 		t.Fatalf("missing = %v, want [R9]", missing)
 	}
-	in, ok := inputs["R1"]
-	if !ok {
-		t.Fatal("R1 input missing")
-	}
 	if len(in.MemberPins) != 2 {
-		t.Errorf("MemberPins = %v, want R1's 2 pins", in.MemberPins)
+		t.Errorf("MemberPins = %v, want R1's 2 pins(位号大小写/空白归一,不重复计)", in.MemberPins)
 	}
 	if len(in.OtherPins) != 1 || in.OtherPins[0] != [2]float64{300, 200} {
-		t.Errorf("OtherPins = %v, want only U1's pin", in.OtherPins)
+		t.Errorf("OtherPins = %v, want only U1's pin(移动集之外的件)", in.OtherPins)
 	}
 	if len(in.Flags) != 1 || in.Flags[0].ID != "idF1" {
 		t.Errorf("Flags = %v, want the netflag", in.Flags)
 	}
 	if len(in.Wires) != 1 || in.Wires[0].ID != "w1" {
-		t.Errorf("Wires = %v, want shared wire list", in.Wires)
+		t.Errorf("Wires = %v, want the full-page wire list", in.Wires)
 	}
 }
 
-// 散件纳入语义走真展开:桩线+远端旗随件;终止在他件 pin 的树 = SharedTrees 留原地。
-// 注意 stub 与跨件线必须从不同 pin 出发 —— 同点起步会被 union-find 并成一棵树
-// (平台把共点导线合并成一个电气树,正是 expandGroupAttachments 建模的语义)。
-func TestZoneLooseExpansionSemantics(t *testing.T) {
+// 全区展开语义走真展开:桩线+远端旗随区;终止在区外件 pin 的树 = SharedTrees
+// 留原地。注意 stub 与跨区线必须从不同 pin 出发 —— 同点起步会被 union-find 并成
+// 一棵树(平台把共点导线合并成一个电气树,正是 expandGroupAttachments 建模的语义)。
+func TestZoneMoveExpansionStubAndFlag(t *testing.T) {
 	comps := []layoutComp{
 		zmComp("idR1", "R1", "part", [2]float64{100, 200}, [2]float64{100, 160}),
 		zmComp("idU1", "U1", "part", [2]float64{300, 160}),
 		zmComp("idF1", "F1", "netflag", [2]float64{100, 260}),
 	}
-	// stub:R1 pin1 → 旗;inter:R1 pin2 → U1 pin(终止在他件 pin = 真实布线)
+	// stub:R1 pin1 → 旗;inter:R1 pin2 → 区外件 U1 pin(终止在区外 pin = 跨区布线)
 	wires := []schGroupWire{
 		{ID: "wStub", Points: []float64{100, 200, 100, 260}},
 		{ID: "wInter", Points: []float64{100, 160, 300, 160}},
 	}
-	inputs, missing := buildZoneLooseInputs([]string{"R1"}, comps, wires)
+	in, missing := buildZoneMoveExpandInput([]string{"R1"}, comps, wires)
 	if len(missing) != 0 {
 		t.Fatalf("missing = %v", missing)
 	}
-	exp := expandGroupAttachments(inputs["R1"])
+	exp := expandGroupAttachments(in)
 	if strings.Join(exp.WireIDs, ",") != "wStub" {
-		t.Errorf("WireIDs = %v, want [wStub] (inter-part tree stays)", exp.WireIDs)
+		t.Errorf("WireIDs = %v, want [wStub] (cross-zone tree stays)", exp.WireIDs)
 	}
 	if strings.Join(exp.FlagIDs, ",") != "idF1" {
 		t.Errorf("FlagIDs = %v, want [idF1]", exp.FlagIDs)
@@ -215,17 +212,99 @@ func TestZoneLooseExpansionSemantics(t *testing.T) {
 	}
 }
 
-// 半移残骸(同线断触)在散件展开里同样必须被抓住 —— 与组预检同一判据。
-func TestZoneLooseExpansionCatchesResidue(t *testing.T) {
+// ── F1 回归:区内跨单元直连线必须随区刚移 ──────────────────────────────────
+//
+// 场景:区 POWER = 组{U2} + 散件 J1。wDirect 直连 U2↔J1(区内跨单元直连线),
+// wCross 从 U2 拉到区外件 X9 的 pin(真实跨区布线)。契约:wDirect 随区搬
+// (∈ WireIDs),只有 wCross 算 SharedTrees(=1)留在原地。
+//
+// 旧实现逐单元展开(组走 expandSchGroupForMove、散件走临时单件组输入),同区
+// 另一单元的 pin 也算 foreign → wDirect 两边都判 shared 留在原地(刚体被撕开、
+// 两端悬空断网),且同一棵树被两单元各计一次(实测旧路径:WireIDs=[]、
+// SharedTrees=2/3,本测试红);全区一份展开(buildZoneMoveExpandInput,
+// MemberPins=U2+J1 全部 pin)修复后绿。
+func TestZoneMoveExpandIntraZoneDirectWire(t *testing.T) {
+	comps := []layoutComp{
+		zmComp("idU2", "U2", "part", [2]float64{100, 200}, [2]float64{140, 200}, [2]float64{100, 160}),
+		zmComp("idJ1", "J1", "part", [2]float64{300, 200}),
+		zmComp("idX9", "X9", "part", [2]float64{100, 40}),
+	}
+	wDirect := schGroupWire{ID: "wDirect", Points: []float64{140, 200, 300, 200}}
+	wCross := schGroupWire{ID: "wCross", Points: []float64{100, 160, 100, 40}}
+	cases := []struct {
+		name        string
+		wires       []schGroupWire
+		wantWireIDs string
+		wantShared  int
+	}{
+		{"区内跨单元直连线随区搬", []schGroupWire{wDirect}, "wDirect", 0},
+		{"真跨区布线留原地", []schGroupWire{wCross}, "", 1},
+		{"混合:直连随搬+跨区留守", []schGroupWire{wDirect, wCross}, "wDirect", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 生产路径:移动集 = 组{U2} 全部成员 + 散件 J1,全区一份展开输入,
+			// expandGroupAttachments 只调一次(runSchZoneMove 的同款口径)。
+			in, missing := buildZoneMoveExpandInput([]string{"U2", "J1"}, comps, tc.wires)
+			if len(missing) != 0 {
+				t.Fatalf("missing = %v", missing)
+			}
+			exp := expandGroupAttachments(in)
+			if got := strings.Join(exp.WireIDs, ","); got != tc.wantWireIDs {
+				t.Errorf("WireIDs = %v, want %q(区内直连线必须随区刚移)", exp.WireIDs, tc.wantWireIDs)
+			}
+			if exp.SharedTrees != tc.wantShared {
+				t.Errorf("SharedTrees = %d, want %d(只有终止于区外件 pin 的树才算跨区,且一棵树只计一次)", exp.SharedTrees, tc.wantShared)
+			}
+			if len(exp.Suspects) != 0 {
+				t.Errorf("Suspects = %v, want none", exp.Suspects)
+			}
+		})
+	}
+}
+
+// 半移残骸(同线断触)在全区展开里同样必须被抓住 —— 与组预检同一判据。
+func TestZoneMoveExpansionCatchesResidue(t *testing.T) {
 	comps := []layoutComp{
 		zmComp("idR1", "R1", "part", [2]float64{810, 475}),
 	}
 	// 残骸:同 y、同线,起点距 pin 10 单位(> eps 0.5,≤ nearTol 12),不接触。
 	wires := []schGroupWire{{ID: "wGhost", Points: []float64{820, 475, 845, 475}}}
-	inputs, _ := buildZoneLooseInputs([]string{"R1"}, comps, wires)
-	exp := expandGroupAttachments(inputs["R1"])
+	in, _ := buildZoneMoveExpandInput([]string{"R1"}, comps, wires)
+	exp := expandGroupAttachments(in)
 	if len(exp.Suspects) != 1 || exp.Suspects[0].WireID != "wGhost" {
 		t.Fatalf("Suspects = %+v, want the collinear-graze residue wGhost", exp.Suspects)
+	}
+}
+
+// ── F2:move 后重画前的几何指纹(settle 的一致性判定)───────────────────────
+
+func TestZoneMoveGeomFingerprint(t *testing.T) {
+	b1 := &layoutBBox{MinX: 100, MinY: 200, MaxX: 140, MaxY: 260}
+	b2 := &layoutBBox{MinX: 300, MinY: 200, MaxX: 340, MaxY: 260}
+	a := []layoutComp{{ID: "idA", BBox: b1}, {ID: "idB", BBox: b2}, {ID: "idFlag"}} // idFlag 无 bbox
+	// 读取顺序无关:同一份几何换序,指纹必须一致(double-read 判定的根基)。
+	shuffled := []layoutComp{{ID: "idFlag"}, {ID: "idB", BBox: b2}, {ID: "idA", BBox: b1}}
+	if zoneMoveGeomFingerprint(a) != zoneMoveGeomFingerprint(shuffled) {
+		t.Fatal("同一份几何换序后指纹必须一致")
+	}
+	// bbox 变化(半更新快照:器件还在旧位)→ 指纹必须变。
+	movedB := []layoutComp{{ID: "idA", BBox: b1},
+		{ID: "idB", BBox: &layoutBBox{MinX: 400, MinY: 200, MaxX: 440, MaxY: 260}}, {ID: "idFlag"}}
+	if zoneMoveGeomFingerprint(a) == zoneMoveGeomFingerprint(movedB) {
+		t.Fatal("bbox 平移后指纹必须变化")
+	}
+	// id 集变化(文本/旗 recreate 出新 id)→ 指纹必须变。
+	if zoneMoveGeomFingerprint(a) == zoneMoveGeomFingerprint(a[:2]) {
+		t.Fatal("id 集变化后指纹必须变化")
+	}
+	// 有无 bbox 是不同状态(bbox 从缺到有 = 渲染信息刚就绪)。
+	if zoneMoveGeomFingerprint([]layoutComp{{ID: "idA"}}) ==
+		zoneMoveGeomFingerprint([]layoutComp{{ID: "idA", BBox: b1}}) {
+		t.Fatal("无 bbox 与有 bbox 指纹必须不同")
+	}
+	if zoneMoveGeomFingerprint(nil) != "" {
+		t.Fatal("空快照指纹应为空串")
 	}
 }
 

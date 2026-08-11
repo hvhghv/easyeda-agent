@@ -3,12 +3,17 @@ package app
 // cmd_sch_zone_move.go — `sch zone move`(设计契约 docs/schematic-layout-hierarchy.md §2):
 // 功能区整体刚移。移动链的中间层:zone move → 带动区内全部 group → 带动器件+导线+标志。
 //
-// 展开集(契约原文):
-//   - 区内每个 group 的完整 move 集(expandSchGroupForMove,组去重;成员∈区校验,
-//     跨区组=配置错误直接报错);
-//   - 散件(被区认领但未入任何组):按「临时单件组」走同一展开语义 —— 每个散件
-//     构造一份 groupExpandInput(MemberPins=它自己的 pin,OtherPins=页上其它所有件),
-//     喂给同一个 expandGroupAttachments(桩线+远端旗自动纳入,suspects 残骸照样拒绝);
+// 展开集(契约 §2,全区一份展开):
+//   - 移动集 = 区内每个组的全部成员 + 散件(被区认领但未入任何组)。组的刚体
+//     校验照旧:跨区组=配置错误直接报错;成员不在页=半移预防硬拒。
+//   - wire/flag 采集**不逐单元做**:构造一份全区 groupExpandInput(MemberPins=
+//     全部移动件的 pin,OtherPins=页上不在移动集的件的 pin,Wires/Flags 全页),
+//     只调一次 expandGroupAttachments。区内跨单元直连线(组↔散件、组↔组)两端
+//     都是 member → 随区刚移;SharedTrees 因此真正 = 终止于区外件 pin 的跨区
+//     布线,留在原地由旗对接。(教训:早期逐单元展开时,同区另一单元的 pin 也
+//     算 foreign,区内直连线两边都判 shared 留在原地 —— 刚体被撕开、两端悬空
+//     断网,且同一棵树被两单元各计一次,计数虚高。回归测试
+//     TestZoneMoveExpandIntraZoneDirectWire 钉死此语义。)
 //   - 区内 note 文本:schematic.text.list 里锚点落在区内容 bbox(外扩 --text-pad)内、
 //     且 id 不在 zone-draw 的框记录(SchZoneFrameIdsByPage / 遗留 SchZoneFrameIds)里
 //     ——框图元不搬,move 后默认重画。
@@ -17,6 +22,8 @@ package app
 // schematic.text.list,没有 modify 类 action,所以走契约的 delete+recreate:
 // 单次 exec_js 先 create 新文本(content/rotation/color/fontSize 保留、坐标平移)、
 // 验证新 id 后再删旧 id 并复核删除(sch_PrimitiveObject.delete 才落盘,#164 教训)。
+// 注意 recreate 只保留 content/rotation/color/fontSize/fontName —— **bold/italic
+// 等富文本样式不保留**(create 接口不收这些参数)。
 //
 // 目的地预检(move 前,纯几何):
 //   - 出 sheet / 压图签 keepout(titleBlockKeepout)→ 硬拒,--force 也不放行;
@@ -26,7 +33,11 @@ package app
 // 文本逐条 delete+recreate;成功后显式 schematic.save。
 // --redraw-frame(默认 true):move 后按本页框记录的 mode 重画 —— partition 模式
 // 直接复用 runPartitionDraw(内部先 computePartitionPlan 校验六项 0,不清洁拒绝重画),
-// zones 模式复用 runFixedZoneDraw。
+// zones 模式复用 runFixedZoneDraw。**重画前必须 settle**(铁则2:重 mutation 后
+// 读几何要 double-read 一致):components.list 的 (id+bbox) 指纹连续两次一致才
+// 允许重画(350ms 间隔、4 次预算,照 fetchSchWirePolylinesStable 骨架的本文件
+// 私有实现 waitZoneMoveGeometrySettled);超预算降级 —— 框不重画并提示手动
+// `sch zone-draw`,绝不按未稳定的几何画错框。
 //
 // 注册方式:主会话统一挂载 —— 本命令 Use 为 "move",预期挂在 `sch zone` 父命令下
 // (`zone := &cobra.Command{Use: "zone"}; zone.AddCommand(newSchZoneMoveCommand(...))`)。
@@ -37,6 +48,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
@@ -121,53 +133,50 @@ func partitionZoneMoveUnits(zoneName string, claimed []string, groups []*schGrou
 	return units, nil
 }
 
-// buildZoneLooseInputs 为每个散件构造「临时单件组」的展开输入(纯函数):
-// MemberPins = 该件自己的 pin,OtherPins = 页上其它所有实体件的 pin(含同区其它件
-// —— 单件组语义,件与件之间的真实布线仍按 SharedTrees 留在原地由旗对接),
-// Wires/Flags 全页共享。返回值第二项是页上找不到的认领位号(半移预防:缺件即硬拒)。
-func buildZoneLooseInputs(loose []string, comps []layoutComp, wires []schGroupWire) (map[string]groupExpandInput, []string) {
-	type pinOf struct {
-		desig string
-		pt    [2]float64
+// buildZoneMoveExpandInput 构造「全区一份」的展开输入(纯函数):
+// MemberPins = 全部移动件(入选组的所有成员 + 散件)的 pin,OtherPins = 页上
+// **不在移动集**的实体件的 pin,Wires/Flags 全页。区内跨单元直连线两端都是
+// MemberPins → 随区刚移;只有终止于区外件 pin 的树才是 SharedTrees(真实跨区
+// 布线,留在原地由旗对接)。逐单元展开是错的:同区另一单元的 pin 会被算成
+// foreign,把区内直连线判 shared 留在原地,刚体被撕开(评审 F1)。
+// 返回值第二项是页上找不到的移动位号(半移预防:缺件即硬拒)。
+func buildZoneMoveExpandInput(moving []string, comps []layoutComp, wires []schGroupWire) (groupExpandInput, []string) {
+	movingSet := map[string]bool{}
+	for _, d := range moving {
+		if u := strings.ToUpper(strings.TrimSpace(d)); u != "" {
+			movingSet[u] = true
+		}
 	}
-	var allPins []pinOf
-	var flags []schGroupFlag
+	in := groupExpandInput{Wires: wires}
 	present := map[string]bool{}
 	for _, c := range comps {
 		switch {
 		case schGroupFlagTypes[c.ComponentType]:
 			if c.AnchorAvailable && c.ID != "" {
-				flags = append(flags, schGroupFlag{ID: c.ID, X: c.X, Y: c.Y})
+				in.Flags = append(in.Flags, schGroupFlag{ID: c.ID, X: c.X, Y: c.Y})
 			}
 		case c.ComponentType == "" || c.ComponentType == schLayoutPartType:
 			d := strings.ToUpper(c.Designator)
-			if d != "" {
+			if d != "" && movingSet[d] {
 				present[d] = true
-			}
-			for _, p := range c.Pins {
-				allPins = append(allPins, pinOf{d, [2]float64{p.X, p.Y}})
+				for _, p := range c.Pins {
+					in.MemberPins = append(in.MemberPins, [2]float64{p.X, p.Y})
+				}
+			} else {
+				for _, p := range c.Pins {
+					in.OtherPins = append(in.OtherPins, [2]float64{p.X, p.Y})
+				}
 			}
 		}
 	}
-	out := map[string]groupExpandInput{}
 	var missing []string
-	for _, d := range loose {
+	for d := range movingSet {
 		if !present[d] {
 			missing = append(missing, d)
-			continue
 		}
-		in := groupExpandInput{Wires: wires, Flags: flags}
-		for _, p := range allPins {
-			if p.desig == d {
-				in.MemberPins = append(in.MemberPins, p.pt)
-			} else {
-				in.OtherPins = append(in.OtherPins, p.pt)
-			}
-		}
-		out[d] = in
 	}
 	sort.Strings(missing)
-	return out, missing
+	return in, missing
 }
 
 // ── 纯函数:区内文本判定 ────────────────────────────────────────────────────
@@ -418,6 +427,56 @@ func findZoneMoveClaim(zones map[string]*schZoneClaim, ref string) (string, *sch
 	}
 }
 
+// ── 纯函数 + settle:move 后重画前的几何稳定判定(评审 F2 / 铁则2)────────────
+
+// zoneMoveGeomFingerprint 把 components.list 快照压成 (id + bbox) 指纹(纯函数):
+// 每件一条 "id@minX,minY,maxX,maxY"(无 bbox 者退化为 "id"),排序后拼接 ——
+// 与读取顺序无关;任何件的增删或 bbox 变化都改变指纹。两次读取指纹一致 =
+// 平台快照已 settle,重画才许读几何。
+func zoneMoveGeomFingerprint(comps []layoutComp) string {
+	keys := make([]string, 0, len(comps))
+	for _, c := range comps {
+		key := c.ID
+		if c.BBox != nil {
+			key = fmt.Sprintf("%s@%g,%g,%g,%g", c.ID, c.BBox.MinX, c.BBox.MinY, c.BBox.MaxX, c.BBox.MaxY)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ";")
+}
+
+// waitZoneMoveGeometrySettled 在框重画前等 components.list 的 (id+bbox) 指纹
+// 连续两次一致(350ms 间隔、4 次预算 —— 照抄 fetchSchWirePolylinesStable 的
+// double-read 骨架,私有实现,不动共享文件)。schematic.group.move + 文本
+// delete+recreate 都是重 mutation,紧跟着的单次 components.list 可能读到平台
+// 半更新的快照,拿它算分区框就是画错框;超预算返回错误,调用方降级不画。
+func waitZoneMoveGeometrySettled(cfg *appConfig, window, docUUID string) error {
+	const attempts = 4
+	var prevKey string
+	havePrev := false
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(350 * time.Millisecond)
+		}
+		res, err := requestAutolayoutAction(cfg, "schematic.components.list", window,
+			map[string]any{"includeBBox": true}, docUUID, "settle zone-move geometry")
+		if err != nil {
+			return err
+		}
+		comps, err := parseLayoutComps(res.Result)
+		if err != nil {
+			return err
+		}
+		key := zoneMoveGeomFingerprint(comps)
+		if havePrev && key == prevKey {
+			return nil
+		}
+		prevKey, havePrev = key, true
+	}
+	return fmt.Errorf("components.list 指纹 %d 次读取仍未稳定(move 后平台快照还在收敛)", attempts)
+}
+
 // ── I/O 执行 ────────────────────────────────────────────────────────────────
 
 // zoneMoveIDSet 聚合去重后的刚移 id 集。
@@ -482,27 +541,9 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		return err
 	}
 
-	// 1) 组:逐组走 expandSchGroupForMove(自带成员在页校验 + suspects 残骸硬拒 +
-	//    stable 导线快照);id 汇入去重集。
-	ids := newZoneMoveIDSet()
-	for _, g := range units.Groups {
-		set, gerr := expandSchGroupForMove(pinned, win, g.ID)
-		if gerr != nil {
-			return fmt.Errorf("区 %q 的组 %s 展开失败:%w", zoneName, describeSchGroup(g), gerr)
-		}
-		for _, id := range set.ComponentIDs {
-			ids.comp[id] = true
-		}
-		for _, id := range set.Expansion.WireIDs {
-			ids.wire[id] = true
-		}
-		for _, id := range set.Expansion.FlagIDs {
-			ids.flag[id] = true
-		}
-		ids.shared += set.Expansion.SharedTrees
-	}
-
-	// 2) 全页几何一次拉齐(pin + bbox),散件按临时单件组展开(同一 suspects 预检)。
+	// 1) 全页几何一次拉齐(pin + bbox)+ stable 导线快照 —— 组与散件共用同一份
+	//    快照,展开必须「全区一份」(逐单元展开会把区内跨单元直连线误判成
+	//    SharedTrees 留在原地,刚体被撕开;评审 F1)。
 	res, err := requestAutolayoutAction(pinned, "schematic.components.list", win,
 		map[string]any{"includePins": true, "includeBBox": true}, docUUID, "read zone-move geometry")
 	if err != nil {
@@ -515,11 +556,6 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	wires, err := fetchSchWirePolylinesStable(pinned, win, docUUID)
 	if err != nil {
 		return fmt.Errorf("读取导线几何:%w", err)
-	}
-	inputs, missing := buildZoneLooseInputs(units.Loose, comps, wires)
-	if len(missing) > 0 {
-		return fmt.Errorf("区 %q 认领的散件不在当前页:%s — 半移预防,先补齐/修正认领(`sch zones set`)或切到正确页(`easyeda doc switch`)",
-			zoneName, strings.Join(missing, ","))
 	}
 	partByDesig := map[string]layoutComp{}
 	flagPosByID := map[string][2]float64{}
@@ -535,39 +571,88 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 			}
 		}
 	}
-	for _, d := range units.Loose {
-		exp := expandGroupAttachments(inputs[d])
-		if len(exp.Suspects) > 0 {
-			var lines []string
-			for _, sp := range exp.Suspects {
-				lines = append(lines, fmt.Sprintf("  wire %s [%g,%g → %g,%g] 共线擦过 %s 的 pin (%g,%g) 却未连接",
-					sp.WireID, sp.X0, sp.Y0, sp.X1, sp.Y1, d, sp.PinX, sp.PinY))
-			}
-			return fmt.Errorf("散件 %s 的展开不完整 — 检出半移残骸(同线断触):\n%s\n拒绝移区;先清理(`sch prim-delete --ids <wireId>` + `sch check`)再重连重试",
-				d, strings.Join(lines, "\n"))
+
+	// 2) 移动集 = 入选组的全部成员 + 散件;成员在页校验(半移预防:缺件即硬拒,
+	//    组按组点名、散件汇总点名,修复动作可执行)。
+	movingSeen := map[string]bool{}
+	var movingList []string
+	addMoving := func(d string) {
+		if u := strings.ToUpper(strings.TrimSpace(d)); u != "" && !movingSeen[u] {
+			movingSeen[u] = true
+			movingList = append(movingList, u)
 		}
-		if c, ok := partByDesig[d]; ok && c.ID != "" {
+	}
+	for _, g := range units.Groups {
+		var miss []string
+		for _, m := range g.Members {
+			if _, ok := partByDesig[strings.ToUpper(m)]; !ok {
+				miss = append(miss, m)
+			}
+			addMoving(m)
+		}
+		if len(miss) > 0 {
+			return fmt.Errorf("区 %q 的组 %s 有成员不在当前页:%s — 半移预防拒绝移区;`sch group remove --group %s --members %s` 修组,或 `easyeda doc switch` 切到正确页",
+				zoneName, describeSchGroup(g), strings.Join(miss, ","), g.ID, strings.Join(miss, ","))
+		}
+	}
+	for _, d := range units.Loose {
+		addMoving(d)
+	}
+	sort.Strings(movingList)
+
+	// 3) 全区一份展开输入 → expandGroupAttachments 只调一次:MemberPins=全部
+	//    移动件 pin,OtherPins=页上移动集之外的件 pin。区内跨单元直连线两端都是
+	//    member → 随区刚移;SharedTrees 此后真正 = 跨区布线。suspects 残骸预检
+	//    与组展开同一判据,零容忍硬拒。
+	in, missing := buildZoneMoveExpandInput(movingList, comps, wires)
+	if len(missing) > 0 {
+		return fmt.Errorf("区 %q 认领的散件不在当前页:%s — 半移预防,先补齐/修正认领(`sch zones set`)或切到正确页(`easyeda doc switch`)",
+			zoneName, strings.Join(missing, ","))
+	}
+	exp := expandGroupAttachments(in)
+	if len(exp.Suspects) > 0 {
+		ownerOf := func(x, y float64) string {
+			for _, d := range movingList {
+				for _, p := range partByDesig[d].Pins {
+					if p.X == x && p.Y == y {
+						return d
+					}
+				}
+			}
+			return "?"
+		}
+		var lines []string
+		for _, sp := range exp.Suspects {
+			lines = append(lines, fmt.Sprintf("  wire %s [%g,%g → %g,%g] 共线擦过 %s 的 pin (%g,%g) 却未连接",
+				sp.WireID, sp.X0, sp.Y0, sp.X1, sp.Y1, ownerOf(sp.PinX, sp.PinY), sp.PinX, sp.PinY))
+		}
+		return fmt.Errorf("区 %q 的展开不完整 — 检出半移残骸(同线断触):\n%s\n拒绝移区;先清理(`sch prim-delete --ids <wireId>` + `sch check`)再重连重试",
+			zoneName, strings.Join(lines, "\n"))
+	}
+	ids := newZoneMoveIDSet()
+	for _, d := range movingList {
+		if c := partByDesig[d]; c.ID != "" {
 			ids.comp[c.ID] = true
 		}
-		for _, id := range exp.WireIDs {
-			ids.wire[id] = true
-		}
-		for _, id := range exp.FlagIDs {
-			ids.flag[id] = true
-		}
-		ids.shared += exp.SharedTrees
 	}
+	for _, id := range exp.WireIDs {
+		ids.wire[id] = true
+	}
+	for _, id := range exp.FlagIDs {
+		ids.flag[id] = true
+	}
+	ids.shared = exp.SharedTrees
 	if len(ids.comp) == 0 {
 		return fmt.Errorf("区 %q 在本页展开不出任何器件 — 检查认领(`sch zones status`)", zoneName)
 	}
 
-	// 3) 区内容 bbox:认领件 bbox ∪ 被搬导线端点 ∪ 被搬旗锚点。
+	// 4) 区内容 bbox:认领件 bbox ∪ 被搬导线端点 ∪ 被搬旗锚点。
 	var pts [][2]float64
 	var boxes []layoutBBox
 	for _, d := range claim.Parts {
 		c, ok := partByDesig[strings.ToUpper(d)]
 		if !ok {
-			continue // 组路径已做在页校验;此处宽松
+			continue // 移动集已在步骤 2/3 做过在页校验;此处宽松
 		}
 		if c.BBox != nil {
 			boxes = append(boxes, *c.BBox)
@@ -596,7 +681,7 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		return fmt.Errorf("区 %q 凑不出内容 bbox(认领件无 bbox/锚点)— 无法做目的地预检,拒绝盲移", zoneName)
 	}
 
-	// 4) 区内 note 文本(框图元排除)。
+	// 5) 区内 note 文本(框图元排除)。
 	tres, err := requestAutolayoutAction(pinned, "schematic.text.list", win, map[string]any{}, docUUID, "list zone texts")
 	if err != nil {
 		return fmt.Errorf("读取文本列表:%w", err)
@@ -607,7 +692,7 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	}
 	notes := selectZoneMoveTexts(parseZoneMoveTexts(tres.Result), zoneMoveInflate(content, textPad), excluded)
 
-	// 5) 目的地预检:全展开 bbox(含文本锚点)平移后逐项比对。
+	// 6) 目的地预检:全展开 bbox(含文本锚点)平移后逐项比对。
 	var notePts [][2]float64
 	for _, t := range notes {
 		notePts = append(notePts, [2]float64{t.X, t.Y})
@@ -652,13 +737,13 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		return nil
 	}
 
-	// 6) 刚移:器件+导线+旗一次 schematic.group.move。
+	// 7) 刚移:器件+导线+旗一次 schematic.group.move。
 	if _, err := requestAutolayoutAction(pinned, "schematic.group.move", win,
 		map[string]any{"primitiveIds": ids.all(), "dx": dx, "dy": dy}, docUUID, "zone rigid move"); err != nil {
 		return fmt.Errorf("zone move 刚移失败:%w", err)
 	}
 
-	// 7) 文本 delete+recreate(create 先行,失败不丢原文;旧 id 删除必须复核)。
+	// 8) 文本 delete+recreate(create 先行,失败不丢原文;旧 id 删除必须复核)。
 	for _, t := range notes {
 		v, terr := execAutolayoutZoneJS(pinned, win, docUUID, "move zone note", buildZoneMoveTextJS(t, dx, dy))
 		if terr != nil {
@@ -673,13 +758,13 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		}
 	}
 
-	// 8) 显式落盘(autosave 只是兜底)。
+	// 9) 显式落盘(autosave 只是兜底)。
 	if err := saveZoneDocument(pinned, win, docUUID, "save zone move"); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "✓ 刚移完成 (%+g,%+g) — %s;已保存\n", dx, dy, summary)
 
-	// 9) 框重画(默认):框图元没搬,按本页记录的 mode 重画。partition 模式内部先
+	// 10) 框重画(默认):框图元没搬,按本页记录的 mode 重画。partition 模式内部先
 	//    zone-plan 校验(六项 0,不清洁拒绝重画),满足契约的「校验 → 重画」链。
 	if !redraw {
 		fmt.Fprintln(stdout, "⚠ --redraw-frame=false:分区框未重画,仍停在旧位置 — 记得 `sch zone-draw`(--mode 按原样)手动重画")
@@ -688,6 +773,12 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	prev, _ := recordedZoneFrames(st, docUUID)
 	if prev == nil {
 		fmt.Fprintln(stdout, "本页无 zone-draw 框记录 — 跳过重画(要框:`sch zone-draw --mode partition`)")
+		return nil
+	}
+	// 铁则2 settle:group.move + 文本重建是重 mutation,重画内部要重新读几何;
+	// (id+bbox) 指纹连续两次一致才放行。超预算降级不画 —— 宁可没框,不画错框。
+	if serr := waitZoneMoveGeometrySettled(pinned, win, docUUID); serr != nil {
+		fmt.Fprintf(stdout, "⚠ move 后几何未稳定(%v)— 框未重画,稍后手动 `sch zone-draw`(--mode 按原样)重画\n", serr)
 		return nil
 	}
 	if prev.Mode == "zones" {
@@ -716,14 +807,16 @@ func newSchZoneMoveCommand(cfg *appConfig, window *string, stdout, stderr io.Wri
 		Long: `功能区(zone)整体刚性平移 — 三层布局体系(docs/schematic-layout-hierarchy.md)
 的中间层移动:zone move → 带动区内全部 group → 带动器件+导线+标志。
 
-展开集:
-  - 区内每个组的完整 move 集(sch group-move 的同款展开:成员 + 桩线 + 远端旗;
-    组的完整性预检照常生效 — 半移残骸 suspects 直接拒绝);
-  - 散件(被区认领但未入组):按临时单件组走同一展开;
+展开集(全区一份展开):
+  - 移动集 = 区内每个组的全部成员 + 散件(被区认领但未入组);桩线 + 远端旗
+    按全区一次展开自动纳入 — 区内跨单元的直连线随区刚移,只有终止于区外件
+    pin 的布线(SharedTrees)留在原地由旗对接;完整性预检照常生效 — 半移残骸
+    suspects 直接拒绝;
   - 区内 note 文本(sch note 放的说明):锚点落在区内容 bbox(外扩 --text-pad)内、
     且不属于 zone-draw 框图元的文本,随区平移(平台无 text modify,delete+recreate,
-    内容/字号/颜色/旋转保留);
-  - zone-draw 的分区框不搬:move 后默认自动重画(--redraw-frame=false 跳过)。
+    内容/字号/颜色/旋转保留;bold/italic 等富文本样式不保留);
+  - zone-draw 的分区框不搬:move 后默认自动重画(--redraw-frame=false 跳过;
+    重画前等几何 settle,超预算则不画并提示手动 sch zone-draw)。
 
 跨区组 = 配置错误(组是刚体,不能被区撕开),直接报错。
 
