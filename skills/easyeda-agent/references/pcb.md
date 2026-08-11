@@ -313,7 +313,7 @@ subset; `--dry-run` prints the per-corner plan. Save after placing; delete via
 > fresh snapshot shows a **stale frame**. Verify slots/fills/pours by **data** (`pcb fill
 > list`, DRC, manufacture export), not screenshot — the snapshot is for component layout only.
 >
-> **Stale-frame detection (issue #31).** `pcb snapshot` now has parity with `sch snapshot`:
+> **Stale-frame detection (issue #31).** `pcb snapshot` carries the anti-stale machinery (the schematic-side snapshot was removed — sch renders via `sch export-image`):
 > the result exposes a frame `sha256`, and `--previous-sha256 <sha>` lets the connector
 > detect a byte-identical (stale) frame, force a redraw (ratline recompute + zoom-to-all)
 > and retry once, reporting `stale:true` if it still cannot refresh. **Reliable recording

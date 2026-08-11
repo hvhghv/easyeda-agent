@@ -92,8 +92,8 @@ a LARGER stored y renders HIGHER on screen. The flag names are accepted as two
 unordered Y bounds, so you do not need to pre-sort them.
 
 For a partial / zoomed-in screenshot, frame the area here first, then capture
-with "easyeda sch snapshot --no-fit" so the snapshot keeps this viewport. The
-snapshot waits for the canvas to repaint before grabbing the frame (issue #20).`,
+with "easyeda pcb snapshot --no-fit" (PCB side) so the capture keeps this
+viewport; the schematic side renders via "sch export-image" (viewport-free).`,
 			Args:    cobra.NoArgs,
 			Example: `  easyeda view region --left 0 --right 1000 --top 1000 --bottom 0`,
 			RunE: func(cmd *cobra.Command, args []string) error {

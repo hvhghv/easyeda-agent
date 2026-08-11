@@ -202,7 +202,7 @@ func AllActions() []ActionSpec {
 			Description:  "Clear the ACTIVE schematic page: delete every page-level primitive — components, net flags/ports/labels (all are components), wires, buses, and graphics (arcs/circles/rectangles/polygons/text) — optionally preserving the sheet/title block (图框). schematic.component.delete only removes components and silently leaves wires/buses/graphics behind, so the page looks clean in components.list while residual primitives remain; use this for a true page reset (generate → detect → clear → retry). No undo — dryRun reports counts without deleting.",
 			Inputs:       []string{"preserveSheet optional (default true)", "dryRun optional (default false)"},
 			Outputs:      []string{"deleted (counts by primitive type)", "total", "deletedIds", "preserveSheet", "dryRun"},
-			VerifyWith:   []string{"schematic.components.list", "schematic.snapshot"},
+			VerifyWith:   []string{"schematic.components.list"},
 		},
 		{
 			Name:        "schematic.rename",
@@ -233,7 +233,7 @@ func AllActions() []ActionSpec {
 			Description: "Place a device/component from library identity at coordinates. `uuid` must be a device-library uuid (from schematic.library.search), NOT a placed-instance id from schematic.components.list — an instance uuid hangs the EasyEDA API.",
 			Inputs:      []string{"libraryUuid", "uuid (device-library uuid, not an instance id)", "x", "y", "rotation optional", "mirror optional"},
 			Outputs:     []string{"primitive id", "component state"},
-			VerifyWith:  []string{"schematic.component.get", "schematic.snapshot"},
+			VerifyWith:  []string{"schematic.component.get"},
 		},
 		{
 			Name:        "schematic.component.modify",
@@ -268,7 +268,7 @@ func AllActions() []ActionSpec {
 			Description:  "Delete schematic primitives of ANY type by id (components, net flags/ports/labels, wires, buses, graphics) — generalizes schematic.component.delete beyond components by routing each id to its owning sch_Primitive* class. Omit primitiveIds to delete the current selection (select first via schematic.select), enabling a 'select-all then delete' flow. No undo.",
 			Inputs:       []string{"primitiveIds optional (string or string[]; default = current selection)"},
 			Outputs:      []string{"deleted (counts by primitive type)", "total", "notFound", "deletedIds"},
-			VerifyWith:   []string{"schematic.components.list", "schematic.snapshot"},
+			VerifyWith:   []string{"schematic.components.list"},
 		},
 		{
 			Name:        "schematic.wire.create",
@@ -279,7 +279,7 @@ func AllActions() []ActionSpec {
 			Description: "Create a schematic wire polyline.",
 			Inputs:      []string{"points", "net optional", "style optional"},
 			Outputs:     []string{"primitive id", "wire state"},
-			VerifyWith:  []string{"schematic.primitive.get", "schematic.snapshot"},
+			VerifyWith:  []string{"schematic.primitive.get"},
 		},
 		{
 			Name:        "schematic.group.move",
@@ -290,7 +290,7 @@ func AllActions() []ActionSpec {
 			Description: "Translate a set of primitives (components AND wires, in any mix) together by (dx,dy) as a rigid assembly — a component + its surrounding stub wires + flags move as one unit, internal relative layout untouched. NOT backed by EasyEDA's native '组合' UI field — investigated 2026-07-07: that field has zero extension-API exposure (not a primitive type, no getter/setter, not in OtherProperty), so it can't be read, written, or driven programmatically. This is a stateless virtual group: pass the full member id list every call, nothing is remembered between calls. Components translate via a plain modify; wires have no modify-in-place so they are deleted and recreated at the shifted endpoints (net/color/width/lineType preserved) — a wire's returned primitiveId CHANGES, re-fetch fresh ids before any follow-up mutation.",
 			Inputs:      []string{"primitiveIds (string[], components and/or wires)", "dx", "dy"},
 			Outputs:     []string{"movedComponents[]{primitiveId,designator,from,to}", "movedWires[]{oldPrimitiveId,newPrimitiveId,net}", "count", "notFound"},
-			VerifyWith:  []string{"schematic.components.list", "schematic.snapshot"},
+			VerifyWith:  []string{"schematic.components.list"},
 		},
 		{
 			Name:        "schematic.netflag.create",
@@ -301,7 +301,7 @@ func AllActions() []ActionSpec {
 			Description: "Create power, ground, analog ground, protective ground, net port, or short-circuit flag.",
 			Inputs:      []string{"kind", "net", "x", "y", "rotation optional"},
 			Outputs:     []string{"primitive id", "component state"},
-			VerifyWith:  []string{"schematic.snapshot"},
+			VerifyWith:  []string{"schematic.export.image"},
 		},
 		{
 			Name:        "schematic.pin.set_no_connect",
@@ -395,7 +395,7 @@ func AllActions() []ActionSpec {
 			Description: "Composite: stub a wire out of a pin and place a netflag/netport at its far end in one call — structurally prevents the 'netflag overlaps pin' DRC fatal. `direction` is the VISUAL outward direction on the y-UP canvas: up moves the endpoint to a larger y, down to a smaller y. Direction/offset/rotation default from kind and can be overridden; flag orientation follows schematic-layout-conventions.md §3.5.",
 			Inputs:      []string{"pinX", "pinY", "kind", "net", "direction optional", "offset optional", "rotation optional"},
 			Outputs:     []string{"wire primitiveId", "flag primitiveId", "end point", "rotation"},
-			VerifyWith:  []string{"schematic.snapshot", "schematic.drc.check"},
+			VerifyWith:  []string{"schematic.drc.check"},
 		},
 		{
 			Name:        "schematic.pin.disconnect",
@@ -406,7 +406,7 @@ func AllActions() []ActionSpec {
 			Description: "Symmetric inverse of schematic.power.connect_pin — removes a pin's stub wire AND its netflag/netport/netlabel together. Fixes the orphan-stub trap: deleting only the flag (schematic.primitives.delete) leaves the wire dangling with an EasyEDA auto-named single-pin net ($3N…), which the old dangling-wire rule missed. Target by designator+pin, or by a known flagPrimitiveId/wirePrimitiveId (whatever connect_pin returned) — at least one locator required. Resolves ids via getAll()+local filter, not a per-id .get(id) (a just-created primitive can 404 on a direct .get()).",
 			Inputs:      []string{"designator + pin, OR flagPrimitiveId, OR wirePrimitiveId (at least one)"},
 			Outputs:     []string{"disconnected", "pin", "at{x,y}", "deletedWires", "deletedFlags"},
-			VerifyWith:  []string{"schematic.check", "schematic.snapshot"},
+			VerifyWith:  []string{"schematic.check"},
 		},
 		{
 			Name:        "schematic.select",
@@ -416,15 +416,6 @@ func AllActions() []ActionSpec {
 			Description: "Select schematic primitives by id and return the active selection.",
 			Inputs:      []string{"primitiveIds"},
 			Outputs:     []string{"selected primitive ids"},
-		},
-		{
-			Name:        "schematic.snapshot",
-			Domain:      DomainSchematic,
-			Phase:       1,
-			NeedsWindow: true,
-			Description: "Capture current rendered area image as an artifact. Zooms to fit all primitives (适应全部) BY DEFAULT before capturing so the whole sheet lands in frame (and the viewport change nudges a redraw); pass fit=false to keep the current viewport. WARNING: EasyEDA may not auto-redraw after API edits, so the image can be a STALE frame — judge state by data (sch list/getAll), not the screenshot. Returns primitiveCount + capturedAt; if primitiveCount changed between two snapshots but the image is unchanged, the frame is stale.",
-			Inputs:      []string{"fit optional (default true)"},
-			Outputs:     []string{"artifact id", "file path", "mime type", "primitiveCount", "fitted", "capturedAt"},
 		},
 		{
 			Name:        "schematic.drc.check",
@@ -968,7 +959,7 @@ func AllActions() []ActionSpec {
 			Domain:      DomainPcb,
 			Phase:       2,
 			NeedsWindow: true,
-			Description: "Capture the active PCB canvas as a PNG artifact (eda.dmt_EditorControl.getCurrentRenderedAreaImage; fit-to-all by default, pass fit=false to keep viewport). The PCB counterpart to schematic.snapshot. Returns a frame sha256 — pass it back via previousSha256 on the next snapshot and the connector detects a byte-identical (stale) frame, forces a redraw (ratline recompute + zoom-to-all) + retries once, and reports stale=true if it is still identical. WARNING: EasyEDA may return a STALE frame after API edits — judge layout/DRC by data (pcb list / pcb drc), screenshot for a human eyeball only.",
+			Description: "Capture the active PCB canvas as a PNG artifact (eda.dmt_EditorControl.getCurrentRenderedAreaImage; fit-to-all by default, pass fit=false to keep viewport). The canvas-frame capture for the PCB (the schematic-side snapshot was removed — sch uses schematic.export.image). Returns a frame sha256 — pass it back via previousSha256 on the next snapshot and the connector detects a byte-identical (stale) frame, forces a redraw (ratline recompute + zoom-to-all) + retries once, and reports stale=true if it is still identical. WARNING: EasyEDA may return a STALE frame after API edits — judge layout/DRC by data (pcb list / pcb drc), screenshot for a human eyeball only.",
 			Inputs:      []string{"fit optional (default true)", "tabId optional", "previousSha256 optional (enables stale-frame detection + auto-retry)"},
 			Outputs:     []string{"artifact id", "file path", "fitted", "sha256", "stale", "staleRetry", "capturedAt"},
 		},

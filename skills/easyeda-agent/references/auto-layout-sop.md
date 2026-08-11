@@ -97,7 +97,7 @@ easyeda sch zone-draw --mode partition --font-size 22 --doc <page> --project <pr
 
 截图闭环：
 
-`sch snapshot --previous-sha256 <上一帧 sha>`。若仍返回 `stale:true`，只报告截图不可用，
+`sch export-image`(渲染文档数据,无视口/stale 问题)。若导出失败,只报告图不可用,
 不要据此否定数据结果。
 
 `sch check --json` 使用统一信封

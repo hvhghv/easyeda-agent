@@ -366,7 +366,7 @@ func TestActionArtifactPersisted(t *testing.T) {
 				OK:       true,
 				Artifacts: []protocol.Artifact{{
 					ID:           "art_snap",
-					Kind:         "schematic_snapshot",
+					Kind:         "pcb_snapshot",
 					MimeType:     "image/png",
 					FileName:     "snap.png",
 					InlineBase64: base64.StdEncoding.EncodeToString([]byte(payload)),
@@ -379,7 +379,7 @@ func TestActionArtifactPersisted(t *testing.T) {
 
 	// Send a CLI cwd via outputDir; artifacts must land under its hidden dir.
 	outDir := t.TempDir()
-	resp := postAction(t, base, fmt.Sprintf(`{"action":"schematic.snapshot","windowId":"win-1","outputDir":%q}`, outDir))
+	resp := postAction(t, base, fmt.Sprintf(`{"action":"pcb.snapshot","windowId":"win-1","outputDir":%q}`, outDir))
 	if !resp.OK || len(resp.Artifacts) != 1 {
 		t.Fatalf("expected one artifact, got ok=%v artifacts=%d err=%+v", resp.OK, len(resp.Artifacts), resp.Error)
 	}
@@ -413,7 +413,7 @@ func TestActionArtifactPersisted(t *testing.T) {
 	}
 	// ...with a sortable, findable name: <YYYYMMDD-HHMMSS>-<kind>-<short>.png
 	bn := filepath.Base(a.Path)
-	if !strings.Contains(bn, "schematic_snapshot") || !strings.HasSuffix(bn, ".png") {
+	if !strings.Contains(bn, "pcb_snapshot") || !strings.HasSuffix(bn, ".png") {
 		t.Fatalf("unexpected artifact name: %s", bn)
 	}
 	if _, err := time.Parse("20060102-150405", bn[:15]); err != nil {

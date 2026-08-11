@@ -71,7 +71,7 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 - `schematic.components.list` — 当前页（或全页）所有元件，可含 pins
 - `schematic.select` — 按 primitiveId 选中图元
 - `schematic.export.image` — **看局部原理图的首选**（#166）。把当前页、或**只把指定图元**渲染成 **SVG / PNG / PDF**：`easyeda sch export-image --ids id1,id2 --out block.svg`（省略 `--ids` 导整页；`--format` 默认 svg；`--scope selection|page|project`；`--page` 定位页）。给了 `--ids` 就自动选中并**把画布裁到选区**（实测 3 个器件 → 283×155，整页是 1191×846）。**比 `view region` + `snapshot` 可靠**：不走视口，所以不受「后台标签页不重绘 → 截回上一帧整页」的影响；SVG 还是矢量，放大看密集接线不糊。⚠️ 底层 `getExportDocumentFile` 的 `object` 字面量**官方类型定义是错的**，传错不报错、直接让 promise 永远悬着（编辑器卡在 1% 进度条）——真值已固化在 handler 里，**不要照 .d.ts "修正"**；handler 另有 30s 超时兜底。
-- `schematic.snapshot` — 截取当前渲染区域为 PNG artifact。**默认先「适应全部」再截**（整张图入画，无需另调 `view.fit`）；`easyeda sch snapshot --no-fit` 保留当前视口。**局部截图改用上面的 `sch export-image --ids`**；老路子（`easyeda view region --left --right --top --bottom` 再 `sch snapshot --no-fit`）依赖视口重绘，标签页不在前台时会静默截回整页旧帧。**落盘绝对路径**在 `result.artifactPath`（所有产 artifact 的动作统一如此，含 pcb snapshot/BOM/网表导出），stderr 另有 `📎 artifact saved: <path>` 一行 —— 读图直接用这个路径
+- ~~`schematic.snapshot`~~ — **已移除(2026-08-12)**:视口截图易 stale,原理图出图统一走 `sch export-image`(整页或 `--ids` 选区,渲染文档数据、无视口依赖)。**落盘绝对路径**在 `result.artifactPath`(所有产 artifact 的动作统一如此,含 pcb snapshot/BOM/网表导出),stderr 另有 `📎 artifact saved: <path>` 一行 —— 读图直接用这个路径
 
 ## Mutate Schematic
 

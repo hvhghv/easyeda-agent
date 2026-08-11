@@ -116,11 +116,11 @@ near-equivalent, first).
    the gate proves the page is *legal*, only that comparison proves it is *correct*.
    The single checkers stay available for spot re-checks; the data linter
    (`scripts/lint.sh <project>`) is an additional check, not a replacement. ⚠️ After API edits the **EasyEDA canvas may not
-   auto-redraw** → `schematic.snapshot` / `getCurrentRenderedAreaImage` return a STALE
+   auto-redraw** → `getCurrentRenderedAreaImage`-class viewport captures return a STALE
    frame (even `view fit` framing is stale). **Judge STATE by data (`sch list`/`getAll`),
    use the screenshot for visual layout only**, and touch the page in EasyEDA (scroll/
    click) to force a redraw before trusting a snapshot. Pass the previous frame's `sha256`
-   back through `sch snapshot --previous-sha256 <sha>`; a remaining `stale:true` frame
+   by preferring `sch export-image` (renders document data, viewport-free); a stale frame
    must not be trusted for verification.
 
 ## Bulk realization from a netlist (automated)
@@ -437,7 +437,7 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `schematic.power.connect_pin`
 - `schematic.pin.set_no_connect` — 打/清「非连接标识」(NC, X 标记),让 DRC 不再对故意悬空的引脚报"未连接"。按位号+引脚号定位:`easyeda sch no-connect --designator U1 --pin 23,24[,…]`(`--clear` 清除)。实现必须从器件实例 `getAllPins()` 取引脚,`setState_NoConnected(...)` 后逐脚 `await pin.done()` 应用到画布,再重新获取器件实例回读;只调 setter 会得到当前句柄假 `true`、实际画布不变。
 - `schematic.select`
-- `schematic.snapshot` — 截图。**产物保存在 CLI 运行目录下的隐藏目录 `<cwd>/.easyeda/artifacts/`,文件名带本地时间戳**(`<YYYYMMDD-HHMMSS>-<kind>-<短id>.png`,便于排序/查找);响应里的 `artifacts[].path` 是绝对路径。netlist/BOM 等其他产物同此规则。
+- ~~`schematic.snapshot`~~ — 已移除(2026-08-12,出图统一 `sch export-image`)。**产物保存在 CLI 运行目录下的隐藏目录 `<cwd>/.easyeda/artifacts/`,文件名带本地时间戳**(`<YYYYMMDD-HHMMSS>-<kind>-<短id>.png`);响应里的 `artifacts[].path` 是绝对路径。netlist/BOM 等其他产物同此规则。
 - **`easyeda sch gate`** — **S5 校验门的唯一入口**:按固定顺序跑 `layout-lint` → `check` → `bridge-check` → `drc`,出一张报告。四个单命令原样保留(局部复查),但**交付门走 gate**。收敛动机见 `docs/design-sch-surface-convergence.md`:四个检查器各自为政时,「跑哪几个、什么顺序、谁的退出码算数」每次都要现场决定,而这个决策没有数据判据 —— audit log 实测 agent 对同一个失败拼过四种不同的下一步。现在顺序、阻塞判据、退出码都固化在代码里。**阻塞判据**:layout-lint `overlap`/`pin-coincidence` · check fatal+error · bridge-check `wire-bridge`(真短路) · drc fatal;tight spacing / orphan stub / 非 fatal DRC 项是告警,`--strict` 提升为阻塞。**顺序不是随意的**:几何最便宜且解释力最强(重叠会连锁出一堆电气误报,先治几何省掉大半来回),DRC 最慢且需前台故垫底。**verdict 三态,`blocked` ≠ `fail`**:`pass` 全过 / `fail` **板子有阻塞问题** / `blocked` **检查器没跑起来**(连接器断、页没打开、返回结构异常)——此时原理图**从未被完整判定**,后续 stage 直接跳过而不是继续撞同一堵墙,报告会指向 `easyeda health` + `doc switch` 而不是让你去改电路(旧行为下 agent 曾在 NO_CONNECTOR 后盲目改调别的命令 146 次)。每个失败 stage 自带**规定的下一步**,不用自己发明。`--json` 带每个 stage 的完整原生报告(`stages[].detail`),是四个单命令 JSON 的超集;`--only`/`--skip` 选子集(拼错 stage 名直接报错,绝不静默少跑一关);`--fail-fast` 第一个阻塞失败就停;窗口不在前台时 `--skip drc` 先过前三关。
 - `schematic.drc.check` — 用 `easyeda sch drc` 跑 EasyEDA SDK 的 `sch_Drc.check`。**注意:当前 EasyEDA build 可能只返回布尔/聚合结果,不会暴露 UI DRC 面板里的逐条 warning**(例如网络标识与导线名不一致、悬空脚明细)。所以它只能作为 SDK DRC 门,不能单独宣称“官方 DRC 干净”。
 - `schematic.check` — 用 `easyeda sch check` 跑的**重建式逐条设计检查**(补 SDK DRC 暴露不全)。**每条 finding 带 kebab-case 规则类型名 `type`(与 `pcb check` 同约定,可按类型统计/gate),summary 每类一个计数字段**。规则清单(全部 WARN):**floating-pin**(引脚悬空)、**geom-net-mismatch**(导线触碰引脚但网表未归入任何 net——疑漏报)、**net-marker-mismatch**(网络标识/端口/标签名与所连导线 net 名不一致)、**multi-net-wire**(同一导线多个网络名)、**wire-crossing**(导线交叉)、**wire-over-pin**(导线穿过引脚)、**zero-length-wire**(零长度残线)、**dangling-wire**(悬挂导线/孤儿 stub)。**几何 marker 规则(Go 侧,消费 `components.list` 的真实 bbox/锚点,电气引擎看不见的三类,#146/#147/#148)**:**duplicate-net-marker**(同类型+同网+同锚点的重合 netflag/netport ≥2 个——批量 autoconnect 中断重试留下的重复 GND/电源/端口标识,连接器会把同名重合旗合并掉网,故所有电气规则全绿而页面叠着一对;finding 带全部 `primitiveIds` + `suggestKeepId`/`suggestDeleteIds`,直接喂 `sch prim-delete`)、**titleblock-overlap**(part/marker 的 bbox 侵入 A4 标题栏图签 keep-out——autoconnect 会把 netport 落进明细表而 layout-lint 只检 part、电气检查几何盲)、**marker-overlap**(marker body 正面积压住 part 或另一 marker——电气正确但不可读;`--overlap-eps` 默认 0.5 调噪声下限,平行同侧端口的 ~1 unit 天然相交仍会报,靠 stagger/换 offset 治)。`floating-pin` 现在带 `primitiveId` 与 `pinDetails[]`(每个悬空脚的 `number`/`name`/`x`/`y`),文本报告逐脚打印脚名+坐标、designator 为空时回退打印 `primitiveId`,可直接喂给 `sch no-connect`。`wire-over-pin` 会**排除落在导线端点或 netflag/netport/netlabel 锚点上的引脚**——那是 `sch connect` 短 stub 的合法终点(EasyEDA 把共线相邻 stub 自动合并成一条长导线时,内部引脚会落进合并后导线的内部,但官方 DRC 视为合法,故不再误报)。`--json`、`--strict`(有 finding 即非零退出)、`--all-pages`。

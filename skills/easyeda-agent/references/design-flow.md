@@ -204,11 +204,11 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 | 门 | 判什么 | 用什么 | 何时看 |
 |----|--------|--------|--------|
 | **数据门(始终生效)** | 设计对不对 | `pcb list` / `track-list` / `via-list` / `pour-list` / `drc` / `check` / `layout-lint`(原理图侧 `sch list` / `layout-lint`) | 每阶段判正确性 |
-| **可视化产物门(仅录制/演示)** | 每阶段有没有**非 blank、非 stale、且是对的文档**的原生截图 | `easyeda pcb stage-snapshot --stage … --previous-sha256 <上帧sha>`(自动把关);单帧用 `pcb/sch snapshot` | 每阶段留档交付 |
+| **可视化产物门(仅录制/演示)** | 每阶段有没有**非 blank、非 stale、且是对的文档**的原生截图 | `easyeda pcb stage-snapshot --stage … --previous-sha256 <上帧sha>`(自动把关);单帧 PCB 用 `pcb snapshot`,原理图用 `sch export-image` | 每阶段留档交付 |
 
 **核心纪律——原生截图 ≠ 数据渲染图**:
 
-1. **优先原生 EasyEDA 截图。** 每个阶段用 `easyeda pcb snapshot`(原理图侧 `sch snapshot`)抓画布。响应里带 `sha256`/`capturedAt`。
+1. **优先原生 EasyEDA 截图。** 每个阶段 PCB 用 `easyeda pcb snapshot` 抓画布(带 `sha256`/`capturedAt`);原理图用 `sch export-image`(渲染文档数据,无 stale)。
 2. **两种坏帧要分开:STALE(冻结)vs BLANK(空白)。**
    - **STALE** = 与上一帧字节相同(EasyEDA 不在 API 改动后自动重绘)。传 `--previous-sha256 <上帧sha>`,connector 检测到即重试一次并回报 `stale=true`。
    - **BLANK** = 画布根本没渲染出内容(窗口最小化 / 在别的 Space / 被别的窗口挡住时,`getCurrentRenderedAreaImage` 回读一张平坦帧)。`snapshot` / `stage-snapshot` 现在会**在 CLI 侧读 PNG 判空**并告警(`primitiveCount>0` 却是平坦单色图 = 窗口没渲染,不是设计错)。

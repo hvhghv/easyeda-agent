@@ -2256,85 +2256,9 @@ async function blobSha256(blob: Blob): Promise<string | null> {
 	}
 }
 
-const schematicSnapshot: Handler = async (payload) => {
-	const tabId = optionalString(payload, 'tabId');
-	// Auto fit-to-all before capturing (适应全部) is ON by default so the whole
-	// sheet lands in frame without the caller having to issue a separate view.fit
-	// — pass fit=false to keep the current viewport. Best-effort: a failure must
-	// not block the capture. Bonus: changing the viewport also nudges EasyEDA to
-	// redraw, which mitigates the stale-frame problem documented below.
-	const fit = optionalBoolean(payload, 'fit') !== false;
-	// Optional sha256 of the PREVIOUS snapshot (caller threads it back in). When
-	// present we can DETECT a stale frame ourselves (issue #20) instead of only
-	// emitting advisory text: if the canvas state changed but the image bytes are
-	// byte-identical, the capture is stale — we retry once after another settle.
-	const previousSha = optionalString(payload, 'previousSha256');
-	let fitted = false;
-	if (fit) {
-		try {
-			await eda.dmt_EditorControl.zoomToAllPrimitives();
-			fitted = true;
-		}
-		catch {
-			/* best-effort — fall through and capture at the current viewport */
-		}
-	}
-
-	// Let any pending viewport change (a preceding `view region`/`view zoom`, or
-	// the zoomToAllPrimitives above) commit + repaint before we read the frame.
-	// Without this the --no-fit path captures the PRE-region viewport (issue #20).
-	await waitForCanvasSettle();
-
-	const capture = async (): Promise<Blob> => {
-		let b;
-		try {
-			b = await eda.dmt_EditorControl.getCurrentRenderedAreaImage(tabId);
-		}
-		catch (err) {
-			throw edaError(err, 'Failed to capture snapshot.');
-		}
-		if (!b) {
-			throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Snapshot returned no image.');
-		}
-		return b;
-	};
-
-	let blob = await capture();
-	let sha256 = await blobSha256(blob);
-	// Built-in stale detection: if the caller told us the prior frame's sha and we
-	// got the exact same bytes back, the canvas almost certainly didn't repaint —
-	// give it one more settle + recapture before reporting.
-	let staleRetry = false;
-	if (previousSha && sha256 && sha256 === previousSha) {
-		staleRetry = true;
-		await waitForCanvasSettle();
-		blob = await capture();
-		sha256 = await blobSha256(blob);
-	}
-	const stale = Boolean(previousSha && sha256 && sha256 === previousSha);
-
-	const artifact = await blobToArtifact(blob, 'schematic_snapshot', 'snapshot.png', 'image/png');
-	// Anti-stale metadata (issue #2/#20): EasyEDA does NOT auto-redraw after eda.*
-	// edits, so getCurrentRenderedAreaImage can return a byte-identical STALE
-	// frame. We now (a) settle the canvas before capturing, (b) expose the frame
-	// `sha256` so the caller can thread it back as `previousSha256` to let us
-	// detect+retry a stale frame, and (c) still surface `primitiveCount` for the
-	// data-over-picture judgement.
-	const primitiveCount = await countLivePagePrimitives();
-	return {
-		result: {
-			artifactId: artifact.id,
-			primitiveCount,
-			fitted,
-			sha256,
-			stale,
-			staleRetry,
-			capturedAt: new Date().toISOString(),
-			staleHint: 'EasyEDA may not auto-redraw after API edits. Thread this sha256 back as previousSha256 on the next snapshot to auto-detect a stale frame; judge state by data, screenshot for layout only.',
-		},
-		artifacts: [artifact],
-	};
-};
+// (schematic.snapshot removed 2026-08-12 — viewport captures are stale-prone and
+// fully superseded by schematic.export.image, which renders document data
+// viewport-free. The PCB-side pcb.snapshot keeps the frame-capture machinery.)
 
 // ─── DRC ──────────────────────────────────────────────────────────────
 
@@ -9661,7 +9585,6 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.pin.set_no_connect': schematicPinSetNoConnect,
 	'schematic.pin.disconnect': schematicPinDisconnect,
 	'schematic.select': schematicSelect,
-	'schematic.snapshot': schematicSnapshot,
 	'schematic.drc.check': schematicDrcCheck,
 	'schematic.check': schematicCheck,
 	'schematic.bridgeCheck': schematicBridgeCheck,

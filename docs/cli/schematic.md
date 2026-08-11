@@ -77,7 +77,6 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 能力 | 命令 | 说明 |
 |---|---|---|
 | 页面导图 | `sch export-image` | SVG/PNG/PDF,选区或整页,不依赖前台视口(残留进度条已在导出后主动销毁) |
-| 视口截图 | `sch snapshot` | 需前台,stale 检测 |
 | BOM/网表 | `sch export`(bom/netlist) | BOM 自动补 LCSC C 号(`bom-enrich.py`) |
 
 ## 附:易混命令辨析(AI 选型速查)
