@@ -1192,5 +1192,8 @@ at most one group per page.`,
 		group.AddCommand(c)
 	}
 
+	// Group 层的组内布局计算(三层体系,docs/schematic-layout-hierarchy.md §1)。
+	group.AddCommand(newSchGroupTidyCommand(cfg, window, stdout, stderr))
+
 	return group
 }

@@ -1675,6 +1675,18 @@ the selection). Without --ids it exports the whole active page.`,
 	// easyeda-agent 自己按 documentUuid 持久化组关系,group-move / align /
 	// distribute / autolayout 消费。
 	sch.AddCommand(newSchGroupCmd(cfg, &window, stdout, stderr))
+	// ── 三层布局体系(docs/schematic-layout-hierarchy.md):Zone 层命令族 ──
+	// `sch zone move` / `sch zone tidy` — 功能区刚移(带组带件带 note+框重画)与
+	// 组间叠加布局;Group 层的 `sch group tidy`(组内布局计算)挂在 group 树上。
+	{
+		zone := &cobra.Command{
+			Use:   "zone",
+			Short: "功能区层操作(三层体系:Sheet→Zone→Group)— move 整区刚移 / tidy 组间叠加布局",
+		}
+		zone.AddCommand(newSchZoneMoveCommand(cfg, &window, stdout, stderr))
+		zone.AddCommand(newSchZoneTidyCommand(cfg, &window, stdout, stderr))
+		sch.AddCommand(zone)
+	}
 	sch.AddCommand(newSchAlignCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchDistributeCmd(cfg, &window, stdout, stderr))
 	// 布局质量打分(诊断视角,不是门):折叠/反向/贴核心/长链可识别,归因带可

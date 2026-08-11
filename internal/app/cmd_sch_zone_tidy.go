@@ -999,7 +999,7 @@ func newSchZoneTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wri
 	var hGap, vGap float64
 	var apply, dryRun, asJSON bool
 	c := &cobra.Command{
-		Use:   "zone-tidy",
+		Use:   "tidy",
 		Short: "组间叠加布局:把功能区内的组与散件当刚体在区带内重排(默认 dry-run;--apply 执行)",
 		Long: `组间叠加布局(设计契约 §3):把一个功能区(` + "`sch zones`" + ` claim)内的每个
 持久化组 —— 以及未入组的认领散件(临时单件组)—— 当作刚体,在该区的区带内重排:
