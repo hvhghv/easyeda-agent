@@ -39,14 +39,16 @@ func TestDeriveSheetGeometry_KnownTemplateA4Landscape(t *testing.T) {
 		t.Fatal("expected a title-block bbox")
 	}
 	tb := g.TitleBlock.BBox
-	// 60% width × 20% height (calibrated against the real 3.2.148 A4 title block —
-	// see defaultTitleBlockRatio), anchored to the visual bottom-right corner — on
-	// the y-UP canvas that is the high-x/LOW-y corner (probe-proven 2026-07-19;
-	// the old high-y form protected the visual top-right, the wrong corner).
+	// 60% width × 24% height (calibrated against the real 3.2.148 A4 title block —
+	// see defaultTitleBlockRatio; height re-calibrated 0.2→0.24 on 2026-08-11 when
+	// the rendered table top measured ≈ y190 on A4 vs the 0.2 estimate's 165),
+	// anchored to the visual bottom-right corner — on the y-UP canvas that is the
+	// high-x/LOW-y corner (probe-proven 2026-07-19; the old high-y form protected
+	// the visual top-right, the wrong corner).
 	if tb.MaxX != 1160 || tb.MinY != 0 {
 		t.Errorf("keep-out must anchor to the high-x/low-y (visual bottom-right) corner, got maxX %.2f minY %.2f", tb.MaxX, tb.MinY)
 	}
-	if tb.MinX != round2(1160-0.6*1160) || tb.MaxY != round2(0+0.2*820) {
+	if tb.MinX != round2(1160-0.6*1160) || tb.MaxY != round2(0+0.24*820) {
 		t.Errorf("unexpected keep-out extent: minX %.2f maxY %.2f", tb.MinX, tb.MaxY)
 	}
 	if len(g.Keepouts) != 1 || g.Keepouts[0].Name != "titleBlock" || !g.Keepouts[0].Hard {

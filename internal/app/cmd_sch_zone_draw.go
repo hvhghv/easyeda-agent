@@ -578,8 +578,12 @@ Use the global --doc <page> selector for multi-page projects.`,
 	c.Flags().BoolVar(&clear, "clear", false, "remove the frames drawn by the last zone-draw on this page")
 	c.Flags().StringVar(&mode, "mode", "zones", "zones = fixed-grid claim rectangles; partition = data-driven whole-sheet functional partitions (issue #149)")
 	c.Flags().Float64Var(&fontSize, "font-size", 0, "label/title font size (default: 14 for zones, 22 for partition)")
-	c.Flags().Float64Var(&margin, "margin", 20, "--mode partition: page margin inset from the sheet edge")
-	c.Flags().Float64Var(&gutter, "gutter", 12, "--mode partition: gutter between adjacent partitions")
-	c.Flags().Float64Var(&titleBand, "title-band", 30, "--mode partition: height of each partition's title band")
+	// Defaults come from defaultPartitionOpts so the flag layer can never drift
+	// from the planner's own defaults (margin 20 lingered here after the planner
+	// moved to 28 — live 2026-08-11).
+	def := defaultPartitionOpts()
+	c.Flags().Float64Var(&margin, "margin", def.Margin, "--mode partition: page margin inset from the sheet edge")
+	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "--mode partition: gutter between adjacent partitions")
+	c.Flags().Float64Var(&titleBand, "title-band", def.TitleBand, "--mode partition: height of each partition's title band")
 	return c
 }

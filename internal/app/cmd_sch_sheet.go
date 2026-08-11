@@ -56,9 +56,14 @@ type sheetTemplate struct {
 // table on ceshi (2026-07-22): the earlier 0.22×0.14 covered only the RIGHT date
 // columns, leaving the 原理图/Schematic1/Board1/ceshi left half UNPROTECTED — so
 // autoconnect markers (#147) and partition frames (#149) could land on it while
-// every keep-out check read "clear". The real table spans ~60% of the width ×
-// ~20% of the height.
-var defaultTitleBlockRatio = titleBlockRatio{WidthFrac: 0.6, HeightFrac: 0.2}
+// every keep-out check read "clear". The real table spans ~60% of the width.
+// HeightFrac re-calibrated 0.2 → 0.24 (2026-08-11): at 0.2 the keep-out top sat
+// at y=165 on A4 (825 high) while the RENDERED table top measures ≈ y≈190 — a
+// partition frame lifted to 165+6 visibly crossed the 原理图/Schematic1 row while
+// zone-plan validation still read titleBlockHits=0 (false green). 0.24 → 198
+// keeps the whole table covered with the deliberate over-estimate bias this
+// table documents above.
+var defaultTitleBlockRatio = titleBlockRatio{WidthFrac: 0.6, HeightFrac: 0.24}
 
 // sheetTemplates is the known sheet → title-block ratio table. Mirrored for
 // humans/skills in skills/easyeda-agent/references/sheet-templates.json;

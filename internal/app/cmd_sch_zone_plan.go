@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -44,11 +45,51 @@ type partitionValidation struct {
 	TitleBlockHits    int `json:"titleBlockHits"`
 	ModuleOutsideZone int `json:"moduleOutsideZone"`
 	LabelCollisions   int `json:"labelCollisions"`
+	// SheetMarginHits counts frame edges that hug the sheet border closer than
+	// sheetEdgeMinGap — a frame flush against the printed sheet frame reads as a
+	// confusing double line (live feedback 2026-08-11).
+	SheetMarginHits int `json:"sheetMarginHits"`
 }
 
 func (v partitionValidation) clean() bool {
 	return v.SheetOverflow == 0 && v.PartitionOverlap == 0 && v.TitleBlockHits == 0 &&
-		v.ModuleOutsideZone == 0 && v.LabelCollisions == 0
+		v.ModuleOutsideZone == 0 && v.LabelCollisions == 0 && v.SheetMarginHits == 0
+}
+
+// titleBlockSafety is the extra clearance (schematic units) kept between a
+// partition frame and the DERIVED title-block keep-out, and the tolerance the
+// validator checks against. The keep-out is a ratio ESTIMATE (known-template-ratio,
+// see deriveSheetGeometry) that can undershoot the rendered table; lifting by
+// gutter/2=6 alone let a frame's bottom edge visibly cross the 原理图/Schematic1
+// row while validation (checked against the same bare estimate) still read
+// titleBlockHits=0 — a false green (live 2026-08-11). One constant is shared by
+// BOTH the lift and the check so "how far we lift" and "what we gate on" can
+// never drift apart again — that drift (lift by gutter/2, validate against the
+// bare keepout) was the root cause. 30 (not more): HeightFrac 0.24 already covers
+// the rendered table, so this is pure margin; legitimate boards place modules as
+// close as ~34 above the keep-out (real six-module fixture) and must stay clean.
+const titleBlockSafety = 30.0
+
+// sheetEdgeMinGap is the minimum distance a partition frame edge must keep from
+// the sheet border (the printed frame), feeding SheetMarginHits.
+const sheetEdgeMinGap = 12.0
+
+// partitionContentPad is how far a partition frame extends beyond its modules'
+// union bbox. Frames used to span the FULL column/row band, so a single-module
+// column drew a near-page-height frame around a 230-unit cluster (visual bloat,
+// live 2026-08-11); now the frame hugs content + this pad, clamped to its band.
+const partitionContentPad = 24.0
+
+// inflatedTitleKeepout grows the estimated keep-out by titleBlockSafety on every
+// side — the shared basis for the partition lift AND the validator.
+func inflatedTitleKeepout(keepout *layoutBBox) *layoutBBox {
+	if keepout == nil {
+		return nil
+	}
+	return &layoutBBox{
+		MinX: keepout.MinX - titleBlockSafety, MinY: keepout.MinY - titleBlockSafety,
+		MaxX: keepout.MaxX + titleBlockSafety, MaxY: keepout.MaxY + titleBlockSafety,
+	}
 }
 
 type partitionPlan struct {
@@ -67,7 +108,9 @@ type partitionOpts struct {
 }
 
 func defaultPartitionOpts() partitionOpts {
-	return partitionOpts{Margin: 20, Gutter: 12, TitleBand: 30, MaxCols: 3, MaxRows: 2}
+	// Margin 20 → 28 (2026-08-11): at 20 the frame sat 26 units from the sheet
+	// edge, hugging the printed sheet frame like a double line.
+	return partitionOpts{Margin: 28, Gutter: 12, TitleBand: 30, MaxCols: 3, MaxRows: 2}
 }
 
 // planPartitions is the pure planner: usable sheet (minus margin) carved into
@@ -118,15 +161,51 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 	})
 
 	half := opts.Gutter / 2
+	// Lift/validate against the SAME inflated keep-out (titleBlockSafety) so the
+	// planner can never pass its own gate while visibly crossing the real table.
+	safe := inflatedTitleKeepout(keepout)
 	for _, k := range order {
-		rect := layoutBBox{
+		cell := layoutBBox{
 			MinX: colBounds[k.c] + half, MinY: rowBounds[k.r] + half,
 			MaxX: colBounds[k.c+1] - half, MaxY: rowBounds[k.r+1] - half,
 		}
+		// Shrink the frame to its modules' union bbox + pad (clamped to the cell):
+		// the cell keeps partitions disjoint, the content hug kills the page-height
+		// frame around a small cluster. Top pad additionally reserves the title band
+		// so the big zone label never sits on a symbol.
+		content := modules[cells[k][0]].BBox
+		for _, i := range cells[k][1:] {
+			b := modules[i].BBox
+			if b.MinX < content.MinX {
+				content.MinX = b.MinX
+			}
+			if b.MinY < content.MinY {
+				content.MinY = b.MinY
+			}
+			if b.MaxX > content.MaxX {
+				content.MaxX = b.MaxX
+			}
+			if b.MaxY > content.MaxY {
+				content.MaxY = b.MaxY
+			}
+		}
+		rect := layoutBBox{
+			MinX: math.Max(cell.MinX, content.MinX-partitionContentPad),
+			MinY: math.Max(cell.MinY, content.MinY-partitionContentPad),
+			MaxX: math.Min(cell.MaxX, content.MaxX+partitionContentPad),
+			MaxY: math.Min(cell.MaxY, content.MaxY+partitionContentPad+opts.TitleBand),
+		}
 		// Lift the bottom above the title-block keep-out (a bottom-right band) so no
-		// partition covers the 图签/明细表.
-		if keepout != nil && boxesOverlap(rect, *keepout) {
-			if lift := keepout.MaxY + half; lift < rect.MaxY {
+		// partition covers the 图签/明细表. Never lift past the module content: the
+		// frame's job is to contain its modules — if a module itself intrudes the
+		// safety band, keep it contained and let validation flag the titleBlockHit
+		// (refusing to draw and pointing at the real fix: move the module up).
+		if safe != nil && boxesOverlap(rect, *safe) {
+			lift := safe.MaxY
+			if lift > content.MinY {
+				lift = content.MinY
+			}
+			if lift > rect.MinY && lift < rect.MaxY {
 				rect.MinY = lift
 			}
 		}
@@ -218,12 +297,21 @@ func bboxContains(outer, inner layoutBBox) bool {
 func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *layoutBBox) partitionValidation {
 	var v partitionValidation
 	ps := plan.Partitions
+	// Same inflated basis the planner lifts with (titleBlockSafety): validating
+	// against the bare estimate while lifting by a different amount is exactly the
+	// false-green this replaced.
+	safe := inflatedTitleKeepout(keepout)
 	for _, p := range ps {
 		if !bboxContains(plan.Sheet, p.BBox) {
 			v.SheetOverflow++
 		}
-		if keepout != nil && boxesOverlap(p.BBox, *keepout) {
+		if safe != nil && boxesOverlap(p.BBox, *safe) {
 			v.TitleBlockHits++
+		}
+		// A frame edge hugging the printed sheet frame reads as a double line.
+		if p.BBox.MinX-plan.Sheet.MinX < sheetEdgeMinGap || plan.Sheet.MaxX-p.BBox.MaxX < sheetEdgeMinGap ||
+			p.BBox.MinY-plan.Sheet.MinY < sheetEdgeMinGap || plan.Sheet.MaxY-p.BBox.MaxY < sheetEdgeMinGap {
+			v.SheetMarginHits++
 		}
 	}
 	for i := 0; i < len(ps); i++ {
@@ -394,9 +482,11 @@ labelCollisions, all should be 0). Draw it with ` + "`sch zone-draw --mode parti
 		},
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the full plan + validation as JSON")
-	c.Flags().Float64Var(&margin, "margin", 20, "page margin inset from the sheet edge")
-	c.Flags().Float64Var(&gutter, "gutter", 12, "gutter between adjacent partitions")
-	c.Flags().Float64Var(&titleBand, "title-band", 30, "height of each partition's title band")
+	// Defaults from defaultPartitionOpts — single source, no flag/planner drift.
+	def := defaultPartitionOpts()
+	c.Flags().Float64Var(&margin, "margin", def.Margin, "page margin inset from the sheet edge")
+	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "gutter between adjacent partitions")
+	c.Flags().Float64Var(&titleBand, "title-band", def.TitleBand, "height of each partition's title band")
 	c.Flags().IntVar(&maxCols, "max-cols", 3, "maximum partition columns")
 	c.Flags().IntVar(&maxRows, "max-rows", 2, "maximum partition rows")
 	return c
