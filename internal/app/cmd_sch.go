@@ -948,15 +948,19 @@ unit — internal relative layout is untouched, only the whole assembly shifts b
 There is no EasyEDA grouping API to persist against (probed 3.2.121: zero
 group/parent surface), so --group reads easyeda-agent's own page-scoped store.
 
---group runs a COMPLETENESS PRECHECK and refuses over half-moving: a wire that
-sits NEAR a member pin (within 12 units) without electrically attaching is the
-signature of residue from an earlier half-move — a stranded stub recreated a
-few units off its pin (seen live: line start 820 vs pin 810, folded-back vertex
-list). Such residue attaches to nothing, so a naive expansion would leave it
-behind and every later move would strand it further (dangling wires, flags
-parked on other parts). On detection the move is REJECTED with the offending
-wire ids + coordinates; clean up first (` + "`sch prim-delete --ids <wireId>`" + `, audit
-with ` + "`sch check`" + `), re-connect the pin, then retry.
+--group runs a COMPLETENESS PRECHECK and refuses over half-moving: a wire whose
+own LINE passes through a member pin (perpendicular offset ≤1 unit) but whose
+span stops SHORT of it by up to 12 units without attaching is the signature of
+residue from an earlier half-move — a stranded stub displaced ALONG its own
+line (seen live: line start 820 vs pin 810, same y, folded-back vertex list).
+Such residue attaches to nothing, so a naive expansion would leave it behind
+and every later move would strand it further (dangling wires, flags parked on
+other parts). The test is deliberately COLLINEAR, not radial: a healthy
+NEIGHBORING stub runs parallel one pin half-pitch away (can be <12 radially,
+e.g. y=485 stub vs y=475 pin) and must never trip it. On detection the move is
+REJECTED with the offending wire ids + coordinates; clean up first
+(` + "`sch prim-delete --ids <wireId>`" + `, audit with ` + "`sch check`" + `), re-connect the
+pin, then retry.
 
 Components translate via a plain position modify (same primitiveId survives).
 Wires have no modify-in-place, so each is deleted and recreated at the shifted
@@ -1224,58 +1228,6 @@ pull fresh ids before any follow-up mutation on it.`,
 			},
 		}
 		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to select — CSV: id1,id2 (required)")
-		sch.AddCommand(c)
-	}
-
-	// ── snapshot ──────────────────────────────────────────────────────────
-	// schematic.snapshot
-	{
-		var noFit bool
-		var previousSha string
-		c := &cobra.Command{
-			Use:   "snapshot",
-			Short: "Capture the current schematic view as an image artifact",
-			Long: `Capture the current schematic view as an image artifact.
-
-Zooms to fit all primitives (适应全部) before capturing BY DEFAULT, so the whole
-sheet lands in frame without a separate view.fit — pass --no-fit to keep the
-current viewport.
-
-For a PARTIAL / zoomed-in shot, frame the area first with "easyeda view region
---left --right --top --bottom" (or "view zoom --x --y --scale"), then capture
-with --no-fit so the snapshot keeps that viewport instead of zooming back out.
-The snapshot now waits for the canvas to repaint before grabbing the frame, so
-"view region && sch snapshot --no-fit" reliably captures the requested region
-(issue #20).
-
-STALE FRAMES: EasyEDA does NOT auto-redraw after API edits, so a capture can be
-byte-identical to a previous one even though the page changed. The result now
-includes a frame "sha256" — pass it back via --previous-sha256 on the next
-snapshot and the connector will detect a byte-identical (stale) frame, retry
-once after another redraw, and report stale=true if it is still identical. Also
-compare primitiveCount and judge STATE by data (sch list/getAll), not the pixels.`,
-			Args: cobra.NoArgs,
-			Example: `  easyeda sch snapshot           # auto fit-to-all, then capture
-  easyeda sch snapshot --no-fit  # keep the current viewport (partial shot)
-  easyeda view region --left 100 --right 400 --top 500 --bottom 200 && easyeda sch snapshot --no-fit`,
-			RunE: func(cmd *cobra.Command, args []string) error {
-				// Auto-fit is built into the schematic.snapshot action (default on);
-				// the CLI just forwards the opt-out so a single round-trip both fits
-				// and captures.
-				payload := map[string]any{"fit": !noFit}
-				if previousSha != "" {
-					payload["previousSha256"] = previousSha
-				}
-				res, err := dispatchCapture(cfg, "schematic.snapshot", window, payload, stdout)
-				if err != nil {
-					return err
-				}
-				warnIfBlankSnapshot(res, stderr)
-				return nil
-			},
-		}
-		c.Flags().BoolVar(&noFit, "no-fit", false, "do NOT zoom to fit before capturing (keep current viewport)")
-		c.Flags().StringVar(&previousSha, "previous-sha256", "", "sha256 of the previous snapshot; enables stale-frame detection + auto-retry")
 		sch.AddCommand(c)
 	}
 
@@ -1643,7 +1595,7 @@ The keepouts[] format is what sch autoconnect / autolayout consume.`,
 			Long: `Render the active schematic page, or ONLY the primitives you name, to
 SVG / PNG / PDF (#166).
 
-Why not ` + "`view region` + `snapshot`" + `: that path is viewport-dependent — a
+Why not a viewport capture (the removed ` + "`sch snapshot`" + `): that path is viewport-dependent — a
 backgrounded tab never repaints, so it silently hands back the previous
 full-page frame. This renders the requested primitives directly: no viewport,
 no foreground requirement, no dialog. SVG is vector, so an agent can zoom into

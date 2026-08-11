@@ -336,9 +336,56 @@ func TestExpandGroupAttachmentsResidueBesideHealthyStub(t *testing.T) {
 	}
 }
 
+func TestExpandGroupAttachmentsParallelNeighborStubNotSuspect(t *testing.T) {
+	// EXACT live geometry (终验 2026-08-12 误拒): R1's REAL pin at (820,475)
+	// (pin half-pitch is ±20, not the ±10 of the earlier hand-built scene);
+	// U2:EN's healthy stub runs PARALLEL at y=485 — [815,485 → 835,485] passes
+	// 10 RADIAL units from the pin, inside a naive radius-12 test, but its
+	// perpendicular offset is 10 ≫ 1: a different line entirely, never residue.
+	in := groupExpandInput{
+		MemberPins: [][2]float64{{820, 475}},
+		Wires: []schGroupWire{
+			{ID: "w-r1", Points: []float64{820, 475, 850, 475}},   // R1's own stub (attaches)
+			{ID: "w-u2en", Points: []float64{815, 485, 835, 485}}, // parallel neighbor
+		},
+		Flags: []schGroupFlag{{ID: "f-r1", X: 850, Y: 475}},
+	}
+	got := expandGroupAttachments(in)
+	if len(got.Suspects) != 0 {
+		t.Fatalf("parallel neighbor stub must NOT be a suspect: %+v", got.Suspects)
+	}
+	if strings.Join(got.WireIDs, ",") != "w-r1" || strings.Join(got.FlagIDs, ",") != "f-r1" {
+		t.Fatalf("member's own stub must expand normally: %+v", got)
+	}
+}
+
+func TestSegmentGrazesPointCollinearBand(t *testing.T) {
+	// The graze criterion is COLLINEAR: perp ≤1 AND along-line gap ∈ (0.5, 12].
+	cases := []struct {
+		name           string
+		px, py         float64
+		x0, y0, x1, y1 float64
+		want           bool
+	}{
+		{"collinear 10-unit gap (live residue)", 810, 475, 820, 475, 835, 475, true},
+		{"collinear gap beyond far end", 845, 475, 820, 475, 835, 475, true},
+		{"collinear but gap over tolerance", 800, 475, 820, 475, 835, 475, false},
+		{"collinear attached (gap under eps)", 820, 475, 820, 475, 835, 475, false},
+		{"parallel neighbor perp 10 (live false-reject)", 820, 475, 815, 485, 835, 485, false},
+		{"perp just over the 1-unit bound", 810, 476.5, 820, 475, 835, 475, false},
+		{"slanted carrier, on-line gap ~9.9", 813, 468, 820, 475, 830, 485, true},
+		{"slanted carrier, on-line gap over tolerance", 810, 465, 820, 475, 830, 485, false},
+	}
+	for _, tc := range cases {
+		if got := segmentGrazesPoint(tc.px, tc.py, tc.x0, tc.y0, tc.x1, tc.y1); got != tc.want {
+			t.Errorf("%s: segmentGrazesPoint = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestExpandGroupAttachmentsCleanScenesHaveNoSuspects(t *testing.T) {
 	// Attached stubs (exact pin contact) and genuinely-far wires must never
-	// trip the precheck — only the graze-without-attach band (0.5, 12] does.
+	// trip the precheck — only the collinear graze band does.
 	cases := []struct {
 		name string
 		in   groupExpandInput

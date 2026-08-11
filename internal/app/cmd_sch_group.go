@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -253,16 +254,27 @@ func findPartialGroups(groups []*schGroup, selected []string) []*schGroup {
 // float tails without ever bridging distinct grid points.
 const schGroupEps = 0.5
 
-// schGroupNearTol is the LOOSE tolerance of the expansion-completeness precheck.
-// Live 2026-08-12: a stub wire that an earlier HALF-MOVE had stranded sat 10
-// units off its pin (line start 820 vs pin R1:1 at 810, folded-back vertex list
-// [820,475 835,475 845,475 835,475]) — it electrically touches nothing, so the
+// schGroupNearTol is the ALONG-LINE gap tolerance of the expansion-completeness
+// precheck. Live 2026-08-12: a stub wire that an earlier HALF-MOVE had stranded
+// sat 10 units off its pin ALONG ITS OWN LINE (line start 820 vs pin at 810,
+// same y, folded-back vertex list) — it electrically touches nothing, so the
 // eps-based tree classes (member/foreign) both miss it, the expansion leaves it
 // behind, and the next move half-carries the group AGAIN, compounding the
-// damage. Any wire that comes within this distance of a member pin without
-// attaching (schGroupEps) is treated as such residue and hard-rejects the move.
-// 12 covers the observed 10-unit displacement with margin.
+// damage. A wire whose LINE passes through the pin (perpendicular distance ≤
+// schGroupPerpTol) but whose span stops short of it by a gap in
+// (schGroupEps, schGroupNearTol] is treated as such residue and hard-rejects
+// the move. 12 covers the observed 10-unit displacement with margin.
 const schGroupNearTol = 12.0
+
+// schGroupPerpTol bounds the PERPENDICULAR distance for the residue test.
+// Half-move residue is COLLINEAR with its pin — displaced only along the line,
+// perpendicular offset ~0. A legitimate NEIGHBORING stub runs PARALLEL one
+// half-pitch away and must never match (live 终验 2026-08-12: U2:EN's healthy
+// stub at y=485 passed 10 radial units from R1's real pin at y=475 — the pin
+// half-pitch is ±20, putting parallel neighbors inside a radial 12 — and a
+// radius-only test wrongly rejected the move). Perpendicular offset above this
+// means a DIFFERENT line entirely → never residue.
+const schGroupPerpTol = 1.0
 
 // schGroupWire is one wire polyline with its live primitiveId (pulled via the
 // debug.exec_js hatch — the components.list `wires` payload carries segments
@@ -285,10 +297,12 @@ type groupExpandInput struct {
 	Flags      []schGroupFlag
 }
 
-// groupSuspect is one wire flagged by the completeness precheck: it GRAZES a
-// member pin (within schGroupNearTol) without electrically attaching (within
-// schGroupEps) — the signature of residue from an earlier half-move. Endpoints
-// + the grazed pin go into the rejection report so the cleanup is actionable.
+// groupSuspect is one wire flagged by the completeness precheck: its carrier
+// LINE passes through a member pin (perp ≤ schGroupPerpTol) but its span stops
+// short of it by an along-line gap in (schGroupEps, schGroupNearTol] — the
+// collinear "same line, broken contact" signature of half-move residue.
+// Endpoints + the grazed pin go into the rejection report so the cleanup is
+// actionable.
 type groupSuspect struct {
 	WireID         string
 	X0, Y0, X1, Y1 float64 // wire's first/last polyline vertex
@@ -340,6 +354,57 @@ func pointOnPolyline(px, py float64, pts []float64, eps float64) bool {
 	}
 	for i := 0; i+3 < len(pts); i += 2 {
 		if pointOnSegment(px, py, pts[i], pts[i+1], pts[i+2], pts[i+3], eps) {
+			return true
+		}
+	}
+	return false
+}
+
+// segmentGrazesPoint reports whether (px,py) lies ON the segment's carrier LINE
+// (perpendicular distance ≤ schGroupPerpTol) while the segment's span stops
+// short of it by an along-line gap in (schGroupEps, schGroupNearTol] — the
+// "same line, broken contact" signature of half-move residue. A PARALLEL
+// neighboring stub (perp offset > schGroupPerpTol) never matches, no matter how
+// radially close (终验 false-reject: y=485 stub vs y=475 pin, radial 10). The
+// projection-outside-span formula covers slanted segments unchanged. A
+// degenerate zero-length segment falls back to radial distance as the gap.
+func segmentGrazesPoint(px, py, x0, y0, x1, y1 float64) bool {
+	vx, vy := x1-x0, y1-y0
+	wx, wy := px-x0, py-y0
+	segLen2 := vx*vx + vy*vy
+	if segLen2 == 0 {
+		d := math.Hypot(wx, wy)
+		return d > schGroupEps && d <= schGroupNearTol
+	}
+	segLen := math.Sqrt(segLen2)
+	// Perpendicular distance from the pin to the carrier (infinite) line.
+	if math.Abs(vx*wy-vy*wx)/segLen > schGroupPerpTol {
+		return false
+	}
+	// Along-line gap: how far the pin's projection falls OUTSIDE the span.
+	t := (wx*vx + wy*vy) / segLen2
+	var gap float64
+	switch {
+	case t < 0:
+		gap = -t * segLen
+	case t > 1:
+		gap = (t - 1) * segLen
+	default:
+		gap = 0 // projection inside the span (attached is handled by eps matching)
+	}
+	return gap > schGroupEps && gap <= schGroupNearTol
+}
+
+// polylineGrazesPoint reports whether any edge of the polyline collinearly
+// grazes the point (see segmentGrazesPoint). A single-point polyline degrades
+// to the radial-gap test.
+func polylineGrazesPoint(px, py float64, pts []float64) bool {
+	if len(pts) == 2 {
+		d := math.Hypot(px-pts[0], py-pts[1])
+		return d > schGroupEps && d <= schGroupNearTol
+	}
+	for i := 0; i+3 < len(pts); i += 2 {
+		if segmentGrazesPoint(px, py, pts[i], pts[i+1], pts[i+2], pts[i+3]) {
 			return true
 		}
 	}
@@ -432,12 +497,14 @@ func expandGroupAttachments(in groupExpandInput) groupExpansion {
 	for _, t := range trees {
 		if !t.member {
 			// Completeness precheck: a tree that ATTACHES to no member pin but
-			// GRAZES one (within schGroupNearTol) is residue of an earlier
-			// half-move — silently leaving it behind is how the damage compounds.
+			// COLLINEARLY GRAZES one (same carrier line, along-line gap ≤
+			// schGroupNearTol) is residue of an earlier half-move — silently
+			// leaving it behind is how the damage compounds. Parallel neighbor
+			// stubs (perp offset > schGroupPerpTol) are legitimate and ignored.
 			for _, wi := range t.wires {
 				w := in.Wires[wi]
 				for _, p := range in.MemberPins {
-					if pointOnPolyline(p[0], p[1], w.Points, schGroupNearTol) {
+					if polylineGrazesPoint(p[0], p[1], w.Points) {
 						last := len(w.Points)
 						out.Suspects = append(out.Suspects, groupSuspect{
 							WireID: w.ID,
@@ -637,10 +704,10 @@ func expandSchGroupForMove(cfg *appConfig, window, groupRef string) (*schGroupMo
 		var lines, ids []string
 		for _, s := range set.Expansion.Suspects {
 			ids = append(ids, s.WireID)
-			lines = append(lines, fmt.Sprintf("  wire %s [%g,%g → %g,%g] grazes member pin (%g,%g) without attaching",
+			lines = append(lines, fmt.Sprintf("  wire %s [%g,%g → %g,%g] collinearly grazes member pin (%g,%g) without attaching",
 				s.WireID, s.X0, s.Y0, s.X1, s.Y1, s.PinX, s.PinY))
 		}
-		return nil, fmt.Errorf(`group %s expansion is INCOMPLETE — %d wire(s) sit within %g units of a member pin but are NOT electrically attached (likely residue of an earlier half-move):
+		return nil, fmt.Errorf(`group %s expansion is INCOMPLETE — %d wire(s) lie on a member pin's own line but stop short of it by ≤%g units without attaching (the signature of residue from an earlier half-move):
 %s
 refusing to move — a half-moved group is exactly what groups exist to prevent. Clean up first:
   easyeda sch prim-delete --ids %s   # remove the stray stub(s)
