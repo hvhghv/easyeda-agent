@@ -197,10 +197,13 @@ codex mcp add easyeda-agent \
 
 均以 typed CLI 子命令暴露(`easyeda <domain> <verb>`),每项都在固定的 ESP32-S3 回归板上真机验证过。
 
-**原理图**
-- 从立创/LCSC 库按 uuid 放**真实器件**再布线;电源/地**网络标志**用 `connect_pin`(自动补偿旋转存储的坑)。
-- **DRC**(`sch drc`)+ 重建的逐项**设计检查**(`sch check`——悬空引脚、导线交叉、导线压引脚)+ 几何 **layout-lint**(重叠/间距)+ **树粒度桥接检测**(`sch bridge-check`——共线合并短路 BRIDGE / 孤儿桩 ORPHAN,`sch check` 的单线视角看不全的盲区)。
-- 模块感知**自动布局**(放置→校验→调整)、一次调用 **`sch read`**(器件+网络+悬空引脚+检查)、**BOM**/**网表**导出(BOM 自动补 LCSC C 号)。
+**原理图** — 完整功能地图(已支持 40+ 子命令按功能域 + 待支持路线)见 **[docs/schematic-features.md](docs/schematic-features.md)**;摘要:
+- **器件与库**:从立创/LCSC 库按 uuid 放**真实器件**、换型号(`replace`)、符号/封装重绑、C 号确定性解析(`resolve-lcsc`);`modify` 属性 **merge 语义**(只 patch 顶层字段不再清空自定义属性,#175)。
+- **连线**:`connect`/`autoconnect`(**打分器**自选方向——碰撞/穿件/图签/fanout 全几何成本,netport **竖排折叠惩罚**让密集引脚列标签保持水平)/`disconnect` 成对删;电源/地标志自动补偿旋转存储的坑。
+- **布局与可读性三件套**:模块感知**自动布局**(template/official 双引擎)、对齐/等距/刚体平移;**分页 reconcile + 数据驱动分区框(`zone-plan`/`zone-draw`,校验压图签/贴边全 0 才许画)+ 每模块电路说明(`note`)**——多器件页未分区会被 `sch check` 的 missing-partition 机械拦下。
+- **校验门**:`sch gate` 一条龙(layout-lint→check→bridge-check→drc);check 重建逐项 finding(悬空脚/交叉/压引脚/重合标志/**标签折叠**…);**layout-score** 五维布局质量诊断,逐项归因**带可执行 fix 命令**。
+- **电路块库**:`block-apply` 一键实例化验证过的拓扑(20 块/11 类目,离线可查);`extract-layout` 真板反推模板。
+- 一次调用 **`sch read`**(器件+网络+检查)、**BOM**/**网表**导出(自动补 LCSC C 号)、页面导图 SVG/PNG/PDF。
 
 **PCB — 布局**
 - **`pcb new-board`** — 从原理图**新建一块板 + 空 PCB 页**并绑定(CLI 版「新建 PCB / 原理图转 PCB」),再 `pcb import-changes` 从零布局;区别于只做链接的 `board.create`。
