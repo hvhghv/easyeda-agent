@@ -706,3 +706,33 @@ func TestScoreCandidate_StubEndingOnNeighbourPinHardRejects(t *testing.T) {
 		t.Fatalf("clear direction must not be rejected, got %v (%v)", left.Score, left.Reasons)
 	}
 }
+
+// TestScoreCandidate_FoldedNetPortPenalty: standing a netport vertical costs
+// costFoldedPort so horizontal placement wins on dense pin columns unless the
+// horizontal candidates are genuinely colliding (≥ costFlagCollision); square
+// ground markers stay exempt.
+func TestScoreCandidate_FoldedNetPortPenalty(t *testing.T) {
+	pin := acPin{X: 100, Y: 100}
+	scene := acScene{}
+	rules := autoconnectRules{}
+	has := func(c acCandidate) bool {
+		for _, r := range c.Reasons {
+			if r.Cost == costFoldedPort {
+				return true
+			}
+		}
+		return false
+	}
+	if c := scoreCandidate(pin, "up", 18, "net_port_bi", "N", scene, rules); !has(c) {
+		t.Fatalf("vertical netport must carry costFoldedPort: %+v", c.Reasons)
+	}
+	if c := scoreCandidate(pin, "down", 18, "net_port_bi", "N", scene, rules); !has(c) {
+		t.Fatalf("vertical netport must carry costFoldedPort: %+v", c.Reasons)
+	}
+	if c := scoreCandidate(pin, "left", 18, "net_port_bi", "N", scene, rules); has(c) {
+		t.Fatalf("horizontal netport must NOT carry costFoldedPort: %+v", c.Reasons)
+	}
+	if c := scoreCandidate(pin, "up", 18, "ground", "GND", scene, rules); has(c) {
+		t.Fatalf("ground marker must stay exempt: %+v", c.Reasons)
+	}
+}

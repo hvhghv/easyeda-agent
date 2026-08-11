@@ -148,8 +148,18 @@ const (
 	costWireTouch     = costHardReject
 	costFlagCollision = 1000 // endpoint/label collides with an existing flag/port/label
 	costThroughPart   = 500  // stub passes through another component bbox
-	costFanoutChannel = 100  // too close to a preserved pin-fanout channel
-	costOffsetPerUnit = 0.1  // +offset * 0.1 — prefer shorter stubs
+	// costFoldedPort penalizes standing a long-bodied netport vertical (up/down):
+	// the whole 31-long body rotates 90/270 and its net name renders SIDEWAYS —
+	// the "标签折起来" readability fail users flag on dense pin columns (live
+	// 2026-08-11: 10-pitch MCU columns made every horizontal candidate eat
+	// costFanoutChannel, so vertical won and labels folded). 150 sits between
+	// costFanoutChannel (a folded label beats squeezing past a fanout channel is
+	// FALSE — horizontal-with-channel ≈ 100+ still wins) and costThroughPart /
+	// costFlagCollision (a folded label DOES beat overlapping a part or another
+	// label). Ground/power markers are near-square and stay exempt.
+	costFoldedPort    = 150
+	costFanoutChannel = 100 // too close to a preserved pin-fanout channel
+	costOffsetPerUnit = 0.1 // +offset * 0.1 — prefer shorter stubs
 	bonusOutwardSide  = -20  // direction matches the pin's outward side
 	bonusKindDefault  = -10  // direction matches the kind default (GND down / power up / port outward)
 	acCoordEps        = 0.01 // coordinate-equality tolerance
@@ -175,6 +185,17 @@ type acMarkerBBoxProfile struct {
 	Near  float64
 	Far   float64
 	Cross float64
+}
+
+// isNetPortKind reports whether the canonical kind is the long-bodied netport
+// family (the only marker family whose vertical placement folds its label —
+// ground/power are near-square).
+func isNetPortKind(canonicalKind string) bool {
+	switch canonicalKind {
+	case "net_port_in", "net_port_out", "net_port_bi", "netport":
+		return true
+	}
+	return false
 }
 
 func markerBBoxProfile(canonicalKind string) acMarkerBBoxProfile {
@@ -517,6 +538,11 @@ func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, target
 				break
 			}
 		}
+	}
+
+	// +150 a vertical netport folds its net name sideways (see costFoldedPort).
+	if isNetPortKind(canonicalKind) && (dir == "up" || dir == "down") {
+		reasons = append(reasons, acReason{costFoldedPort, "netport folded vertical — label reads sideways"})
 	}
 
 	// +offset * 0.1 — prefer shorter stubs.

@@ -57,6 +57,40 @@ func analyzeMarkerGeometry(comps []layoutComp, titleBlock *layoutBBox, overlapEp
 	findings = append(findings, duplicateNetMarkerFindings(comps)...)
 	findings = append(findings, titleblockOverlapFindings(comps, titleBlock, overlapEps)...)
 	findings = append(findings, markerOverlapFindings(comps, overlapEps)...)
+	findings = append(findings, foldedNetLabelFindings(comps)...)
+	return findings
+}
+
+// foldedNetLabelFindings flags netports standing VERTICAL (rotation 90/270): the
+// long body (31×11 horizontal) rotates to 11×31 and its net name renders sideways
+// — the "标签折起来" readability fail on dense pin columns (live 2026-08-11: the
+// autoconnect scorer picked vertical to dodge fanout-channel penalties; the
+// costFoldedPort scoring change fixes the planner, this rule is the delivery-gate
+// backstop so a folded label can never reach a finished sheet unseen, whatever
+// planner produced it). Pure bbox geometry: height > width on a netport ⇔
+// rotation ∈ {90,270}; ground/power markers are near-square and exempt.
+func foldedNetLabelFindings(comps []layoutComp) []checkFinding {
+	var findings []checkFinding
+	for _, c := range comps {
+		if c.ComponentType != "netport" || c.BBox == nil {
+			continue
+		}
+		w := c.BBox.MaxX - c.BBox.MinX
+		h := c.BBox.MaxY - c.BBox.MinY
+		if h <= w {
+			continue
+		}
+		findings = append(findings, checkFinding{
+			Type:          "folded-net-label",
+			Level:         "warn",
+			PrimitiveId:   c.ID,
+			ComponentType: c.ComponentType,
+			MarkerNet:     c.Net,
+			BBox:          c.BBox,
+			At:            &checkPoint{X: c.X, Y: c.Y},
+			Message:       fmt.Sprintf("netport %q 竖排折叠(bbox %.0f×%.0f, 文字侧向)— 重连该脚:`sch autoconnect --replace` 加大 offset 水平错列,或显式 --direction left|right", c.Net, w, h),
+		})
+	}
 	return findings
 }
 
@@ -295,6 +329,8 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 			rep.Summary.MarkerOverlaps++
 		case "missing-partition":
 			rep.Summary.MissingPartitions++
+		case "folded-net-label":
+			rep.Summary.FoldedNetLabels++
 		}
 	}
 	rep.Summary.Total = len(rep.Findings)

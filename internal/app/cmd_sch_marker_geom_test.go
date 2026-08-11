@@ -226,3 +226,23 @@ func TestPartitionFindingFor(t *testing.T) {
 		})
 	}
 }
+
+// TestFoldedNetLabelFindings: vertical netports (bbox taller than wide = rotation
+// 90/270, label sideways) are flagged; horizontal netports and near-square
+// ground/power markers are not. Real ceshi geometry: folded 11×31, normal 31×11.
+func TestFoldedNetLabelFindings(t *testing.T) {
+	comps := []layoutComp{
+		{ID: "folded", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(940, 440, 951, 471)},   // 11×31 vertical
+		{ID: "normal", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(945, 650, 976, 661)},   // 31×11 horizontal
+		{ID: "gndv", ComponentType: "netflag", Net: "GND", BBox: bb(0, 0, 10, 21)},                // ground is exempt
+		{ID: "nobox", ComponentType: "netport", Net: "EN"},                                        // no bbox → skip
+	}
+	fs := foldedNetLabelFindings(comps)
+	if len(fs) != 1 {
+		t.Fatalf("expected exactly the vertical netport flagged, got %d: %+v", len(fs), fs)
+	}
+	f := fs[0]
+	if f.Type != "folded-net-label" || f.PrimitiveId != "folded" || f.MarkerNet != "LED_CTRL" || f.Level != "warn" {
+		t.Fatalf("unexpected finding: %+v", f)
+	}
+}
