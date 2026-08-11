@@ -6,6 +6,7 @@ package app
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,31 @@ func TestClassifyTidyMember(t *testing.T) {
 			{Pin: "2", Net: "GND", Flag: "netlabel"},
 		}, tidyRoleSkip},
 		{"未连接件", "C2", []tidyPinConn{{Pin: "1"}, {Pin: "2"}}, tidyRoleSkip},
+		// ── F1/铁则5:双旗 + 未建模第三连接 → skip(不动比扯断好)──
+		{"3-pin 馈通:第三 pin 普通导线 → skip", "C11", []tidyPinConn{
+			{Pin: "1", Net: "5V", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			{Pin: "3", Net: "SIG", OnWire: true}, // 无标记但在线上 = 真连接
+		}, tidyRoleSkip},
+		{"3-pin 馈通:第三 pin 信号 netflag → skip", "C12", []tidyPinConn{
+			{Pin: "1", Net: "5V", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			{Pin: "3", Net: "SIG", Flag: "netflag", OnWire: true},
+		}, tidyRoleSkip},
+		{"3-pin 馈通:第三 pin netlabel → skip", "C13", []tidyPinConn{
+			{Pin: "1", Net: "5V", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			{Pin: "3", Net: "SIG", Flag: "netlabel", OnWire: true},
+		}, tidyRoleSkip},
+		{"3-pin:第三 pin 悬空(不在线上)→ 仍 power-updown", "C14", []tidyPinConn{
+			{Pin: "1", Net: "5V", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			{Pin: "3"},
+		}, tidyRolePowerUpdown},
+		{"旗 pin 本身 OnWire(旗经导线连,常态)不影响判型", "C15", []tidyPinConn{
+			{Pin: "1", Net: "3V3", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+		}, tidyRolePowerUpdown},
 	}
 	for _, tc := range cases {
 		if got := classifyTidyMember(tc.desig, tc.pins); got != tc.want {
@@ -79,6 +105,30 @@ func TestTidyNetClass(t *testing.T) {
 	for _, tc := range cases {
 		if got := tidyNetClass(tc.net); got != tc.want {
 			t.Errorf("tidyNetClass(%q) = %q, want %q", tc.net, got, tc.want)
+		}
+	}
+}
+
+// ── tidyUnmodeledConn:power-updown 未建模连接判据(F1/铁则5)─────────────────
+
+func TestTidyUnmodeledConn(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  tidyPinConn
+		want bool
+	}{
+		{"power netflag = 已建模", tidyPinConn{Pin: "1", Net: "3V3", Flag: "netflag", OnWire: true}, false},
+		{"gnd netflag = 已建模", tidyPinConn{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true}, false},
+		{"netport = signal-row 建模(planPowerUpdown 另行显式拒绝)", tidyPinConn{Pin: "1", Net: "EN", Flag: "netport", OnWire: true}, false},
+		{"信号 netflag = 未建模", tidyPinConn{Pin: "3", Net: "SIG", Flag: "netflag", OnWire: true}, true},
+		{"未知网 netflag(net 空)= 未建模(fail-closed)", tidyPinConn{Pin: "3", Flag: "netflag", OnWire: true}, true},
+		{"netlabel = 未建模(connect_pin 建不回)", tidyPinConn{Pin: "3", Net: "3V3", Flag: "netlabel", OnWire: true}, true},
+		{"无标记但在导线上 = 未建模(普通线连接)", tidyPinConn{Pin: "3", Net: "SIG", OnWire: true}, true},
+		{"悬空 pin = 无连接", tidyPinConn{Pin: "3"}, false},
+	}
+	for _, tc := range cases {
+		if got := tidyUnmodeledConn(tc.pin); got != tc.want {
+			t.Errorf("%s: tidyUnmodeledConn(%+v) = %v, want %v", tc.name, tc.pin, got, tc.want)
 		}
 	}
 }
@@ -273,6 +323,48 @@ func TestPlanPowerUpdownErrors(t *testing.T) {
 	}
 }
 
+// F1/铁则5:3-pin 馈通电容(pin1=5V 旗、pin2=GND 旗、pin3=信号/普通线)——
+// 显式 --pattern power-updown 必须报错(不许静默扯断第三 pin),错误信息点名
+// 违规 pin;auto 判型对同一件降级 skip(见 TestClassifyTidyMember)。
+func TestPlanPowerUpdownFeedthrough3Pin(t *testing.T) {
+	feedthrough := func(third tidyPinConn) tidyMemberIn {
+		return tidyMemberIn{Designator: "C20", Pins: []tidyPinConn{
+			{Pin: "1", Net: "5V", Flag: "netflag", OnWire: true},
+			{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			third,
+		}}
+	}
+	cases := []struct {
+		name         string
+		third        tidyPinConn
+		wantContains []string
+	}{
+		{"第三 pin 普通导线(树上无标记)", tidyPinConn{Pin: "3", Net: "SIG", OnWire: true},
+			[]string{"pin 3", "未建模", "普通导线"}},
+		{"第三 pin 信号 netflag", tidyPinConn{Pin: "3", Net: "SIG", Flag: "netflag", OnWire: true},
+			[]string{"pin 3", "未建模", "netflag SIG"}},
+		{"第三 pin netlabel", tidyPinConn{Pin: "3", Net: "SIG", Flag: "netlabel", OnWire: true},
+			[]string{"pin 3", "未建模", "netlabel SIG"}},
+	}
+	for _, tc := range cases {
+		_, err := planPowerUpdown([]tidyMemberIn{feedthrough(tc.third)}, tidyAnchor{X: 100, Y: 100}, 50)
+		if err == nil {
+			t.Errorf("%s: want error, got nil", tc.name)
+			continue
+		}
+		for _, sub := range tc.wantContains {
+			if !strings.Contains(err.Error(), sub) {
+				t.Errorf("%s: 错误信息 %q 缺少 %q", tc.name, err.Error(), sub)
+			}
+		}
+	}
+	// 第三 pin 真悬空(不在任何导线上)→ 无连接可扯断,照常出计划。
+	plans, err := planPowerUpdown([]tidyMemberIn{feedthrough(tidyPinConn{Pin: "3"})}, tidyAnchor{X: 100, Y: 100}, 50)
+	if err != nil || len(plans) != 1 {
+		t.Errorf("悬空第三 pin: got (%d plans, %v), want 1 plan no error", len(plans), err)
+	}
+}
+
 func TestPlanPowerUpdownEmpty(t *testing.T) {
 	plans, err := planPowerUpdown(nil, tidyAnchor{}, 50)
 	if err != nil || plans != nil {
@@ -379,27 +471,33 @@ func TestTidyPinAttachment(t *testing.T) {
 	flagFar := tidyMarker("f3", "netflag", "3V3", 340, 300)
 
 	// 直连桩:pin → w1;标记锚在 w2 远端,经树归属找到。
-	m, ok := tidyPinAttachment(100, 100, wires, roots, []layoutComp{flagGND, flagFar})
-	if !ok || m.ID != "f1" {
-		t.Errorf("merged-tree attachment = (%v,%v), want f1", m.ID, ok)
+	m, ok, onWire := tidyPinAttachment(100, 100, wires, roots, []layoutComp{flagGND, flagFar})
+	if !ok || m.ID != "f1" || !onWire {
+		t.Errorf("merged-tree attachment = (%v,%v,onWire=%v), want f1 onWire", m.ID, ok, onWire)
 	}
 	// 同树 netflag+netport 并存 → netport 优先(决定 signal-row 分类)。
-	m, ok = tidyPinAttachment(100, 100, wires, roots, []layoutComp{flagGND, portEN})
+	m, ok, _ = tidyPinAttachment(100, 100, wires, roots, []layoutComp{flagGND, portEN})
 	if !ok || m.ID != "f2" {
 		t.Errorf("netport priority = (%v,%v), want f2", m.ID, ok)
 	}
 	// 别的树上的标记不算。
-	m, ok = tidyPinAttachment(300, 300, wires, roots, []layoutComp{flagGND, flagFar})
+	m, ok, _ = tidyPinAttachment(300, 300, wires, roots, []layoutComp{flagGND, flagFar})
 	if !ok || m.ID != "f3" {
 		t.Errorf("far tree = (%v,%v), want f3", m.ID, ok)
 	}
-	// pin 不在任何 wire 上 → 无归属(压坐标不算连接)。
-	if _, ok = tidyPinAttachment(999, 999, wires, roots, []layoutComp{flagGND}); ok {
-		t.Error("isolated pin should have no attachment")
+	// pin 不在任何 wire 上 → 无归属且不在线上(压坐标不算连接)。
+	if _, ok, onWire = tidyPinAttachment(999, 999, wires, roots, []layoutComp{flagGND}); ok || onWire {
+		t.Errorf("isolated pin = (ok=%v,onWire=%v), want no attachment / not on wire", ok, onWire)
+	}
+	// F1:pin 在导线上但树上无任何标记 → 无归属但 onWire=true(普通导线连接,
+	// 不能折叠成「未连接」—— 否则 tidy 搬移会静默扯断它,铁则5)。
+	m, ok, onWire = tidyPinAttachment(300, 300, wires, roots, []layoutComp{flagGND})
+	if ok || !onWire {
+		t.Errorf("bare-wire pin = (%v,ok=%v,onWire=%v), want no marker but onWire", m.ID, ok, onWire)
 	}
 	// 标记锚在 wire 中段(EasyEDA 合并遗留)也算。
 	mid := tidyMarker("f4", "netflag", "GND", 110, 100)
-	m, ok = tidyPinAttachment(100, 100, wires, roots, []layoutComp{mid})
+	m, ok, _ = tidyPinAttachment(100, 100, wires, roots, []layoutComp{mid})
 	if !ok || m.ID != "f4" {
 		t.Errorf("mid-span marker = (%v,%v), want f4", m.ID, ok)
 	}
@@ -511,20 +609,41 @@ func TestTidyResolveAnchor(t *testing.T) {
 	cap1 := tidyLivePart("C1", 100, 100, &layoutBBox{MinX: 90, MinY: 80, MaxX: 110, MaxY: 120}, tidyRolePowerUpdown)
 	cap2 := tidyLivePart("C2", 300, 100, &layoutBBox{MinX: 290, MinY: 80, MaxX: 310, MaxY: 120}, tidyRolePowerUpdown)
 
-	a, desig := tidyResolveAnchor([]tidyLiveMember{cap1, ic, cap2})
-	if !a.IsIC || desig != "U1" {
-		t.Fatalf("anchor = %+v (%s), want IC U1", a, desig)
+	a, desig, ok := tidyResolveAnchor([]tidyLiveMember{cap1, ic, cap2})
+	if !ok || !a.IsIC || desig != "U1" {
+		t.Fatalf("anchor = %+v (%s, ok=%v), want IC U1", a, desig, ok)
 	}
 	if a.X != 500 || a.Y != 400 || a.HalfWidth != 60 {
 		t.Errorf("IC anchor geometry = %+v, want (500,400) halfWidth 60", a)
 	}
 
-	a, desig = tidyResolveAnchor([]tidyLiveMember{cap1, cap2})
-	if a.IsIC || desig != "" {
-		t.Fatalf("no-IC anchor = %+v (%s), want bbox-center", a, desig)
+	a, desig, ok = tidyResolveAnchor([]tidyLiveMember{cap1, cap2})
+	if !ok || a.IsIC || desig != "" {
+		t.Fatalf("no-IC anchor = %+v (%s, ok=%v), want bbox-center", a, desig, ok)
 	}
 	if a.X != 200 || a.Y != 100 {
 		t.Errorf("bbox-center anchor = (%g,%g), want (200,100)", a.X, a.Y)
+	}
+
+	// F4:全员既无 bbox 又无锚坐标 → ok=false(不许拿零值锚继续,否则整排
+	// 错排到 (0,0))。
+	noGeo1 := tidyLivePart("C1", 0, 0, nil, tidyRolePowerUpdown)
+	noGeo1.Comp.AnchorAvailable = false
+	noGeo2 := tidyLivePart("C2", 0, 0, nil, tidyRolePowerUpdown)
+	noGeo2.Comp.AnchorAvailable = false
+	if a, desig, ok = tidyResolveAnchor([]tidyLiveMember{noGeo1, noGeo2}); ok {
+		t.Errorf("no-geometry anchor = %+v (%s, ok=%v), want ok=false", a, desig, ok)
+	}
+
+	// F4:无几何的 IC 当不了锚 —— 跳过,让位给有几何成员的 bbox 中心。
+	blindIC := tidyLivePart("U9", 0, 0, nil, tidyRoleAnchorIC)
+	blindIC.Comp.AnchorAvailable = false
+	a, desig, ok = tidyResolveAnchor([]tidyLiveMember{blindIC, cap1, cap2})
+	if !ok || a.IsIC || desig != "" {
+		t.Fatalf("blind-IC anchor = %+v (%s, ok=%v), want bbox-center fallback", a, desig, ok)
+	}
+	if a.X != 200 || a.Y != 100 {
+		t.Errorf("blind-IC fallback anchor = (%g,%g), want (200,100)", a.X, a.Y)
 	}
 }
 
@@ -597,6 +716,133 @@ func TestBuildTidyPlanAuto(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.SignalNoop, []string{"R4"}) {
 		t.Errorf("signal noop = %v, want [R4]", plan.SignalNoop)
+	}
+}
+
+// F4:组内有 power-updown 件但全员无 bbox/锚坐标 → 锚不可得必须报错,
+// 不许拿零值锚把整排排到 (0,0)。
+func TestBuildTidyPlanAnchorUnresolvable(t *testing.T) {
+	blind := tidyLivePart("C1", 0, 0, nil, tidyRolePowerUpdown)
+	blind.Comp.AnchorAvailable = false
+	blind.Pins = []tidyLivePin{
+		{Conn: tidyPinConn{Pin: "1", Net: "3V3", Flag: "netflag", OnWire: true},
+			Marker: tidyMarker("f1", "netflag", "3V3", 0, 40), HasMarker: true},
+		{Conn: tidyPinConn{Pin: "2", Net: "GND", Flag: "netflag", OnWire: true},
+			Marker: tidyMarker("f2", "netflag", "GND", 0, -40), HasMarker: true},
+	}
+	members := map[string]tidyLiveMember{"C1": blind}
+	_, err := buildTidyPlan(members, []string{"C1"}, "auto", 50)
+	if err == nil {
+		t.Fatal("锚不可得应报错,got nil")
+	}
+	if !strings.Contains(err.Error(), "锚不可得") {
+		t.Errorf("错误信息 %q 应点名锚不可得", err.Error())
+	}
+	// 同组只有 skip 件(无人按锚排)→ 锚不可得不阻断(signal-row/skip 不用锚)。
+	skipOnly := tidyLivePart("R9", 0, 0, nil, tidyRoleSkip)
+	skipOnly.Comp.AnchorAvailable = false
+	plan, err := buildTidyPlan(map[string]tidyLiveMember{"R9": skipOnly}, []string{"R9"}, "auto", 50)
+	if err != nil {
+		t.Fatalf("纯 skip 组不应因锚报错:%v", err)
+	}
+	if !reflect.DeepEqual(plan.Skipped, []string{"R9"}) {
+		t.Errorf("skipped = %v, want [R9]", plan.Skipped)
+	}
+}
+
+// ── buildTidyMembers:OnWire 穿线(F1 几何发现 → 分类)────────────────────────
+
+func TestBuildTidyMembersOnWireThreading(t *testing.T) {
+	// 3-pin 馈通电容:pin1 经导线挂 5V 旗、pin2 挂 GND 旗、pin3 经普通导线
+	// 连出去(树上无任何标记)。buildTidyMembers 必须把 pin3 标成 OnWire,
+	// classify 因此判 skip —— 修复前 pin3 被折叠成「未连接」→ power-updown
+	// 搬走器件把线扯断成开路。
+	g := &schGroup{ID: "g1", Members: []string{"C1"}}
+	part := layoutComp{
+		ID: "id-C1", Designator: "C1", ComponentType: schLayoutPartType,
+		X: 100, Y: 80, AnchorAvailable: true,
+		Pins: []layoutPin{
+			{Number: "1", X: 100, Y: 100},
+			{Number: "2", X: 100, Y: 60},
+			{Number: "3", X: 140, Y: 80},
+		},
+	}
+	flag5V := tidyMarker("f1", "netflag", "5V", 100, 140)
+	flagGND := tidyMarker("f2", "netflag", "GND", 100, 20)
+	wires := []schGroupWire{
+		{ID: "w1", Points: []float64{100, 100, 100, 140}}, // pin1 → 5V 旗
+		{ID: "w2", Points: []float64{100, 60, 100, 20}},   // pin2 → GND 旗
+		{ID: "w3", Points: []float64{140, 80, 200, 80}},   // pin3 → 普通导线,无标记
+	}
+	members, order, err := buildTidyMembers(g, []layoutComp{part, flag5V, flagGND}, nil, wires)
+	if err != nil {
+		t.Fatalf("buildTidyMembers: %v", err)
+	}
+	if !reflect.DeepEqual(order, []string{"C1"}) {
+		t.Fatalf("order = %v", order)
+	}
+	m := members["C1"]
+	p3 := m.pin("3")
+	if p3 == nil {
+		t.Fatal("pin 3 missing")
+	}
+	if !p3.Conn.OnWire || p3.HasMarker || p3.Conn.Flag != "" {
+		t.Errorf("pin3 = %+v — want OnWire=true 无标记(普通导线连接不许折叠成未连接)", p3.Conn)
+	}
+	if p1 := m.pin("1"); p1 == nil || !p1.Conn.OnWire || p1.Conn.Flag != "netflag" {
+		t.Errorf("pin1 = %+v — want netflag + OnWire", p1)
+	}
+	if m.Role != tidyRoleSkip {
+		t.Errorf("3-pin 馈通 auto 判型 = %s, want skip(铁则5:第三连接未建模)", m.Role)
+	}
+}
+
+// ── tidyGuardDisconnect:共享导线连带断开 fail-fast(F2/铁则5)───────────────
+
+func TestTidyGuardDisconnect(t *testing.T) {
+	cases := []struct {
+		name         string
+		result       map[string]any
+		wantErr      bool
+		wantContains []string
+	}{
+		{"nil result(旧连接器无该字段)→ 放行", nil, false, nil},
+		{"无 alsoDisconnectedPins 字段 → 放行", map[string]any{"disconnected": true}, false, nil},
+		{"空列表 → 放行", map[string]any{"alsoDisconnectedPins": []any{}}, false, nil},
+		{"连带断开邻件 pin → 错误且列出受影响 pin",
+			map[string]any{"alsoDisconnectedPins": []any{"C2:1", "C2:2"}}, true,
+			[]string{"C1:2", "C2:1", "C2:2", "铁则5"}},
+		{"[]string 形态同样识别",
+			map[string]any{"alsoDisconnectedPins": []string{"R7:1"}}, true,
+			[]string{"R7:1"}},
+	}
+	for _, tc := range cases {
+		err := tidyGuardDisconnect("C1", "2", tc.result)
+		if !tc.wantErr {
+			if err != nil {
+				t.Errorf("%s: unexpected error %v", tc.name, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s: want error, got nil", tc.name)
+			continue
+		}
+		for _, sub := range tc.wantContains {
+			if !strings.Contains(err.Error(), sub) {
+				t.Errorf("%s: 错误信息 %q 缺少 %q", tc.name, err.Error(), sub)
+			}
+		}
+	}
+}
+
+func TestTidyDisconnectCollateral(t *testing.T) {
+	if got := tidyDisconnectCollateral(nil); got != nil {
+		t.Errorf("nil result → %v, want nil", got)
+	}
+	got := tidyDisconnectCollateral(map[string]any{"alsoDisconnectedPins": []any{"C2:1", "", 42, "C2:2"}})
+	if !reflect.DeepEqual(got, []string{"C2:1", "C2:2"}) {
+		t.Errorf("collateral = %v, want [C2:1 C2:2](空串/非串剔除)", got)
 	}
 }
 

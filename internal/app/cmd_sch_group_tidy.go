@@ -12,7 +12,9 @@ package app
 //     长条标竖排=折叠),pin 在器件中线左侧=left / 右侧=right;
 //   - auto(默认):逐件判型 —— 每 pin 的目标旗从「现有连接」读(net + 旗类型):
 //     IC → 锚;含 netport → signal-row(优先于双旗,竖放会折叠长条标);
-//     双{power,gnd}旗 → power-updown;其余 skip。
+//     双{power,gnd}旗且无未建模第三连接 → power-updown;其余 skip —— 信号
+//     netflag / netlabel / 普通导线连接的 pin(如 3-pin 馈通电容的信号脚)
+//     搬走器件会被静默扯断(铁则5),auto 降级 skip,显式 power-updown 报错。
 //
 // 执行铁则(契约,全部实战校准,违反必返工):
 //   1. pin 实测:任何 rot 之后 fresh 重读 pin 实位再连 —— 同规格不同库件符号
@@ -69,11 +71,45 @@ const (
 
 // tidyPinConn 是一个 pin 的「现有连接」事实:net + 旗类型(从画布几何读回,
 // 不是目标)。Flag 取连接器的 componentType 值:netflag / netport / netlabel,
-// "" = 该 pin 没挂标记。
+// "" = 该 pin 没挂标记。OnWire = pin 落在真实导线上(即使树上没有任何标记):
+// 普通导线连接也是连接,搬器件前必须看见它(铁则5 —— 否则 3-pin 馈通电容的
+// 第三 pin 会被静默扯断成开路)。
 type tidyPinConn struct {
-	Pin  string // pin number
-	Net  string // 现有 net("" = 未连接)
-	Flag string // "netflag" | "netport" | "netlabel" | ""
+	Pin    string // pin number
+	Net    string // 现有 net("" = 未连接)
+	Flag   string // "netflag" | "netport" | "netlabel" | ""
+	OnWire bool   // pin 在导线上(Flag != "" 时必为 true;Flag=="" 且 true = 普通线连接)
+}
+
+// tidyUnmodeledConn 判一个 pin 是否带着 power-updown 未建模的连接(铁则5:
+// 器件被搬走时这些连接会被静默扯断成开路+孤旗,自检测不出):信号网/未知网的
+// netflag、netlabel、无标记的普通导线。power/gnd netflag 与 netport 是已建模
+// 形态(前者是 power-updown 的输入,后者由 signal-row 处理、planPowerUpdown
+// 显式拒绝)。
+func tidyUnmodeledConn(p tidyPinConn) bool {
+	switch p.Flag {
+	case "netport":
+		return false
+	case "netflag":
+		c := tidyNetClass(p.Net)
+		return c != "power" && c != "ground"
+	case "":
+		return p.OnWire
+	}
+	return true // netlabel 及其它标记类型:connect_pin 建不回来,一律未建模
+}
+
+// tidyConnDescribe 描述一个 pin 的连接形态(错误信息用)。
+func tidyConnDescribe(p tidyPinConn) string {
+	switch {
+	case p.Flag != "" && p.Net != "":
+		return fmt.Sprintf("%s %s", p.Flag, p.Net)
+	case p.Flag != "":
+		return p.Flag
+	case p.OnWire:
+		return "普通导线"
+	}
+	return "无连接"
 }
 
 // tidyNetClass 把网名分为 ground / power / signal("" = 未连接)。地族在前:
@@ -117,16 +153,18 @@ func tidyNetClass(net string) string {
 // classifyTidyMember 按「现有连接」逐件判型(契约 auto 判型)。优先级:
 //  1. IC(位号 U 前缀)→ anchor-ic:锚不动,哪怕它也挂着 netport;
 //  2. 任一 pin 挂 netport → signal-row:优先于双旗 —— 竖放会折叠长条标(铁则4);
-//  3. 同时有 power 旗 pin 和 gnd 旗 pin → power-updown;
+//  3. 同时有 power 旗 pin 和 gnd 旗 pin,**且没有任何未建模的第三连接**(信号
+//     netflag / netlabel / 普通导线,tidyUnmodeledConn)→ power-updown;有第三
+//     连接的(如 3-pin 馈通电容)搬走器件会把那根线静默扯断(铁则5)→ skip;
 //  4. 其余 → skip(信息不足,不动比动错好)。
 //
-// 分类只依赖连接(net + 旗类型),不依赖当前姿态 —— 已整理过的件连接不变,
-// 分类不变,tidy 幂等。
+// 分类只依赖连接(net + 旗类型 + 是否在线上),不依赖当前姿态 —— 已整理过的件
+// 连接不变,分类不变,tidy 幂等。
 func classifyTidyMember(designator string, pins []tidyPinConn) tidyRole {
 	if strings.EqualFold(designatorPrefix(strings.TrimSpace(designator)), "U") {
 		return tidyRoleAnchorIC
 	}
-	hasPower, hasGnd := false, false
+	hasPower, hasGnd, hasUnmodeled := false, false, false
 	for _, p := range pins {
 		switch p.Flag {
 		case "netport":
@@ -135,12 +173,17 @@ func classifyTidyMember(designator string, pins []tidyPinConn) tidyRole {
 			switch tidyNetClass(p.Net) {
 			case "power":
 				hasPower = true
+				continue
 			case "ground":
 				hasGnd = true
+				continue
 			}
 		}
+		if tidyUnmodeledConn(p) {
+			hasUnmodeled = true
+		}
 	}
-	if hasPower && hasGnd {
+	if hasPower && hasGnd && !hasUnmodeled {
 		return tidyRolePowerUpdown
 	}
 	return tidyRoleSkip
@@ -292,12 +335,21 @@ func planPowerUpdown(members []tidyMemberIn, anchor tidyAnchor, spacing float64)
 						return nil, fmt.Errorf("%s 有多个电源旗 pin(%s/%s)— power-updown 需要恰好一电源一地", m.Designator, powerPin.Pin, p.Pin)
 					}
 					powerPin = p
+					continue
 				case "ground":
 					if gndPin != nil {
 						return nil, fmt.Errorf("%s 有多个地旗 pin(%s/%s)— power-updown 需要恰好一电源一地", m.Designator, gndPin.Pin, p.Pin)
 					}
 					gndPin = p
+					continue
 				}
+			}
+			// 铁则5:power/gnd 旗之外任何有连接的 pin(信号 netflag / netlabel /
+			// 普通导线)都是 power-updown 未建模的第三连接 —— 器件搬走会把它
+			// 静默扯断成开路+孤旗(3-pin 馈通电容场景),报错而不是静默忽略。
+			if tidyUnmodeledConn(*p) {
+				return nil, fmt.Errorf("%s 的 pin %s 有 power-updown 未建模的连接(%s)— 器件搬走会把这根连接静默扯断成开路(铁则5),不能按 power-updown 排(auto 判型会 skip 它)",
+					m.Designator, p.Pin, tidyConnDescribe(*p))
 			}
 		}
 		if powerPin == nil || gndPin == nil {
@@ -439,7 +491,9 @@ func tidyWireRoots(wires []schGroupWire) []int {
 // tidyPinAttachment 找一个 pin 的现有旗连接:pin → 所在 wire 树 → 树上锚着的
 // net 标记。netflag 必须经真实导线相连(压坐标不算连接),所以只认树上的锚。
 // 同树多标记时 netport 优先(它决定 signal-row 分类),再 netflag,再 netlabel。
-func tidyPinAttachment(pinX, pinY float64, wires []schGroupWire, roots []int, markers []layoutComp) (layoutComp, bool) {
+// 第三返回值 onWire:pin 落在某根导线上(即使树上无任何标记)—— 普通导线连接
+// 也是连接,不返回它就会被折叠成「未连接」而在 tidy 搬移时被静默扯断(铁则5)。
+func tidyPinAttachment(pinX, pinY float64, wires []schGroupWire, roots []int, markers []layoutComp) (layoutComp, bool, bool) {
 	touched := map[int]bool{}
 	for i, w := range wires {
 		if pointOnPolyline(pinX, pinY, w.Points, schGroupEps) {
@@ -447,7 +501,7 @@ func tidyPinAttachment(pinX, pinY float64, wires []schGroupWire, roots []int, ma
 		}
 	}
 	if len(touched) == 0 {
-		return layoutComp{}, false
+		return layoutComp{}, false, false
 	}
 	rank := func(t string) int {
 		switch t {
@@ -479,9 +533,9 @@ func tidyPinAttachment(pinX, pinY float64, wires []schGroupWire, roots []int, ma
 		}
 	}
 	if best < 0 {
-		return layoutComp{}, false
+		return layoutComp{}, false, true // 在线上但树上无标记 = 普通导线连接
 	}
-	return markers[best], true
+	return markers[best], true, true
 }
 
 // tidyStubDirection 从 pin→标记锚的位移推 stub 方向(主轴)与长度(y-UP:
@@ -625,16 +679,23 @@ func tidyVerticalPortPins(m tidyLiveMember) []string {
 }
 
 // tidyResolveAnchor 定组内锚:优先含 IC(anchor-ic 角色)且 bbox 最大者
-// (IC 不动,横排从其右侧起);无 IC 时取全体成员 bbox 并集的中心。
-func tidyResolveAnchor(members []tidyLiveMember) (tidyAnchor, string) {
+// (IC 不动,横排从其右侧起);无 IC 时取全体成员 bbox 并集的中心。第三返回值
+// ok=false = 锚不可得(全员既无 bbox 又无锚坐标)—— 调用方必须报错而不是拿
+// 零值锚继续,否则 power-updown 会把整排错排到 (0,0)(F4)。无几何的 IC 也
+// 当不了锚(其 X/Y 是零值),跳过让位给有几何的成员。
+func tidyResolveAnchor(members []tidyLiveMember) (tidyAnchor, string, bool) {
 	bestIC, bestArea := -1, -1.0
 	for i := range members {
 		if members[i].Role != tidyRoleAnchorIC {
 			continue
 		}
+		c := members[i].Comp
+		if c.BBox == nil && !c.AnchorAvailable {
+			continue // 无几何的 IC:X/Y 是零值,不能当锚
+		}
 		area := 0.0
-		if members[i].Comp.BBox != nil {
-			area = bboxArea(members[i].Comp.BBox)
+		if c.BBox != nil {
+			area = bboxArea(c.BBox)
 		}
 		if area > bestArea {
 			bestIC, bestArea = i, area
@@ -648,7 +709,7 @@ func tidyResolveAnchor(members []tidyLiveMember) (tidyAnchor, string) {
 			a.Y = (c.BBox.MinY + c.BBox.MaxY) / 2
 			a.HalfWidth = (c.BBox.MaxX - c.BBox.MinX) / 2
 		}
-		return a, c.Designator
+		return a, c.Designator, true
 	}
 	minX, minY := math.Inf(1), math.Inf(1)
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
@@ -663,9 +724,9 @@ func tidyResolveAnchor(members []tidyLiveMember) (tidyAnchor, string) {
 		}
 	}
 	if math.IsInf(minX, 1) {
-		return tidyAnchor{}, ""
+		return tidyAnchor{}, "", false
 	}
-	return tidyAnchor{X: (minX + maxX) / 2, Y: (minY + maxY) / 2}, ""
+	return tidyAnchor{X: (minX + maxX) / 2, Y: (minY + maxY) / 2}, "", true
 }
 
 // tidyRoleEntry 是计划报告里的一行:位号 → 角色。
@@ -696,7 +757,8 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 	for _, d := range order {
 		lives = append(lives, members[d])
 	}
-	p.Anchor, p.AnchorDesig = tidyResolveAnchor(lives)
+	var anchorOK bool
+	p.Anchor, p.AnchorDesig, anchorOK = tidyResolveAnchor(lives)
 
 	var powerIns []tidyMemberIn
 	var signalLives []tidyLiveMember
@@ -720,6 +782,12 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 		case tidyRoleSkip:
 			p.Skipped = append(p.Skipped, d)
 		}
+	}
+
+	// F4 guard:锚不可得(全员无 bbox/锚坐标)时零值锚会把 power-updown 整排
+	// 错排到 (0,0)—— 只要有件要按锚排,锚必须真实可得,否则报错拒绝出计划。
+	if len(powerIns) > 0 && !anchorOK {
+		return nil, fmt.Errorf("组锚不可得:全员既无 bbox 又无锚坐标 — power-updown 无法定横排位置(零值锚会错排到 (0,0)),拒绝出计划(确认目标页已渲染 bbox 后重跑)")
 	}
 
 	var err error
@@ -809,8 +877,8 @@ func buildTidyMembers(g *schGroup, comps []layoutComp, extras map[string]tidyCom
 		ex := extras[d]
 		live := tidyLiveMember{Comp: c, Rotation: ex.Rotation}
 		for _, p := range c.Pins {
-			marker, found := tidyPinAttachment(p.X, p.Y, wires, roots, markers)
-			conn := tidyPinConn{Pin: p.Number}
+			marker, found, onWire := tidyPinAttachment(p.X, p.Y, wires, roots, markers)
+			conn := tidyPinConn{Pin: p.Number, OnWire: onWire}
 			if ex.PinNets != nil {
 				conn.Net = ex.PinNets[p.Number]
 			}
@@ -1001,6 +1069,28 @@ func tidyRollback(cfg *appConfig, win, docUUID string, steps []tidyStepRecord, s
 
 // ── 执行 ────────────────────────────────────────────────────────────────────
 
+// tidyDisconnectCollateral 从 disconnect result 提取 alsoDisconnectedPins ——
+// 连接器对合并树整树删除时回报的「连带被断开的其它 pin」(desig:pin 列表)。
+func tidyDisconnectCollateral(result map[string]any) []string {
+	if result == nil {
+		return nil
+	}
+	return asStringSlice(result["alsoDisconnectedPins"])
+}
+
+// tidyGuardDisconnect 判一次 disconnect 是否连带断开了共享导线上的邻件 pin
+// (铁则5:两电容共享一根 GND rail 一面旗时,拆第一颗会整树删、第二颗被静默
+// 断开)。非空立即按错误处理 —— 调用方触发既有逐步回滚;错误信息列出受影响
+// pin,便于人工复核重连。纯函数,便于表驱动测试。
+func tidyGuardDisconnect(designator, pin string, result map[string]any) error {
+	collateral := tidyDisconnectCollateral(result)
+	if len(collateral) == 0 {
+		return nil
+	}
+	return fmt.Errorf("disconnect %s:%s 删的是合并导线树,连带断开了共享导线上的其它 pin:%s — 邻件被静默断开违反铁则5,按错误回滚(先分离共享 rail/旗再 tidy)",
+		designator, pin, strings.Join(collateral, ","))
+}
+
 func tidyPinNumbers(targets []tidyPinTarget) []string {
 	out := make([]string, len(targets))
 	for i, t := range targets {
@@ -1018,9 +1108,15 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 		if lp == nil || !lp.HasMarker {
 			continue // 无旗可拆(计划仍会给它连上目标旗)
 		}
-		if _, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
-			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect"); err != nil {
+		res, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
+			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect")
+		if err != nil {
 			return fmt.Errorf("disconnect %s:%s:%w", live.Comp.Designator, t.Pin, err)
+		}
+		// F2/铁则5:整树删除连带断开共享导线上的邻件 pin = 立即按错误处理
+		// (触发调用方的逐步回滚),不许静默丢弃 alsoDisconnectedPins。
+		if gerr := tidyGuardDisconnect(live.Comp.Designator, t.Pin, res.Result); gerr != nil {
+			return gerr
 		}
 	}
 	usedRot := mp.RotationCandidates[0]
@@ -1074,9 +1170,14 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 // settle 实测 → 按左入右出水平重连(器件位置/rotation 不动)。
 func tidyExecSignalMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, sp tidySignalPlan, stdout io.Writer) error {
 	for _, t := range sp.Pins {
-		if _, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
-			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect"); err != nil {
+		res, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
+			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect")
+		if err != nil {
 			return fmt.Errorf("disconnect %s:%s:%w", live.Comp.Designator, t.Pin, err)
+		}
+		// F2/铁则5:同 power 路径 —— 连带断开邻件 pin 非空立即错,触发回滚。
+		if gerr := tidyGuardDisconnect(live.Comp.Designator, t.Pin, res.Result); gerr != nil {
+			return gerr
 		}
 	}
 	pins, err := tidySettledPins(cfg, win, docUUID, live.Comp.Designator)
@@ -1219,8 +1320,9 @@ func newSchGroupTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 
 patterns(--pattern):
   auto(默认)  逐件判型:每 pin 的目标旗从现有连接读(net+旗类型)——
-                IC → 锚不动;含 netport → signal-row;双{power,gnd}旗 →
-                power-updown;其余 skip
+                IC → 锚不动;含 netport → signal-row;双{power,gnd}旗且无
+                其它连接 → power-updown;其余 skip(信号 netflag/netlabel/
+                普通导线连着的第三 pin 搬走会被扯断,一律不动)
   power-updown  双旗无源件竖放、上电源旗/下 GND 旗、文字朝外(校准表)、
                 横排等距(--spacing,默认 50);IC 为锚,无 IC 用组 bbox 中心
   signal-row    保持横放,竖着的 netport 拆掉按左入右出水平重连(netport 永不竖放)
