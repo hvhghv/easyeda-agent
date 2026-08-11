@@ -40,7 +40,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 空隙打包 | `sch autoplace-free` | 无分区场景往空白处塞件 |
 | 对齐/等距 | `sch align` / `sch distribute` | 按渲染 bbox 对齐(left/right/top/…)/ 单轴等距摊开;默认 dry-run;选集**部分覆盖**持久组时硬拒绝(`--break-group` 显式放行) |
 | 刚体平移 | `sch group-move` | 器件+桩线+flag 一起搬:`--ids`(无状态,每次传全 id)或 `--group <id>`(持久组,成员桩线+远端 flag **自动展开**,触碰非成员脚的线树留在原地并报告) |
-| 持久化编组 | `sch group create/list/add/remove/ungroup` | **virtual group**(平台墙真机坐实:EasyEDA Pro 3.2.121 的 `eda.*` 无编组 API,组件实例 70 个方法/属性零 group/parent 字段——UI 原生组对扩展完全不可见)。按 documentUuid 存 workflow state(同 zones claims 模式);成员存**位号**(netlist key,页内稳定;primitiveId 在 wire 重建/reload 时会变),move 时解析当前 id;同一位号只属一个组(入组查重报所在组);组空自动删;`list` 标 stale 成员;autolayout/autoplace-free 检测到组时警告(v1 不保组内相对几何) |
+| 持久化编组 | `sch group create/list/add/remove/ungroup` | **virtual group**(平台墙真机坐实:EasyEDA Pro 3.2.121 的 `eda.*` 无编组 API,组件实例 70 个方法/属性零 group/parent 字段——UI 原生组对扩展完全不可见;后经用户 UI 实建 Group1 复核:44 图元全状态前后差分 0、selection 三种读法含私有属性零组字段,与 virtual group 并存不冲突)。按 documentUuid 存 workflow state(同 zones claims 模式);成员存**位号**(netlist key,页内稳定;primitiveId 在 wire 重建/reload 时会变),move 时解析当前 id;同一位号只属一个组(入组查重报所在组);组空自动删;`list` 标 stale 成员;autolayout/autoplace-free 检测到组时警告(v1 不保组内相对几何) |
 | 布局硬门 | `sch layout-lint` | 真实渲染 bbox 查重叠(ERROR 非零退出)/紧间距/off-grid/分区违规 |
 | 布局质量分 | `sch layout-score` | **五维诊断**:标签折叠 / 标签反向(背离核心)/ 外围贴芯片距离 / 长链散乱 / 框贴合——逐项归因**带可执行 fix 命令**(AI 照抄即修);诊断视角,门仍是 layout-lint+check |
 
@@ -95,7 +95,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 出图给人看 | `sch export-image` | `snapshot` 是**视口截图**(需前台、会 stale) | export 不依赖前台 |
 | 读电路状态 | `sch read`(=list+nets+check 聚合) | 只要器件清单用 `list`;只要检查用 `check` | read 最贵但一次拿全 |
 | 分区框(整纸版式) | `zones set` → `zone-plan`(校验)→ `zone-draw --mode partition` | ⚠ 固定九宫格 claim 对宽模组会误报 zone-violation——partition 画完后 `zones clear` | 三段链,顺序固定 |
-| 整组挪动(免收集 id) | `sch group-move --group g1`(先 `sch group create --members …`) | `--ids` 是**无状态**老路:每次手工传全部 primitiveId | 两 flag 互斥;`--group` 存位号、move 时解析 id,并自动带上成员桩线+远端 flag |
+| 整组挪动(免收集 id) | `sch group-move --group g1`(先 `sch group create --members …`) | `--ids` 是**无状态**老路:每次手工传全部 primitiveId | 两 flag 互斥;`--group` 存位号、move 时解析 id,并自动带上成员桩线+远端 flag。**移动目的地保持净空**:把组临时压到其他电路上再搬走(如 ±100 往返测试)会造成"树终止于异脚"的接触歧义(与真连线几何不可分),个别桩可能按真连线保留原地并报 note——真实用途(挪到空白区)无此问题,压他人电路本身就是 layout-lint 会拦的违规布局 |
 | 建裸网络标志 | **尽量别用** `sch netflag` | 裸 flag 不经 wire = 假连接(铁律 9) | 用 connect/autoconnect |
 
 **参数风格已收敛**:pin 定位统一 `--pin 位号:脚号`(connect/autoconnect/disconnect 同式,connect 另留
