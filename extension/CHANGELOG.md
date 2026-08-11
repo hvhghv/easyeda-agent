@@ -4,6 +4,35 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.24.0] - 2026-08-12
+
+原理图能力大版:持久化编组 + 布局质量打分 + CLI 参数收敛(含 BREAKING)。
+连接器侧含 0.23.1–0.23.3 的全部修复(见下)加本版的 group.move flag 支持与
+schematic.snapshot 移除;CLI 侧新增见 repo commit 历史(feat/sch-zoned-layout-opt)。
+
+### Added
+- **原理图持久化编组(virtual group)**:`sch group create/list/add/remove/ungroup`
+  按 documentUuid 持久化(平台无编组 API,真机探测+UI 实建 Group1 差分复核:
+  扩展 API 零可见);`sch group-move --group` 成员桩线+标志自动展开随组刚移
+  (完整性预检拒半搬、共线残骸判据、"树终止于异脚"方向判据,live dump 全量
+  回放测试);`align/distribute` 部分组硬拒绝(`--break-group` 放行)。
+- **`sch layout-score` 布局质量五维打分**:折叠/反向/贴芯片距离/长链/框贴合,
+  逐项归因**带可执行 fix 命令**;模块认领感知(zones claims 围栏)、电源网豁免、
+  宿主 pin 走导线端点匹配。实战:ceshi 重排 86.2→96.0 [excellent]。
+- **`sch check` 新增机械检查**:`missing-partition`(多器件页未画分区框/说明,
+  铁律#15 兜底)与 `folded-net-label`(netport 竖排折叠);autoconnect 打分器
+  新增竖排折叠惩罚(密集引脚列标签保持水平)。
+- 分区框几何修正:图签 keepout 校准(HeightFrac 0.24)+ 抬升/校验共用安全余量
+  + 框贴合模块内容 + 贴边校验,六项 validation 全 0 才许画。
+
+### Changed / BREAKING(CLI 与手册配套发版,不留兼容)
+- `--ids` 全域改 **CSV**(JSON 数组字符串不再支持);
+- `sch delete` 移除(`prim-delete` 唯一删除入口);
+- `sch snapshot` / `schematic.snapshot` 移除(出图统一 `sch export-image`,
+  选区导出与文档数据逐件核对验证);
+- `sch connect` 新增 `--pin 位号:脚号`(与 `--x/--y` 互斥);`sch modify` 新增
+  `--x/--y/--rotation/--designator` 快捷 flags。
+
 ## [0.23.3] - 2026-08-12
 
 ### Fixed
