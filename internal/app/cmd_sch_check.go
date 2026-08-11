@@ -101,7 +101,12 @@ type checkSummary struct {
 	DuplicateNetMarkers int `json:"duplicateNetMarkers"`
 	TitleblockOverlaps  int `json:"titleblockOverlaps"`
 	MarkerOverlaps      int `json:"markerOverlaps"`
-	Total               int `json:"total"`
+	// Layout-organization rule (铁律 #15): a multi-module page with zero functional
+	// zone frames / circuit notes. Mechanical backstop so "分区分区" is enforced by
+	// the check, not by remembering the rule (which is unreliable — it was skipped
+	// twice in one session before this existed).
+	MissingPartitions int `json:"missingPartitions"`
+	Total             int `json:"total"`
 }
 
 type checkReport struct {
@@ -190,8 +195,8 @@ func checkLevelTag(level string) string {
 
 func renderCheckReport(rep checkReport, w io.Writer) {
 	s := rep.Summary
-	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s)\n",
-		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps)
+	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s), %d missing-partition\n",
+		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps, s.MissingPartitions)
 
 	for _, f := range rep.Findings {
 		tag := checkLevelTag(f.Level)
@@ -269,5 +274,8 @@ func renderCheckReport(rep checkReport, w io.Writer) {
 	}
 	if s.MarkerOverlaps > 0 {
 		fmt.Fprintln(w, "→ marker overlap: net markers cover a part/each other — stagger the labels or re-run autoconnect with more offset")
+	}
+	if s.MissingPartitions > 0 {
+		fmt.Fprintln(w, "→ missing-partition: 多器件页没画功能分区框/电路说明(铁律#15) — `sch zones set`→`sch zone-draw`(整纸版式 --mode partition)画区框,每模块 `sch note` 加 1~3 行说明")
 	}
 }

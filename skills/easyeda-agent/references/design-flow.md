@@ -125,8 +125,9 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
 ### S1 — 图纸 / 分页(先图纸,再分页!)
 - **做什么**:确认当前页有图纸,默认 A4;再按模块/功能把设计**先分到几页**(电源一页、主控一页、接口一页…),别全堆一页。
-- **怎么做**:`easyeda doc ls` 读页结构 → `easyeda doc switch` 切目标页 → `easyeda sch sheet-geometry --json` 读 sheet/title-block。无 sheet 或 provenance 为 none 时停止,不要开始 place。需要多页时用 `easyeda sch page-new` / `page-rename`;复杂模块独立成页。
-- **💾 过门条件**:每个目标页都有可读图纸(A4 默认)和明确职责;每页模块预计能落在可用区内,标题栏 keep-out 明确 → `easyeda sch save`。若用户要求逐步确认,保存/继续前停住。
+- **怎么做**:`easyeda sch pages`(或 `doc ls`)读页结构 → `easyeda doc switch` 切目标页 → `easyeda sch sheet-geometry --json` 读 sheet/title-block。无 sheet 或 provenance 为 none 时停止,不要开始 place。
+- **页面对齐模块计划(用户点名·必做)**:分页不是照单全收用户现有的页——**要主动把现有分页 reconcile 到模块计划**:①页名无意义(`P1`/`P2`/`Schematic1`/`page1`)或与模块不符 → `easyeda sch page-rename --page <uuid> --name <功能名>`(如 `P1_POWER`/`P2_MCU_ESP32`/`P3_IO`),命名风格跟参考板 `P1_POWER_PATH` 一致;②模块比页多 / 复杂模块要独立 → `easyeda sch page-new` 补页;③**多余空页 → `easyeda sch page-delete --page <uuid>` 删掉**(先确认该页无器件,`sch pages` + 逐页 `list` 核实;page-delete 无 undo,属破坏性,删前 inspect)。单页小板:把唯一那页也 `page-rename` 成有意义的名(别留 `Schematic1`),不必强行分多页。目标:**页集合 = 模块计划**,一页一功能域,跨页同名 `net_port` 接续。
+- **💾 过门条件**:页集合与模块计划一致(该改名的已改、该补的已补、多余空页已删);每个目标页都有可读图纸(A4 默认)和明确职责;每页模块预计能落在可用区内,标题栏 keep-out 明确 → `easyeda sch save`。若用户要求逐步确认,保存/继续前停住。
 
 ### S2 — 模块编组
 - **做什么**:在每页内,把「芯片 + 其外围电路」定义为一个**组**,并规划各组在页面上的**分区位置**(谁在左、谁在右、信号流向)。

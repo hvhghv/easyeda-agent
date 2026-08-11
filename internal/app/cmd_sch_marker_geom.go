@@ -270,6 +270,17 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 		titleBlock, _ = titleBlockKeepout(sheet)
 	}
 	geo := analyzeMarkerGeometry(comps, titleBlock, overlapEps)
+
+	// Layout-organization rule (铁律 #15): a multi-module page with no functional
+	// zone frames / circuit notes. Mechanical backstop — the rule was skipped twice
+	// in one session when it lived only in docs. Scope to the single page under
+	// check (allPages inflates the part count while text.list is active-page only).
+	if !allPages {
+		if pf := partitionFinding(cfg, window, comps, stderr); pf != nil {
+			geo = append(geo, *pf)
+		}
+	}
+
 	if len(geo) == 0 {
 		return
 	}
@@ -282,8 +293,68 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 			rep.Summary.TitleblockOverlaps++
 		case "marker-overlap":
 			rep.Summary.MarkerOverlaps++
+		case "missing-partition":
+			rep.Summary.MissingPartitions++
 		}
 	}
 	rep.Summary.Total = len(rep.Findings)
 	rep.Passed = len(rep.Findings) == 0
+}
+
+// schPartitionMinParts is the part-count above which a page is expected to be
+// organized into functional zones (铁律 #15). Below it, a page is a single trivial
+// module and framing would be noise; our fixed ESP32-blink regression board has 12.
+const schPartitionMinParts = 6
+
+// partitionFinding flags a multi-part page that carries ZERO free text primitives
+// (zone titles + circuit notes). `sch zone-draw` always writes a title text next to
+// every frame it draws, and `sch note` writes the per-module descriptions, so
+// text.list==0 on a ≥schPartitionMinParts-part page means neither ran — the page was
+// left un-partitioned (exactly the lapse this backstops). Title-block fields are NOT
+// free text (they live on the sheet), so a bare, un-annotated page reads as 0.
+// Best-effort: a text.list failure returns nil (never masks the electrical findings).
+func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr io.Writer) *checkFinding {
+	parts := 0
+	for _, c := range comps {
+		if c.ComponentType == schLayoutPartType {
+			parts++
+		}
+	}
+	if parts < schPartitionMinParts {
+		return nil
+	}
+	res, err := requestAction(cfg, "schematic.text.list", window, map[string]any{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: partition-check skipped — text.list failed: %v\n", err)
+		return nil
+	}
+	return partitionFindingFor(parts, schTextCount(res.Result))
+}
+
+// partitionFindingFor is the pure decision (split out for testing): a page with
+// enough parts to be multi-module but zero free text = un-partitioned → WARN.
+func partitionFindingFor(parts, textCount int) *checkFinding {
+	if parts < schPartitionMinParts || textCount > 0 {
+		return nil
+	}
+	return &checkFinding{
+		Type:    "missing-partition",
+		Level:   "warn",
+		Count:   parts,
+		Message: fmt.Sprintf("%d parts on this page but 0 functional zone frames / circuit notes — 铁律#15 要求分区框(sch zone-draw)+ 每模块电路说明(sch note);交付前补上", parts),
+	}
+}
+
+// schTextCount extracts the number of free text primitives from a
+// schematic.text.list result, tolerating either {texts:[…]} or a bare […].
+func schTextCount(result map[string]any) int {
+	if result == nil {
+		return 0
+	}
+	if raw, ok := result["texts"]; ok {
+		if arr, ok := raw.([]any); ok {
+			return len(arr)
+		}
+	}
+	return 0
 }

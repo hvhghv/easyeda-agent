@@ -193,3 +193,36 @@ func TestSplitConnResults_Partial(t *testing.T) {
 		t.Error("all-success run must not be partial")
 	}
 }
+
+// TestPartitionFindingFor covers the 铁律#15 backstop: a multi-module page
+// (parts ≥ schPartitionMinParts) with zero free text (no zone frames / notes) is
+// flagged missing-partition; a framed/noted page or a trivially small one is not.
+func TestPartitionFindingFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		parts     int
+		textCount int
+		wantFlag  bool
+	}{
+		{"unzoned 12-part board flags", 12, 0, true},
+		{"zoned 12-part board (6 texts) clean", 12, 6, false},
+		{"frames drawn (titles present) clean", 8, 3, false},
+		{"below threshold never flags", schPartitionMinParts - 1, 0, false},
+		{"exactly at threshold flags", schPartitionMinParts, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := partitionFindingFor(tc.parts, tc.textCount)
+			if tc.wantFlag {
+				if f == nil {
+					t.Fatalf("parts=%d text=%d: expected a missing-partition finding, got nil", tc.parts, tc.textCount)
+				}
+				if f.Type != "missing-partition" || f.Level != "warn" || f.Count != tc.parts {
+					t.Fatalf("unexpected finding: %+v", *f)
+				}
+			} else if f != nil {
+				t.Fatalf("parts=%d text=%d: expected no finding, got %+v", tc.parts, tc.textCount, *f)
+			}
+		})
+	}
+}
