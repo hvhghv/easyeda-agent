@@ -68,8 +68,14 @@ async function hotReloadConnector({ TEAM, UUID, VERSION, PORT = 8790 }) {
 	if (typeof idx.fileSize === 'number') idx.fileSize = bin.length;
 	await put('extensionsIndex', idx, UUID);
 
-	// 5. Reload so EasyEDA re-reads the extension from IndexedDB.
-	location.reload();
+	// 5. Reload so EasyEDA re-reads the extension from IndexedDB. When this runs
+	// inside the CONNECTOR's sandbox (debug exec path — the fully hands-free
+	// loop), bare location.reload() is a silent no-op; window.top reaches the real
+	// editor page (live-verified 2026-08-11: bare reload left both connections'
+	// connectedAt unchanged, window.top.location.reload() re-attached at the new
+	// version). Same-origin here, so top access is allowed.
+	try { window.top.location.reload(); }
+	catch { location.reload(); }
 	return { ok: true, bytes: bin.length, oldVersion, newVersion: VERSION };
 }
 
