@@ -4,6 +4,20 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added(CLI 侧,三层布局体系 —— docs/schematic-layout-hierarchy.md)
+- **`sch group tidy`** 组内布局计算:双电源旗电容自动竖放+上电下地+文字朝外
+  (真机校准 rotation 表:power up=0/gnd down=0);实测 pin 旋转二义消解、
+  stale 双读防线、未建模第三连接拒绝(3-pin 馈通不被扯断)、disconnect 连带
+  断开即错、自检红即逐步回滚。
+- **`sch zone move`** 功能区整体刚移(带组带件带 note,分区框自动重画):
+  全区一份展开治"区内直连线被判跨区留守"的刚体撕裂;重画前几何指纹 settle。
+- **`sch zone tidy`** 组间叠加布局:锚组+上下堆叠(hGap=117 可调),装不下
+  给最小尺寸诊断;双认领图元差集过滤(正向/回滚对称)。
+- 三命令均经独立交叉评审(2 FAIL 修复转绿 + 1 PASS 加固)与 ceshi 真机三层
+  联动验收(乱排→tidy 复原/整区 move 单程 check 0 dangling/装不下诊断)。
+
 ## [0.24.0] - 2026-08-12
 
 原理图能力大版:持久化编组 + 布局质量打分 + CLI 参数收敛(含 BREAKING)。

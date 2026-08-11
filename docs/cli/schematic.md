@@ -42,6 +42,9 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 刚体平移 | `sch group-move` | 器件+桩线+flag 一起搬:`--ids`(无状态,每次传全 id)或 `--group <id>`(持久组,成员桩线+远端 flag **自动展开**,触碰非成员脚的线树留在原地并报告) |
 | 持久化编组 | `sch group create/list/add/remove/ungroup` | **virtual group**(平台墙真机坐实:EasyEDA Pro 3.2.121 的 `eda.*` 无编组 API,组件实例 70 个方法/属性零 group/parent 字段——UI 原生组对扩展完全不可见;后经用户 UI 实建 Group1 复核:44 图元全状态前后差分 0、selection 三种读法含私有属性零组字段,与 virtual group 并存不冲突)。按 documentUuid 存 workflow state(同 zones claims 模式);成员存**位号**(netlist key,页内稳定;primitiveId 在 wire 重建/reload 时会变),move 时解析当前 id;同一位号只属一个组(入组查重报所在组);组空自动删;`list` 标 stale 成员;autolayout/autoplace-free 检测到组时警告(v1 不保组内相对几何) |
 | 布局硬门 | `sch layout-lint` | 真实渲染 bbox 查重叠(ERROR 非零退出)/紧间距/off-grid/分区违规 |
+| 组内布局计算 | `sch group tidy` | **三层体系 Group 层**:pattern auto/power-updown/signal-row——双电源旗电容自动竖放+上电下地+**文字朝外**(真机校准 rotation 表);实测 pin 二义消解、stale 双读、未建模第三连接拒绝、连带断开即错、自检红即逐步回滚 |
+| 功能区刚移 | `sch zone move` | **Zone 层**:区内组+散件+桩+旗+note 整体平移;**全区一份展开**(区内直连线随行,跨区线才留守);出界/压图签硬拒、压他区警告;分区框自动重画(重画前指纹 settle) |
+| 组间叠加布局 | `sch zone tidy` | **Zone 层**:区内组当刚体排布(锚组+上下堆叠,hGap 默认 117 可调);装不下给最小尺寸诊断不硬塞;双认领图元差集(正/回滚对称);自检红逆序回滚 |
 | 布局质量分 | `sch layout-score` | **五维诊断**:标签折叠 / 标签反向(背离核心)/ 外围贴芯片距离 / 长链散乱 / 框贴合——逐项归因**带可执行 fix 命令**(AI 照抄即修);诊断视角,门仍是 layout-lint+check |
 
 ### 4. 页面组织与分区(可读性三件套)
@@ -101,6 +104,9 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 **参数风格已收敛**:pin 定位统一 `--pin 位号:脚号`(connect/autoconnect/disconnect 同式,connect 另留
 `--x/--y` 裸坐标能力)、`--ids` 统一 CSV、modify 快捷 flag 对齐 place。旧的 JSON 数组 `--ids` 与
 `sch delete` 命令已移除(不留兼容)。
+
+**三层布局体系**(Sheet→Zone→Group 每层 tidy+move)设计契约见
+[`docs/schematic-layout-hierarchy.md`](../schematic-layout-hierarchy.md)。
 
 ## 二、待支持 / 路线(按 AI 可操作性缺口排序)
 
