@@ -7,6 +7,14 @@ follow [SemVer](https://semver.org/).
 ## [0.23.1] - 2026-08-11
 
 ### Fixed
+- **`export-image` 后编辑器残留「卡在 99%」进度条 —— 导出完成后主动 teardown。**
+  根因:导出走 `sch_ManufactureData.getExportDocumentFile`(唯一的矢量+选区+后台
+  出图路径,无替代 API),该制造数据管线会弹 BOM/器件库进度条,且**成功返回后
+  平台不销毁它**——命令 2-3s 成功、文件正常,但 GUI 的 99% toast 挂着要手动关
+  (实测 2/2 复现)。修复:`schematicExportImage` 的导出 `finally` 里延迟 400ms
+  best-effort 调 `sys_LoadingAndProgressBar.destroyProgressBar()/destroyLoading()`
+  (@public 幂等,已 debug exec 真机验证 showProgressBar(99)→destroy 可清);
+  成功场景清 99% 残留,超时场景连卡 1% 的一并清。纯 GUI 清理,不改任何输出。
 - **原理图布局「卡进度到 99%」间歇挂死 —— `connect_pin` 平台变异调用补单步超时。**
   根因:EasyEDA 平台 API 偶发**吞掉创建请求但既不 resolve 也不 reject**(与
   `schematicExportImage` 早已用 `withTimeout` 兜的 SCH_EXPORT「platform drops the

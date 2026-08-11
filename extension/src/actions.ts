@@ -3270,6 +3270,21 @@ const schematicExportImage: Handler = async (payload) => {
 		if (err instanceof ActionError) throw err;
 		throw edaError(err, 'Failed to export the schematic image.');
 	}
+	finally {
+		// The ManufactureData export pipeline LEAKS its progress toast: the export
+		// resolves (2-3s, file delivered) but the editor's progress bar stays stuck
+		// at 99% until the user closes it by hand (live-reported twice). Tear it
+		// down explicitly — destroyProgressBar/destroyLoading are @public and
+		// idempotent (safe with no bar showing), verified live via debug exec:
+		// showProgressBar(99) → destroyProgressBar() clears the stuck toast.
+		// Delay past the platform's own settle so we don't race its teardown; on
+		// the timeout path this also clears the stuck-at-1% toast the error
+		// message used to tell the user to clear by reloading.
+		setTimeout(() => {
+			try { eda.sys_LoadingAndProgressBar.destroyProgressBar(); } catch { /* best-effort */ }
+			try { eda.sys_LoadingAndProgressBar.destroyLoading(); } catch { /* best-effort */ }
+		}, 400);
+	}
 	if (!file) {
 		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Export returned no file.');
 	}
