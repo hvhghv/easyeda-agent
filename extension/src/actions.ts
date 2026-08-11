@@ -1144,6 +1144,7 @@ export const schematicComponentModify: Handler = async (payload) => {
 
 	let expectedProperties: Record<string, SchematicPropertyValue> | undefined;
 	let propertiesBefore: Record<string, SchematicPropertyValue> | undefined;
+	let preservedPropertyKeys: Array<string> | undefined;
 	if (hasCustomAttributes || hasOtherProperty) {
 		const field = hasCustomAttributes ? 'customAttributes' : 'otherProperty';
 		expectedProperties = requireSchematicPropertyPatch(normalizedPatch[field], field);
@@ -1157,6 +1158,24 @@ export const schematicComponentModify: Handler = async (payload) => {
 		) ?? {};
 		normalizedPatch.otherProperty = { ...propertiesBefore, ...expectedProperties };
 		delete normalizedPatch.customAttributes;
+	}
+	else {
+		// #175: 平台 modify 对 otherProperty 是整体重写语义 — patch 不带
+		// otherProperty 时,平台会把现有自定义属性**整体清空**(实测:166 件填好
+		// Value 后单独 patch supplierId,Value 全被清成 "";ok=true 无任何告警)。
+		// read-preserve-write:回读现有自定义属性并在同一次 modify 里原样写回,
+		// 让「merge 语义」对顶层字段补丁同样成立。现有属性为空时不加
+		// otherProperty 键(无数据可保,也不做无谓的整体写 — 见 attrs_backfill
+		// 处对整体写 otherProperty 平台副作用的实测记录)。
+		const current = await getComponentOrThrow(primitiveId);
+		const existing = cleanOtherProperty(
+			current.getState_OtherProperty() as Record<string, unknown> | undefined,
+		);
+		if (existing) {
+			propertiesBefore = existing;
+			preservedPropertyKeys = Object.keys(existing);
+			normalizedPatch.otherProperty = { ...existing };
+		}
 	}
 
 	let component;
@@ -1173,7 +1192,7 @@ export const schematicComponentModify: Handler = async (payload) => {
 		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to modify component "${primitiveId}".`);
 	}
 
-	if (expectedProperties) {
+	if (expectedProperties || preservedPropertyKeys) {
 		// SDK 某些字段会返回成功但静默 no-op；必须用新句柄回读实际画布状态。
 		// modify 已成功返回 ⇒ 画布可能已变;此后回读通道自身的失败绝不能再变成
 		// ok:false —— daemon 只对 ok:true 排 autosave,抛错会让已落画布的变更
@@ -1208,8 +1227,39 @@ export const schematicComponentModify: Handler = async (payload) => {
 		const actual = cleanOtherProperty(
 			fresh.getState_OtherProperty() as Record<string, unknown> | undefined,
 		) ?? {};
-		const expectedKeys = Object.keys(expectedProperties);
 		const before = propertiesBefore ?? {};
+		if (!expectedProperties) {
+			// #175 preserve-only:patch 未动自定义属性,只需验证保留写回没弄丢键。
+			// 丢键 = 静默数据丢失,绝不许无声通过:复用 partial/notApplied 结构
+			// (CLI `sch modify` 对 notApplied 非空非零退出,错误信号不丢),
+			// propertiesBefore 支撑重放恢复。
+			const lost = Object.keys(before).filter(key => !propertyApplied(actual, key, before[key]));
+			if (lost.length > 0) {
+				return {
+					result: {
+						component: serializeComponent(fresh),
+						partial: true,
+						notApplied: lost,
+						propertiesBefore: before,
+					},
+					warnings: [
+						`组件 "${primitiveId}" 顶层字段补丁已生效,但自定义属性保留写回后仍丢失: ${lost.join(', ')}`
+						+ '(平台 modify 整体重写 otherProperty,写回未被接受);'
+						+ '重放 result.propertiesBefore 可恢复丢失键(issue #175)。',
+					],
+				};
+			}
+			return {
+				result: {
+					component: serializeComponent(fresh),
+					// 显式回报整体重写中被原样保留的键 + before 快照(审计约定):
+					// 调用方能看见「哪些属性被这次顶层补丁连带重写过」,不再有静默面。
+					propertiesPreserved: preservedPropertyKeys,
+					propertiesBefore: before,
+				},
+			};
+		}
+		const expectedKeys = Object.keys(expectedProperties);
 		const notApplied = expectedKeys
 			.filter(key => !propertyApplied(actual, key, expectedProperties[key]));
 		// 回读命中的键按 before 快照再二分:before 本就等于期望值的键无法证明

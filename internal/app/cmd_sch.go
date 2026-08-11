@@ -500,7 +500,14 @@ properties and are verified by fresh readback, with tiered semantics (#151):
     added by this call (addedKeys) cannot be removed via modify
   - pure-property patch, nothing applied  → error (canvas unchanged)
   - readback channel itself fails         → success with verified:false +
-    warning (erroring would skip autosave and lose the applied edit)`,
+    warning (erroring would skip autosave and lose the applied edit)
+
+MERGE also holds for top-level-only patches (#175): the platform's modify
+rewrites otherProperty WHOLESALE, so a patch like {"supplierId":...} used to
+silently wipe all custom properties. The connector now reads the existing
+custom properties and re-writes them in the same modify call; preserved keys
+come back in result.propertiesPreserved (+propertiesBefore), and any key the
+platform still dropped is reported in result.notApplied (non-zero exit).`,
 			Example: `  easyeda sch modify --id <primitiveId> --patch '{"x":150,"y":200}'
   easyeda sch modify --id <id> --patch '{"customAttributes":{"Value":"10k"}}'`,
 			RunE: func(cmd *cobra.Command, args []string) error {

@@ -279,10 +279,13 @@ function installComponentModifyStub(options: {
 	normalize?: boolean;
 	/** modify 成功后回读通道坏掉:get 恒抛错(#151 残洞) */
 	failGetAfterModify?: boolean;
+	/** 覆盖初始 otherProperty(默认 Description/Value 两键) */
+	initial?: Record<string, string | number | boolean>;
+	/** 平台在任何写入后硬删这些键(模拟保留写回也保不住的键,#175) */
+	dropKeys?: string[];
 } = {}) {
 	let otherProperty: Record<string, string | number | boolean> = {
-		Description: 'keep me',
-		Value: '',
+		...(options.initial ?? { Description: 'keep me', Value: '' }),
 	};
 	const calls: Array<{ id: string; patch: Record<string, unknown> }> = [];
 	let modifyCalled = false;
@@ -301,20 +304,28 @@ function installComponentModifyStub(options: {
 			modify: async (id: string, patch: Record<string, unknown>) => {
 				calls.push({ id, patch });
 				modifyCalled = true;
-				if (options.apply !== false && patch.otherProperty) {
-					const next = patch.otherProperty as Record<string, string | number | boolean>;
-					if (options.applyKeys) {
-						const out = { ...otherProperty };
-						for (const key of options.applyKeys) {
-							if (key in next) out[key] = store(next[key]);
+				if (options.apply !== false) {
+					if (patch.otherProperty) {
+						const next = patch.otherProperty as Record<string, string | number | boolean>;
+						if (options.applyKeys) {
+							const out = { ...otherProperty };
+							for (const key of options.applyKeys) {
+								if (key in next) out[key] = store(next[key]);
+							}
+							otherProperty = out;
 						}
-						otherProperty = out;
+						else {
+							otherProperty = Object.fromEntries(
+								Object.entries(next).map(([k, v]) => [k, store(v)]),
+							);
+						}
 					}
 					else {
-						otherProperty = Object.fromEntries(
-							Object.entries(next).map(([k, v]) => [k, store(v)]),
-						);
+						// #175 平台真值:modify 对 otherProperty 是整体重写语义,
+						// patch 不带 otherProperty ⇒ 现有自定义属性被整体清空。
+						otherProperty = {};
 					}
+					for (const key of options.dropKeys ?? []) delete otherProperty[key];
 				}
 				return current();
 			},
@@ -481,6 +492,76 @@ test('modify: readback failure after successful modify degrades to verified:fals
 	assert.deepEqual(res.result.propertiesBefore, { Description: 'keep me', Value: '' });
 	assert.equal(res.warnings.length, 1);
 	assert.match(res.warnings[0], /回读校验/);
+	delete (globalThis as any).eda;
+});
+
+test('modify: top-level-only patch preserves existing custom properties (issue #175)', async () => {
+	// 平台 modify 整体重写 otherProperty(stub 默认建模):不带 otherProperty 的
+	// patch 会把自定义属性清空。read-preserve-write 必须在同一次 modify 里原样写回。
+	const fx = installComponentModifyStub();
+	const res: any = await schematicComponentModify({
+		primitiveId: 'r2-pid',
+		patch: { supplierId: 'C2918502' },
+	});
+
+	assert.deepEqual(fx.calls[0], {
+		id: 'r2-pid',
+		patch: { supplierId: 'C2918502', otherProperty: { Description: 'keep me', Value: '' } },
+	});
+	// 画布真值:自定义属性原样存活,没有被整体重写清空
+	assert.deepEqual(fx.getOtherProperty(), { Description: 'keep me', Value: '' });
+	assert.equal(res.result.partial, undefined);
+	// 显式回报被连带重写但原样保留的键 + before 快照(不再有静默面)
+	assert.deepEqual(res.result.propertiesPreserved, ['Description', 'Value']);
+	assert.deepEqual(res.result.propertiesBefore, { Description: 'keep me', Value: '' });
+	delete (globalThis as any).eda;
+});
+
+test('modify: top-level-only patch with empty otherProperty adds no property write (issue #175)', async () => {
+	// 无数据可保时不做无谓的整体写(整体写 otherProperty 有平台副作用先例,
+	// 见 attrs_backfill 的投影键事故)
+	const fx = installComponentModifyStub({ initial: {} });
+	const res: any = await schematicComponentModify({
+		primitiveId: 'r2-pid',
+		patch: { supplierId: 'C2918502' },
+	});
+	assert.deepEqual(fx.calls[0], { id: 'r2-pid', patch: { supplierId: 'C2918502' } });
+	assert.equal(res.result.propertiesPreserved, undefined);
+	assert.equal(res.result.propertiesBefore, undefined);
+	delete (globalThis as any).eda;
+});
+
+test('modify: preserved key the platform still drops → partial + notApplied, never silent (issue #175)', async () => {
+	const fx = installComponentModifyStub({
+		initial: { Description: 'keep me', Value: '10k' },
+		dropKeys: ['Value'],
+	});
+	const res: any = await schematicComponentModify({
+		primitiveId: 'r2-pid',
+		patch: { supplierId: 'C2918502' },
+	});
+	// 顶层字段已生效是既成事实(ok:true 照常 arm autosave),但丢键必须结构化
+	// 暴露:notApplied 非空 → CLI `sch modify` 非零退出,错误信号不丢
+	assert.equal(res.result.partial, true);
+	assert.deepEqual(res.result.notApplied, ['Value']);
+	assert.deepEqual(res.result.propertiesBefore, { Description: 'keep me', Value: '10k' });
+	assert.equal(res.warnings.length, 1);
+	assert.match(res.warnings[0], /Value/);
+	assert.match(res.warnings[0], /r2-pid/);
+	assert.deepEqual(fx.getOtherProperty(), { Description: 'keep me' });
+	delete (globalThis as any).eda;
+});
+
+test('modify: readback failure on preserve path degrades to verified:false with before snapshot (issue #175)', async () => {
+	installComponentModifyStub({ failGetAfterModify: true });
+	const res: any = await schematicComponentModify({
+		primitiveId: 'r2-pid',
+		patch: { supplierId: 'C2918502' },
+	});
+	// preserve 写回已随 modify 提交;回读通道失败绝不能抛错(丢 autosave)
+	assert.equal(res.result.verified, false);
+	assert.deepEqual(res.result.propertiesBefore, { Description: 'keep me', Value: '' });
+	assert.equal(res.warnings.length, 1);
 	delete (globalThis as any).eda;
 });
 

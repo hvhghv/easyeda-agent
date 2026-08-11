@@ -7,6 +7,19 @@ follow [SemVer](https://semver.org/).
 ## [0.23.1] - 2026-08-11
 
 ### Fixed
+- **`sch modify` 只 patch 顶层字段(如 supplierId)会把自定义属性整体静默清空(#175)。**
+  根因:平台 `eda.sch_PrimitiveComponent.modify` 对 `otherProperty` 是**整体重写**
+  语义 —— patch 不带 `otherProperty` 时平台直接把现有自定义属性清成空,而 handler
+  只在 patch 含 `customAttributes/otherProperty` 时才做 read-merge-write,顶层字段
+  补丁原样透传 → 166 件填好的 Value 被一条 `{"supplierId":"C..."}` 全清成 ""、
+  `ok=true` 零告警(CLI 文档承诺的 MERGE 语义只兑现了一半)。修复:顶层字段补丁
+  同样先回读现有 `otherProperty` 并在**同一次 modify 里原样写回**;全保住时
+  `result.propertiesPreserved` + `propertiesBefore` 显式回报被连带重写的键,平台仍
+  丢的键走 `partial:true` + `notApplied`(CLI 非零退出)绝不静默;现有属性为空则不
+  加 `otherProperty` 键(不做无谓整体写,避开 attrs_backfill 记录过的投影键副作用)。
+  验证:单测把平台整体重写语义建进 stub(不带 otherProperty ⇒ 清空)+ 4 个新用例
+  (保留写回 / 空属性不写 / 平台仍丢键报 partial / 回读失败降级 verified:false),
+  连接器 111 单测全过、`tsc --noEmit` 干净。
 - **`export-image` 后编辑器残留「卡在 99%」进度条 —— 导出完成后主动 teardown。**
   根因:导出走 `sch_ManufactureData.getExportDocumentFile`(唯一的矢量+选区+后台
   出图路径,无替代 API),该制造数据管线会弹 BOM/器件库进度条,且**成功返回后
