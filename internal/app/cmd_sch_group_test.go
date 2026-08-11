@@ -411,6 +411,167 @@ func TestExpandGroupAttachmentsCleanScenesHaveNoSuspects(t *testing.T) {
 	}
 }
 
+// ── return-leg dump replay: folded stub parked over a foreign pin ───────────
+
+func TestExpandGroupAttachmentsFoldedStubOverForeignPin(t *testing.T) {
+	// Minimal form of the live 悬案: the folded stub [820→835→845→835] sits at
+	// +100 with U2:3 directly UNDER its 835 vertex (also its terminal polyline
+	// vertex). The wire geometrically PASSES THROUGH 835 (runs 820→845), so
+	// this is incidental wire-over-pin contact, NOT deliberate wiring — the
+	// tree must ride along with the member, or the group half-moves forever.
+	in := groupExpandInput{
+		MemberPins: [][2]float64{{820, 475}},
+		OtherPins:  [][2]float64{{835, 475}}, // U2:3 under the fold
+		Wires: []schGroupWire{
+			{ID: "w-fold", Points: []float64{820, 475, 835, 475, 845, 475, 835, 475}},
+		},
+		Flags: []schGroupFlag{{ID: "f-port", X: 845, Y: 475}},
+	}
+	got := expandGroupAttachments(in)
+	if strings.Join(got.WireIDs, ",") != "w-fold" || strings.Join(got.FlagIDs, ",") != "f-port" {
+		t.Fatalf("pass-over foreign contact must not strand the stub: %+v", got)
+	}
+	if got.SharedTrees != 0 || len(got.Suspects) != 0 {
+		t.Fatalf("no shared/suspect expected: %+v", got)
+	}
+
+	// Counter-case: the foreign pin at 845 — the tree's true OPEN END (all
+	// incident directions point back west). That IS deliberate wiring → shared.
+	in.OtherPins = [][2]float64{{845, 475}}
+	got = expandGroupAttachments(in)
+	if len(got.WireIDs) != 0 || got.SharedTrees != 1 {
+		t.Fatalf("open-end foreign contact must stay a shared tree: %+v", got)
+	}
+}
+
+func TestTreeTerminatesAt(t *testing.T) {
+	fold := []schGroupWire{{ID: "w", Points: []float64{820, 475, 835, 475, 845, 475, 835, 475}}}
+	cases := []struct {
+		name   string
+		wires  []schGroupWire
+		px, py float64
+		want   bool
+	}{
+		{"folded stub: 820 is an open end", fold, 820, 475, true},
+		{"folded stub: 845 is an open end (re-traced tail, same direction twice)", fold, 845, 475, true},
+		{"folded stub: 835 is pass-through despite being the terminal VERTEX", fold, 835, 475, false},
+		{"plain wire: interior span contact", []schGroupWire{{ID: "w", Points: []float64{100, 100, 200, 100}}}, 150, 100, false},
+		{"plain wire: endpoint", []schGroupWire{{ID: "w", Points: []float64{100, 100, 200, 100}}}, 200, 100, true},
+		{"T-junction point: three directions", []schGroupWire{
+			{ID: "a", Points: []float64{100, 100, 200, 100}},
+			{ID: "b", Points: []float64{150, 100, 150, 160}},
+		}, 150, 100, false},
+		{"no contact at all", fold, 500, 500, false},
+	}
+	for _, tc := range cases {
+		if got := treeTerminatesAt(tc.wires, tc.px, tc.py); got != tc.want {
+			t.Errorf("%s: treeTerminatesAt = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExpandGroupAttachmentsReturnLegDump(t *testing.T) {
+	// FULL live dump replay (scratchpad dump-wires/dump-comps, 2026-08-12): the
+	// return leg of a +100/-100 pair. Members R1/C5 are at +100 (pins shifted
+	// +100 in x from the dump's rest positions), the two folded stragglers
+	// 6d5de030/992f1930 sit at +100 where their spans PASS OVER U2:3 (835,475)
+	// and C6:1 (890,710). Live this expanded 2+2+2 and stranded them; the
+	// terminate-at-foreign rule must include both wires + both their flags.
+	dumpWires := []schGroupWire{
+		{ID: "ca3f7ab6eaf8d6db", Points: []float64{175, 610, 195, 610}},
+		{ID: "a2c541eec38e02e6", Points: []float64{165, 620, 195, 620}},
+		{ID: "05f1913f4f534755", Points: []float64{305, 620, 285, 620}},
+		{ID: "e7091e49102b44c4", Points: []float64{160, 630, 195, 630}},
+		{ID: "0631bb5fa9ccc36b", Points: []float64{815, 485, 835, 485}},
+		{ID: "dc79db38db08f8db", Points: []float64{945, 310, 925, 310}},
+		{ID: "03d645e612a633ed", Points: []float64{955, 300, 925, 300}},
+		{ID: "cf58af16050d691b", Points: []float64{925, 240, 925, 270}},
+		{ID: "2f636bbf11f51ac6", Points: []float64{1000, 460, 980, 460}},
+		{ID: "e175d8489822eeae", Points: []float64{1120, 460, 1100, 460}},
+		{ID: "de552f2d7bedff6b", Points: []float64{1010, 460, 1060, 460}},
+		{ID: "a8a5696e57e45fda", Points: []float64{945, 650, 925, 650}},
+		{ID: "3d0d9250afc3b1e4", Points: []float64{945, 670, 925, 670}},
+		{ID: "7283f81ad3a8232d", Points: []float64{940, 440, 940, 460}},
+		{ID: "15fcf26cacf3165d", Points: []float64{120, 670, 140, 670}},
+		{ID: "f10636960ad683c6", Points: []float64{180, 640, 180, 670}},
+		{ID: "73b5b4d38c34010c", Points: []float64{200, 690, 200, 670}},
+		{ID: "9097fc8ca332024f", Points: []float64{240, 700, 240, 670}},
+		{ID: "91d8bea283bcb5e1", Points: []float64{260, 690, 260, 670}},
+		{ID: "ffb5f5542600133e", Points: []float64{320, 670, 300, 670}},
+		{ID: "7146c215674924ce", Points: []float64{580, 710, 600, 710}},
+		{ID: "ea610ac561d747ce", Points: []float64{660, 710, 640, 710}},
+		{ID: "48fa397237afface", Points: []float64{950, 710, 930, 710}},
+		{ID: "5af32079e0d4d0c4", Points: []float64{850, 240, 870, 240}},
+		{ID: "69ebf0a39c2744f2", Points: []float64{910, 220, 910, 240}},
+		{ID: "6d5de030c74d42ae", Points: []float64{820, 475, 835, 475, 845, 475, 835, 475}},
+		{ID: "992f19309a01bae4", Points: []float64{885, 710, 890, 710, 905, 710, 890, 710}},
+		{ID: "172ff0339f55d7de", Points: []float64{660, 475, 680, 475}},
+		{ID: "66b353cd212cb01d", Points: []float64{725, 710, 745, 710}},
+	}
+	otherPins := [][2]float64{
+		{240, 670}, {200, 670}, {930, 710}, {890, 710}, {140, 670},
+		{180, 670}, {600, 710}, {640, 710}, {260, 670}, {300, 670},
+		{195, 630}, {195, 620}, {195, 610}, {285, 620}, {910, 240},
+		{870, 240}, {835, 485}, {835, 475}, {835, 465}, {835, 455},
+		{925, 270}, {925, 300}, {925, 310}, {925, 340}, {925, 350},
+		{925, 360}, {925, 370}, {925, 380}, {925, 390}, {925, 400},
+		{925, 410}, {925, 420}, {925, 430}, {925, 440}, {925, 450},
+		{925, 460}, {925, 470}, {925, 480}, {925, 490}, {925, 500},
+		{925, 510}, {925, 520}, {925, 530}, {925, 540}, {925, 550},
+		{925, 560}, {925, 570}, {925, 580}, {925, 590}, {925, 600},
+		{925, 610}, {925, 620}, {925, 630}, {925, 640}, {925, 650},
+		{925, 660}, {925, 670}, {1060, 460}, {1100, 460}, {980, 460},
+		{940, 460},
+	}
+	dumpFlags := []schGroupFlag{
+		{ID: "d6ea4a990dac8743", X: 175, Y: 610},
+		{ID: "efd9ac4991092d3a", X: 165, Y: 620},
+		{ID: "bcf974688534e9e0", X: 305, Y: 620},
+		{ID: "28a8576f85f5eafa", X: 815, Y: 485},
+		{ID: "78ba73565e481a3c", X: 120, Y: 670},
+		{ID: "7b46c83c07a3d804", X: 200.00000000000003, Y: 690},
+		{ID: "5df56dabb44a70a7", X: 259.99999999999994, Y: 690},
+		{ID: "16a7eafd30a1bc9c", X: 580, Y: 710},
+		{ID: "82d8c0448e22e145", X: 910, Y: 220},
+		{ID: "b7464e597f031005", X: 160, Y: 630},
+		{ID: "cb9d163cf88ade6a", X: 945, Y: 310},
+		{ID: "40e4347fd16d59f7", X: 955, Y: 300},
+		{ID: "a711dfe2a0cbf64e", X: 925, Y: 240},
+		{ID: "046a811e71630703", X: 1010, Y: 459.9999999999999},
+		{ID: "0f32f367ed25ef94", X: 180.00000000000003, Y: 640},
+		{ID: "583ea7ad96c0be2e", X: 240, Y: 700},
+		{ID: "b75cab5e8b176658", X: 320, Y: 670},
+		{ID: "65db43d6e91e139f", X: 660, Y: 710},
+		{ID: "575da495c7fb20fb", X: 950.0000000000001, Y: 710},
+		{ID: "36503a859f4e4a8c", X: 1000, Y: 460},
+		{ID: "3f012deae3152d7b", X: 1120, Y: 460},
+		{ID: "685a32b3670dcb5a", X: 945, Y: 650},
+		{ID: "c2a78d5741f13a97", X: 945, Y: 670},
+		{ID: "26cc53caf3d2acf0", X: 940, Y: 440},
+		{ID: "4b3db16c9edf4831", X: 850, Y: 240},
+		{ID: "b8e4549ee4132dbb", X: 845, Y: 475},
+		{ID: "d4fad03d208ac84c", X: 905, Y: 710},
+		{ID: "5c01a4ca252866a4", X: 660, Y: 475},
+		{ID: "d9ad205729976df0", X: 725, Y: 710},
+	}
+	memberPins := [][2]float64{{780, 475}, {820, 475}, {845, 710}, {885, 710}}
+	got := expandGroupAttachments(groupExpandInput{
+		MemberPins: memberPins,
+		OtherPins:  otherPins,
+		Wires:      dumpWires,
+		Flags:      dumpFlags,
+	})
+	if strings.Join(got.WireIDs, ",") != "6d5de030c74d42ae,992f19309a01bae4" {
+		t.Fatalf("both stragglers must be carried: %v", got.WireIDs)
+	}
+	if strings.Join(got.FlagIDs, ",") != "b8e4549ee4132dbb,d4fad03d208ac84c" {
+		t.Fatalf("both stranded flags must be carried: %v", got.FlagIDs)
+	}
+	if got.SharedTrees != 0 || len(got.Suspects) != 0 {
+		t.Fatalf("no shared/suspect expected on the dump scene: %+v", got)
+	}
+}
+
 // ── move-set flattening ─────────────────────────────────────────────────────
 
 func TestSchGroupMoveSetAllIDs(t *testing.T) {

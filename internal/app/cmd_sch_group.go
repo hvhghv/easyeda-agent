@@ -428,15 +428,78 @@ func wiresTouch(a, b schGroupWire, eps float64) bool {
 	return false
 }
 
+// treeTerminatesAt reports whether the wire tree ENDS at the point: the point
+// touches the tree only at segment endpoints, and every incident segment leaves
+// in ONE direction — the signature of a wire deliberately drawn TO that point.
+// It returns false when the tree PASSES THROUGH the point: interior span
+// contact, or endpoint contact with segments leaving in different directions.
+//
+// Why direction-based and not "is the point a terminal polyline vertex": the
+// live folded stub [820,475 835,475 845,475 835,475] has its terminal VERTEX at
+// 835 — exactly on U2:3 — yet geometrically the wire runs 820→845 and passes
+// THROUGH 835 (incident directions west AND east). A vertex-based test would
+// call that a termination and misclassify the tree as deliberately wired to
+// U2:3; the direction test correctly sees a pass-over. The true open ends (820,
+// 845) have all incident directions equal.
+func treeTerminatesAt(wires []schGroupWire, px, py float64) bool {
+	var dirX, dirY float64
+	found := false
+	// addDir folds one outgoing direction into the running "single direction"
+	// check; a second DISTINCT direction means pass-through/junction, not an end.
+	addDir := func(ox, oy float64) bool {
+		dx, dy := ox-px, oy-py
+		l := math.Hypot(dx, dy)
+		if l <= schGroupEps {
+			return true // degenerate (zero-length) — no direction information
+		}
+		dx, dy = dx/l, dy/l
+		if !found {
+			dirX, dirY, found = dx, dy, true
+			return true
+		}
+		return dirX*dx+dirY*dy > 0.999 // same outgoing direction (folded tail re-tracing)
+	}
+	for _, w := range wires {
+		pts := w.Points
+		for i := 0; i+3 < len(pts); i += 2 {
+			x0, y0, x1, y1 := pts[i], pts[i+1], pts[i+2], pts[i+3]
+			if !pointOnSegment(px, py, x0, y0, x1, y1, schGroupEps) {
+				continue
+			}
+			c0 := pointsClose(px, py, x0, y0, schGroupEps)
+			c1 := pointsClose(px, py, x1, y1, schGroupEps)
+			if !c0 && !c1 {
+				return false // interior span contact — the tree passes over the point
+			}
+			if c0 && !addDir(x1, y1) {
+				return false
+			}
+			if c1 && !addDir(x0, y0) {
+				return false
+			}
+		}
+	}
+	return found
+}
+
 // expandGroupAttachments discovers which wires + flags ride along with the
 // group members, at wire-TREE granularity (union-find over touching wires —
 // the same semantics `sch disconnect` uses: collinear merged stubs span several
 // wire primitives, and flags can sit on mid-vertices or mid-span).
 //
-// A tree is included iff it touches ≥1 member pin and ZERO non-member pins
-// (pure stub fan-out: pin → wire → flag). A tree that also touches a foreign
-// pin is real inter-component wiring — rigidly moving it would tear the far
-// end, so it is skipped and counted in SharedTrees for the caller to report.
+// A tree is included iff it touches ≥1 member pin and is not DELIBERATELY
+// wired to a non-member pin. Member matching is whole-span generous (endpoint,
+// vertex, or mid-span — never leave member attachments behind); foreign
+// matching demands that the tree TERMINATE at the foreign pin
+// (treeTerminatesAt): a deliberate connection is a wire drawn TO the pin,
+// while a span merely PASSING OVER a foreign pin is incidental wire-over-pin
+// contact. The distinction is load-bearing (live 2026-08-12 悬案): a folded
+// stub moved +100 came to rest ON TOP of U2:3 — a radial whole-span foreign
+// test then classified its tree as "real inter-part wiring" and refused to
+// carry it back, half-moving the group on every return leg. Deliberately
+// wired trees (foreign pin at the tree's open end) still count as
+// SharedTrees: rigidly moving them would tear the far end, so they are
+// skipped and reported.
 func expandGroupAttachments(in groupExpandInput) groupExpansion {
 	n := len(in.Wires)
 	parent := make([]int, n)
@@ -460,49 +523,37 @@ func expandGroupAttachments(in groupExpandInput) groupExpansion {
 		}
 	}
 
-	type treeStat struct {
-		wires   []int
-		member  bool
-		foreign bool
-	}
-	trees := map[int]*treeStat{}
+	trees := map[int][]int{}
 	for i := 0; i < n; i++ {
 		root := find(i)
-		t := trees[root]
-		if t == nil {
-			t = &treeStat{}
-			trees[root] = t
-		}
-		t.wires = append(t.wires, i)
-		w := in.Wires[i]
-		if !t.member {
-			for _, p := range in.MemberPins {
-				if pointOnPolyline(p[0], p[1], w.Points, schGroupEps) {
-					t.member = true
-					break
-				}
-			}
-		}
-		if !t.foreign {
-			for _, p := range in.OtherPins {
-				if pointOnPolyline(p[0], p[1], w.Points, schGroupEps) {
-					t.foreign = true
-					break
-				}
-			}
-		}
+		trees[root] = append(trees[root], i)
 	}
 
 	var out groupExpansion
-	for _, t := range trees {
-		if !t.member {
+	for _, idxs := range trees {
+		tw := make([]schGroupWire, len(idxs))
+		for k, wi := range idxs {
+			tw[k] = in.Wires[wi]
+		}
+		member := false
+		for _, w := range tw {
+			for _, p := range in.MemberPins {
+				if pointOnPolyline(p[0], p[1], w.Points, schGroupEps) {
+					member = true
+					break
+				}
+			}
+			if member {
+				break
+			}
+		}
+		if !member {
 			// Completeness precheck: a tree that ATTACHES to no member pin but
 			// COLLINEARLY GRAZES one (same carrier line, along-line gap ≤
 			// schGroupNearTol) is residue of an earlier half-move — silently
 			// leaving it behind is how the damage compounds. Parallel neighbor
 			// stubs (perp offset > schGroupPerpTol) are legitimate and ignored.
-			for _, wi := range t.wires {
-				w := in.Wires[wi]
+			for _, w := range tw {
 				for _, p := range in.MemberPins {
 					if polylineGrazesPoint(p[0], p[1], w.Points) {
 						last := len(w.Points)
@@ -518,16 +569,34 @@ func expandGroupAttachments(in groupExpandInput) groupExpansion {
 			}
 			continue
 		}
-		if t.foreign {
+		// Foreign = the tree is deliberately WIRED to a non-member pin: it must
+		// TERMINATE there, not merely pass over it (see treeTerminatesAt — the
+		// pass-over case is a stub parked on a foreign pin by an earlier move,
+		// which MUST ride along or the group half-moves forever).
+		foreign := false
+		for _, p := range in.OtherPins {
+			touches := false
+			for _, w := range tw {
+				if pointOnPolyline(p[0], p[1], w.Points, schGroupEps) {
+					touches = true
+					break
+				}
+			}
+			if touches && treeTerminatesAt(tw, p[0], p[1]) {
+				foreign = true
+				break
+			}
+		}
+		if foreign {
 			out.SharedTrees++
 			continue
 		}
-		for _, wi := range t.wires {
-			out.WireIDs = append(out.WireIDs, in.Wires[wi].ID)
+		for _, w := range tw {
+			out.WireIDs = append(out.WireIDs, w.ID)
 		}
 		for _, f := range in.Flags {
-			for _, wi := range t.wires {
-				if pointOnPolyline(f.X, f.Y, in.Wires[wi].Points, schGroupEps) {
+			for _, w := range tw {
+				if pointOnPolyline(f.X, f.Y, w.Points, schGroupEps) {
 					out.FlagIDs = append(out.FlagIDs, f.ID)
 					break
 				}
