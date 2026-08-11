@@ -18,15 +18,15 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 换型号 | `sch replace` | 换库器件,pinDiff 非空提示需重接线 |
 | 符号/封装重绑 | `sch rebind-symbol` / `rebind-footprint` | 五步 rebind(modify→delete→create→restore) |
 | C 号解析 | `sch resolve-lcsc` | 已放置器件 → 真实 LCSC C 号(确定性,绝不模糊兜底);dry-run 默认 |
-| 属性修改 | `sch modify` | 位置/位号/BOM 标志/自定义属性;**merge 语义**:只 patch 顶层字段(如 supplierId)时自动保留全部 otherProperty 并回报 `propertiesPreserved`(#175) |
-| 删除 | `sch delete` / `sch prim-delete` / `sch clear` | 按 id 删器件 / 删任意图元(含文本、图形)/ 整页清空(dry-run 可数) |
+| 属性修改 | `sch modify` | `--x/--y/--rotation/--designator` 快捷 flag,复杂属性走 `--patch`(两来源可并用,flag 覆盖同名键);**merge 语义**:只 patch 顶层字段(如 supplierId)时自动保留全部 otherProperty 并回报 `propertiesPreserved`(#175) |
+| 删除 | `sch prim-delete` / `sch clear` | 唯一删除入口:按 id 删**任意图元**(器件、文本、图形、导线)/ 整页清空(dry-run 可数)。旧 `sch delete`(仅器件)已移除 |
 
 ### 2. 连线与网络
 
 | 能力 | 命令 | 说明 |
 |---|---|---|
 | 画线 | `sch wire` | 折线;netflag 必须经真 wire 连(重叠坐标不算连接,平台规则) |
-| 引脚出线+标志 | `sch connect` | pin → 短 stub → netflag/netport,显式方向/offset;自动补偿平台「旋转存储取负」的坑 |
+| 引脚出线+标志 | `sch connect` | pin → 短 stub → netflag/netport,`--pin U1:5` 或 `--x/--y` 二选一定位,显式方向/offset;自动补偿平台「旋转存储取负」的坑 |
 | 智能连接 | `sch autoconnect` | **打分器**自选方向/offset:碰撞/穿件/图签/fanout 通道全几何成本,含 **netport 竖排折叠惩罚**(密集引脚列不再把标签翻竖);幂等(已连跳过),`--replace` 换网 |
 | 断开 | `sch disconnect` | connect 的逆操作:stub+flag 成对删(免孤儿桩) |
 | NC 标记 | `sch no-connect` | 引脚非连接标识(check 的 floating-pin 出的清单可直接喂) |
@@ -86,10 +86,10 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 你想做 | 用这个 | 别用/别混 | 参数注意 |
 |---|---|---|---|
 | 给引脚接网络标志(常规) | `sch autoconnect --pin R1:1 --kind netport --net EN` | — | `--pin` 是 `位号:脚号` 一参式 |
-| 给引脚接标志(指定方向) | `sch connect --x <px> --y <py> --direction right` | ⚠ connect **没有** `--pin`,只认坐标 | 坐标从 list/check 的 pinDetails 拿 |
+| 给引脚接标志(指定方向) | `sch connect --pin U1:5 --direction right` | 也可 `--x <px> --y <py>`(裸坐标/无位号场景) | `--pin` 与 `--x/--y` 互斥二选一 |
 | 断开引脚的 stub+flag | `sch disconnect --pin C4:1` | ⚠ 不是 `--designator C4 --pin 1` 两参式 | 也可 `--flag-id`/`--wire-id` |
-| 挪器件/改属性 | `sch modify --id <pid> --patch '{"x":100,"y":200}'` | ⚠ **没有** `--x/--y` flag(place 才有) | patch 是 JSON 对象 |
-| 删器件 | `sch prim-delete --ids '["id1","id2"]'` | `sch delete` 是它的器件子集,统一用 prim-delete | ⚠ `--ids` 是 **JSON 数组字符串**,不是 CSV |
+| 挪器件/改属性 | `sch modify --id <pid> --x 100 --y 200` | 复杂属性(customAttributes 等)走 `--patch '{json}'` | flag 与 patch 可并用,flag 覆盖同名键 |
+| 删图元(任意类型) | `sch prim-delete --ids id1,id2` | 旧 `sch delete`(仅器件)**已移除** | `--ids` 是 **CSV**(JSON 数组已不再接受) |
 | 清整页 | `sch clear` | — | 破坏性,先 dry-run/确认 |
 | 列页/切页 | `sch pages` / `sch open` | `doc ls`/`doc switch` 是跨域老入口,功能重叠 | sch 域内优先用 sch 命令 |
 | 出图给人看 | `sch export-image` | `snapshot` 是**视口截图**(需前台、会 stale) | export 不依赖前台 |
@@ -97,8 +97,9 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 分区框(整纸版式) | `zones set` → `zone-plan`(校验)→ `zone-draw --mode partition` | ⚠ 固定九宫格 claim 对宽模组会误报 zone-violation——partition 画完后 `zones clear` | 三段链,顺序固定 |
 | 建裸网络标志 | **尽量别用** `sch netflag` | 裸 flag 不经 wire = 假连接(铁律 9) | 用 connect/autoconnect |
 
-**参数风格差异是历史债**(connect 坐标式 / autoconnect 位号式 / modify patch 式 / delete JSON 数组),
-统一化在收敛路线上(见下)。
+**参数风格已收敛**:pin 定位统一 `--pin 位号:脚号`(connect/autoconnect/disconnect 同式,connect 另留
+`--x/--y` 裸坐标能力)、`--ids` 统一 CSV、modify 快捷 flag 对齐 place。旧的 JSON 数组 `--ids` 与
+`sch delete` 命令已移除(不留兼容)。
 
 ## 二、待支持 / 路线(按 AI 可操作性缺口排序)
 

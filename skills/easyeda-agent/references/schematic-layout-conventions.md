@@ -88,7 +88,7 @@ CH340C: USB 全速\nDTR/RTS→Q1/Q2 自动下载             ← USB-串口
 
 **摆放与核对**：note 放模块框内/旁的**空白处**，不压器件不压导线——放完跑
 `sch layout-lint` 核 overlap；`sch text-list` 枚举本页全部文本、
-`sch prim-delete --ids '["<pid>"]'` 清理。说明属于图纸内容，`sch note` 落笔
+`sch prim-delete --ids <pid>` 清理。说明属于图纸内容，`sch note` 落笔
 即显式 save。
 
 ## 2. 模块间距

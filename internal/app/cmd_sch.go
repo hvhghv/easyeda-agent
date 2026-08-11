@@ -477,12 +477,18 @@ final placed state.`,
 	// ── modify ────────────────────────────────────────────────────────────
 	// schematic.component.modify
 	{
-		var id, patchJSON string
+		var id, patchJSON, designator string
+		var mx, my, mrot float64
 		c := &cobra.Command{
 			Use:   "modify",
 			Short: "Modify component position, designator, BOM flags, or custom properties",
 			Args:  cobra.NoArgs,
 			Long: `Modify component position, designator, BOM flags, or custom properties.
+
+Common tweaks go straight on the command line — --x / --y / --rotation /
+--designator (same flags as ` + "`sch place`" + `). --patch takes a JSON object for
+everything else (customAttributes, BOM flags, ...). Both may be combined; on a
+key collision the explicit flag wins and the override is reported on stderr.
 
 Patch keys are validated up front against the EasyEDA SDK modify signature
 (x/y/rotation/mirror/addIntoBom/addIntoPcb/designator/name/uniqueId/
@@ -508,18 +514,34 @@ silently wipe all custom properties. The connector now reads the existing
 custom properties and re-writes them in the same modify call; preserved keys
 come back in result.propertiesPreserved (+propertiesBefore), and any key the
 platform still dropped is reported in result.notApplied (non-zero exit).`,
-			Example: `  easyeda sch modify --id <primitiveId> --patch '{"x":150,"y":200}'
+			Example: `  easyeda sch modify --id <primitiveId> --x 150 --y 200
+  easyeda sch modify --id <id> --rotation 90 --designator R12
   easyeda sch modify --id <id> --patch '{"customAttributes":{"Value":"10k"}}'`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if id == "" {
 					return fmt.Errorf("--id is required")
 				}
-				if patchJSON == "" {
-					return fmt.Errorf("--patch is required")
+				// Only EXPLICITLY-passed flags enter the patch (Changed guard):
+				// a default-zero --x must never overwrite a real position.
+				overrides := map[string]any{}
+				if cmd.Flags().Changed("x") {
+					overrides["x"] = mx
 				}
-				var patch map[string]any
-				if err := json.Unmarshal([]byte(patchJSON), &patch); err != nil {
-					return fmt.Errorf("invalid --patch json: %w", err)
+				if cmd.Flags().Changed("y") {
+					overrides["y"] = my
+				}
+				if cmd.Flags().Changed("rotation") {
+					overrides["rotation"] = mrot
+				}
+				if cmd.Flags().Changed("designator") {
+					overrides["designator"] = designator
+				}
+				patch, overridden, err := buildModifyPatch(patchJSON, overrides)
+				if err != nil {
+					return err
+				}
+				if len(overridden) > 0 {
+					fmt.Fprintf(stderr, "note: flag value(s) override --patch key(s): %s\n", strings.Join(overridden, ", "))
 				}
 				res, err := dispatchCapture(cfg, "schematic.component.modify", window,
 					map[string]any{"primitiveId": id, "patch": patch}, stdout)
@@ -540,7 +562,11 @@ platform still dropped is reported in result.notApplied (non-zero exit).`,
 			},
 		}
 		c.Flags().StringVar(&id, "id", "", "primitive ID to modify (required)")
-		c.Flags().StringVar(&patchJSON, "patch", "", "JSON object with fields to update (required)")
+		c.Flags().Float64Var(&mx, "x", 0, "new X coordinate (shortcut for --patch '{\"x\":…}')")
+		c.Flags().Float64Var(&my, "y", 0, "new Y coordinate (shortcut for --patch '{\"y\":…}')")
+		c.Flags().Float64Var(&mrot, "rotation", 0, "new rotation in degrees (shortcut for --patch '{\"rotation\":…}')")
+		c.Flags().StringVar(&designator, "designator", "", "new designator, e.g. R12 (shortcut for --patch '{\"designator\":…}')")
+		c.Flags().StringVar(&patchJSON, "patch", "", "JSON object with fields to update (for keys without a shortcut flag: customAttributes, BOM flags, …)")
 		sch.AddCommand(c)
 	}
 
@@ -718,47 +744,25 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 		sch.AddCommand(c)
 	}
 
-	// ── delete ────────────────────────────────────────────────────────────
-	// schematic.component.delete
-	{
-		var idsJSON string
-		c := &cobra.Command{
-			Use:     "delete",
-			Short:   "Delete schematic component primitives",
-			Args:    cobra.NoArgs,
-			Example: `  easyeda sch delete --ids '["id1","id2"]'`,
-			RunE: func(cmd *cobra.Command, args []string) error {
-				if idsJSON == "" {
-					return fmt.Errorf("--ids is required")
-				}
-				var ids []any
-				if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-					return fmt.Errorf("invalid --ids json (expected array): %w", err)
-				}
-				return dispatch(cfg, "schematic.component.delete", window,
-					map[string]any{"primitiveIds": ids}, stdout, stderr)
-			},
-		}
-		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to delete (required), e.g. '["id1","id2"]'`)
-		sch.AddCommand(c)
-	}
-
 	// ── prim-delete ─────────────────────────────────────────────────────────
-	// schematic.primitives.delete
+	// schematic.primitives.delete — the ONE delete entry point. The old
+	// `sch delete` (components only, schematic.component.delete) was removed:
+	// prim-delete covers components too, and two delete verbs with different
+	// type coverage was a real agent trap.
 	{
-		var idsJSON string
+		var idsRaw string
 		c := &cobra.Command{
 			Use:   "prim-delete",
 			Short: "Delete schematic primitives of ANY type by id (or the current selection if --ids omitted)",
 			Args:  cobra.NoArgs,
-			Example: `  easyeda sch prim-delete --ids '["id1","id2"]'   # delete these (any primitive type)
-  easyeda sch prim-delete                         # delete the current selection`,
+			Example: `  easyeda sch prim-delete --ids id1,id2   # delete these (any primitive type)
+  easyeda sch prim-delete                 # delete the current selection`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				payload := map[string]any{}
-				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+				if idsRaw != "" {
+					ids, err := parseIDList(idsRaw)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -773,7 +777,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 				return failOnSurvivingPrimitives(res, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to delete (any type); omit to delete the current selection`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to delete (any type) — CSV: id1,id2; omit to delete the current selection")
 		sch.AddCommand(c)
 	}
 
@@ -916,7 +920,7 @@ Page-lazy-load law: only the active page's texts are returned — pass --page (o
 	// 2026-07-07: that field has zero extension-API surface — no primitive
 	// type, no getter/setter, not smuggled into OtherProperty either).
 	{
-		var idsJSON string
+		var idsRaw string
 		var dx, dy float64
 		c := &cobra.Command{
 			Use:   "group-move",
@@ -932,24 +936,24 @@ Wires have no modify-in-place, so each is deleted and recreated at the shifted
 endpoints (net/color/width/lineType preserved) — a wire's primitiveId CHANGES;
 pull fresh ids before any follow-up mutation on it.`,
 			Args: cobra.NoArgs,
-			Example: `  easyeda sch group-move --ids '["idComp1","idWire1","idWire2"]' --dx 200 --dy 0
-  easyeda sch group-move --ids '["<R4>","<stub-wire>","<flag>"]' --dx 0 --dy -150`,
+			Example: `  easyeda sch group-move --ids idComp1,idWire1,idWire2 --dx 200 --dy 0
+  easyeda sch group-move --ids "<R4>,<stub-wire>,<flag>" --dx 0 --dy -150`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				if idsJSON == "" {
+				if idsRaw == "" {
 					return fmt.Errorf("--ids is required (component and/or wire primitiveIds)")
 				}
 				if !cmd.Flags().Changed("dx") && !cmd.Flags().Changed("dy") {
 					return fmt.Errorf("at least one of --dx / --dy is required (a zero-move is a no-op)")
 				}
-				var ids []any
-				if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-					return fmt.Errorf("invalid --ids json (expected array): %w", err)
+				ids, err := parseIDList(idsRaw)
+				if err != nil {
+					return err
 				}
 				payload := map[string]any{"primitiveIds": ids, "dx": dx, "dy": dy}
 				return dispatch(cfg, "schematic.group.move", window, payload, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsJSON, "ids", "", "JSON array of primitiveIds (components and/or wires) to move together (required)")
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveIds (components and/or wires) to move together — CSV: id1,id2 (required)")
 		c.Flags().Float64Var(&dx, "dx", 0, "X translation (mil)")
 		c.Flags().Float64Var(&dy, "dy", 0, "Y translation (mil)")
 		sch.AddCommand(c)
@@ -1000,13 +1004,13 @@ pull fresh ids before any follow-up mutation on it.`,
 	// ── connect ───────────────────────────────────────────────────────────
 	// schematic.power.connect_pin
 	{
-		var kind, net, direction string
+		var kind, net, direction, pinRef string
 		var x, y, offset, rotation float64
 		c := &cobra.Command{
 			Use:   "connect",
 			Short: "Stub a wire out of a pin and place a netflag/netport at its far end",
 			Args:  cobra.NoArgs,
-			Example: `  easyeda sch connect --x 100 --y 200 --kind power --net VCC
+			Example: `  easyeda sch connect --pin U1:5 --kind power --net VCC
   easyeda sch connect --x 100 --y 200 --kind gnd --net GND --direction down --offset 40`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if kind == "" {
@@ -1018,6 +1022,15 @@ pull fresh ids before any follow-up mutation on it.`,
 				canonicalKind, err := resolveNetflagKind(kind)
 				if err != nil {
 					return err
+				}
+				if err := validatePinTarget(pinRef != "", cmd.Flags().Changed("x"), cmd.Flags().Changed("y")); err != nil {
+					return err
+				}
+				if pinRef != "" {
+					x, y, err = resolveSchPinXY(cfg, window, pinRef)
+					if err != nil {
+						return err
+					}
 				}
 				payload := map[string]any{
 					"pinX": x,
@@ -1037,8 +1050,9 @@ pull fresh ids before any follow-up mutation on it.`,
 				return dispatch(cfg, "schematic.power.connect_pin", window, payload, stdout, stderr)
 			},
 		}
-		c.Flags().Float64Var(&x, "x", 0, "pin X coordinate")
-		c.Flags().Float64Var(&y, "y", 0, "pin Y coordinate")
+		c.Flags().StringVar(&pinRef, "pin", "", "target pin as DESIGNATOR:PIN, e.g. U1:5 (resolved to coordinates; mutually exclusive with --x/--y)")
+		c.Flags().Float64Var(&x, "x", 0, "pin X coordinate (use with --y instead of --pin)")
+		c.Flags().Float64Var(&y, "y", 0, "pin Y coordinate (use with --x instead of --pin)")
 		c.Flags().StringVar(&kind, "kind", "", netflagKindHelp)
 		c.Flags().StringVar(&net, "net", "", "net name (required)")
 		c.Flags().StringVar(&direction, "direction", "", "visual stub direction (up=higher on canvas, down=lower): up, down, left, right")
@@ -1144,25 +1158,25 @@ pull fresh ids before any follow-up mutation on it.`,
 	// ── select ────────────────────────────────────────────────────────────
 	// schematic.select
 	{
-		var idsJSON string
+		var idsRaw string
 		c := &cobra.Command{
-			Use:     "select",
-			Short:   "Select schematic primitives by ID",
-			Args:    cobra.NoArgs,
-			Example: `  easyeda sch select --ids '["id1","id2"]'`,
+			Use:   "select",
+			Short: "Select schematic primitives by ID",
+			Args:  cobra.NoArgs,
+			Example: `  easyeda sch select --ids id1,id2`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				if idsJSON == "" {
+				if idsRaw == "" {
 					return fmt.Errorf("--ids is required")
 				}
-				var ids []any
-				if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-					return fmt.Errorf("invalid --ids json (expected array): %w", err)
+				ids, err := parseIDList(idsRaw)
+				if err != nil {
+					return err
 				}
 				return dispatch(cfg, "schematic.select", window,
 					map[string]any{"primitiveIds": ids}, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to select (required)`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to select — CSV: id1,id2 (required)")
 		sch.AddCommand(c)
 	}
 
@@ -1573,7 +1587,7 @@ The keepouts[] format is what sch autoconnect / autolayout consume.`,
 	// ── export-image ──────────────────────────────────────────────────────
 	// schematic.export.image (#166)
 	{
-		var idsJSON, format, scope, out, page, theme, lineWidth string
+		var idsRaw, format, scope, out, page, theme, lineWidth string
 		var stay bool
 		c := &cobra.Command{
 			Use:   "export-image",
@@ -1590,7 +1604,7 @@ dense wiring without resampling a blurry screenshot.
 
 --ids selects those primitives and exports just them (the export box shrinks to
 the selection). Without --ids it exports the whole active page.`,
-			Example: `  easyeda sch export-image --ids '["id1","id2"]' --out block.svg
+			Example: `  easyeda sch export-image --ids id1,id2 --out block.svg
   easyeda sch export-image --format png --out page.png
   easyeda sch export-image --scope page --format pdf --page P2 --out p2.pdf`,
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -1605,10 +1619,10 @@ the selection). Without --ids it exports the whole active page.`,
 					window = scopeRes.window
 				}
 				payload := map[string]any{}
-				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+				if idsRaw != "" {
+					ids, err := parseIDList(idsRaw)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -1637,7 +1651,7 @@ the selection). Without --ids it exports the whole active page.`,
 				return nil
 			},
 		}
-		c.Flags().StringVar(&idsJSON, "ids", "", `JSON array of primitive IDs to export alone, e.g. '["id1","id2"]' (omit to export the whole page)`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to export alone — CSV: id1,id2 (omit to export the whole page)")
 		c.Flags().StringVar(&format, "format", "", "svg | png | pdf (default svg)")
 		c.Flags().StringVar(&scope, "scope", "", "selection | page | project (default: selection when --ids given, else page)")
 		c.Flags().StringVarP(&out, "out", "o", "", "write the rendered file to this path")

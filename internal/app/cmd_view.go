@@ -37,7 +37,7 @@ func newViewCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 		Use:     "fit-selection",
 		Short:   "Zoom to fit the currently selected primitives (适应选中)",
 		Args:    cobra.NoArgs,
-		Example: `  easyeda sch select --ids '["id1"]' && easyeda view fit-selection`,
+		Example: `  easyeda sch select --ids id1 && easyeda view fit-selection`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return dispatch(cfg, "view.fit_selection", window, nil, stdout, stderr)
 		},

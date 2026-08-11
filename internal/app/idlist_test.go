@@ -2,6 +2,7 @@ package app
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -12,23 +13,19 @@ func TestParseIDList(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"json array", `["id1","id2"]`, []string{"id1", "id2"}, false},
-		{"json single", `["184fd1d7742ac942"]`, []string{"184fd1d7742ac942"}, false},
-		{"json with spaces", ` [ "id1" , "id2" ] `, []string{"id1", "id2"}, false},
-		{"json inner padding", `[" id1 ", "id2"]`, []string{"id1", "id2"}, false},
-		{"json numbers stringified", `[1, 22]`, []string{"1", "22"}, false},
 		{"csv", "id1,id2", []string{"id1", "id2"}, false},
 		{"csv with spaces", " id1 , id2 ", []string{"id1", "id2"}, false},
 		{"csv single", "abc", []string{"abc"}, false},
+		{"csv single padded", "  184fd1d7742ac942  ", []string{"184fd1d7742ac942"}, false},
 		{"csv trailing comma", "id1,id2,", []string{"id1", "id2"}, false},
 		{"csv empty items dropped", "id1,,id2", []string{"id1", "id2"}, false},
 		{"empty string", "", nil, true},
 		{"whitespace only", "   ", nil, true},
 		{"only commas", ",,,", nil, true},
-		{"empty json array", `[]`, nil, true},
-		{"json array of empties", `["", " "]`, nil, true},
-		{"malformed json not csv-fallback", `["id1",`, nil, true},
-		{"json non-string item", `[{"id":"x"}]`, nil, true},
+		{"json array rejected", `["id1","id2"]`, nil, true},
+		{"json array padded rejected", ` [ "id1" ] `, nil, true},
+		{"empty json array rejected", `[]`, nil, true},
+		{"malformed json rejected", `["id1",`, nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,5 +43,17 @@ func TestParseIDList(t *testing.T) {
 				t.Fatalf("parseIDList(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// A JSON-array input must fail with the pointed "no longer accepts" error, not
+// a generic parse failure — the message is the migration hint.
+func TestParseIDListJSONRejectionMessage(t *testing.T) {
+	_, err := parseIDList(`["id1","id2"]`)
+	if err == nil {
+		t.Fatal("expected error for JSON array input")
+	}
+	if !strings.Contains(err.Error(), "no longer accepts a JSON array") {
+		t.Fatalf("error should name the removed JSON-array format, got: %v", err)
 	}
 }

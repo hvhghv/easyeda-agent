@@ -623,7 +623,7 @@ rotate first ('--patch {"rotation":…}'), then --center in a second call.`,
 			Use:   "delete",
 			Short: "Delete PCB component primitives by id",
 			Args:  cobra.NoArgs,
-			Example: `  easyeda pcb delete --ids '["id1","id2"]'
+			Example: `  easyeda pcb delete --ids id1,id2
   easyeda pcb delete --ids id1,id2          # CSV works too`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if idsRaw == "" {
@@ -637,7 +637,7 @@ rotate first ('--patch {"rotation":…}'), then --center in a second call.`,
 					map[string]any{"primitiveIds": ids}, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsRaw, "ids", "", `primitive IDs to delete — CSV (id1,id2) or JSON array '["id1","id2"]' (required)`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to delete — CSV: id1,id2 (required)")
 		pcb.AddCommand(c)
 	}
 
@@ -703,9 +703,9 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 					payload[flagName] = val
 				}
 				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+					ids, err := parseIDList(idsJSON)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -715,7 +715,7 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 		if withValue {
 			c.Flags().StringVar(&val, flagName, "", flagDesc)
 		}
-		c.Flags().StringVar(&idsJSON, "ids", "", "JSON array of primitive IDs (omit = current selection)")
+		c.Flags().StringVar(&idsJSON, "ids", "", "primitive IDs — CSV: id1,id2 (omit = current selection)")
 		pcb.AddCommand(c)
 	}
 	addLayoutOp("align", "Align components by edge/center (left|right|top|bottom|centerX|centerY)",
@@ -733,16 +733,16 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 			Short: "Snap component anchors to a grid (PCB data units, mil-scale)",
 			Args:  cobra.NoArgs,
 			Example: `  easyeda pcb grid-snap --grid 100
-  easyeda pcb grid-snap --grid 100 --ids '["id1","id2"]'`,
+  easyeda pcb grid-snap --grid 100 --ids id1,id2`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if !cmd.Flags().Changed("grid") {
 					return fmt.Errorf("--grid is required")
 				}
 				payload := map[string]any{"grid": grid}
 				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+					ids, err := parseIDList(idsJSON)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -750,7 +750,7 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 			},
 		}
 		c.Flags().Float64Var(&grid, "grid", 0, "grid step in PCB data units (required)")
-		c.Flags().StringVar(&idsJSON, "ids", "", "JSON array of primitive IDs (omit = current selection)")
+		c.Flags().StringVar(&idsJSON, "ids", "", "primitive IDs — CSV: id1,id2 (omit = current selection)")
 		pcb.AddCommand(c)
 	}
 	{
@@ -761,16 +761,16 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 			Short: "Translate components by a relative (dx, dy) offset",
 			Args:  cobra.NoArgs,
 			Example: `  easyeda pcb move --dx 100 --dy 0
-  easyeda pcb move --dx 100 --dy 50 --ids '["id1"]'`,
+  easyeda pcb move --dx 100 --dy 50 --ids id1`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if !cmd.Flags().Changed("dx") && !cmd.Flags().Changed("dy") {
 					return fmt.Errorf("at least one of --dx / --dy is required")
 				}
 				payload := map[string]any{"dx": dx, "dy": dy}
 				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+					ids, err := parseIDList(idsJSON)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -779,7 +779,7 @@ behavior (faster, but re-check with '--dry-run' after a reload yourself).`,
 		}
 		c.Flags().Float64Var(&dx, "dx", 0, "X offset")
 		c.Flags().Float64Var(&dy, "dy", 0, "Y offset")
-		c.Flags().StringVar(&idsJSON, "ids", "", "JSON array of primitive IDs (omit = current selection)")
+		c.Flags().StringVar(&idsJSON, "ids", "", "primitive IDs — CSV: id1,id2 (omit = current selection)")
 		pcb.AddCommand(c)
 	}
 	{
@@ -812,9 +812,9 @@ the placement priorities in pcb-layout-conventions.md (easyeda-agent) afterward.
 					payload["cols"] = cols
 				}
 				if idsJSON != "" {
-					var ids []any
-					if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
-						return fmt.Errorf("invalid --ids json (expected array): %w", err)
+					ids, err := parseIDList(idsJSON)
+					if err != nil {
+						return err
 					}
 					payload["primitiveIds"] = ids
 				}
@@ -825,7 +825,7 @@ the placement priorities in pcb-layout-conventions.md (easyeda-agent) afterward.
 		c.Flags().Float64Var(&pitch, "pitch", 0, "component pitch within a block")
 		c.Flags().Float64Var(&gutter, "gutter", 0, "gutter between blocks")
 		c.Flags().IntVar(&cols, "cols", 0, "columns for grid mode")
-		c.Flags().StringVar(&idsJSON, "ids", "", "JSON array of primitive IDs (omit = current selection)")
+		c.Flags().StringVar(&idsJSON, "ids", "", "primitive IDs — CSV: id1,id2 (omit = current selection)")
 		pcb.AddCommand(c)
 	}
 
@@ -1182,15 +1182,13 @@ pours reflow under the new clearance.`,
 			use: "via-delete", kind: "via",
 			short: "Delete specific vias by primitiveId (rip-up is net-scoped; this is surgical)",
 			example: `  easyeda pcb via-delete --ids 184fd1d7742ac942
-  easyeda pcb via-delete --ids id1,id2      # ids from 'pcb via-list' or 'pcb drc --json' objs
-  easyeda pcb via-delete --ids '["id1","id2"]'   # JSON array works too`,
+  easyeda pcb via-delete --ids id1,id2      # ids from 'pcb via-list' or 'pcb drc --json' objs`,
 		},
 		{
 			use: "track-delete", kind: "track",
 			short: "Delete specific copper tracks by primitiveId (rip-up is net-scoped; this is surgical)",
 			example: `  easyeda pcb track-delete --ids 666de996beeb75f4
-  easyeda pcb track-delete --ids id1,id2    # ids from 'pcb track-list' or 'pcb drc --json' objs
-  easyeda pcb track-delete --ids '["id1","id2"]' # JSON array works too`,
+  easyeda pcb track-delete --ids id1,id2    # ids from 'pcb track-list' or 'pcb drc --json' objs`,
 		},
 	} {
 		var idsRaw string
@@ -1211,7 +1209,7 @@ pours reflow under the new clearance.`,
 				return dispatch(cfg, "pcb.route.delete", window, payload, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsRaw, "ids", "", `primitiveId(s) to delete — CSV (id1,id2) or JSON array '["id1","id2"]'`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveId(s) to delete — CSV: id1,id2")
 		pcb.AddCommand(c)
 	}
 
@@ -1476,7 +1474,7 @@ plane. fill = solid (default) | grid | grid45.`,
 			Use:   "pour-delete",
 			Short: "Delete copper pour regions by primitiveId",
 			Args:  cobra.NoArgs,
-			Example: `  easyeda pcb pour-delete --ids '["id1","id2"]'
+			Example: `  easyeda pcb pour-delete --ids id1,id2
   easyeda pcb pour-delete --ids id1,id2     # CSV works too`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if idsRaw == "" {
@@ -1490,7 +1488,7 @@ plane. fill = solid (default) | grid | grid45.`,
 					map[string]any{"primitiveIds": ids}, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsRaw, "ids", "", `pour primitiveIds to delete — CSV (id1,id2) or JSON array '["id1","id2"]' (required)`)
+		c.Flags().StringVar(&idsRaw, "ids", "", "pour primitiveIds to delete — CSV: id1,id2 (required)")
 		pcb.AddCommand(c)
 	}
 	{
@@ -2853,7 +2851,7 @@ no-pours(7), no-inner-electrical(8), follow-rule(9). Default is a hard keep-out
 				Use:   "delete",
 				Short: "Delete keep-out / rule regions by primitiveId",
 				Args:  cobra.NoArgs,
-				Example: `  easyeda pcb region delete --ids '["id1","id2"]'
+				Example: `  easyeda pcb region delete --ids id1,id2
   easyeda pcb region delete --ids id1,id2   # CSV works too`,
 				RunE: func(cmd *cobra.Command, args []string) error {
 					if idsRaw == "" {
@@ -2867,7 +2865,7 @@ no-pours(7), no-inner-electrical(8), follow-rule(9). Default is a hard keep-out
 						map[string]any{"primitiveIds": ids}, stdout, stderr)
 				},
 			}
-			c.Flags().StringVar(&idsRaw, "ids", "", `region primitiveIds to delete — CSV (id1,id2) or JSON array '["id1","id2"]' (required)`)
+			c.Flags().StringVar(&idsRaw, "ids", "", "region primitiveIds to delete — CSV: id1,id2 (required)")
 			region.AddCommand(c)
 		}
 		pcb.AddCommand(region)
@@ -2993,7 +2991,7 @@ carries a net. fillMode: solid (default) | mesh | inner.`,
 				Use:   "delete",
 				Short: "Delete net-bound filled regions by primitiveId",
 				Args:  cobra.NoArgs,
-				Example: `  easyeda pcb fill delete --ids '["id1","id2"]'
+				Example: `  easyeda pcb fill delete --ids id1,id2
   easyeda pcb fill delete --ids id1,id2     # CSV works too`,
 				RunE: func(cmd *cobra.Command, args []string) error {
 					if idsRaw == "" {
@@ -3007,7 +3005,7 @@ carries a net. fillMode: solid (default) | mesh | inner.`,
 						map[string]any{"primitiveIds": ids}, stdout, stderr)
 				},
 			}
-			c.Flags().StringVar(&idsRaw, "ids", "", `fill primitiveIds to delete — CSV (id1,id2) or JSON array '["id1","id2"]' (required)`)
+			c.Flags().StringVar(&idsRaw, "ids", "", "fill primitiveIds to delete — CSV: id1,id2 (required)")
 			fill.AddCommand(c)
 		}
 		pcb.AddCommand(fill)
@@ -3515,7 +3513,7 @@ restyle later with 'pcb silk-set'.`,
 			Use:   "silk-set",
 			Short: "Batch-adjust existing silk: position / rotation / size / text, or align to a reference",
 			Long: `Reconfigure existing silkscreen primitive(s) in ONE batch — component designators
-(位号) and free strings alike. --ids is a JSON array of primitiveIds (from 'pcb
+(位号) and free strings alike. --ids is a CSV of primitiveIds (from 'pcb
 check --json' or a silk list); set any of --x/--y/--rotation/--font-size/--line-width
 /--text and ONLY those keys change.
 
@@ -3528,17 +3526,17 @@ NOTE: rotation via the reliable .modify persists, but a 'pcb snapshot' taken bef
 document reload shows the OLD orientation (stale render) — judge success by 'pcb check'
 / silk list, not a screenshot.`,
 			Args: cobra.NoArgs,
-			Example: `  easyeda pcb silk-set --ids '["id1"]' --rotation 0
-  easyeda pcb silk-set --ids '["credit"]' --ref board --align centerx   # center the board credit
-  easyeda pcb silk-set --ids '["lbl"]' --ref U1 --align top             # align label to U1's top
-  easyeda pcb silk-set --ids '["id1"]' --font-size 45 --line-width 6`,
+			Example: `  easyeda pcb silk-set --ids id1 --rotation 0
+  easyeda pcb silk-set --ids credit --ref board --align centerx   # center the board credit
+  easyeda pcb silk-set --ids lbl --ref U1 --align top             # align label to U1's top
+  easyeda pcb silk-set --ids id1,id2 --font-size 45 --line-width 6`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if ids == "" {
-					return fmt.Errorf("--ids is required (JSON array of primitiveIds)")
+					return fmt.Errorf("--ids is required (CSV of primitiveIds)")
 				}
-				var idList []string
-				if err := json.Unmarshal([]byte(ids), &idList); err != nil {
-					return fmt.Errorf("--ids must be a JSON array of strings: %w", err)
+				idList, err := parseIDList(ids)
+				if err != nil {
+					return err
 				}
 				payload := map[string]any{"primitiveIds": idList}
 				for flag, key := range map[string]string{"x": "x", "y": "y", "rotation": "rotation", "font-size": "fontSize", "line-width": "lineWidth"} {
@@ -3569,7 +3567,7 @@ document reload shows the OLD orientation (stale render) — judge success by 'p
 				return dispatch(cfg, "pcb.silk.set", window, payload, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&ids, "ids", "", "JSON array of silk primitiveIds to adjust (required)")
+		c.Flags().StringVar(&ids, "ids", "", "silk primitiveIds to adjust — CSV: id1,id2 (required)")
 		c.Flags().Float64Var(&x, "x", 0, "new X (mil)")
 		c.Flags().Float64Var(&y, "y", 0, "new Y (mil)")
 		c.Flags().Float64Var(&rotation, "rotation", 0, "new rotation (deg) — 0 = upright")

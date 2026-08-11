@@ -103,7 +103,7 @@ top1 的 146 次是 **agent 在连接器根本没连上时瞎试别的命令**,�
 | `sch zone` | `zone-plan` `zones` `zone-draw` | 子命令 `plan\|apply\|draw\|status\|clear` |
 | `sch gate` | `check` `layout-lint` `bridge-check` `drc` `netlist` 对账 | **固定顺序跑,出一张统一报告**;非零退出可 gate |
 | `sch modify` | — | #151 三态契约样板,保留 |
-| `sch delete` | `prim-delete` `disconnect` | 按 kind 守卫统一删除 |
+| `sch prim-delete` | `delete`(**已移除**,2026-08) | 唯一删除入口(任意图元类型);`disconnect` 保留语义化断开 stub+flag |
 | `sch page` | `page-new` `page-rename` `page-delete` `open` | 页生命周期 |
 | `sch save` | — | |
 | `sch clear` | — | |
