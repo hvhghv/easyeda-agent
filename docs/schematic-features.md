@@ -79,6 +79,28 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 视口截图 | `sch snapshot` | 需前台,stale 检测 |
 | BOM/网表 | `sch export`(bom/netlist) | BOM 自动补 LCSC C 号(`bom-enrich.py`) |
 
+## 附:易混命令辨析(AI 选型速查)
+
+同族命令的边界与参数差异——**每条都来自 agent 真实误用**(2026-08-11 一次会话踩 5 次),
+读这张表可以一次选对:
+
+| 你想做 | 用这个 | 别用/别混 | 参数注意 |
+|---|---|---|---|
+| 给引脚接网络标志(常规) | `sch autoconnect --pin R1:1 --kind netport --net EN` | — | `--pin` 是 `位号:脚号` 一参式 |
+| 给引脚接标志(指定方向) | `sch connect --x <px> --y <py> --direction right` | ⚠ connect **没有** `--pin`,只认坐标 | 坐标从 list/check 的 pinDetails 拿 |
+| 断开引脚的 stub+flag | `sch disconnect --pin C4:1` | ⚠ 不是 `--designator C4 --pin 1` 两参式 | 也可 `--flag-id`/`--wire-id` |
+| 挪器件/改属性 | `sch modify --id <pid> --patch '{"x":100,"y":200}'` | ⚠ **没有** `--x/--y` flag(place 才有) | patch 是 JSON 对象 |
+| 删器件 | `sch prim-delete --ids '["id1","id2"]'` | `sch delete` 是它的器件子集,统一用 prim-delete | ⚠ `--ids` 是 **JSON 数组字符串**,不是 CSV |
+| 清整页 | `sch clear` | — | 破坏性,先 dry-run/确认 |
+| 列页/切页 | `sch pages` / `sch open` | `doc ls`/`doc switch` 是跨域老入口,功能重叠 | sch 域内优先用 sch 命令 |
+| 出图给人看 | `sch export-image` | `snapshot` 是**视口截图**(需前台、会 stale) | export 不依赖前台 |
+| 读电路状态 | `sch read`(=list+nets+check 聚合) | 只要器件清单用 `list`;只要检查用 `check` | read 最贵但一次拿全 |
+| 分区框(整纸版式) | `zones set` → `zone-plan`(校验)→ `zone-draw --mode partition` | ⚠ 固定九宫格 claim 对宽模组会误报 zone-violation——partition 画完后 `zones clear` | 三段链,顺序固定 |
+| 建裸网络标志 | **尽量别用** `sch netflag` | 裸 flag 不经 wire = 假连接(铁律 9) | 用 connect/autoconnect |
+
+**参数风格差异是历史债**(connect 坐标式 / autoconnect 位号式 / modify patch 式 / delete JSON 数组),
+统一化在收敛路线上(见下)。
+
 ## 二、待支持 / 路线(按 AI 可操作性缺口排序)
 
 ### 1. 持久化编组(用户点名;sch 侧对齐 PCB 的 #173)
