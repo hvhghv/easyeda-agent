@@ -1824,14 +1824,66 @@ const schematicGroupMove: Handler = async (payload) => {
 	}
 
 	const movedComponents: Array<Record<string, unknown>> = [];
+	const movedFlags: Array<Record<string, unknown>> = [];
 	const movedWires: Array<Record<string, unknown>> = [];
 	const notFound: Array<string> = [];
 	const seen = new Set<string>();
 
+	// ── Pre-flight classification. `sch_PrimitiveComponent.modify` is ELEMENT-ONLY:
+	// calling it on a netflag/netport throws「仅当器件类型为元件时允许使用该函数进行修改」,
+	// and since the platform has no transaction the old element-loop died on the
+	// first flag with earlier members already moved (live 2026-08-12: R1 translated
+	// three half-runs in a row while C5 + every wire never moved). Flags must move
+	// by DELETE + re-CREATE instead — so resolve every flag's recreate parameters
+	// UP FRONT and abort with ZERO mutations if any member is unresolvable.
+	type flagPlan = {
+		id: string; kind: 'netflag' | 'netport'; createArg: string; net: string;
+		x: number; y: number; rotation: number; mirror: boolean;
+	};
+	const elements: Array<{ id: string; comp: (typeof allComponents)[number] }> = [];
+	const flagPlans: Array<flagPlan> = [];
 	for (const comp of allComponents) {
 		const id = comp.getState_PrimitiveId();
 		if (!wantIds.has(id)) continue;
 		seen.add(id);
+		const ctype = String(comp.getState_ComponentType?.() ?? '');
+		if (ctype === 'netflag' || ctype === 'netport') {
+			const rawName = (comp.getState_Component?.() as { name?: string } | undefined)?.name ?? comp.getState_Name?.() ?? '';
+			const name = String(rawName).toLowerCase();
+			let createArg = '';
+			if (ctype === 'netflag') {
+				if (name.includes('analog')) createArg = 'AnalogGround';
+				else if (name.includes('protect')) createArg = 'ProtectGround';
+				else if (name.startsWith('ground')) createArg = 'Ground';
+				else if (name.startsWith('power')) createArg = 'Power';
+			}
+			else {
+				if (name.endsWith('-bi')) createArg = 'BI';
+				else if (name.endsWith('-in')) createArg = 'IN';
+				else if (name.endsWith('-out')) createArg = 'OUT';
+			}
+			if (!createArg) {
+				throw new ActionError(ErrorCodes.EDA_CALL_FAILED,
+					`group-move: cannot derive recreate parameters for ${ctype} ${id} (symbol "${rawName}") — aborted BEFORE any mutation. Exclude it from the set or move it manually.`);
+			}
+			flagPlans.push({
+				id, kind: ctype, createArg,
+				net: String(comp.getState_Net?.() ?? ''),
+				x: comp.getState_X(), y: comp.getState_Y(),
+				rotation: Number(comp.getState_Rotation?.() ?? 0),
+				mirror: Boolean(comp.getState_Mirror?.() ?? false),
+			});
+		}
+		else if (ctype === 'netlabel' || ctype === 'short_symbol') {
+			throw new ActionError(ErrorCodes.EDA_CALL_FAILED,
+				`group-move: ${ctype} ${id} cannot be moved (no create API to recreate it) — aborted BEFORE any mutation. Exclude it from the set.`);
+		}
+		else {
+			elements.push({ id, comp });
+		}
+	}
+
+	for (const { id, comp } of elements) {
 		const from = { x: comp.getState_X(), y: comp.getState_Y() };
 		const to = { x: from.x + dx, y: from.y + dy };
 		let moved;
@@ -1839,6 +1891,24 @@ const schematicGroupMove: Handler = async (payload) => {
 		catch (err) { throw edaError(err, `group-move: failed to translate component ${id}.`); }
 		if (!moved) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: modify returned no primitive for component ${id}.`);
 		movedComponents.push({ primitiveId: id, designator: moved.getState_Designator?.() ?? null, from, to });
+	}
+
+	// Flags: delete + recreate at the shifted anchor. Rotation passes through
+	// appliedRotation so the STORED rotation is preserved on negating builds
+	// (same compensation connect_pin uses).
+	for (const f of flagPlans) {
+		try { await deleteSchGroup('components', [f.id]); }
+		catch (err) { throw edaError(err, `group-move: failed to remove old ${f.kind} ${f.id} before recreating it shifted.`); }
+		const applied = await appliedRotation(f.rotation);
+		let created;
+		try {
+			created = f.kind === 'netflag'
+				? await eda.sch_PrimitiveComponent.createNetFlag(f.createArg as 'Power' | 'Ground' | 'AnalogGround' | 'ProtectGround', f.net, f.x + dx, f.y + dy, applied, f.mirror)
+				: await eda.sch_PrimitiveComponent.createNetPort(f.createArg as 'IN' | 'OUT' | 'BI', f.net, f.x + dx, f.y + dy, applied, f.mirror);
+		}
+		catch (err) { throw edaError(err, `group-move: failed to recreate ${f.kind} ${f.id} ("${f.net}") at the shifted position (original was deleted — recreate manually at (${f.x + dx},${f.y + dy})).`); }
+		if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: recreating ${f.kind} ${f.id} ("${f.net}") returned no primitive (original was deleted).`);
+		movedFlags.push({ oldPrimitiveId: f.id, newPrimitiveId: created.getState_PrimitiveId(), kind: f.kind, net: f.net });
 	}
 
 	for (const wire of allWires) {
@@ -1864,16 +1934,17 @@ const schematicGroupMove: Handler = async (payload) => {
 		if (!seen.has(id)) notFound.push(id);
 	}
 
-	if (!movedComponents.length && !movedWires.length) {
-		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: none of the ${wantIds.size} id(s) resolved to a component or wire. Pull fresh ids first.`);
+	if (!movedComponents.length && !movedFlags.length && !movedWires.length) {
+		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: none of the ${wantIds.size} id(s) resolved to a component, flag, or wire. Pull fresh ids first.`);
 	}
 
 	return {
 		result: {
 			dx, dy,
 			movedComponents,
+			movedFlags,
 			movedWires,
-			count: movedComponents.length + movedWires.length,
+			count: movedComponents.length + movedFlags.length + movedWires.length,
 			...(notFound.length ? { notFound } : {}),
 		},
 	};

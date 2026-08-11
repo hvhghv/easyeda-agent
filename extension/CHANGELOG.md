@@ -4,6 +4,24 @@ All notable changes to the **EDA Agent Connector** (the easyeda-agent project's 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions
 follow [SemVer](https://semver.org/).
 
+## [0.23.3] - 2026-08-12
+
+### Fixed
+- **`schematic.group.move` 对 netflag/netport 半途崩溃 —— flag 改走 delete+recreate。**
+  平台 `sch_PrimitiveComponent.modify` 仅限元件(「仅当器件类型为元件时允许使用该函数
+  进行修改」),旧实现把 flag 与元件同锅 modify:碰到第一个 flag 即抛错中断,而平台无
+  事务——**此前已 modify 的成员留在新位、其余全没动**(live 实测:R1 连续三次半搬、
+  C5 与全部导线原地不动)。修复:预检阶段先把 wantIds 分类并解析每个 flag 的 recreate
+  参数(identification/direction 从符号名推:power-*/ground-*/netport-bi|in|out;
+  net/rotation/mirror 读实例),**任一成员不可解析(含 netlabel/short_symbol 无
+  create API)→ 零变更拒绝**;执行阶段元件 modify、flag delete+createNetFlag/Port
+  (rotation 经 appliedRotation 补偿负存储 build)、wire delete+recreate。result 新增
+  `movedFlags`。111 单测过。
+
+## [0.23.2] - 2026-08-11
+
+- 版本对齐 bump(hot-reload 部署 0.23.1 修复集时占用的序号),无独立代码变更。
+
 ## [0.23.1] - 2026-08-11
 
 ### Fixed
