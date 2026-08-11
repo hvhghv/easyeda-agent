@@ -38,8 +38,9 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 |---|---|---|
 | 模块感知自动布局 | `sch autolayout` | 双引擎:`template`(spec 驱动,核心放分区中心+外围环绕,确定性,布线前用)/ `official`(平台 @beta 兜底,破坏性,`--rewire` 网表重建) |
 | 空隙打包 | `sch autoplace-free` | 无分区场景往空白处塞件 |
-| 对齐/等距 | `sch align` / `sch distribute` | 按渲染 bbox 对齐(left/right/top/…)/ 单轴等距摊开;默认 dry-run |
-| 刚体平移 | `sch group-move` | 器件+桩线+flag 一起搬(**无状态**虚拟组:每次传全 ids;持久编组见路线 §1) |
+| 对齐/等距 | `sch align` / `sch distribute` | 按渲染 bbox 对齐(left/right/top/…)/ 单轴等距摊开;默认 dry-run;选集**部分覆盖**持久组时硬拒绝(`--break-group` 显式放行) |
+| 刚体平移 | `sch group-move` | 器件+桩线+flag 一起搬:`--ids`(无状态,每次传全 id)或 `--group <id>`(持久组,成员桩线+远端 flag **自动展开**,触碰非成员脚的线树留在原地并报告) |
+| 持久化编组 | `sch group create/list/add/remove/ungroup` | **virtual group**(平台墙真机坐实:EasyEDA Pro 3.2.121 的 `eda.*` 无编组 API,组件实例 70 个方法/属性零 group/parent 字段——UI 原生组对扩展完全不可见)。按 documentUuid 存 workflow state(同 zones claims 模式);成员存**位号**(netlist key,页内稳定;primitiveId 在 wire 重建/reload 时会变),move 时解析当前 id;同一位号只属一个组(入组查重报所在组);组空自动删;`list` 标 stale 成员;autolayout/autoplace-free 检测到组时警告(v1 不保组内相对几何) |
 | 布局硬门 | `sch layout-lint` | 真实渲染 bbox 查重叠(ERROR 非零退出)/紧间距/off-grid/分区违规 |
 | 布局质量分 | `sch layout-score` | **五维诊断**:标签折叠 / 标签反向(背离核心)/ 外围贴芯片距离 / 长链散乱 / 框贴合——逐项归因**带可执行 fix 命令**(AI 照抄即修);诊断视角,门仍是 layout-lint+check |
 
@@ -95,6 +96,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 出图给人看 | `sch export-image` | `snapshot` 是**视口截图**(需前台、会 stale) | export 不依赖前台 |
 | 读电路状态 | `sch read`(=list+nets+check 聚合) | 只要器件清单用 `list`;只要检查用 `check` | read 最贵但一次拿全 |
 | 分区框(整纸版式) | `zones set` → `zone-plan`(校验)→ `zone-draw --mode partition` | ⚠ 固定九宫格 claim 对宽模组会误报 zone-violation——partition 画完后 `zones clear` | 三段链,顺序固定 |
+| 整组挪动(免收集 id) | `sch group-move --group g1`(先 `sch group create --members …`) | `--ids` 是**无状态**老路:每次手工传全部 primitiveId | 两 flag 互斥;`--group` 存位号、move 时解析 id,并自动带上成员桩线+远端 flag |
 | 建裸网络标志 | **尽量别用** `sch netflag` | 裸 flag 不经 wire = 假连接(铁律 9) | 用 connect/autoconnect |
 
 **参数风格已收敛**:pin 定位统一 `--pin 位号:脚号`(connect/autoconnect/disconnect 同式,connect 另留
@@ -103,46 +105,35 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 
 ## 二、待支持 / 路线(按 AI 可操作性缺口排序)
 
-### 1. 持久化编组(用户点名;sch 侧对齐 PCB 的 #173)
+> 持久化编组(原路线 §1)已落地,见上文「布局与整理」表的 `sch group` 行。
+> 存储在 workflow state 的 `groupsByPage`(按 documentUuid),结构刻意**不 sch
+> 专名化**——PCB 侧同需求(#173)落地时同一存储直接挂 PCB 文档的 uuid。
+> v1 范围:group-move 自动展开附着物 + align/distribute 刚体保护;autolayout /
+> autoplace-free 只警告不保组内几何(组感知重排是后续项)。
 
-**为什么**:AI 操作原理图要「把这几件当一个整体一起动」——现在 `group-move` 是无状态的
-(每次调用传全 ids,布局动作也不知道组的存在),UI 里用户手工编的组 CLI 读不出,
-后续 align/autolayout/单件 modify 会拆散用户确认过的模块。
-
-**平台墙(真机探测,EasyEDA Pro 3.2.121)**:`eda.*` 无通用编组 API
-(`api search group` 仅 pcb_Drc 等长组);`sch_PrimitiveComponent` 实例遍历全部 70 个
-方法/属性,**零 group/parent 字段**——UI 原生组对扩展 API 完全不可见。
-
-**方案(与 #173 的 fallback 一致)**:easyeda-agent 自己的 **virtual group**,按
-documentUuid 持久化(同 zones claims 的 workflow-state 模式):
-- `sch group create --ids …` / `list` / `add` / `remove` / `ungroup`
-- `sch group-move --group <id>`(免传全 ids;成员的桩线+flag 自动纳入)
-- align / distribute / autolayout / autoplace-free **默认把组当不可拆刚体**,显式解组才拆
-- 验收:CLI 建组 → reload → 读回相同成员;布局动作不再单独移动组内成员;组绑定 documentUuid 不跨页串组
-
-### 2. `sch layout-score`(实现中)
+### 1. `sch layout-score`(实现中)
 
 五维布局质量打分(折叠/反向/贴芯片/长链/框贴合),逐项归因带可执行 fix 命令——
 「识别出来 + AI 知道怎么修」。落地后接 **sch refine**(打分驱动的自动精修环,对齐 `pcb refine`)。
 
-### 3. 布局引擎 v2:外围贴芯片 + 顺信号流
+### 2. 布局引擎 v2:外围贴芯片 + 顺信号流
 
 block-apply 无模板时的 fallback 从「per-row 等分栅格」升级为:
 **等分只定核心芯片位置;外围件贴自家核心上下排布**,件的轴向顺服务引脚的出线方向
 (块 `internal_nets` 可推导「谁服务谁」),相邻件间距 ≥117(两个相向水平 netport 标签的实测最小距)。
 真机已按此规则验证:标签全部自然水平、框贴合、可读性达标。
 
-### 4. 分区框 content 纳入 note/flag
+### 3. 分区框 content 纳入 note/flag
 
 框几何目前只算器件 bbox——模块的说明文字和引脚 netflag/netport 会落在框外。
 计划把「归属该模块的 note + 成员件的 marker」并进 content 再画框。
 
-### 5. zone-draw 的 stale bbox
+### 4. zone-draw 的 stale bbox
 
 modify 挪件后**立即** zone-draw 会按旧 bbox 画框(隔几个命令重画就对)。
 需要在 zone-draw 取数前强制 fresh 读(schematic 侧的 stale 时序与 PCB reload 同族)。
 
-### 6. netlabel(实线中途标网名)
+### 5. netlabel(实线中途标网名)
 
 connect/autoconnect 只有端点挂 netflag/netport 一种表达;同模块内「实线直连 + 线上标网名」
 的行业画法(如上拉电阻串进引线)需要 netlabel 创建 API 封装。

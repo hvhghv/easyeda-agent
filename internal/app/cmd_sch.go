@@ -765,6 +765,9 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 						return err
 					}
 					payload["primitiveIds"] = ids
+					// Persistent-group awareness (best-effort, read-only): deleting
+					// a group member leaves the relation stale — say so up front.
+					warnSchGroupMemberDeletion(cfg, window, ids, stderr)
 				}
 				res, err := dispatchCapture(cfg, "schematic.primitives.delete", window, payload, stdout)
 				if err != nil {
@@ -914,22 +917,36 @@ Page-lazy-load law: only the active page's texts are returned — pass --page (o
 	}
 
 	// ── group-move ────────────────────────────────────────────────────────
-	// schematic.group.move — a virtual, stateless group: pass the full member
-	// id list every call (components AND wires in any mix), nothing persists
-	// between calls. NOT backed by EasyEDA's native "组合" UI field (verified
-	// 2026-07-07: that field has zero extension-API surface — no primitive
-	// type, no getter/setter, not smuggled into OtherProperty either).
+	// schematic.group.move — rigid translation. Two input modes:
+	//   --ids    stateless: pass the full member id list every call;
+	//   --group  persistent virtual group (cmd_sch_group.go): members resolve
+	//            from designators, and their stub wires + far-end flags are
+	//            discovered automatically (no more hand-collecting ids).
+	// NOT backed by EasyEDA's native "组合" UI field (verified 2026-07-07:
+	// that field has zero extension-API surface — no primitive type, no
+	// getter/setter, not smuggled into OtherProperty either).
 	{
-		var idsRaw string
+		var idsRaw, groupRef string
 		var dx, dy float64
 		c := &cobra.Command{
 			Use:   "group-move",
-			Short: "Translate a set of components+wires together as one rigid assembly (dx,dy)",
+			Short: "Translate components+wires together as one rigid assembly (dx,dy) — by --ids or a persistent --group",
 			Long: `Move a component and its surrounding stub wires/flags together as a single
 unit — internal relative layout is untouched, only the whole assembly shifts by
-(dx,dy). This is a STATELESS virtual group: pass every member's primitiveId on
-each call, nothing is remembered between invocations (there is no EasyEDA API
-for its native "组合" UI field to persist against — see docs/optimization-loop.md).
+(dx,dy). Two ways to name the members:
+
+  --ids    STATELESS: pass every member's primitiveId on each call, nothing is
+           remembered between invocations.
+  --group  PERSISTENT virtual group (see ` + "`sch group create`" + `): members are
+           stored as designators, resolved to live primitiveIds at call time,
+           and each member's ATTACHMENTS ride along automatically — the stub
+           wires hanging off its pins plus the netflag/netport/netlabel at the
+           far end (wire-tree semantics, same as ` + "`sch disconnect`" + `). A wire
+           tree that also touches a NON-member pin is real inter-part wiring,
+           not a stub — it is left in place and reported.
+
+There is no EasyEDA grouping API to persist against (probed 3.2.121: zero
+group/parent surface), so --group reads easyeda-agent's own page-scoped store.
 
 Components translate via a plain position modify (same primitiveId survives).
 Wires have no modify-in-place, so each is deleted and recreated at the shifted
@@ -937,23 +954,43 @@ endpoints (net/color/width/lineType preserved) — a wire's primitiveId CHANGES;
 pull fresh ids before any follow-up mutation on it.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda sch group-move --ids idComp1,idWire1,idWire2 --dx 200 --dy 0
-  easyeda sch group-move --ids "<R4>,<stub-wire>,<flag>" --dx 0 --dy -150`,
+  easyeda sch group-move --group g1 --dx 100 --dy 0   # members + stubs + flags auto-expanded`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				if idsRaw == "" {
-					return fmt.Errorf("--ids is required (component and/or wire primitiveIds)")
+				if idsRaw != "" && groupRef != "" {
+					return fmt.Errorf("--ids and --group are mutually exclusive")
+				}
+				if idsRaw == "" && groupRef == "" {
+					return fmt.Errorf("pass --ids (primitiveId CSV) or --group <id> (persistent group, `sch group list`)")
 				}
 				if !cmd.Flags().Changed("dx") && !cmd.Flags().Changed("dy") {
 					return fmt.Errorf("at least one of --dx / --dy is required (a zero-move is a no-op)")
 				}
-				ids, err := parseIDList(idsRaw)
-				if err != nil {
-					return err
+				var ids []string
+				if groupRef != "" {
+					set, err := expandSchGroupForMove(cfg, window, groupRef)
+					if err != nil {
+						return err
+					}
+					ids = set.AllIDs()
+					fmt.Fprintf(stderr, "group %s expanded: %d component(s) + %d stub wire(s) + %d flag(s)\n",
+						describeSchGroup(set.Group), len(set.ComponentIDs), len(set.Expansion.WireIDs), len(set.Expansion.FlagIDs))
+					if set.Expansion.SharedTrees > 0 {
+						fmt.Fprintf(stderr, "note: %d wire tree(s) also touch non-member pins (real inter-part wiring) — left in place; re-check connectivity after the move (`sch check`)\n",
+							set.Expansion.SharedTrees)
+					}
+				} else {
+					var err error
+					ids, err = parseIDList(idsRaw)
+					if err != nil {
+						return err
+					}
 				}
 				payload := map[string]any{"primitiveIds": ids, "dx": dx, "dy": dy}
 				return dispatch(cfg, "schematic.group.move", window, payload, stdout, stderr)
 			},
 		}
-		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveIds (components and/or wires) to move together — CSV: id1,id2 (required)")
+		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveIds (components and/or wires) to move together — CSV: id1,id2 (mutually exclusive with --group)")
+		c.Flags().StringVar(&groupRef, "group", "", "persistent group id/name (`sch group list`) — members' stub wires + flags are auto-included")
 		c.Flags().Float64Var(&dx, "dx", 0, "X translation (mil)")
 		c.Flags().Float64Var(&dy, "dy", 0, "Y translation (mil)")
 		sch.AddCommand(c)
@@ -1672,6 +1709,10 @@ the selection). Without --ids it exports the whole active page.`,
 	// 电路说明文本:分区框(zone-draw)只给模块命名,note 给模块配「作用+关键参数」
 	// 的一两行说明 —— 原理图布局默认约定的另一半。
 	sch.AddCommand(newSchNoteCmd(cfg, &window, stdout, stderr))
+	// 持久化编组(用户点名;#173 的 sch 侧):平台无编组 API(真机探测坐实),
+	// easyeda-agent 自己按 documentUuid 持久化组关系,group-move / align /
+	// distribute / autolayout 消费。
+	sch.AddCommand(newSchGroupCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchAlignCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchDistributeCmd(cfg, &window, stdout, stderr))
 	// 布局质量打分(诊断视角,不是门):折叠/反向/贴核心/长链可识别,归因带可

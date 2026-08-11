@@ -1076,6 +1076,9 @@ Spec shape:
 			if dryRun && apply {
 				return fmt.Errorf("--dry-run and --apply are mutually exclusive")
 			}
+			// v1 group awareness (warn only): both engines place parts individually
+			// and do NOT preserve intra-group relative geometry.
+			warnSchGroupsPresent(cfg, *window, "autolayout", stderr)
 			// The official engine has a totally different interface (no spec): it
 			// wraps the platform's own long-running autoLayout over the active page.
 			switch engine {

@@ -280,7 +280,7 @@ func splitDesignators(s string) []string {
 // newSchAlignCmd builds `sch align`.
 func newSchAlignCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var designators, mode, ref string
-	var apply, asJSON bool
+	var apply, asJSON, breakGroup bool
 	c := &cobra.Command{
 		Use:   "align",
 		Short: "Align parts' rendered bboxes (left|right|top|bottom|centerx|centery) to a reference part",
@@ -292,16 +292,24 @@ connect_pin stubs downstream).
 The canvas is y-UP: top aligns the larger-y (visually upper) edges. centerx
 lines up centers into a vertical column; centery into a horizontal row.
 
+Persistent groups (` + "`sch group`" + `) are treated as rigid bodies: a selection that
+contains SOME but not all members of a group is refused (pass the whole group,
+or --break-group to override).
+
 Dry-run by default; --apply moves via schematic.component.modify and re-checks
 overlap among the moved parts.`,
 		Example: `  easyeda sch align --designators C1,C2,C3 --mode centerx --project ceshi
   easyeda sch align --designators U1,C1 --mode top --ref U1 --apply`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			selected := splitDesignators(designators)
+			if err := guardSchGroupIntegrity(cfg, *window, selected, breakGroup, stderr); err != nil {
+				return err
+			}
 			parts, err := fetchAlignParts(cfg, *window)
 			if err != nil {
 				return err
 			}
-			picked, err := pickParts(parts, splitDesignators(designators))
+			picked, err := pickParts(parts, selected)
 			if err != nil {
 				return err
 			}
@@ -317,6 +325,7 @@ overlap among the moved parts.`,
 	c.Flags().StringVar(&ref, "ref", "", "reference designator (default: first in --designators)")
 	c.Flags().BoolVar(&apply, "apply", false, "actually move (default: dry-run plan)")
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the plan as JSON")
+	c.Flags().BoolVar(&breakGroup, "break-group", false, "allow a selection that partially covers a persistent group (explicitly break the rigid body)")
 	_ = c.MarkFlagRequired("designators")
 	return c
 }
@@ -325,7 +334,7 @@ overlap among the moved parts.`,
 func newSchDistributeCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var designators, axis string
 	var gap float64
-	var apply, asJSON bool
+	var apply, asJSON, breakGroup bool
 	c := &cobra.Command{
 		Use:   "distribute",
 		Short: "Equalize edge-to-edge gaps between parts along one axis (x|y)",
@@ -335,16 +344,24 @@ equal edge-to-edge gaps (needs ≥3 parts; errors when the parts overflow the
 span). With --gap every part packs sequentially from the first at exactly that
 gap (≥2 parts). Anchors snap to the 5-unit grid.
 
+Persistent groups (` + "`sch group`" + `) are treated as rigid bodies: a selection that
+contains SOME but not all members of a group is refused (pass the whole group,
+or --break-group to override).
+
 Dry-run by default; --apply moves via schematic.component.modify and re-checks
 overlap among the moved parts.`,
 		Example: `  easyeda sch distribute --designators C1,C2,C3,C4 --axis x --project ceshi
   easyeda sch distribute --designators C1,C2,C3 --axis y --gap 20 --apply`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			selected := splitDesignators(designators)
+			if err := guardSchGroupIntegrity(cfg, *window, selected, breakGroup, stderr); err != nil {
+				return err
+			}
 			parts, err := fetchAlignParts(cfg, *window)
 			if err != nil {
 				return err
 			}
-			picked, err := pickParts(parts, splitDesignators(designators))
+			picked, err := pickParts(parts, selected)
 			if err != nil {
 				return err
 			}
@@ -360,6 +377,7 @@ overlap among the moved parts.`,
 	c.Flags().Float64Var(&gap, "gap", 20, "edge-to-edge gap (omit to redistribute the current span)")
 	c.Flags().BoolVar(&apply, "apply", false, "actually move (default: dry-run plan)")
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the plan as JSON")
+	c.Flags().BoolVar(&breakGroup, "break-group", false, "allow a selection that partially covers a persistent group (explicitly break the rigid body)")
 	_ = c.MarkFlagRequired("designators")
 	return c
 }

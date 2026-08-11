@@ -425,3 +425,53 @@ func TestReplaceSchZonesByPageKeepsThreePagesIndependent(t *testing.T) {
 		t.Fatalf("page-power claims crossed pages: %v", got)
 	}
 }
+
+func TestGroupsByPageRoundTrip(t *testing.T) {
+	t.Setenv(EnvDir, t.TempDir())
+
+	st, err := Load("proj-groups")
+	if err != nil {
+		t.Fatalf("fresh load: %v", err)
+	}
+	st.SetGroupsForPage("page-a", []*Group{
+		{ID: "g1", Name: "mcu-core", Members: []string{"C5", "R1", "U2"}},
+	})
+	st.SetGroupsForPage("page-b", []*Group{
+		{ID: "g1", Members: []string{"J1"}},
+	})
+	if err := Save(st); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := Load("proj-groups")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	a := got.GroupsForPage("page-a")
+	if len(a) != 1 || a[0].ID != "g1" || a[0].Name != "mcu-core" || len(a[0].Members) != 3 {
+		t.Fatalf("page-a groups did not survive the reload: %+v", a)
+	}
+	// Page scoping: page-b's g1 is a DIFFERENT group; unknown pages are empty.
+	if b := got.GroupsForPage("page-b"); len(b) != 1 || b[0].Members[0] != "J1" {
+		t.Fatalf("page-b groups crossed pages: %+v", b)
+	}
+	if got.GroupsForPage("page-c") != nil {
+		t.Fatal("unknown page must have no groups")
+	}
+
+	// Empty table removes the page key entirely.
+	got.SetGroupsForPage("page-a", nil)
+	if got.GroupsForPage("page-a") != nil {
+		t.Fatal("cleared page must have no groups")
+	}
+	if err := Save(got); err != nil {
+		t.Fatalf("save cleared: %v", err)
+	}
+	reloaded, err := Load("proj-groups")
+	if err != nil {
+		t.Fatalf("reload cleared: %v", err)
+	}
+	if reloaded.GroupsForPage("page-a") != nil || reloaded.GroupsForPage("page-b") == nil {
+		t.Fatal("clearing one page must not disturb another")
+	}
+}

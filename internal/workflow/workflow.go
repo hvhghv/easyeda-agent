@@ -205,6 +205,15 @@ type State struct {
 	// does not fall back to SchZones once this map has any entries: mixing the
 	// legacy project-wide table with page-scoped writes would reintroduce crosstalk.
 	SchZonesByPage map[string]map[string]*SchZoneClaim `json:"schZonesByPage,omitempty"`
+	// GroupsByPage are the persistent virtual groups, keyed by document UUID
+	// (sch side of issue #173). The platform has NO grouping API — probed live on
+	// EasyEDA Pro 3.2.121: `eda.*` exposes no generic group calls, and a placed
+	// sch_PrimitiveComponent instance's 70 methods/props carry zero group/parent
+	// fields (native UI groups are invisible to extensions) — so easyeda-agent
+	// persists the relation itself and layout actions consume it. The struct is
+	// deliberately NOT sch-named: a PCB document's UUID can key its own groups
+	// here when #173 lands.
+	GroupsByPage map[string][]*Group `json:"groupsByPage,omitempty"`
 	// SchZoneFrameIds is the pre-page-scoped frame record. New fixed-grid,
 	// partition, and autolayout draws all use SchZoneFrameIdsByPage.
 	SchZoneFrameIds *SchZoneFrames `json:"schZoneFrameIds,omitempty"`
@@ -275,6 +284,49 @@ func (s *State) ReplaceSchZonesByPage(z map[string]map[string]*SchZoneClaim) {
 	s.History = append(s.History, Event{
 		Stage: "sch-zones", At: time.Now().Format(time.RFC3339), Action: "confirm",
 		Note: fmt.Sprintf("%d schematic page zone table(s)", len(z)),
+	})
+}
+
+// Group is one persistent virtual group. Members are DESIGNATORS (upper-case,
+// sorted), not primitiveIds: a designator is the netlist key and stays stable
+// within a document, while primitiveIds churn on wire rebuilds / re-place /
+// window reloads. Consumers (group-move --group) resolve designator → current
+// primitiveId at call time. A designator belongs to at most ONE group per page.
+type Group struct {
+	ID      string   `json:"id"`             // auto-assigned: g1, g2, …
+	Name    string   `json:"name,omitempty"` // optional human-readable label
+	Members []string `json:"members"`        // designators, upper-case, sorted
+	At      string   `json:"at,omitempty"`
+}
+
+// GroupsForPage returns one document's persistent groups (nil when none).
+func (s *State) GroupsForPage(documentUUID string) []*Group {
+	if s == nil {
+		return nil
+	}
+	return s.GroupsByPage[documentUUID]
+}
+
+// SetGroupsForPage replaces one document's group table without disturbing other
+// documents; an empty table removes the page key.
+func (s *State) SetGroupsForPage(documentUUID string, groups []*Group) {
+	if strings.TrimSpace(documentUUID) == "" {
+		return
+	}
+	if s.GroupsByPage == nil {
+		s.GroupsByPage = map[string][]*Group{}
+	}
+	if len(groups) == 0 {
+		delete(s.GroupsByPage, documentUUID)
+		if len(s.GroupsByPage) == 0 {
+			s.GroupsByPage = nil
+		}
+	} else {
+		s.GroupsByPage[documentUUID] = groups
+	}
+	s.History = append(s.History, Event{
+		Stage: "sch-groups", At: time.Now().Format(time.RFC3339), Action: "confirm",
+		Note: fmt.Sprintf("%d virtual group(s) on page %s", len(groups), documentUUID),
 	})
 }
 

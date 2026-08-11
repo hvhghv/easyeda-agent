@@ -198,6 +198,9 @@ A sheet bbox is required (verify with 'easyeda sch sheet-geometry').`,
 				opts.GridStep = gridStep
 			}
 			opts.AvoidTitleBlock = !noAvoidTitle
+			// v1 group awareness (warn only): the packer places parts one by one
+			// and does NOT preserve intra-group relative geometry.
+			warnSchGroupsPresent(cfg, *window, "autoplace-free", stderr)
 			return runAutoplaceFree(cfg, *window, designators, all, opts, apply, asJSON, stdout, stderr)
 		},
 	}

@@ -5,7 +5,7 @@ Cobra 子命令暴露(`--help` 自描述),机器可读真值是 `easyeda actions
 
 | 域 | 状态 | 文档 | 一句话 |
 |---|---|---|---|
-| **原理图**(`easyeda sch` + `blocks`) | ✅ 已支持(40+ 子命令) | [schematic.md](./schematic.md) | 器件/连线/布局/分区三件套/校验门/电路块库/导出,含布局质量五维打分(归因带可执行 fix) |
+| **原理图**(`easyeda sch` + `blocks`) | ✅ 已支持(40+ 子命令) | [schematic.md](./schematic.md) | 器件/连线/布局/持久编组/分区三件套/校验门/电路块库/导出,含布局质量五维打分(归因带可执行 fix) |
 | **PCB**(`easyeda pcb` + `workflow`) | ✅ 已支持(50+ 子命令) | [pcb.md](./pcb.md) | 同步/布局/布线/铺铜/丝印/叠层规则/制造导出,九维布局打分 + 机械阶段门禁 |
 | **3D 外壳设计** | 🚧 规划中(未实现) | [enclosure-3d.md](./enclosure-3d.md) | 板框/安装孔/接口开孔驱动的外壳生成,复用块库的插拔件 openings 声明 |
 
