@@ -20,9 +20,12 @@ package app
 // title band);取不到时降级为区内现有内容 bbox 外扩 zoneTidyBandPad(stderr 报告)。
 //
 // --apply 执行(契约铁则):对每个非零 {dx,dy} 的组走一次完整 group-move 集合派发
-// (持久化组复用 expandSchGroupForMove;散件走同语义的单件展开),组间 settle
-// 350ms(铁则 2:上一组 recreate 后立即展开下一组会 churn);完成后 layout-lint +
-// bridge-check 自检(铁则 5),红则按逆序把已移组移回 (-dx,-dy)。
+// (持久化组复用 expandSchGroupForMove;散件走同语义的单件展开),展开后对计划期
+// 标记的双认领桩线/旗做差集过滤(zoneTidySubtractShared —— 执行与计划的「原地
+// 不动」承诺一致),组间 settle 350ms(铁则 2:上一组 recreate 后立即展开下一组会
+// churn);完成后 layout-lint + bridge-check 自检(铁则 5),红则按逆序把已移组移回
+// (-dx,-dy)。回滚本身不重跑自检(固有语义限制,见 applyZoneTidy),完成后需人工
+// `sch layout-lint` + `sch check` 复核。
 //
 // 共享依赖只读复用:expandSchGroupForMove / fetchSchWirePolylinesStable /
 // expandGroupAttachments(cmd_sch_group.go)、loadSchZoneClaimsForPage
@@ -421,6 +424,63 @@ func zoneTidyUnionBBox(boxes []layoutBBox, wirePolys [][]float64, points [][2]fl
 	return u, has
 }
 
+// ── 双认领图元(计划/执行共用纯函数) ───────────────────────────────────────
+
+// zoneTidyUnitExp 是一个刚体单元计划期的附着展开(桩线/旗 primitiveId 集)。
+type zoneTidyUnitExp struct {
+	wireIDs []string
+	flagIDs []string
+}
+
+// zoneTidySharedIDs 收集被 >1 个单元认领的桩线/旗 primitiveId(区内组间互连:
+// 一棵树同时压在两个单元的成员脚上、又不 terminate 在任何一方 —— 不属于任何单个
+// 刚体)。primitiveId 全文档唯一(group.move 收的就是平铺混合列表),wire/flag
+// 合并进一个集合即可。
+func zoneTidySharedIDs(exps []zoneTidyUnitExp) map[string]bool {
+	wireClaims, flagClaims := map[string]int{}, map[string]int{}
+	for _, e := range exps {
+		for _, id := range e.wireIDs {
+			wireClaims[id]++
+		}
+		for _, id := range e.flagIDs {
+			flagClaims[id]++
+		}
+	}
+	shared := map[string]bool{}
+	for id, n := range wireClaims {
+		if n > 1 {
+			shared[id] = true
+		}
+	}
+	for id, n := range flagClaims {
+		if n > 1 {
+			shared[id] = true
+		}
+	}
+	return shared
+}
+
+// zoneTidySubtractShared 从一个 move 集里剔除计划期标记的双认领图元(差集过滤,
+// 保序,不改输入)。计划侧与执行侧必须用同一把刀:computeZoneTidy 把双认领桩线/
+// 旗从所有单元剔除并承诺「原地不动」,但 --apply 的 expandSchGroupForMove /散件
+// 展开是独立重展开、不知道这次 dedup —— 不过滤的话,一棵 member-touch 单元 A 且
+// 掠过单元 B 成员脚的树会随 A 被拖走,与计划几何承诺相悖(且收尾自检可能不红,
+// 静默偏差绿灯通过)。按计划期 id 过滤是可靠的:双认领图元恰恰全程不被移动,
+// group.move 的 recreate 只发生在被移集合上,它们的 id 在整个 apply/回滚循环中
+// 保持稳定。
+func zoneTidySubtractShared(ids []string, shared map[string]bool) []string {
+	if len(shared) == 0 {
+		return ids
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !shared[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // ── band 来源(纯函数) ─────────────────────────────────────────────────────
 
 // zoneTidyBandFromPlan 从 zone-plan 里取本区的分区 rect 当区带:该分区必须独占
@@ -516,39 +576,41 @@ type zoneTidyReport struct {
 
 // computeZoneTidy 读一次几何快照(components.list + 稳定桩线读),把区成员切成
 // 刚体单元、求每单元全集 bbox、定 band、跑 planZonePack。只读不 mutate。
-func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap float64, stderr io.Writer) (*zoneTidyReport, map[string]zoneTidyUnit, error) {
+// 第三个返回值 = 计划期标记的双认领桩线/旗 id 集,--apply 侧用它做差集过滤,
+// 保证执行与计划的「原地不动」承诺一致。
+func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap float64, stderr io.Writer) (*zoneTidyReport, map[string]zoneTidyUnit, map[string]bool, error) {
 	zones, project, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	zoneName, claim, err := findZoneTidyClaim(zones, zoneRef)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	st, err := loadPcbStageState(project)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	units, err := zoneTidyUnits(claim.Parts, st.GroupsForPage(docUUID))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(units) == 0 {
-		return nil, nil, fmt.Errorf("zone %q claims no placeable parts", zoneName)
+		return nil, nil, nil, fmt.Errorf("zone %q claims no placeable parts", zoneName)
 	}
 
 	res, err := requestAutolayoutAction(pinned, "schematic.components.list", win,
 		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "read zone-tidy geometry")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	comps, err := parseLayoutComps(res.Result)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	wires, err := fetchSchWirePolylinesStable(pinned, win, docUUID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read zone-tidy wire geometry: %w", err)
+		return nil, nil, nil, fmt.Errorf("read zone-tidy wire geometry: %w", err)
 	}
 
 	// 器件/旗几何索引(pin 实测,禁假设 —— 铁则 1)。
@@ -594,19 +656,13 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	for _, f := range flags {
 		flagByID[f.ID] = [2]float64{f.X, f.Y}
 	}
-	type unitExp struct {
-		wireIDs []string
-		flagIDs []string
-	}
-	exps := make([]unitExp, len(units))
-	wireClaims := map[string]int{}
-	flagClaims := map[string]int{}
+	exps := make([]zoneTidyUnitExp, len(units))
 	sharedTrees := 0
 	for i, u := range units {
 		memberSet := map[string]bool{}
 		for _, m := range u.Members {
 			if !partSeen[m] {
-				return nil, nil, fmt.Errorf("claimed part %s (unit %s) is not on the active page — stale claim/group, or wrong page (`doc switch`)", m, u.Ref)
+				return nil, nil, nil, fmt.Errorf("claimed part %s (unit %s) is not on the active page — stale claim/group, or wrong page (`doc switch`)", m, u.Ref)
 			}
 			memberSet[m] = true
 		}
@@ -624,37 +680,22 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 			for _, s := range exp.Suspects {
 				ids = append(ids, s.WireID)
 			}
-			return nil, nil, fmt.Errorf("unit %s expansion is INCOMPLETE — %d residue wire(s) collinearly graze a member pin without attaching (half-move residue): %s; clean up first (`sch prim-delete --ids %s`, then `sch check`) and retry",
+			return nil, nil, nil, fmt.Errorf("unit %s expansion is INCOMPLETE — %d residue wire(s) collinearly graze a member pin without attaching (half-move residue): %s; clean up first (`sch prim-delete --ids %s`, then `sch check`) and retry",
 				u.Ref, len(exp.Suspects), strings.Join(ids, ","), strings.Join(ids, ","))
 		}
 		sharedTrees += exp.SharedTrees
-		exps[i] = unitExp{wireIDs: exp.WireIDs, flagIDs: exp.FlagIDs}
-		for _, id := range exp.WireIDs {
-			wireClaims[id]++
-		}
-		for _, id := range exp.FlagIDs {
-			flagClaims[id]++
-		}
+		exps[i] = zoneTidyUnitExp{wireIDs: exp.WireIDs, flagIDs: exp.FlagIDs}
 	}
 	// 跨单元共用的桩线/旗(区内组间互连)不属于任何单个刚体 —— 从所有单元剔除,
-	// 原地不动(移动会撕另一端),报告提示。
+	// 原地不动(移动会撕另一端),报告提示。sharedIDs 同时返回给 --apply 做同一把
+	// 差集过滤(执行侧独立重展开不知道这次 dedup;见 zoneTidySubtractShared)。
+	sharedIDs := zoneTidySharedIDs(exps)
 	dupWires, dupFlags := 0, 0
 	for i := range exps {
-		var kw, kf []string
-		for _, id := range exps[i].wireIDs {
-			if wireClaims[id] > 1 {
-				dupWires++
-				continue
-			}
-			kw = append(kw, id)
-		}
-		for _, id := range exps[i].flagIDs {
-			if flagClaims[id] > 1 {
-				dupFlags++
-				continue
-			}
-			kf = append(kf, id)
-		}
+		kw := zoneTidySubtractShared(exps[i].wireIDs, sharedIDs)
+		kf := zoneTidySubtractShared(exps[i].flagIDs, sharedIDs)
+		dupWires += len(exps[i].wireIDs) - len(kw)
+		dupFlags += len(exps[i].flagIDs) - len(kf)
 		exps[i].wireIDs, exps[i].flagIDs = kw, kf
 	}
 	if sharedTrees > 0 || dupWires > 0 {
@@ -669,7 +710,7 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 		for _, m := range u.Members {
 			b := partBBox[m]
 			if b == nil {
-				return nil, nil, fmt.Errorf("part %s (unit %s) has no rendered bbox — shallow page data; `doc switch` to the page and retry", m, u.Ref)
+				return nil, nil, nil, fmt.Errorf("part %s (unit %s) has no rendered bbox — shallow page data; `doc switch` to the page and retry", m, u.Ref)
 			}
 			boxes = append(boxes, *b)
 		}
@@ -683,7 +724,7 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 		}
 		bb, ok := zoneTidyUnionBBox(boxes, polys, pts)
 		if !ok {
-			return nil, nil, fmt.Errorf("unit %s produced no geometry", u.Ref)
+			return nil, nil, nil, fmt.Errorf("unit %s produced no geometry", u.Ref)
 		}
 		unitBoxes[i] = bb
 	}
@@ -703,7 +744,7 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	if bandSource == "" {
 		b, ok := zoneTidyContentBand(unitBoxes, zoneTidyBandPad)
 		if !ok {
-			return nil, nil, fmt.Errorf("cannot derive a band for zone %q — no content bbox", zoneName)
+			return nil, nil, nil, fmt.Errorf("cannot derive a band for zone %q — no content bbox", zoneName)
 		}
 		band, bandSource = b, "content-bbox"
 	}
@@ -747,7 +788,7 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 			})
 		}
 	}
-	return rep, unitByRef, nil
+	return rep, unitByRef, sharedIDs, nil
 }
 
 func renderZoneTidyReport(rep *zoneTidyReport, w io.Writer) {
@@ -852,14 +893,19 @@ func zoneTidyBridgeRed(cfg *appConfig, win string) (red bool, detail string, err
 	return false, "", nil
 }
 
-// applyZoneTidy 执行 plan:逐组完整集合刚移(组间 settle),收尾 layout-lint +
-// bridge-check 自检,红则按逆序回滚已移组。
-func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, unitByRef map[string]zoneTidyUnit, stdout, stderr io.Writer) error {
+// applyZoneTidy 执行 plan:逐组完整集合刚移(组间 settle;每次展开后按 sharedIDs
+// 差集过滤,双认领桩线/旗按计划承诺原地不动),收尾 layout-lint + bridge-check
+// 自检,红则按逆序回滚已移组。
+func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, unitByRef map[string]zoneTidyUnit, sharedIDs map[string]bool, stdout, stderr io.Writer) error {
 	type appliedMove struct {
 		unit   zoneTidyUnit
 		dx, dy float64
 	}
 	var applied []appliedMove
+	// rollback 逆序重放 (-dx,-dy)(eda.* 无程序化 undo,回滚 = 再做一次刚移)。
+	// 固有语义限制(同 group-move 家族):回滚完成后**不重跑** layout-lint /
+	// bridge-check 自检 —— 已在错误路径上,二次自检红了也没有更好的自动动作;
+	// 错误消息里明确要求人工 `sch layout-lint` + `sch check` 复核。
 	rollback := func(cause error) error {
 		if len(applied) == 0 {
 			return cause
@@ -871,6 +917,7 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 			mv := applied[i]
 			ids, err := zoneTidyExpandUnitIDs(pinned, win, docUUID, mv.unit)
 			if err == nil {
+				ids = zoneTidySubtractShared(ids, sharedIDs) // 双认领图元正着没动,倒着也不能拖
 				_, err = requestAutolayoutAction(pinned, "schematic.group.move", win,
 					map[string]any{"primitiveIds": ids, "dx": -mv.dx, "dy": -mv.dy},
 					docUUID, "zone-tidy rollback "+mv.unit.Ref)
@@ -882,10 +929,10 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 			fmt.Fprintf(stderr, "  ↩ %s moved back Δ(%g,%g)\n", mv.unit.Ref, -mv.dx, -mv.dy)
 		}
 		if len(failed) > 0 {
-			return fmt.Errorf("%w; ROLLBACK INCOMPLETE — still displaced: %s (undo manually with `sch group-move` using the inverse deltas, then `sch layout-lint`)",
+			return fmt.Errorf("%w; ROLLBACK INCOMPLETE — still displaced: %s (undo manually with `sch group-move` using the inverse deltas, then re-verify with `sch layout-lint` + `sch check`)",
 				cause, strings.Join(failed, "; "))
 		}
-		return fmt.Errorf("%w; all applied moves rolled back", cause)
+		return fmt.Errorf("%w; all applied moves rolled back — rollback does not re-run the self-check, re-verify manually with `sch layout-lint` + `sch check`", cause)
 	}
 
 	for _, g := range rep.Groups {
@@ -903,6 +950,8 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 		if err != nil {
 			return rollback(fmt.Errorf("expand %s: %w", g.Ref, err))
 		}
+		// 差集过滤:计划期标记的双认领桩线/旗不随本单元移动(执行 = 计划承诺)。
+		ids = zoneTidySubtractShared(ids, sharedIDs)
 		if _, err := requestAutolayoutAction(pinned, "schematic.group.move", win,
 			map[string]any{"primitiveIds": ids, "dx": g.DX, "dy": g.DY},
 			docUUID, "zone-tidy move "+g.Ref); err != nil {
@@ -983,7 +1032,7 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 			if err != nil {
 				return err
 			}
-			rep, unitByRef, err := computeZoneTidy(pinned, win, docUUID, zone, hGap, vGap, stderr)
+			rep, unitByRef, sharedIDs, err := computeZoneTidy(pinned, win, docUUID, zone, hGap, vGap, stderr)
 			if err != nil {
 				return err
 			}
@@ -1005,7 +1054,7 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 				}
 				return nil
 			}
-			return applyZoneTidy(pinned, win, docUUID, rep, unitByRef, stdout, stderr)
+			return applyZoneTidy(pinned, win, docUUID, rep, unitByRef, sharedIDs, stdout, stderr)
 		},
 	}
 	c.Flags().StringVar(&zone, "zone", "", "functional zone name (a `sch zones` claim / module name; required)")

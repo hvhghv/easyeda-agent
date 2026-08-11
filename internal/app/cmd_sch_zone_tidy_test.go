@@ -396,3 +396,100 @@ func TestFindZoneTidyClaim(t *testing.T) {
 		t.Fatalf("empty claims should point at `sch zones set`: %v", err)
 	}
 }
+
+// ── 双认领图元:计划期 dedup 与执行期差集过滤一致 ──────────────────────────
+
+func TestZoneTidySubtractShared(t *testing.T) {
+	cases := []struct {
+		name   string
+		ids    []string
+		shared map[string]bool
+		want   []string
+	}{
+		{"nil shared keeps everything", []string{"c1", "w1"}, nil, []string{"c1", "w1"}},
+		{"empty shared keeps everything", []string{"w1"}, map[string]bool{}, []string{"w1"}},
+		{"drops shared ids, keeps order", []string{"c1", "w1", "w2", "f1"},
+			map[string]bool{"w1": true, "f1": true}, []string{"c1", "w2"}},
+		{"unrelated shared ids are inert", []string{"c1", "w2"},
+			map[string]bool{"w9": true}, []string{"c1", "w2"}},
+		{"all shared → empty set", []string{"w1", "f1"},
+			map[string]bool{"w1": true, "f1": true}, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := append([]string(nil), tc.ids...)
+			got := zoneTidySubtractShared(in, tc.shared)
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("want %v, got %v", tc.want, got)
+				}
+			}
+			if !reflect.DeepEqual(in, tc.ids) {
+				t.Errorf("input slice was mutated: %v → %v", tc.ids, in)
+			}
+		})
+	}
+}
+
+// TestZoneTidyApplySetExcludesSharedTree 复现评审观察 1 的场景:一棵桩线树同时
+// member-touch 两个单元(span 中段压过双方成员脚,不 terminate 在任何一方 —— 两侧
+// 展开都会认领),计划期被 zoneTidySharedIDs 标记为双认领并从两个单元剔除(承诺
+// 「原地不动」);执行期 expandSchGroupForMove 语义的独立重展开仍会认领它 ——
+// 断言 zoneTidySubtractShared 差集过滤后,apply 侧 move 集不含双认领的桩线与旗,
+// 而单元自有的桩线/旗保留(执行与计划几何承诺一致)。
+func TestZoneTidyApplySetExcludesSharedTree(t *testing.T) {
+	// 单元 A:成员脚 (100,100)/(100,200);单元 B:成员脚 (300,100)。
+	pinsA := [][2]float64{{100, 100}, {100, 200}}
+	pinsB := [][2]float64{{300, 100}}
+	wires := []schGroupWire{
+		{ID: "wShared", Points: []float64{50, 100, 350, 100}}, // 中段压过 A pin1 与 B pin,两端悬空
+		{ID: "wStubA", Points: []float64{100, 200, 100, 240}}, // A 自有桩线(端点接 A pin2)
+	}
+	flags := []schGroupFlag{
+		{ID: "fShared", X: 200, Y: 100}, // 骑在双认领树上
+		{ID: "fStubA", X: 100, Y: 240},  // 骑在 A 自有桩线上
+	}
+	expand := func(member, other [][2]float64) groupExpansion {
+		return expandGroupAttachments(groupExpandInput{
+			MemberPins: member, OtherPins: other, Wires: wires, Flags: flags,
+		})
+	}
+	// 计划期:两个单元各自展开(computeZoneTidy 的语义)。
+	expA, expB := expand(pinsA, pinsB), expand(pinsB, pinsA)
+	if len(expA.Suspects) != 0 || len(expB.Suspects) != 0 {
+		t.Fatalf("fixture must not trip the residue precheck: %+v / %+v", expA.Suspects, expB.Suspects)
+	}
+	if !strInSlice(expA.WireIDs, "wShared") || !strInSlice(expB.WireIDs, "wShared") {
+		t.Fatalf("fixture must double-claim wShared: A=%v B=%v", expA.WireIDs, expB.WireIDs)
+	}
+	shared := zoneTidySharedIDs([]zoneTidyUnitExp{
+		{wireIDs: expA.WireIDs, flagIDs: expA.FlagIDs},
+		{wireIDs: expB.WireIDs, flagIDs: expB.FlagIDs},
+	})
+	for _, id := range []string{"wShared", "fShared"} {
+		if !shared[id] {
+			t.Errorf("%s is claimed by both units and must be marked shared, got %v", id, shared)
+		}
+	}
+	for _, id := range []string{"wStubA", "fStubA"} {
+		if shared[id] {
+			t.Errorf("%s is A-only and must NOT be marked shared", id)
+		}
+	}
+	// 执行期:expandSchGroupForMove 同语义重展开单元 A(不知道计划期 dedup)——
+	// 仍会认领双认领树;差集过滤后 move 集不得再含它,自有附着保留。
+	applyExp := expand(pinsA, pinsB)
+	applyIDs := append([]string{"compA"}, applyExp.WireIDs...)
+	applyIDs = append(applyIDs, applyExp.FlagIDs...)
+	if !strInSlice(applyIDs, "wShared") {
+		t.Fatalf("apply-side re-expansion should still claim wShared before subtraction: %v", applyIDs)
+	}
+	got := zoneTidySubtractShared(applyIDs, shared)
+	want := []string{"compA", "wStubA", "fStubA"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("apply-side move set after shared subtraction:\n got %v\nwant %v", got, want)
+	}
+}
