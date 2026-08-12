@@ -305,6 +305,17 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 	}
 	geo := analyzeMarkerGeometry(comps, titleBlock, overlapEps)
 
+	// redundant-net-marker needs the wire trees (exec_js read, stable). Best-effort:
+	// a wire-read failure skips this rule only. Single-page only (wires are read
+	// from the active page).
+	if !allPages {
+		if wires, werr := fetchSchWirePolylinesStable(cfg, window, ""); werr != nil {
+			fmt.Fprintf(stderr, "sch check: redundant-marker skipped — wire read failed: %v\n", werr)
+		} else {
+			geo = append(geo, redundantNetMarkerFindings(comps, wires)...)
+		}
+	}
+
 	// Layout-organization rule (铁律 #15): a multi-module page with no functional
 	// zone frames / circuit notes. Mechanical backstop — the rule was skipped twice
 	// in one session when it lived only in docs. Scope to the single page under
@@ -329,12 +340,114 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 			rep.Summary.MarkerOverlaps++
 		case "missing-partition":
 			rep.Summary.MissingPartitions++
+		case "redundant-net-marker":
+			rep.Summary.RedundantNetMarkers++
 		case "folded-net-label":
 			rep.Summary.FoldedNetLabels++
 		}
 	}
 	rep.Summary.Total = len(rep.Findings)
 	rep.Passed = len(rep.Findings) == 0
+}
+
+// ── redundant-net-marker(同树冗余标志)────────────────────────────────────
+//
+// duplicate-net-marker only catches flags whose anchors COINCIDE (quantized).
+// Live 2026-08-12: two 3V3 flags 10 units apart on the SAME stub tree (a repair
+// stacked a second flag on an already-flagged pin) slipped every rule — anchors
+// differ so no duplicate, bbox graze was under the overlap eps, electrically the
+// tree is fine so bridge-check is silent. Visually it renders as stacked text.
+// Rule: within ONE wire tree, ≥2 markers of the same (net, componentType) are
+// redundant — one names the net, the rest are debris. WARN + suggestDeleteIds
+// (keep the first by stable order).
+func redundantNetMarkerFindings(comps []layoutComp, wires []schGroupWire) []checkFinding {
+	if len(wires) == 0 {
+		return nil
+	}
+	// Union-find over wires: two wires share a tree when any vertex of one lies on
+	// the other (same touch semantics as the group expansion / disconnect family).
+	parent := make([]int, len(wires))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	union := func(a, b int) { parent[find(a)] = find(b) }
+	const eps = 0.5
+	for i := 0; i < len(wires); i++ {
+		for j := i + 1; j < len(wires); j++ {
+			touched := false
+			for k := 0; k+1 < len(wires[i].Points) && !touched; k += 2 {
+				if pointOnPolyline(wires[i].Points[k], wires[i].Points[k+1], wires[j].Points, eps) {
+					touched = true
+				}
+			}
+			for k := 0; k+1 < len(wires[j].Points) && !touched; k += 2 {
+				if pointOnPolyline(wires[j].Points[k], wires[j].Points[k+1], wires[i].Points, eps) {
+					touched = true
+				}
+			}
+			if touched {
+				union(i, j)
+			}
+		}
+	}
+	// Assign each marker (netflag/netport/netlabel with a usable anchor) to the
+	// tree its anchor sits on; group per tree by (net, componentType).
+	type key struct {
+		tree int
+		net  string
+		typ  string
+	}
+	groups := map[key][]layoutComp{}
+	for _, c := range comps {
+		if !isSchMarker(c.ComponentType) || !c.AnchorAvailable || c.Net == "" {
+			continue
+		}
+		for wi, w := range wires {
+			if pointOnPolyline(c.X, c.Y, w.Points, eps) {
+				k := key{find(wi), c.Net, c.ComponentType}
+				groups[k] = append(groups[k], c)
+				break
+			}
+		}
+	}
+	var findings []checkFinding
+	for k, ms := range groups {
+		if len(ms) < 2 {
+			continue
+		}
+		sort.Slice(ms, func(i, j int) bool { return ms[i].ID < ms[j].ID })
+		ids := make([]string, len(ms))
+		var del []string
+		for i, m := range ms {
+			ids[i] = m.ID
+			if i > 0 {
+				del = append(del, m.ID)
+			}
+		}
+		findings = append(findings, checkFinding{
+			Type:             "redundant-net-marker",
+			Level:            "warn",
+			MarkerNet:        k.net,
+			ComponentType:    k.typ,
+			PrimitiveIds:     ids,
+			SuggestKeepId:    ms[0].ID,
+			SuggestDeleteIds: del,
+			At:               &checkPoint{X: ms[0].X, Y: ms[0].Y},
+			Count:            len(ms),
+			Message: fmt.Sprintf("同一根线树上有 %d 个 %s(%s)标志 — 一个命名即可,其余是修补残留(视觉堆叠);建议保留 %s,删除 %s",
+				len(ms), k.net, k.typ, ms[0].ID, strings.Join(del, ",")),
+		})
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].SuggestKeepId < findings[j].SuggestKeepId })
+	return findings
 }
 
 // schPartitionMinParts is the part-count above which a page is expected to be

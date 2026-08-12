@@ -246,3 +246,34 @@ func TestFoldedNetLabelFindings(t *testing.T) {
 		t.Fatalf("unexpected finding: %+v", f)
 	}
 }
+
+// TestRedundantNetMarkerFindings: two same-net flags on ONE wire tree with
+// DIFFERENT anchors (live 2026-08-12: 3V3 flags 10 apart on C3's stub — slipped
+// duplicate [anchors differ], marker-overlap [graze under eps] and bridge-check
+// [electrically fine]). Same-tree same-net ≥2 = redundant; distinct trees or
+// distinct nets stay clean.
+func TestRedundantNetMarkerFindings(t *testing.T) {
+	wires := []schGroupWire{
+		{ID: "w1", Points: []float64{270, 555, 270, 605}}, // C3:1 stub, both flags sit on it
+		{ID: "w2", Points: []float64{500, 100, 540, 100}}, // unrelated tree
+	}
+	comps := []layoutComp{
+		{ID: "fA", ComponentType: "netflag", Net: "3V3", X: 270, Y: 595, AnchorAvailable: true},
+		{ID: "fB", ComponentType: "netflag", Net: "3V3", X: 270, Y: 605, AnchorAvailable: true},
+		{ID: "fC", ComponentType: "netflag", Net: "GND", X: 270, Y: 555, AnchorAvailable: true}, // same tree, different net → clean
+		{ID: "fD", ComponentType: "netflag", Net: "3V3", X: 500, Y: 100, AnchorAvailable: true}, // different tree → clean
+	}
+	fs := redundantNetMarkerFindings(comps, wires)
+	if len(fs) != 1 {
+		t.Fatalf("expected exactly one redundant group, got %d: %+v", len(fs), fs)
+	}
+	f := fs[0]
+	if f.Type != "redundant-net-marker" || f.MarkerNet != "3V3" || f.SuggestKeepId != "fA" ||
+		len(f.SuggestDeleteIds) != 1 || f.SuggestDeleteIds[0] != "fB" {
+		t.Fatalf("unexpected finding: %+v", f)
+	}
+	// Clean board: single flag per (tree, net).
+	if got := redundantNetMarkerFindings(comps[1:], wires); len(got) != 0 {
+		t.Fatalf("clean scene must have no findings, got %+v", got)
+	}
+}
