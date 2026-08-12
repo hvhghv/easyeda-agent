@@ -130,18 +130,19 @@ func relayoutVerticalizeSignal(m tidyLiveMember) (tidyMemberPlan, bool) {
 	if railPin == nil || portPin == nil {
 		return tidyMemberPlan{}, false
 	}
-	// 电源旗端朝上(top)/ 地旗端朝下(bottom);netport 占另一端,水平朝左。
+	// 电源旗端朝上(top)/ 地旗端朝下(bottom);netport 占另一端,**顺方向**
+	// 竖直引出(用户拍板「顺着方向摆布即可」,全员等距不受水平文字牵制)。
 	topPin, bottomPin := railPin.Conn.Pin, portPin.Conn.Pin
-	railDir := "up"
+	railDir, portDir := "up", "down"
 	if railClass == "ground" {
 		topPin, bottomPin = portPin.Conn.Pin, railPin.Conn.Pin
-		railDir = "down"
+		railDir, portDir = "down", "up"
 	}
 	railRot, err := tidyLabelRotation(railClass, railDir)
 	if err != nil {
 		return tidyMemberPlan{}, false
 	}
-	portRot, err := tidyLabelRotation("netport", "left")
+	portRot, err := tidyLabelRotation("netport", portDir)
 	if err != nil {
 		return tidyMemberPlan{}, false
 	}
@@ -156,7 +157,7 @@ func relayoutVerticalizeSignal(m tidyLiveMember) (tidyMemberPlan, bool) {
 		GndPin:             bottomPin,
 		Pins: []tidyPinTarget{
 			{Pin: railPin.Conn.Pin, Direction: railDir, Kind: railKind, Net: railPin.Conn.Net, LabelRotation: railRot},
-			{Pin: portPin.Conn.Pin, Direction: "left", Kind: "net_port_bi", Net: portPin.Conn.Net, LabelRotation: portRot},
+			{Pin: portPin.Conn.Pin, Direction: portDir, Kind: "net_port_bi", Net: portPin.Conn.Net, LabelRotation: portRot},
 		},
 	}, true
 }
@@ -247,18 +248,9 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	var rail []relayoutRailItem
 	for _, mp := range plan.Power {
 		d := strings.ToUpper(mp.Designator)
-		reach := 0.0
-		if hasPort[d] {
-			// 该件 netport 引出实长 = 桩 30 + 网名占位实宽(文字溢出长条,按名长算)。
-			for _, t := range mp.Pins {
-				if strings.HasPrefix(t.Kind, "net_port") {
-					if r := 30 + relayoutPortWidth(t.Net); r > reach {
-						reach = r
-					}
-				}
-			}
-		}
-		rail = append(rail, relayoutRailItem{Desig: d, HasPort: hasPort[d], PortReach: reach})
+		// netport 顺方向竖直引出后不再占水平空间(竖排文字带宽 ~12)——全员
+		// 回归 60 等距(水平引出时代的 per-件 reach 计算已不需要)。
+		rail = append(rail, relayoutRailItem{Desig: d, HasPort: hasPort[d]})
 	}
 	sort.SliceStable(rail, func(i, j int) bool { return tidyDesignatorLess(rail[i].Desig, rail[j].Desig) })
 
@@ -293,7 +285,7 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	for _, it := range rail {
 		tag := "上电下地"
 		if it.HasPort {
-			tag = "电源轴竖直 + netport 水平朝左"
+			tag = "电源轴竖直 + netport 顺方向竖直"
 		}
 		fmt.Fprintf(stdout, "  %-6s 竖放 → (%g,%g) %s\n", it.Desig, pos[it.Desig][0], pos[it.Desig][1], tag)
 	}

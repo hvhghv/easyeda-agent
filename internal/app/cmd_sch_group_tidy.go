@@ -270,10 +270,16 @@ func tidyLabelRotation(kind, direction string) (float64, error) {
 			return 180, nil
 		case "right":
 			return 0, nil
-		case "up", "down":
-			return 0, fmt.Errorf("netport 永不竖放(铁则4:长条标竖排=折叠)— direction %q 拒绝", direction)
+		// 竖直值(orientation.json frozenTable port 行)。旧铁则「netport 永不
+		// 竖放」是密集 pin 列上侧向标签堆叠的应激规则;用户 2026-08-12 拍板
+		// 「顺着方向摆布即可」——竖放件的 netport 顺竖直引出合法,拥挤由
+		// marker-overlap 文字带判据管。
+		case "up":
+			return 90, nil
+		case "down":
+			return 270, nil
 		}
-		return 0, fmt.Errorf("netport direction %q 无效(只允许 left/right)", direction)
+		return 0, fmt.Errorf("netport direction %q 无效(up/down/left/right)", direction)
 	}
 	return 0, fmt.Errorf("未知 flag kind %q(power/ground 族或 netport 族)", kind)
 }

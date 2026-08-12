@@ -70,28 +70,13 @@ func analyzeMarkerGeometry(comps []layoutComp, titleBlock *layoutBBox, overlapEp
 // planner produced it). Pure bbox geometry: height > width on a netport ⇔
 // rotation ∈ {90,270}; ground/power markers are near-square and exempt.
 func foldedNetLabelFindings(comps []layoutComp) []checkFinding {
-	var findings []checkFinding
-	for _, c := range comps {
-		if c.ComponentType != "netport" || c.BBox == nil {
-			continue
-		}
-		w := c.BBox.MaxX - c.BBox.MinX
-		h := c.BBox.MaxY - c.BBox.MinY
-		if h <= w {
-			continue
-		}
-		findings = append(findings, checkFinding{
-			Type:          "folded-net-label",
-			Level:         "warn",
-			PrimitiveId:   c.ID,
-			ComponentType: c.ComponentType,
-			MarkerNet:     c.Net,
-			BBox:          c.BBox,
-			At:            &checkPoint{X: c.X, Y: c.Y},
-			Message:       fmt.Sprintf("netport %q 竖排折叠(bbox %.0f×%.0f, 文字侧向)— 重连该脚:`sch autoconnect --replace` 加大 offset 水平错列,或显式 --direction left|right", c.Net, w, h),
-		})
-	}
-	return findings
+	// 2026-08-12 用户拍板「netport 顺着方向摆布即可」:竖放 netport 合法
+	// (rotation 走 orientation 真值表 port up=90/down=270),不再单独报 folded。
+	// 当年立此判据的真实痛点是**密集 pin 列上侧向标签互相堆叠**——那是拥挤,
+	// 由 marker-overlap 管(netport 的平台 bbox 天然含文字,竖放 11×31 参与
+	// overlap 判定)。保留函数骨架与 summary 字段(报表格式兼容),恒零。
+	_ = comps
+	return nil
 }
 
 // reversedNetFlagFindings 抓**反挂的旗**:netflag 的 stored rotation 与其桩线

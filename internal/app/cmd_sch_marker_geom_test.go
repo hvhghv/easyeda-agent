@@ -237,13 +237,11 @@ func TestFoldedNetLabelFindings(t *testing.T) {
 		{ID: "gndv", ComponentType: "netflag", Net: "GND", BBox: bb(0, 0, 10, 21)},                // ground is exempt
 		{ID: "nobox", ComponentType: "netport", Net: "EN"},                                        // no bbox → skip
 	}
+	// 2026-08-12 用户拍板「netport 顺着方向摆布即可」:竖放合法,判据恒零
+	// (拥挤由 marker-overlap 文字带管)。此测试翻转为语义变更的回归钉。
 	fs := foldedNetLabelFindings(comps)
-	if len(fs) != 1 {
-		t.Fatalf("expected exactly the vertical netport flagged, got %d: %+v", len(fs), fs)
-	}
-	f := fs[0]
-	if f.Type != "folded-net-label" || f.PrimitiveId != "folded" || f.MarkerNet != "LED_CTRL" || f.Level != "warn" {
-		t.Fatalf("unexpected finding: %+v", f)
+	if len(fs) != 0 {
+		t.Fatalf("vertical netport is legal now — folded must report nothing, got %d: %+v", len(fs), fs)
 	}
 }
 

@@ -311,7 +311,10 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
 - **信号链末端的电源/地旗必须竖直**(power 上/gnd 下):横躺(left/right)的
   power/gnd 旗文字竖排侧向渲染(平台特性,极难看)。`sch group tidy` 的
   signal-row 会自动竖直化;手工 `sch connect` 时 power/gnd 一律 --direction
-  up/down,只有 netport 才 left/right(netport 相反:永不竖放)。
+  up/down。**netport 顺着导线方向摆布**(2026-08-12 用户拍板,取代旧「永不
+  竖放」铁则):竖放件的 netport 顺竖直引出(up=90/down=270 真值表)、横链
+  netport 水平(left=180/right=0);拥挤由 marker-overlap 文字带判据管,
+  不再单独报 folded。
 
 ## Module-aware autolayout — place parts by module zone
 

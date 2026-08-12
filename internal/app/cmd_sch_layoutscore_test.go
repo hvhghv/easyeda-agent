@@ -84,20 +84,14 @@ func TestSchLayoutScoreFoldedNetportCaught(t *testing.T) {
 	}
 	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
 	d := dimOf(t, rep, schDimFolded)
-	if d.Status != schDimScored || len(d.Attributions) != 1 {
-		t.Fatalf("folded: want scored + 1 attribution, got status=%s attrs=%d", d.Status, len(d.Attributions))
+	// 2026-08-12 用户拍板「netport 顺着方向摆布即可」:竖放合法,folded 维恒
+	// 满分(拥挤由 marker-overlap 文字带管)。此测试从「必须抓到」翻转为
+	// 「必须不再报」——判据语义变更的回归钉。
+	if d.Status != schDimScored || len(d.Attributions) != 0 {
+		t.Fatalf("folded: want scored + 0 attribution (vertical netport is legal now), got status=%s attrs=%d", d.Status, len(d.Attributions))
 	}
-	if d.Score != 100-schScoreFoldedPenalty {
-		t.Fatalf("folded score = %v, want %v", d.Score, 100-schScoreFoldedPenalty)
-	}
-	a := d.Attributions[0]
-	if a.Target != "LED_CTRL" {
-		t.Fatalf("folded target = %q, want LED_CTRL", a.Target)
-	}
-	for _, frag := range []string{"disconnect --pin R3:1", "--x 950 --y 460", "--kind netport", "--net LED_CTRL", "--direction left"} {
-		if !strings.Contains(a.Fix, frag) {
-			t.Fatalf("folded fix %q missing %q", a.Fix, frag)
-		}
+	if d.Score != 100 {
+		t.Fatalf("folded score = %v, want 100 (vertical netport is legal)", d.Score)
 	}
 }
 
@@ -287,15 +281,15 @@ func TestSchLayoutScoreFrameFitTextOverPart(t *testing.T) {
 
 func TestSchLayoutScoreOverallWeightingAndVerdict(t *testing.T) {
 	// 折叠 1 条,其余干净,frame-fit skipped:
-	// overall = (85·1.2 + 100·1.2 + 100·1.0 + 100·0.8) / 4.2 = 95.71 → 95.7。
+	// folded 维已恒满分(竖放 netport 合法,2026-08-12)→ 全维 100,overall=100。
 	comps := []layoutComp{
 		ceshiU2(), ceshiR3(), ceshiLED1(),
 		lsMarker("np-led", "netport", "LED_CTRL", 940, 440,
 			layoutBBox{MinX: 934.5, MinY: 424.5, MaxX: 945.5, MaxY: 455.5}),
 	}
 	rep := analyzeSchLayoutScore(comps, schScoreInputs{})
-	if rep.Overall != 95.7 {
-		t.Fatalf("overall = %v, want 95.7", rep.Overall)
+	if rep.Overall != 100 {
+		t.Fatalf("overall = %v, want 100", rep.Overall)
 	}
 	if rep.Verdict != schScoreVerdict(&rep) {
 		t.Fatalf("verdict %q not derived from schScoreVerdict (single source)", rep.Verdict)
@@ -416,22 +410,18 @@ func TestSchLayoutScoreHostPinPrefersWireMatch(t *testing.T) {
 		lsMarker("np-led", "netport", "LED_CTRL", 940, 440,
 			layoutBBox{MinX: 934.5, MinY: 424.5, MaxX: 945.5, MaxY: 455.5}),
 	}
-	// 无导线输入:几何兜底会被诱饵骗到 U2:29(记录旧行为,证明 wire 匹配改变结论)。
-	repGeom := analyzeSchLayoutScore(comps, schScoreInputs{})
-	geomFix := dimOf(t, repGeom, schDimFolded).Attributions[0].Fix
-	if !strings.Contains(geomFix, "U2:29") {
-		t.Fatalf("fixture no longer reproduces the geometric-nearest trap: %q", geomFix)
+	// folded 维已恒零(竖放 netport 合法,2026-08-12)——原先借它的归因当载体;
+	// 改为直接测宿主解析纯函数:几何兜底被诱饵骗到 U2:29,导线匹配纠正到 R3:1。
+	scene := buildSchScoreScene(comps, schScoreInputs{})
+	marker := comps[2]
+	if i, p, ok := scene.hostByNearestPin(marker); !ok || comps[i].Designator != "U2" || p.Number != "29" {
+		t.Fatalf("fixture no longer reproduces the geometric-nearest trap: host=%v pin=%v", i, p)
 	}
-	// 有 stub 导线 (940,440)→(940,460):电气匹配定宿主 R3:1。
-	rep := analyzeSchLayoutScore(comps, schScoreInputs{
+	sceneW := buildSchScoreScene(comps, schScoreInputs{
 		Wires: []wireSegment{{X0: 940, Y0: 440, X1: 940, Y1: 460, Net: "LED_CTRL"}},
 	})
-	fix := dimOf(t, rep, schDimFolded).Attributions[0].Fix
-	if !strings.Contains(fix, "disconnect --pin R3:1") || !strings.Contains(fix, "--x 940 --y 460") {
-		t.Fatalf("wire-traced host must be R3:1 @(940,460), got fix %q", fix)
-	}
-	if strings.Contains(fix, "U2:29") {
-		t.Fatalf("decoy pin U2:29 must lose to the wired pin: %q", fix)
+	if i, p, ok := sceneW.hostByWireTrace(marker); !ok || comps[i].Designator != "R3" || p.Number != "1" {
+		t.Fatalf("wire-traced host must be R3:1, got host=%v pin=%+v ok=%v", i, p, ok)
 	}
 }
 

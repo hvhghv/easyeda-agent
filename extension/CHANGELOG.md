@@ -6,6 +6,16 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed(CLI 侧,netport 顺方向摆布——用户拍板,取代「永不竖放」铁则)
+- **netport 顺导线方向摆布**:竖放件的 netport 顺竖直引出(rotation 走
+  orientation port 真值表 up=90/down=270),不再强制水平——水平引出的 L 形
+  正是件间距不等的根源;现在全员回归 60 等距完全平行。旧铁则「netport 永不
+  竖放」的真实痛点是密集 pin 列上侧向标签互相堆叠——那是拥挤,由
+  marker-overlap(netport 平台 bbox 天然含文字)管;folded-net-label 判据
+  恒零(函数与 summary 字段保留,报表兼容),layout-score folded 维恒满分。
+- 相关测试翻转为语义变更回归钉(竖放必须不再报);宿主解析测试改为直测
+  hostByNearestPin/hostByWireTrace 纯函数(原借 folded 归因当载体)。
+
 ### Changed(CLI 侧,relayout 全员平行布局——用户拍板)
 - **外围电容电阻全员竖放、同一行、平行对齐**:此前去耦竖放/信号链横放两种姿势
   (同是电容 C4 竖 C5 横,不工整)。现在 signal 件也转竖放——电源旗端朝上/地旗

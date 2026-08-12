@@ -159,9 +159,10 @@ func TestTidyLabelRotationFullTable(t *testing.T) {
 		{"net_port_in", "right", 0, false},
 		{"net_port_out", "left", 180, false},
 		{"net_port_bi", "right", 0, false},
-		{"netport", "up", 0, true},
-		{"netport", "down", 0, true},
-		{"net_port_bi", "up", 0, true},
+		// 2026-08-12 用户拍板「顺着方向摆布」:netport 竖直合法(port 真值表)。
+		{"netport", "up", 90, false},
+		{"netport", "down", 270, false},
+		{"net_port_bi", "up", 90, false},
 		// 表外组合一律拒绝,不猜。
 		{"power", "left", 0, true},
 		{"power", "right", 0, true},
