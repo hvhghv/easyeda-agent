@@ -45,6 +45,8 @@ var pcbZoneNames = map[string]bool{
 	"left-top": true, "left-bottom": true,
 	"center-top": true, "center-bottom": true,
 	"right-top": true, "right-bottom": true,
+	// 跨两列的宽区(超高主控锚+侧排外围)与整面(方位不设限):
+	"left-center": true, "center-right": true, "any": true,
 }
 
 // pcbZoneRect maps a grid zone name to its sub-rectangle of the board rect.
@@ -61,6 +63,11 @@ func pcbZoneRect(zone string, b cpRect) (cpRect, bool) {
 	col := [2]float64{0, 1} // x fractions
 	row := [2]float64{0, 1} // y fractions, 0 = y0 (bottom), 1 = y1 (top)
 	switch {
+	case zone == "any": // 整面,前缀匹配之前拦下
+	case zone == "left-center": // 跨两列,防 HasPrefix("left") 误收窄
+		col = [2]float64{0, 2.0 / 3}
+	case zone == "center-right":
+		col = [2]float64{1.0 / 3, 1}
 	case strings.HasPrefix(zone, "left"):
 		col = [2]float64{0, 1.0 / 3}
 	case strings.HasPrefix(zone, "center"):

@@ -152,6 +152,61 @@ func pickZonePackAnchor(groups []zonePackGroup) int {
 	return best
 }
 
+// packRowsInto:纯 shelf 行排(无锚语义):others 依序放入 region,从 region 顶
+// 部第一行起左→右,行满换行向下;任何一组放不下即 ok=false(不硬塞)。
+// obs 是区域内的禁放障碍(如图签):落位与障碍相交时 cursor 右跳到障碍右缘重试,
+// 右跳出界则换行——障碍只挡它真实覆盖的角落,不再整条带让位(L 形可用区)。
+// packZoneRows(锚下)/ packZoneRowsBeside(锚侧)/ planSheetTidy(纸面)共用。
+func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, hGap, vGap float64) ([]zonePackMove, bool) {
+	moves := make([]zonePackMove, 0, len(others))
+	rowTop := region.MaxY
+	rowLow := rowTop
+	cursor := region.MinX
+	firstInRow := true
+	for _, g := range others {
+		placed := false
+		for !placed {
+			dx := zonePackCeilGrid(cursor - g.BBox.MinX)
+			eff := zonePackOffset(g.BBox, dx, 0)
+			if eff.MaxX > region.MaxX+zonePackEps {
+				if firstInRow && cursor <= region.MinX+zonePackEps {
+					return nil, false // 行首无障碍跳位仍放不下 = 单组比区域还宽,无解
+				}
+				// 行满(或行首被障碍右跳挤爆)换行;空行连换由 MinY 触底终止
+				rowTop = rowLow - vGap
+				rowLow = rowTop
+				cursor = region.MinX
+				firstInRow = true
+				continue
+			}
+			dy := zonePackFloorGrid(rowTop - g.BBox.MaxY)
+			eff = zonePackOffset(g.BBox, dx, dy)
+			if eff.MinY < region.MinY-zonePackEps {
+				return nil, false // 纵向溢出区域底
+			}
+			hit := false
+			for _, o := range obs {
+				if boxesOverlap(eff, o) {
+					cursor = o.MaxX + hGap // 右跳避障;出界由上方 MaxX 检查转换行
+					hit = true
+					break
+				}
+			}
+			if hit {
+				continue
+			}
+			moves = append(moves, zonePackMove{ID: g.ID, DX: dx, DY: dy})
+			cursor = eff.MaxX + hGap
+			if eff.MinY < rowLow {
+				rowLow = eff.MinY
+			}
+			firstInRow = false
+			placed = true
+		}
+	}
+	return moves, true
+}
+
 // packZoneRows 在 band 内做一次锚定 shelf 打包:锚固定在 (anchorDX,anchorDY)
 // 偏移处(须完整落带),其余组从锚正下方一行开始左→右放置,行满换行继续向下。
 // 返回 (moves, ok);任何一组放不下即 ok=false(不硬塞)。
@@ -160,43 +215,37 @@ func packZoneRows(anchor zonePackGroup, anchorDX, anchorDY float64, others []zon
 	if !bboxContains(band, effA) {
 		return nil, false
 	}
+	// 行区域 = 锚正下方(优先与锚组垂直堆叠——上下布局,用户点名)。
+	region := layoutBBox{MinX: band.MinX, MinY: band.MinY, MaxX: band.MaxX, MaxY: effA.MinY - vGap}
+	rows, ok := packRowsInto(others, region, nil, hGap, vGap)
+	if !ok {
+		return nil, false
+	}
 	moves := make([]zonePackMove, 0, len(others)+1)
 	moves = append(moves, zonePackMove{ID: anchor.ID, DX: anchorDX, DY: anchorDY, Anchor: true})
-	rowTop := effA.MinY - vGap // 优先与锚组垂直堆叠(上下布局,用户点名)
-	rowLow := rowTop
-	cursor := band.MinX
-	firstInRow := true
-	for _, g := range others {
-		dx := zonePackCeilGrid(cursor - g.BBox.MinX)
-		eff := zonePackOffset(g.BBox, dx, 0)
-		if eff.MaxX > band.MaxX+zonePackEps {
-			if firstInRow {
-				return nil, false // 单组比带还宽 —— 无解
-			}
-			// 行满换行
-			rowTop = rowLow - vGap
-			rowLow = rowTop
-			cursor = band.MinX
-			firstInRow = true
-			dx = zonePackCeilGrid(cursor - g.BBox.MinX)
-			eff = zonePackOffset(g.BBox, dx, 0)
-			if eff.MaxX > band.MaxX+zonePackEps {
-				return nil, false
-			}
-		}
-		dy := zonePackFloorGrid(rowTop - g.BBox.MaxY)
-		eff = zonePackOffset(g.BBox, dx, dy)
-		if eff.MinY < band.MinY-zonePackEps {
-			return nil, false // 纵向溢出带底
-		}
-		moves = append(moves, zonePackMove{ID: g.ID, DX: dx, DY: dy})
-		cursor = eff.MaxX + hGap
-		if eff.MinY < rowLow {
-			rowLow = eff.MinY
-		}
-		firstInRow = false
+	return append(moves, rows...), true
+}
+
+// packZoneRowsBeside(策略 B):锚固定在 (anchorDX,anchorDY),其余组行排到锚
+// **右侧**子带(x: 锚右缘+hGap → band 右缘,y: band 全高)。锚下行排对「超高锚」
+// (IC 高度 ≈ 带高,如 40 脚模组)结构性无解——去耦/外围本就该贴芯片侧,这是
+// 电气与几何双正确的第二形状。planZonePack 先试锚下(A)再试锚侧(B)。
+func packZoneRowsBeside(anchor zonePackGroup, anchorDX, anchorDY float64, others []zonePackGroup, band layoutBBox, hGap, vGap float64) ([]zonePackMove, bool) {
+	effA := zonePackOffset(anchor.BBox, anchorDX, anchorDY)
+	if !bboxContains(band, effA) {
+		return nil, false
 	}
-	return moves, true
+	region := layoutBBox{MinX: effA.MaxX + hGap, MinY: band.MinY, MaxX: band.MaxX, MaxY: band.MaxY}
+	if region.MaxX <= region.MinX {
+		return nil, false
+	}
+	rows, ok := packRowsInto(others, region, nil, hGap, vGap)
+	if !ok {
+		return nil, false
+	}
+	moves := make([]zonePackMove, 0, len(others)+1)
+	moves = append(moves, zonePackMove{ID: anchor.ID, DX: anchorDX, DY: anchorDY, Anchor: true})
+	return append(moves, rows...), true
 }
 
 // zonePackValidate 是契约不变量的机械终验:每组恰有一个 move、落位后 bbox 完整
@@ -307,6 +356,12 @@ func planZonePack(groups []zonePackGroup, band layoutBBox, hGap, vGap float64) z
 	}
 	for _, c := range cands {
 		if moves, ok := packZoneRows(anchor, c.dx, c.dy, others, band, hGap, vGap); ok {
+			if err := zonePackValidate(groups, moves, band); err == nil {
+				return zonePackPlan{Fits: true, Moves: moves}
+			}
+		}
+		// 策略 B:锚下装不下(典型:超高模组锚吃满带高)→ 其余组行排到锚右侧。
+		if moves, ok := packZoneRowsBeside(anchor, c.dx, c.dy, others, band, hGap, vGap); ok {
 			if err := zonePackValidate(groups, moves, band); err == nil {
 				return zonePackPlan{Fits: true, Moves: moves}
 			}
@@ -501,6 +556,76 @@ func zoneTidyBandFromPlan(plan partitionPlan, zone string) (layoutBBox, bool) {
 		return band, true
 	}
 	return layoutBBox{}, false
+}
+
+// zoneTidyGrowBand:区带装不下时向纸面空地生长——sheet−margin 可用区内、避开
+// 其他分区 rect(inflate gutter)与图签 safe 带,四向独立夹逼、两轮定点、只长
+// 不缩。区带锁死在旧分区 rect 会把「区内容本来就要长大」判成无解(超高模组锚
+// + 去耦列在旧带里永远装不下);邻居约束由夹逼保证,纸面适配交给 sheet tidy。
+func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts partitionOpts) layoutBBox {
+	// band 是**内容**可占区域;分区框还要在内容外画 pad(四向)+ 顶部标题带,
+	// 所以可用区按框的最终占位收缩——不收缩就是「内容顶到纸边 → 框压图签/标题
+	// 带压 IC 头顶」(validation: LabelCollisions / ModuleOutsideZone,实测踩坑)。
+	avail := layoutBBox{
+		MinX: pplan.Sheet.MinX + opts.Margin + partitionContentPad,
+		MinY: pplan.Sheet.MinY + opts.Margin + partitionContentPad,
+		MaxX: pplan.Sheet.MaxX - opts.Margin - partitionContentPad,
+		MaxY: pplan.Sheet.MaxY - opts.Margin - partitionContentPad - opts.TitleBand,
+	}
+	var obs []layoutBBox
+	pad := opts.Gutter + partitionContentPad + opts.TitleBand // 本区框 pad+标题带也要挤进缝里(全向保守)
+	for _, p := range pplan.Partitions {
+		if strInSlice(p.Modules, zone) {
+			continue
+		}
+		obs = append(obs, layoutBBox{
+			MinX: p.BBox.MinX - pad, MinY: p.BBox.MinY - pad,
+			MaxX: p.BBox.MaxX + pad, MaxY: p.BBox.MaxY + pad,
+		})
+	}
+	if safe := inflatedTitleKeepout(pplan.Keepout); safe != nil {
+		obs = append(obs, *safe)
+	}
+	g := band
+	for round := 0; round < 2; round++ { // 两轮定点:先长的方向让后判的方向看到新范围
+		top := avail.MaxY // 上(+y):夹到最近上方障碍底或纸带顶
+		for _, o := range obs {
+			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MinY >= g.MaxY-zonePackEps && o.MinY < top {
+				top = o.MinY
+			}
+		}
+		if top > g.MaxY {
+			g.MaxY = top
+		}
+		bot := avail.MinY // 下(−y)
+		for _, o := range obs {
+			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MaxY <= g.MinY+zonePackEps && o.MaxY > bot {
+				bot = o.MaxY
+			}
+		}
+		if bot < g.MinY {
+			g.MinY = bot
+		}
+		left := avail.MinX // 左(−x)
+		for _, o := range obs {
+			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MaxX <= g.MinX+zonePackEps && o.MaxX > left {
+				left = o.MaxX
+			}
+		}
+		if left < g.MinX {
+			g.MinX = left
+		}
+		right := avail.MaxX // 右(+x)
+		for _, o := range obs {
+			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MinX >= g.MaxX-zonePackEps && o.MinX < right {
+				right = o.MinX
+			}
+		}
+		if right > g.MaxX {
+			g.MaxX = right
+		}
+	}
+	return g
 }
 
 // zoneTidyContentBand 是降级 band:区内现有内容 bbox 并集外扩 pad。
@@ -761,7 +886,9 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	// band:优先 zone-plan 对应分区 rect;取不到时降级为区内内容 bbox 外扩 pad。
 	var band layoutBBox
 	bandSource := ""
+	var pplan *partitionPlan
 	if plan, _, perr := computePartitionPlan(pinned, win, docUUID, defaultPartitionOpts()); perr == nil {
+		pplan = &plan
 		if b, ok := zoneTidyBandFromPlan(plan, zoneName); ok {
 			band, bandSource = b, "zone-plan"
 		} else {
@@ -796,6 +923,15 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 		bboxByRef[u.Ref] = unitBoxes[i]
 	}
 	plan := planZonePack(packGroups, band, hGap, vGap)
+	if !plan.Fits && pplan != nil {
+		// 装不下 → band 向纸面空地生长(避开其他分区/图签/纸边)后重试。
+		if grown := zoneTidyGrowBand(band, *pplan, zoneName, defaultPartitionOpts()); grown != band {
+			fmt.Fprintf(stderr, "note: band %.0f×%.0f too small — grown to %.0f×%.0f within free sheet space\n",
+				band.MaxX-band.MinX, band.MaxY-band.MinY, grown.MaxX-grown.MinX, grown.MaxY-grown.MinY)
+			band, bandSource = grown, bandSource+"+grown"
+			plan = planZonePack(packGroups, band, hGap, vGap)
+		}
+	}
 
 	rep := &zoneTidyReport{
 		Zone: zoneName, Band: band, BandSource: bandSource,

@@ -213,6 +213,12 @@ func zoneRect(zone string, u layoutBBox) layoutBBox {
 		col, row = full, rowT
 	case "bottom":
 		col, row = full, rowB
+	case "left-center": // 跨两列的宽区(如超高主控锚+右侧外围行排)
+		col, row = [2]float64{0, 2.0 / 3}, full
+	case "center-right":
+		col, row = [2]float64{1.0 / 3, 1.0}, full
+	case "any": // 整纸:方位不设限,框/认领仍照常生效
+		col, row = full, full
 	}
 	return layoutBBox{
 		MinX: u.MinX + col[0]*w, MaxX: u.MinX + col[1]*w,

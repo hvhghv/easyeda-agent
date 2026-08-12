@@ -1923,6 +1923,28 @@ const schematicGroupMove: Handler = async (payload) => {
 		const lineType = wire.getState_LineType();
 		try { await eda.sch_PrimitiveWire.delete([id]); }
 		catch (err) { throw edaError(err, `group-move: failed to remove old wire ${id} before recreating it shifted.`); }
+		// The platform MERGES same-net wires sharing endpoints into ONE primitive
+		// whose line is a SEGMENT ARRAY ((x1,y1,x2,y2)×N, arbitrary order) — feeding
+		// that back to create() as-is is REJECTED (live 2026-08-12: the 3-segment
+		// LED_CTRL run died here, deleting the wire without a replacement). Recreate
+		// segment-array wires as N single-segment creates; the platform re-merges
+		// them on its own. A plain 2-point stub goes through the single-create path.
+		const isSegArray = shifted.length >= 8 && shifted.length % 4 === 0;
+		if (isSegArray) {
+			const newIds: Array<string> = [];
+			for (let s = 0; s + 3 < shifted.length; s += 4) {
+				const seg = [shifted[s], shifted[s + 1], shifted[s + 2], shifted[s + 3]];
+				if (Math.abs(seg[0] - seg[2]) <= 1e-6 && Math.abs(seg[1] - seg[3]) <= 1e-6) continue; // zero-length filler
+				let part;
+				try { part = await eda.sch_PrimitiveWire.create(seg, net, color, lineWidth, lineType); }
+				catch (err) { throw edaError(err, `group-move: failed to recreate segment ${s / 4 + 1} of merged wire ${id} (original deleted, ${newIds.length} segment(s) already recreated — finish manually with sch wire).`); }
+				if (!part) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: segment recreate of merged wire ${id} returned no primitive.`);
+				newIds.push(part.getState_PrimitiveId());
+			}
+			if (newIds.length === 0) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `group-move: merged wire ${id} produced no recreatable segments (original deleted).`);
+			movedWires.push({ oldPrimitiveId: id, newPrimitiveId: newIds[0], newPrimitiveIds: newIds, net, segments: newIds.length });
+			continue;
+		}
 		let created;
 		try { created = await eda.sch_PrimitiveWire.create(shifted, net, color, lineWidth, lineType); }
 		catch (err) { throw edaError(err, `group-move: failed to recreate wire ${id} at the shifted position (original was deleted — rerun with the same spec to retry).`); }
@@ -3161,7 +3183,14 @@ const schematicBridgeCheck: Handler = async (payload) => {
 			trees.push({ kind: 'BRIDGE', wireIds: [...t.wireIds], flagIds, pins: [...new Set(touchedPins)], nets: netList });
 		}
 		else if (netList.length === 0 && touchedPins.length > 0) {
-			trees.push({ kind: 'ORPHAN', wireIds: [...t.wireIds], flagIds, pins: [...new Set(touchedPins)], nets: netList });
+			// A flagless tree touching 2+ DISTINCT pins is a legal pin-to-pin direct
+			// connection (the net just gets an auto name like $2N1792) — only a tree
+			// stuck on a SINGLE pin is a dangling stub (live 2026-08-12: the LED
+			// direct-wire replacing a face-to-face netport pair was false-flagged).
+			const uniquePins = [...new Set(touchedPins)];
+			if (uniquePins.length < 2) {
+				trees.push({ kind: 'ORPHAN', wireIds: [...t.wireIds], flagIds, pins: uniquePins, nets: netList });
+			}
 		}
 	}
 

@@ -6,6 +6,36 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-08-12
+
+### Fixed
+- **bridge-check orphan-stub 误报 pin-to-pin 直连线**:无标线树只要触及 ≥2 个
+  不同器件 pin 就是合法直连(网得自动名如 `$2N1792`),不再报 orphan——只有
+  真·单 pin 空桩才是 dangling(实测:LED 直连线替换相向 netport 对后被误伤,
+  `sch gate --strict` 因此挂红)。
+
+### Added(CLI 侧,Sheet 层 + 布局算法通用化)
+- **`sch sheet tidy`** Sheet 层布局:全部功能区当刚体依据纸张排布(shelf 行排,
+  图签当**障碍物**右跳避让 = L 形可用区,非整条底带让位);band 按分区框最终
+  占位收缩(内容外 pad 24 + 标题带 30),区间 vGap 默认 90(两框 pad+标题带
+  =78,+缝 12);现状已达标时幂等 no-op;--apply 逐区 zone move + 统一重画框。
+- **zone tidy band 自动生长**:区带装不下时向纸面空地四向夹逼生长(避开其他
+  分区+图签+纸边,只长不缩)——区带锁死旧分区 rect 会把「区内容要长大」判成
+  无解(超高模组锚在 326 高旧带里永远装不下)。
+- **zone pack 策略 B(锚侧行排)**:锚下装不下时其余组行排到锚右侧子带——
+  40 脚模组这类「超高锚」吃满带高时,去耦/外围贴芯片侧是电气+几何双正确形状。
+- **zone 方位词新增 `left-center` / `center-right` / `any`**:跨两列的宽区
+  (超高主控锚+侧排外围)原有 1/3 网格词罩不住,逐件 zone-violation 误报。
+
+## [0.24.2] - 2026-08-12
+
+### Fixed
+- **group.move 搬迁平台合并线(segment-array)时崩溃**:平台会把共端点同网线
+  合并为一条 line=(x1,y1,x2,y2)×N 的多段图元,原样喂回 `create()` 被拒——旧线
+  已删、新线没建,组半搬(实测 sheet tidy 首跑 MCU 区在 LED_CTRL 三段合并线上
+  阵亡)。现按段拆成 N 次单段 create(平台自行再合并),0 长度填充段跳过,
+  分段失败报出已建段数。
+
 ### Added(CLI 侧,三层布局体系 —— docs/schematic-layout-hierarchy.md)
 - **`sch group tidy`** 组内布局计算:双电源旗电容自动竖放+上电下地+文字朝外
   (真机校准 rotation 表:power up=0/gnd down=0);实测 pin 旋转二义消解、
@@ -17,6 +47,13 @@ follow [SemVer](https://semver.org/).
   给最小尺寸诊断;双认领图元差集过滤(正向/回滚对称)。
 - 三命令均经独立交叉评审(2 FAIL 修复转绿 + 1 PASS 加固)与 ceshi 真机三层
   联动验收(乱排→tidy 复原/整区 move 单程 check 0 dangling/装不下诊断)。
+
+## [0.24.1] - 2026-08-12
+
+### Fixed
+- **dangling 检测对平台合并线(segment-array)误报**:自由端 = 线段图的度 1
+  顶点(偶数 ≥4 顶点按线段对解析,奇数回退折线链;闭环退化取首尾)——此前
+  把多段合并线当折线读,3 段 L 形合并线的中间顶点被误判成自由端。
 
 ## [0.24.0] - 2026-08-12
 

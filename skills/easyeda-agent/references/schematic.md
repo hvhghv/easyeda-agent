@@ -254,6 +254,35 @@ guessed box can't corrupt scoring). **Prefer `sch autoconnect`
 over hand-picking `sch connect --direction/--offset`** for power/ground/netport
 stubs; `sch connect` stays for when you deliberately override the geometry.
 
+## 三层布局体系 — Sheet → Zone → Group(tidy + move 各层齐备)
+
+已连线页的布局重构走**三层刚体体系**(契约 `docs/schematic-layout-hierarchy.md`),
+每层都有 tidy(布局计算)+ move(刚移,携带下层全部内容:器件+桩线+旗+登记 note):
+
+```bash
+easyeda sch group tidy --group g5 --apply       # 组内:竖放/上电下地/文字朝外;--deep 连残线清扫
+easyeda sch zone tidy --zone MCU --deep --apply # 区内:组间 pack(锚下行排,超高锚自动转锚侧行排;
+                                                #   band 装不下自动向纸面空地生长)
+easyeda sch zone move --zone MCU --dx -510 --dy -95   # 区整体刚移(注册 note 随行,框自动重画)
+easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体依纸张排布(图签作障碍
+                                                #   L 形避让;已达标幂等 no-op;完毕统一重画框)
+```
+
+硬知识(实测踩坑):
+- **顺序**:先 `sheet tidy` 排开各区(给区生长空间),再逐区 `zone tidy --deep`,
+  最后 `sheet tidy` 收尾(幂等,已达标不动)。区带装不下 ≠ 无解——常是邻区挡路,
+  是 Sheet 层的活。
+- **组间 hGap 默认 117** = 两个相向水平 netport 标签实测最小距;压到 40 省空间的
+  代价是 `marker-overlap` 一片(实测 3 处)。
+- **区间 vGap 默认 90** = 两框 pad(24×2)+ 标题带(30)+ 缝(12)——区内容间距
+  决定框间距,小于 78 相邻行的分区框必然相叠。
+- **方位词**支持跨两列:`left-center` / `center-right` / `any`(超高主控锚+侧排
+  外围的宽区,1/3 网格词罩不住会逐件误报 zone-violation)。
+- **说明文字必须 `sch note --zone <区名>` 登记**成区成员——分区框才会包住它、
+  zone/sheet move 才带它走;裸 `sch note` 放的文字在区移动后原地掉队。
+- pin 号 ≠ 坐标序:`disconnect --pin X:2` 按**引脚号**解析(LED1 的 pin1 可能在
+  右侧)。删桩前先 `autoconnect --dry-run` 核对该 pin 当前网名,防拆错脚。
+
 ## Module-aware autolayout — place parts by module zone
 
 Where `autoconnect` is pin-level, **`sch autolayout` is module-level placement**:
