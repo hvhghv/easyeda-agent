@@ -74,10 +74,15 @@ const zonePackEps = 1e-6
 
 // zonePackGroup 是一个刚体输入:组(或散件的临时单件组)的全集 bbox
 // (= expandSchGroupForMove 展开集的 bbox 并集)。
+// Bucket 是形态桶(0=竖放,1=横放,按 bbox 纵横比推):行排时**同桶同行**——
+// 竖放去耦(上电下地)与横放信号链(netport 只能水平)混排一行,顶对齐后高矮
+// 参差,视觉上"横一个竖一个不规范"(用户点名);桶切换强制换行,竖的一排、
+// 横的一排。全 0(如 sheet 层)时行为不变。
 type zonePackGroup struct {
 	ID       string
 	BBox     layoutBBox
 	IsAnchor bool
+	Bucket   int
 }
 
 // zonePackMove 是一个组的刚移增量(已吸附 zonePackGridSnap 网格)。
@@ -163,7 +168,16 @@ func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, h
 	rowLow := rowTop
 	cursor := region.MinX
 	firstInRow := true
+	lastBucket := -1
 	for _, g := range others {
+		// 形态桶切换强制换行(竖放组一排、横放组一排;全同桶时无感)。
+		if !firstInRow && lastBucket >= 0 && g.Bucket != lastBucket {
+			rowTop = rowLow - vGap
+			rowLow = rowTop
+			cursor = region.MinX
+			firstInRow = true
+		}
+		lastBucket = g.Bucket
 		placed := false
 		for !placed {
 			dx := zonePackCeilGrid(cursor - g.BBox.MinX)
@@ -329,8 +343,13 @@ func planZonePack(groups []zonePackGroup, band layoutBBox, hGap, vGap float64) z
 			others = append(others, g)
 		}
 	}
-	// 面积降序 → 宽降序 → ID 升序:全序,重排输入不改输出(确定性)。
+	// 形态桶升序(竖放去耦排前,横放信号链其后)→ 面积降序 → 宽降序 → ID 升
+	// 序:全序,重排输入不改输出(确定性)。桶结合 packRowsInto 的桶切换换行,
+	// 竖的一排横的一排,不再混排参差。
 	sort.Slice(others, func(i, j int) bool {
+		if others[i].Bucket != others[j].Bucket {
+			return others[i].Bucket < others[j].Bucket
+		}
 		ai, aj := zonePackArea(others[i].BBox), zonePackArea(others[j].BBox)
 		if ai != aj {
 			return ai > aj
@@ -918,7 +937,13 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	unitByRef := map[string]zoneTidyUnit{}
 	bboxByRef := map[string]layoutBBox{}
 	for i, u := range units {
-		packGroups[i] = zonePackGroup{ID: u.Ref, BBox: unitBoxes[i], IsAnchor: u.Ref == anchorRef}
+		// 形态桶按 bbox 纵横比:高>宽 = 竖放(双电源旗去耦,桶 0 排前),
+		// 否则横放(带 netport 的信号链,桶 1)——同桶同行,横竖不混排。
+		bucket := 1
+		if unitBoxes[i].MaxY-unitBoxes[i].MinY > unitBoxes[i].MaxX-unitBoxes[i].MinX {
+			bucket = 0
+		}
+		packGroups[i] = zonePackGroup{ID: u.Ref, BBox: unitBoxes[i], IsAnchor: u.Ref == anchorRef, Bucket: bucket}
 		unitByRef[u.Ref] = u
 		bboxByRef[u.Ref] = unitBoxes[i]
 	}
@@ -1061,6 +1086,82 @@ func zoneTidyBridgeRed(cfg *appConfig, win string) (red bool, detail string, err
 // applyZoneTidy 执行 plan:逐组完整集合刚移(组间 settle;每次展开后按 sharedIDs
 // 差集过滤,双认领桩线/旗按计划承诺原地不动),收尾 layout-lint + bridge-check
 // 自检,红则按逆序回滚已移组。
+// zoneTidyMoveStep 是一次刚移步骤;staging 的组出现两步(先停带外 parking 再进终位)。
+type zoneTidyMoveStep struct {
+	ref     string
+	dx, dy  float64
+	staging bool
+}
+
+// zoneTidyOrderMoves 按**暂态依赖**排移动次序:组 i 的目标 bbox 压组 j 的当前
+// bbox(j 未移)→ j 必须先走。平台会把暂态叠位期间共点的线 MERGE 成一根,之后
+// 再移就撕出短路(实测 2026-08-12:C5 落到还没搬走的 R2 原位,EN/IO0 两树被
+// merge 成 multi-net,回滚更撕成同点双 netport + 悬空)。计划终态两两不叠是
+// plan validate 的事;这里管的是**次序过程**。有环时选组两跳走位(先停到带右
+// 外 parking 打破环,他组清场后再进终位)。
+func zoneTidyOrderMoves(groups []zoneTidyGroupReport, band layoutBBox) []zoneTidyMoveStep {
+	const pad = 8.0 // 线头 merge 判定容差:bbox 相切时线端点也可能共点
+	inflate := func(b layoutBBox) layoutBBox {
+		return layoutBBox{MinX: b.MinX - pad, MinY: b.MinY - pad, MaxX: b.MaxX + pad, MaxY: b.MaxY + pad}
+	}
+	var movers []zoneTidyGroupReport
+	for _, g := range groups {
+		if g.DX != 0 || g.DY != 0 {
+			movers = append(movers, g)
+		}
+	}
+	steps := make([]zoneTidyMoveStep, 0, len(movers)+1)
+	done := make([]bool, len(movers))
+	cur := make([]layoutBBox, len(movers)) // 当前占位(未移=原位;parked 组已离场)
+	for i, g := range movers {
+		cur[i] = g.BBox
+	}
+	parkX := band.MaxX + 200 // parking 起点:带右外,不与任何在场内容相交
+	var parkedFinal []zoneTidyMoveStep
+	for remaining := len(movers); remaining > 0; {
+		progress := false
+		for i, g := range movers {
+			if done[i] {
+				continue
+			}
+			blocked := false
+			for j := range movers {
+				if j == i || done[j] {
+					continue
+				}
+				if boxesOverlap(inflate(zonePackOffset(g.BBox, g.DX, g.DY)), inflate(cur[j])) {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			steps = append(steps, zoneTidyMoveStep{ref: g.Ref, dx: g.DX, dy: g.DY})
+			done[i], progress = true, true
+			remaining--
+		}
+		if progress {
+			continue
+		}
+		// 环:取第一个未完组停到 parking(两跳),他组清场后从 parking 进终位。
+		for i, g := range movers {
+			if done[i] {
+				continue
+			}
+			pdx := zonePackCeilGrid(parkX - g.BBox.MinX)
+			steps = append(steps, zoneTidyMoveStep{ref: g.Ref, dx: pdx, dy: 0, staging: true})
+			parkedFinal = append(parkedFinal, zoneTidyMoveStep{ref: g.Ref, dx: g.DX - pdx, dy: g.DY})
+			parkX += (g.BBox.MaxX - g.BBox.MinX) + 100
+			cur[i] = layoutBBox{MinX: 1e18, MinY: 1e18, MaxX: 1e18, MaxY: 1e18} // 已离场,不再挡人
+			done[i] = true
+			remaining--
+			break
+		}
+	}
+	return append(steps, parkedFinal...)
+}
+
 func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, unitByRef map[string]zoneTidyUnit, sharedIDs map[string]bool, stdout, stderr io.Writer) error {
 	type appliedMove struct {
 		unit   zoneTidyUnit
@@ -1068,9 +1169,10 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 	}
 	var applied []appliedMove
 	// rollback 逆序重放 (-dx,-dy)(eda.* 无程序化 undo,回滚 = 再做一次刚移)。
-	// 固有语义限制(同 group-move 家族):回滚完成后**不重跑** layout-lint /
-	// bridge-check 自检 —— 已在错误路径上,二次自检红了也没有更好的自动动作;
-	// 错误消息里明确要求人工 `sch layout-lint` + `sch check` 复核。
+	// 回滚完成后**必须复检** bridge-check:回滚本身也是刚移,若 apply 期间平台
+	// 已把叠位共点线 merge,逆移会撕出短路/同点双标——静默留坏板比报错更糟
+	// (实测 2026-08-12:回滚后 EN/IO0 同点 netport + multi-net 线,直到下一轮
+	// gate 才被发现)。红则大字报受损,别让调用方以为板子完好。
 	rollback := func(cause error) error {
 		if len(applied) == 0 {
 			return cause
@@ -1097,33 +1199,41 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 			return fmt.Errorf("%w; ROLLBACK INCOMPLETE — still displaced: %s (undo manually with `sch group-move` using the inverse deltas, then re-verify with `sch layout-lint` + `sch check`)",
 				cause, strings.Join(failed, "; "))
 		}
-		return fmt.Errorf("%w; all applied moves rolled back — rollback does not re-run the self-check, re-verify manually with `sch layout-lint` + `sch check`", cause)
+		time.Sleep(zoneTidySettle)
+		if red, detail, err := zoneTidyBridgeRed(pinned, win); err != nil {
+			return fmt.Errorf("%w; all applied moves rolled back but the post-rollback re-check was UNAVAILABLE (%v) — verify manually with `sch check` + `sch bridge-check`", cause, err)
+		} else if red {
+			return fmt.Errorf("%w; all applied moves rolled back but the board is DAMAGED (%s) — the platform merged wires during the transient overlap and the rollback tore them; repair per `sch check` findings (multi-net wire → delete + reconnect both pins)", cause, detail)
+		}
+		return fmt.Errorf("%w; all applied moves rolled back, post-rollback bridge-check green", cause)
 	}
 
-	for _, g := range rep.Groups {
-		if g.DX == 0 && g.DY == 0 {
-			continue
-		}
-		u, ok := unitByRef[g.Ref]
+	// 暂态依赖排序:目标位压未移组原位的后走(平台 merge 共点线 → 撕裂短路)。
+	for _, st := range zoneTidyOrderMoves(rep.Groups, rep.Band) {
+		u, ok := unitByRef[st.ref]
 		if !ok {
-			return rollback(fmt.Errorf("internal: no unit for move %s", g.Ref))
+			return rollback(fmt.Errorf("internal: no unit for move %s", st.ref))
 		}
 		if len(applied) > 0 {
 			time.Sleep(zoneTidySettle) // 铁则 2:组间 settle
 		}
 		ids, err := zoneTidyExpandUnitIDs(pinned, win, docUUID, u)
 		if err != nil {
-			return rollback(fmt.Errorf("expand %s: %w", g.Ref, err))
+			return rollback(fmt.Errorf("expand %s: %w", st.ref, err))
 		}
 		// 差集过滤:计划期标记的双认领桩线/旗不随本单元移动(执行 = 计划承诺)。
 		ids = zoneTidySubtractShared(ids, sharedIDs)
 		if _, err := requestAutolayoutAction(pinned, "schematic.group.move", win,
-			map[string]any{"primitiveIds": ids, "dx": g.DX, "dy": g.DY},
-			docUUID, "zone-tidy move "+g.Ref); err != nil {
-			return rollback(fmt.Errorf("move %s: %w", g.Ref, err))
+			map[string]any{"primitiveIds": ids, "dx": st.dx, "dy": st.dy},
+			docUUID, "zone-tidy move "+st.ref); err != nil {
+			return rollback(fmt.Errorf("move %s: %w", st.ref, err))
 		}
-		applied = append(applied, appliedMove{unit: u, dx: g.DX, dy: g.DY})
-		fmt.Fprintf(stderr, "✓ %s moved Δ(%g,%g) — %d primitive(s)\n", g.Ref, g.DX, g.DY, len(ids))
+		applied = append(applied, appliedMove{unit: u, dx: st.dx, dy: st.dy})
+		tag := ""
+		if st.staging {
+			tag = "  [staging:带外暂存打破次序环]"
+		}
+		fmt.Fprintf(stderr, "✓ %s moved Δ(%g,%g) — %d primitive(s)%s\n", st.ref, st.dx, st.dy, len(ids), tag)
 	}
 	if len(applied) == 0 {
 		fmt.Fprintln(stdout, "zone already tidy — no group needed to move")

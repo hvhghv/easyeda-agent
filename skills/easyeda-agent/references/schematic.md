@@ -272,6 +272,12 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
 - **顺序**:先 `sheet tidy` 排开各区(给区生长空间),再逐区 `zone tidy --deep`,
   最后 `sheet tidy` 收尾(幂等,已达标不动)。区带装不下 ≠ 无解——常是邻区挡路,
   是 Sheet 层的活。
+- **横竖分桶**:zone tidy 自动把竖放组(双电源旗去耦)与横放组(带 netport 的
+  信号链——netport 竖排文字必折叠,只能水平)排**不同的行**,竖一排横一排;
+  组的移动次序按暂态依赖自动排序(目标位压谁的原位谁先走)——平台会把暂态
+  叠位的共点线 merge 成一根,乱序移动会撕出短路。apply 自检红自动回滚,回滚
+  后还会复检 bridge-check,报「板已受损」就按 findings 修(multi-net wire →
+  删线 + 两端 autoconnect 重连),别当回滚一定无损。
 - **组间 hGap 默认 117** = 两个相向水平 netport 标签实测最小距;压到 40 省空间的
   代价是 `marker-overlap` 一片(实测 3 处)。
 - **区间 vGap 默认 90** = 两框 pad(24×2)+ 标题带(30)+ 缝(12)——区内容间距

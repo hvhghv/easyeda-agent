@@ -32,7 +32,8 @@ import (
 // 词汇表
 // ---------------------------------------------------------------------------
 
-// ZoneNames 是分区格的合法取值（3 列 × 2 行的九宫格变体，共 11 个）。
+// ZoneNames 是分区格的合法取值（3 列 × 2 行的九宫格变体 11 个,加跨两列宽区
+// left-center / center-right 与整面 any,共 14 个)。
 //
 // 必须与 internal/app/pcb_zones.go 的 pcbZoneNames 保持一致；那边是消费侧，
 // 这边是契约侧。internal/app 有一条单测断言两者相同（app 可以 import spec，
@@ -43,6 +44,8 @@ var ZoneNames = map[string]bool{
 	"left-top": true, "left-bottom": true,
 	"center-top": true, "center-bottom": true,
 	"right-top": true, "right-bottom": true,
+	// 跨两列的宽区(超高主控锚+侧排外围)与整面(方位不设限):
+	"left-center": true, "center-right": true, "any": true,
 }
 
 // ModuleKinds 是功能域词汇 —— `flow` 里出现的就是这些值，modules[].kind 也用它。

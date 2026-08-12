@@ -6,6 +6,20 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added(CLI 侧,zone tidy 组间布局细化)
+- **同形态分桶分行**:竖放组(双电源旗去耦,上电下地)与横放组(带 netport 的
+  信号链,netport 只能水平)不再按面积混排一行——桶切换强制换行,竖的一排、
+  横的一排(用户点名「横着和竖着不规范」;混排顶对齐后高矮参差)。
+- **移动次序依赖排序**:组 i 的目标位压着未移组 j 的原位 → j 先走(Kahn,
+  有环带外 staging 两跳)。平台会把暂态叠位的共点线 MERGE 成一根,之后再移
+  就撕出短路(实测:C5 落到未搬走的 R2 原位,EN/IO0 树合并 multi-net,回滚
+  更撕成同点双 netport)。
+- **回滚后强制复检 bridge-check**:回滚也是刚移,merge 过的线逆移同样撕——
+  红则大字报「板已受损+修复路径」,不再静默留坏板(此前提示人工复核,实测
+  漏过一次坏板直到下轮 gate 才发现)。
+- zone 方位词 `left-center`/`center-right`/`any` 同步进 `internal/spec.ZoneNames`
+  (契约侧;跨包一致性单测抓出的分叉)。
+
 ## [0.24.3] - 2026-08-12
 
 ### Fixed
