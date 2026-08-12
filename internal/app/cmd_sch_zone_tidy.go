@@ -634,11 +634,17 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 	if safe := inflatedTitleKeepout(pplan.Keepout); safe != nil {
 		obs = append(obs, *safe)
 	}
+	// 障碍钳制:凡与 band 正交区间相交、且伸过 band 边缘的障碍,该向生长上限
+	// = max/min(障碍近缘, 现边)——**已相交的障碍钳在原地**(旧判据 `o.MinY >=
+	// g.MaxY` 只认「完全在外侧」的障碍,初始 inflate 相交的邻区被忽略,生长
+	// 穿透邻区腹地:实测 LED band 穿进 MCU 区,链件摆进别人家)。只长不缩。
 	growV := func(g layoutBBox) layoutBBox { // 纵向夹逼(上+下)
 		top := avail.MaxY
 		for _, o := range obs {
-			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MinY >= g.MaxY-zonePackEps && o.MinY < top {
-				top = o.MinY
+			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MaxY > g.MaxY {
+				if lim := math.Max(o.MinY, g.MaxY); lim < top {
+					top = lim
+				}
 			}
 		}
 		if top > g.MaxY {
@@ -646,8 +652,10 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		}
 		bot := avail.MinY
 		for _, o := range obs {
-			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MaxY <= g.MinY+zonePackEps && o.MaxY > bot {
-				bot = o.MaxY
+			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MinY < g.MinY {
+				if lim := math.Min(o.MaxY, g.MinY); lim > bot {
+					bot = lim
+				}
 			}
 		}
 		if bot < g.MinY {
@@ -658,8 +666,10 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 	growH := func(g layoutBBox) layoutBBox { // 横向夹逼(左+右)
 		left := avail.MinX
 		for _, o := range obs {
-			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MaxX <= g.MinX+zonePackEps && o.MaxX > left {
-				left = o.MaxX
+			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MinX < g.MinX {
+				if lim := math.Min(o.MaxX, g.MinX); lim > left {
+					left = lim
+				}
 			}
 		}
 		if left < g.MinX {
@@ -667,8 +677,10 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		}
 		right := avail.MaxX
 		for _, o := range obs {
-			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MinX >= g.MaxX-zonePackEps && o.MinX < right {
-				right = o.MinX
+			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MaxX > g.MaxX {
+				if lim := math.Max(o.MinX, g.MaxX); lim < right {
+					right = lim
+				}
 			}
 		}
 		if right > g.MaxX {

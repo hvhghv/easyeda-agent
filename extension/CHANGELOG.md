@@ -6,6 +6,23 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-12
+
+原理图布局体系定版:placement-first 区级重排(`sch zone relayout`)+ 串联链
+共线串接 + 全员竖放平行对齐 + 顺方向 netport + 竖直旗真值表修正 + 三个新判据
+(reversed-net-flag / marker-overlap 文字带 / redundant-net-marker)。
+连接器含 0.24.1–0.24.5 全部修复(合并线段对解析三处统一/orphan-stub 直连豁免)。
+
+### Added(CLI 侧,串联链 chain——用户拍板「一串完成不折弯」)
+- **relayout 识别 pin-to-pin 直连链**(如 GND—LED—R—netport):全链共线横放
+  串接,相邻 pin 短直线、零折弯;地端在左(旗竖直向下)、netport 端在右
+  (水平顺链向);极性件(LED)rot 按「链左 pin 实测在左」消解。链宽超区带
+  报错提示手动分段(断点两侧同名 netport 对、2+2 分行)——能一串就一串,
+  不主动加标签。
+- **band 生长障碍钳制修复**:旧判据只认「完全在外侧」的障碍,初始 inflate
+  相交的邻区被忽略 → 生长穿透邻区腹地(实测 LED band 穿进 MCU 区,链件摆进
+  别人家)。凡与 band 正交区间相交且伸过边缘的障碍一律钳制,已相交钳在原地。
+
 ### Changed(CLI 侧,netport 顺方向摆布——用户拍板,取代「永不竖放」铁则)
 - **netport 顺导线方向摆布**:竖放件的 netport 顺竖直引出(rotation 走
   orientation port 真值表 up=90/down=270),不再强制水平——水平引出的 L 形

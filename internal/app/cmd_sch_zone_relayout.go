@@ -6,8 +6,9 @@ package app
 // 核心器件的方向和位置,自动计算出来;先对齐理顺电容电阻的方向和间隔,然后再连」):
 //
 //	1. 锚 IC 定位定向(V1:保持现位现向 —— 用户已确认的核心朝向);
-//	2. 外围器件按角色纯计算终局:去耦(双电源旗)竖放、锚右同顶行、等距;
-//	   信号链(带 netport)横放、其下行排、行内基线共线;间隔/网格全部机械;
+//	2. 外围器件按角色纯计算终局:**全员竖放同一行平行对齐**(电上地下,
+//	   netport 顺方向引出);pin 直连链(chain)共线横放串接、零折弯;
+//	   间隔全部按实测几何计算(netport 网名实长、锚伸出),无拍脑袋常量;
 //	3. deep sweep 一次删净全部旧桩/旗(整树)→ modify 逐件落位 → connect_pin
 //	   一遍性重连(方向/rotation 走真值表;链端电源旗竖直)。
 //
@@ -228,9 +229,23 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 			anchorBBox = m.Comp.BBox
 		}
 	}
+	// 串联链识别(pin-to-pin 直连拓扑):链成员从 signal/skip 中拿走,共线串接。
+	chains, chained := relayoutDetectChains(members, wires)
+	if len(chained) > 0 {
+		var ks []string
+		for _, d := range plan.Skipped {
+			if !chained[strings.ToUpper(d)] {
+				ks = append(ks, d)
+			}
+		}
+		plan.Skipped = ks
+	}
 	hasPort := map[string]bool{}
 	var keptSignal []tidySignalPlan
 	for _, sp := range plan.Signal {
+		if chained[strings.ToUpper(sp.Designator)] {
+			continue
+		}
 		d := strings.ToUpper(sp.Designator)
 		m, ok := members[d]
 		if !ok {
@@ -292,6 +307,13 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	for _, sp := range plan.Signal {
 		fmt.Fprintf(stdout, "  %-6s 横放保留(双 netport 无电源轴)\n", sp.Designator)
 	}
+	for _, ch := range chains {
+		var names []string
+		for _, cm := range ch.Members {
+			names = append(names, cm.Desig)
+		}
+		fmt.Fprintf(stdout, "  串联链:%s ─ %s ─ %s(共线串接,零折弯)\n", ch.LeftNet, strings.Join(names, " ─ "), ch.RightNet)
+	}
 	for _, d := range plan.Skipped {
 		fmt.Fprintf(stdout, "  %-6s skip(未建模连接,原位不动)\n", d)
 	}
@@ -301,6 +323,63 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	}
 	if err := tidyApply(pinned, win, docUUID, plan, members, comps, stdout, stderr); err != nil {
 		return err
+	}
+	// 串联链落地:sweep 链树(成员=链件)→ 共线横放 → 端标 + 直线。
+	if len(chains) > 0 {
+		chainSet := map[string]bool{}
+		for d := range chained {
+			chainSet[d] = true
+		}
+		freshWires, werr := fetchSchWirePolylinesStable(pinned, win, docUUID)
+		if werr != nil {
+			return fmt.Errorf("chain sweep wire read:%w", werr)
+		}
+		ids, serr := tidyDeepSweepPlan(chainSet, comps, freshWires)
+		if serr != nil {
+			return serr
+		}
+		if len(ids) > 0 {
+			if _, err := requestAutolayoutAction(pinned, "schematic.primitives.delete", win,
+				map[string]any{"primitiveIds": ids}, docUUID, "chain sweep"); err != nil {
+				return fmt.Errorf("chain sweep delete:%w", err)
+			}
+			fmt.Fprintf(stdout, "  链深度清扫:%d 个旧桩/旗/线\n", len(ids))
+		}
+		// 链行放竖放行下一行(rail 空则顶行)。
+		right := plan.Anchor.X + plan.Anchor.HalfWidth
+		topY := plan.Anchor.Y
+		if anchorBBox != nil {
+			right, topY = anchorBBox.MaxX, anchorBBox.MaxY
+		}
+		if plan.AnchorDesig == "" { // 无锚区(如 LED):从区带左上排
+			right, topY = band.MinX, band.MaxY
+		}
+		chainY := snap5(topY - 50)
+		if len(rail) > 0 {
+			chainY = snap5(topY - 100 - 130)
+		}
+		startX := right + 80
+		for _, ch := range chains {
+			// 链总宽预检:超区带即报错(v1 不自动分段;分段=断点两侧同名 netport 对)。
+			w := 0.0
+			for _, cm := range ch.Members {
+				w += cm.PinSpan
+			}
+			w += 20*float64(len(ch.Members)-1) + 80
+			if startX+w > band.MaxX {
+				return fmt.Errorf("串联链宽 %.0f 超区带(%.0f)— 请手动分段:断点两侧同名 netport 对(2+2),再各自成链", w, band.MaxX-startX)
+			}
+			if err := relayoutApplyChain(pinned, win, docUUID, ch, members, startX, chainY, stdout); err != nil {
+				return err
+			}
+			chainY = snap5(chainY - 130)
+		}
+		if err := tidySelfCheck(pinned, win, docUUID); err != nil {
+			return fmt.Errorf("链落地后自检红:%w(按 sch check findings 修复)", err)
+		}
+		if err := saveAutolayoutDocument(pinned, win, docUUID, "save chain relayout"); err != nil {
+			fmt.Fprintf(stderr, "⚠ save: %v\n", err)
+		}
 	}
 	// 锚 IC 的横躺电源/地旗也竖直化(与外围统一「电上地下」;用户点名:外围都
 	// 遵守约定,中心器件不能例外)。仅当竖直桩不穿本件其他 pin(列顶的电源脚 /
@@ -408,4 +487,289 @@ func newSchZoneRelayoutCommand(cfg *appConfig, window *string, stdout, stderr io
 	c.Flags().StringVar(&zone, "zone", "", "功能区名(zones claim)")
 	c.Flags().BoolVar(&apply, "apply", false, "执行(默认 dry-run)")
 	return c
+}
+
+// ── 串联链(chain)──────────────────────────────────────────────────────────
+//
+// 用户拍板(2026-08-12):「可以做成一串完成而不用折弯」——器件 pin 经普通导线
+// pin-to-pin 直连成链(如 GND—LED—R—netport)时,布局为**全链共线横放串接**:
+// 相邻 pin 20 短直线、零折弯;地端在左(旗竖直向下)、netport 端在右(水平顺
+// 链向)。链宽超区带才断链(两侧同名 netport 对,2+2 分行)——能一串就一串,
+// 不主动加标签;v1 超宽先报错提示手动分段。
+
+type relayoutChainMember struct {
+	Desig    string
+	LeftPin  string // 链序左端 pin(rot 消解判据:实测必须在左)
+	RightPin string
+	PinSpan  float64
+}
+
+type relayoutChain struct {
+	Members   []relayoutChainMember // 左→右
+	LeftKind  string                // connect_pin kind(ground/power/net_port_bi)
+	LeftNet   string
+	LeftDir   string // down(gnd)/up(power)/left(netport)
+	RightKind string
+	RightNet  string
+	RightDir  string
+}
+
+// relayoutDetectChains 从「有 OnWire 无标 pin」的区成员里重建串联链:两件的
+// OnWire pin 共 wire 树 = 链边;分量线性(每件 ≤2 边、无分叉)才成链;链两端
+// pin 的旗/netport 定端标。返回链与消耗的位号集合。
+func relayoutDetectChains(members map[string]tidyLiveMember, wires []schGroupWire) ([]relayoutChain, map[string]bool) {
+	roots := tidyWireRoots(wires)
+	pinTree := func(x, y float64) int {
+		for i, w := range wires {
+			if pointOnPolyline(x, y, w.Points, schGroupEps) {
+				return roots[i]
+			}
+		}
+		return -1
+	}
+	// 每件的 OnWire pin → 树根;树根 → 挂着的件列表。
+	type chainEnd struct {
+		desig string
+		pin   string
+	}
+	treeEnds := map[int][]chainEnd{}
+	for d, m := range members {
+		for _, p := range m.Pins {
+			if p.Conn.Flag == "" && p.Conn.OnWire {
+				if r := pinTree(p.X, p.Y); r >= 0 {
+					treeEnds[r] = append(treeEnds[r], chainEnd{d, p.Conn.Pin})
+				}
+			}
+		}
+	}
+	// 邻接:每树恰 2 端 = 一条链边(>2 = 分叉树,不支持)。
+	adj := map[string][]chainEnd{}
+	for _, ends := range treeEnds {
+		if len(ends) != 2 {
+			continue
+		}
+		a, b := ends[0], ends[1]
+		if a.desig == b.desig {
+			continue
+		}
+		adj[a.desig] = append(adj[a.desig], b)
+		adj[b.desig] = append(adj[b.desig], a)
+	}
+	consumed := map[string]bool{}
+	var chains []relayoutChain
+	for d := range adj {
+		if consumed[d] || len(adj[d]) != 1 {
+			continue // 链从度 1 的端件开始走
+		}
+		// 走链。
+		var order []string
+		cur, prev := d, ""
+		for cur != "" {
+			order = append(order, cur)
+			next := ""
+			for _, e := range adj[cur] {
+				if e.desig != prev {
+					next = e.desig
+					break
+				}
+			}
+			prev, cur = cur, next
+			if len(order) > 32 {
+				break // 环兜底
+			}
+		}
+		if len(order) < 2 {
+			continue
+		}
+		// 端标:链首件的非链 pin 上的旗;链尾件同理。链内 pin 配对从 adj 边读。
+		ch := relayoutChain{}
+		ok := true
+		for i, desig := range order {
+			m := members[desig]
+			// 本件的链邻 pin(与前/后件共树的 pin)。
+			linkPins := map[string]bool{}
+			for _, p := range m.Pins {
+				if p.Conn.Flag == "" && p.Conn.OnWire {
+					linkPins[p.Conn.Pin] = true
+				}
+			}
+			var endPin string // 非链 pin(带标)
+			var endConn tidyPinConn
+			for _, p := range m.Pins {
+				if !linkPins[p.Conn.Pin] {
+					endPin, endConn = p.Conn.Pin, p.Conn
+				}
+			}
+			pinSpan := 40.0
+			if len(m.Pins) >= 2 {
+				minX, maxX := m.Pins[0].X, m.Pins[0].X
+				for _, p := range m.Pins[1:] {
+					if p.X < minX {
+						minX = p.X
+					}
+					if p.X > maxX {
+						maxX = p.X
+					}
+				}
+				if s := maxX - minX; s > 0 {
+					pinSpan = s
+				}
+			}
+			cm := relayoutChainMember{Desig: desig, PinSpan: pinSpan}
+			switch i {
+			case 0: // 链首:端 pin 在左
+				cm.LeftPin = endPin
+				for p := range linkPins {
+					cm.RightPin = p
+				}
+				switch tidyNetClass(endConn.Net) {
+				case "ground":
+					ch.LeftKind, ch.LeftDir = "ground", "down"
+				case "power":
+					ch.LeftKind, ch.LeftDir = "power", "up"
+				default:
+					if endConn.Flag == "netport" {
+						ch.LeftKind, ch.LeftDir = "net_port_bi", "left"
+					} else {
+						ok = false
+					}
+				}
+				ch.LeftNet = endConn.Net
+			case len(order) - 1: // 链尾:端 pin 在右
+				cm.RightPin = endPin
+				for p := range linkPins {
+					cm.LeftPin = p
+				}
+				switch tidyNetClass(endConn.Net) {
+				case "ground":
+					ch.RightKind, ch.RightDir = "ground", "down"
+				case "power":
+					ch.RightKind, ch.RightDir = "power", "up"
+				default:
+					if endConn.Flag == "netport" {
+						ch.RightKind, ch.RightDir = "net_port_bi", "right"
+					} else {
+						ok = false
+					}
+				}
+				ch.RightNet = endConn.Net
+			default: // 链中件:两 pin 都是链 pin,左右按走向由 exec 实测消解
+				var ps []string
+				for p := range linkPins {
+					ps = append(ps, p)
+				}
+				sort.Strings(ps)
+				if len(ps) >= 2 {
+					cm.LeftPin, cm.RightPin = ps[0], ps[1]
+				} else {
+					ok = false
+				}
+			}
+			ch.Members = append(ch.Members, cm)
+		}
+		if !ok || ch.LeftKind == "" || ch.RightKind == "" {
+			continue
+		}
+		// 惯例:地端在左;若右端是地而左端不是 → 反转链。
+		if ch.RightKind == "ground" && ch.LeftKind != "ground" {
+			for i, j := 0, len(ch.Members)-1; i < j; i, j = i+1, j-1 {
+				ch.Members[i], ch.Members[j] = ch.Members[j], ch.Members[i]
+			}
+			for i := range ch.Members {
+				ch.Members[i].LeftPin, ch.Members[i].RightPin = ch.Members[i].RightPin, ch.Members[i].LeftPin
+			}
+			ch.LeftKind, ch.RightKind = ch.RightKind, ch.LeftKind
+			ch.LeftNet, ch.RightNet = ch.RightNet, ch.LeftNet
+			ch.LeftDir, ch.RightDir = ch.RightDir, ch.LeftDir
+			if ch.LeftDir == "right" {
+				ch.LeftDir = "left"
+			}
+			if ch.RightDir == "left" {
+				ch.RightDir = "right"
+			}
+		}
+		for _, cm := range ch.Members {
+			consumed[cm.Desig] = true
+		}
+		chains = append(chains, ch)
+	}
+	return chains, consumed
+}
+
+// relayoutApplyChain 执行一条链:sweep(树整删)已由调用方完成;逐件横放落位
+// (rot 消解:LeftPin 实测在左)→ 端标 connect_pin → 相邻 pin 直线 wire。
+func relayoutApplyChain(cfg *appConfig, win, docUUID string, ch relayoutChain, members map[string]tidyLiveMember,
+	startX, rowY float64, stdout io.Writer) error {
+	const pinGap = 20.0
+	cursor := startX
+	type placed struct{ leftX, rightX, y float64 }
+	pos := make([]placed, len(ch.Members))
+	for i, cm := range ch.Members {
+		m, okm := members[strings.ToUpper(cm.Desig)]
+		if !okm {
+			return fmt.Errorf("chain member %s 不在 live 集合", cm.Desig)
+		}
+		anchorX := snap5(cursor + cm.PinSpan/2)
+		// 横放候选 rot 0/180;实测 LeftPin 在左消解(极性件如 LED 靠这一步保向)。
+		usedRot := 0.0
+		if err := tidyModifyPose(cfg, win, docUUID, m.Comp.ID, anchorX, rowY, usedRot); err != nil {
+			return fmt.Errorf("modify %s:%w", cm.Desig, err)
+		}
+		pins, err := tidySettledPins(cfg, win, docUUID, cm.Desig)
+		if err != nil {
+			return err
+		}
+		lx, ly, ok1 := tidyPinCoord(pins, cm.LeftPin)
+		rx, _, ok2 := tidyPinCoord(pins, cm.RightPin)
+		if !ok1 || !ok2 {
+			return fmt.Errorf("%s 实测 pins 缺 %s/%s", cm.Desig, cm.LeftPin, cm.RightPin)
+		}
+		if lx > rx { // 左 pin 不在左 → 翻 180
+			usedRot = 180
+			if err := tidyModifyPose(cfg, win, docUUID, m.Comp.ID, anchorX, rowY, usedRot); err != nil {
+				return fmt.Errorf("modify %s rot180:%w", cm.Desig, err)
+			}
+			if pins, err = tidySettledPins(cfg, win, docUUID, cm.Desig); err != nil {
+				return err
+			}
+			lx, ly, _ = tidyPinCoord(pins, cm.LeftPin)
+			rx, _, _ = tidyPinCoord(pins, cm.RightPin)
+			if lx > rx {
+				return fmt.Errorf("%s rot 0/180 两候选 %s 都不在左 — 符号基向异常", cm.Desig, cm.LeftPin)
+			}
+		}
+		pos[i] = placed{leftX: lx, rightX: rx, y: ly}
+		cursor = rx + pinGap
+		fmt.Fprintf(stdout, "  ✓ %s 链位 (%g,%g) rot %g\n", cm.Desig, anchorX, rowY, usedRot)
+	}
+	// 端标。
+	first, last := pos[0], pos[len(pos)-1]
+	lRot, err := tidyLabelRotation(ch.LeftKind, ch.LeftDir)
+	if err != nil {
+		return err
+	}
+	if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
+		map[string]any{"pinX": first.leftX, "pinY": first.y, "kind": ch.LeftKind, "net": ch.LeftNet,
+			"direction": ch.LeftDir, "rotation": lRot, "offset": 30.0}, docUUID, "chain left end"); err != nil {
+		return fmt.Errorf("chain 左端 %s:%w", ch.LeftNet, err)
+	}
+	rRot, err := tidyLabelRotation(ch.RightKind, ch.RightDir)
+	if err != nil {
+		return err
+	}
+	if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
+		map[string]any{"pinX": last.rightX, "pinY": last.y, "kind": ch.RightKind, "net": ch.RightNet,
+			"direction": ch.RightDir, "rotation": rRot, "offset": 30.0}, docUUID, "chain right end"); err != nil {
+		return fmt.Errorf("chain 右端 %s:%w", ch.RightNet, err)
+	}
+	// 链内 pin-to-pin 直线(共线零折弯)。
+	for i := 0; i+1 < len(pos); i++ {
+		pts := []any{[]any{pos[i].rightX, pos[i].y}, []any{pos[i+1].leftX, pos[i+1].y}}
+		if _, err := requestAutolayoutAction(cfg, "schematic.wire.create", win,
+			map[string]any{"points": pts}, docUUID, "chain link wire"); err != nil {
+			return fmt.Errorf("chain 直线 %s→%s:%w", ch.Members[i].Desig, ch.Members[i+1].Desig, err)
+		}
+	}
+	fmt.Fprintf(stdout, "  ✓ 串联链 %d 件共线串接(%s ← 链 → %s)\n", len(ch.Members), ch.LeftNet, ch.RightNet)
+	return nil
 }
