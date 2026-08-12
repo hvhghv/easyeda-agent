@@ -31,34 +31,51 @@ const (
 	// relayoutRailPitch:竖放去耦行的节距(件锚到件锚)。竖放件左右无文字,
 	// 40 是符号+呼吸;60 留位号文字。
 	relayoutRailPitch = 60.0
-	// relayoutRailPortPitch:带 netport 的竖放件与左邻的节距——netport 从上/下
-	// pin 水平朝左引出(桩 30 + 长条 31 + 文字),110 让它不压左邻本体。
-	relayoutRailPortPitch = 110.0
-	// relayoutRowGap:横放信号链行的行距(基线到基线)。链的上/下竖旗伸出
-	// ~63(桩 30 + 旗体 21 + 文字 12);两行相向旗(下行 GND 下伸 vs 上行 3V3 上伸)需 ≥126,130 留缝。
-	relayoutRowGap = 130.0
-	// relayoutChainGap:横放链行内间距——链左端 netport 文字自带视觉间隔,60 够;
-	// 117(相向标签安全距)会把两条能同行的链挤成一列。
-	relayoutChainGap = 60.0
-	// relayoutColGap:锚 IC 右缘到第一列内容的间距。
-	relayoutColGap = 100.0
 )
 
-// relayoutRailItem 是竖放行的一个成员:HasPort 的件其 netport 从上/下 pin 水平
-// 朝左引出,与左邻的间距要容 netport 文字(pitch 110);纯双旗件 60 紧凑。
+// 其余间距不再有常量:首列起点按锚 netport 实际伸出、件间距按各件 netport 引出
+// 实长(桩 + 网名占位宽)计算——「不要机械保证,严格算法实现」(用户拍板);
+// 拍脑袋常量在 LED_CTRL(文字溢出长条 bbox)上实测穿帮过。
+
+// relayoutPortWidth:netport 的占位实宽——长条符号 bbox 恒 31,但文字**不撑开
+// 长条**(实测 LED_CTRL 8 字渲染溢出 bbox 右缘 ~25,压进邻件)。按网名实长算:
+// ASCII ~6/字符 + 8 呼吸,短名保底 31。
+func relayoutPortWidth(net string) float64 {
+	w := 6*float64(len(net)) + 8
+	if w < 31 {
+		w = 31
+	}
+	return w
+}
+
+// relayoutRailItem 是竖放行的一个成员:PortReach 是该件 netport 朝左引出的实长
+// (桩 30 + 占位实宽),决定与左邻的间距;0 = 纯双旗件(基础 60 紧凑)。
 type relayoutRailItem struct {
-	Desig   string
-	HasPort bool
+	Desig     string
+	HasPort   bool
+	PortReach float64
 }
 
 // planZoneRelayoutPositions 是区级排位纯函数(用户拍板「全部外围平行对齐」):
 // **所有**外围件竖放、同一行、同顶等距——电源端朝上、地端朝下、netport 端水平
 // 引出;器件锚 y 全同(本体/顶旗/底旗三条线全对齐)。返回 designator → 器件锚
 // 坐标;放不下(超出 band 右缘)返回错误,不硬塞。
-func planZoneRelayoutPositions(anchor tidyAnchor, anchorBBox *layoutBBox, rail []relayoutRailItem,
-	band layoutBBox) (map[string][2]float64, error) {
+// anchorPortReach:锚 IC 右侧水平 netport 的最大伸出(桩 30 + 占位实宽)——
+// 首列起点必须让过它,否则锚的 netport 文字(如 LED_CTRL,溢出长条 bbox)压进
+// 第一个外围件(实测相交)。
+func planZoneRelayoutPositions(anchor tidyAnchor, anchorBBox *layoutBBox, anchorPortReach float64,
+	rail []relayoutRailItem, band layoutBBox) (map[string][2]float64, error) {
 	out := map[string][2]float64{}
-	startX := anchor.X + anchor.HalfWidth + relayoutColGap
+	right := anchor.X + anchor.HalfWidth
+	if anchorBBox != nil {
+		right = anchorBBox.MaxX
+	}
+	// 首列 x = 锚右缘 + max(60, 锚 netport 实际伸出 + 40 呼吸)。
+	gap0 := anchorPortReach + 40
+	if gap0 < 60 {
+		gap0 = 60
+	}
+	startX := right + gap0
 	topY := anchor.Y // 无 bbox 时退锚 y
 	if anchorBBox != nil {
 		topY = anchorBBox.MaxY
@@ -67,12 +84,16 @@ func planZoneRelayoutPositions(anchor tidyAnchor, anchorBBox *layoutBBox, rail [
 	railY := snap5(topY - 50)
 	x := startX
 	for i, it := range rail {
-		if i > 0 { // 与左邻的间距:本件带 netport(朝左伸文字)要 110,否则 60
+		if i > 0 {
+			// 与左邻间距:严格按本件 netport 引出实长 + 40 呼吸(朝左伸的文字
+			// 决定所需间隙);纯双旗件基础 60。
+			pitch := relayoutRailPitch
 			if it.HasPort {
-				x += relayoutRailPortPitch
-			} else {
-				x += relayoutRailPitch
+				if p := it.PortReach + 40; p > pitch {
+					pitch = p
+				}
 			}
+			x += pitch
 		}
 		if x > band.MaxX {
 			return nil, fmt.Errorf("竖放行超出区带右缘(%s @ x=%.0f > %.0f)— 区带太窄", it.Desig, x, band.MaxX)
@@ -226,12 +247,38 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	var rail []relayoutRailItem
 	for _, mp := range plan.Power {
 		d := strings.ToUpper(mp.Designator)
-		rail = append(rail, relayoutRailItem{Desig: d, HasPort: hasPort[d]})
+		reach := 0.0
+		if hasPort[d] {
+			// 该件 netport 引出实长 = 桩 30 + 网名占位实宽(文字溢出长条,按名长算)。
+			for _, t := range mp.Pins {
+				if strings.HasPrefix(t.Kind, "net_port") {
+					if r := 30 + relayoutPortWidth(t.Net); r > reach {
+						reach = r
+					}
+				}
+			}
+		}
+		rail = append(rail, relayoutRailItem{Desig: d, HasPort: hasPort[d], PortReach: reach})
 	}
 	sort.SliceStable(rail, func(i, j int) bool { return tidyDesignatorLess(rail[i].Desig, rail[j].Desig) })
 
+	// 锚右侧水平 netport 的最大伸出(首列必须让过它的文字)。
+	anchorPortReach := 0.0
+	if plan.AnchorDesig != "" {
+		if am, ok := members[strings.ToUpper(plan.AnchorDesig)]; ok {
+			ax := am.Comp.X
+			for _, p := range am.Pins {
+				if p.HasMarker && p.Marker.ComponentType == "netport" && p.Marker.X > ax {
+					if r := 30 + relayoutPortWidth(p.Conn.Net); r > anchorPortReach {
+						anchorPortReach = r
+					}
+				}
+			}
+		}
+	}
+
 	fmt.Fprintf(stderr, "band=(%.0f,%.0f)..(%.0f,%.0f)\n", band.MinX, band.MinY, band.MaxX, band.MaxY)
-	pos, err := planZoneRelayoutPositions(plan.Anchor, anchorBBox, rail, band)
+	pos, err := planZoneRelayoutPositions(plan.Anchor, anchorBBox, anchorPortReach, rail, band)
 	if err != nil {
 		return err
 	}
