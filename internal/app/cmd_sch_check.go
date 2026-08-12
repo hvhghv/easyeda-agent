@@ -111,7 +111,10 @@ type checkSummary struct {
 	// Readability rule: netports standing vertical (rotation 90/270) render their
 	// net name sideways — the "标签折起来" fail on dense pin columns.
 	FoldedNetLabels int `json:"foldedNetLabels"`
-	Total           int `json:"total"`
+	// Orientation rule: a netflag whose stored rotation contradicts its stub
+	// direction per the orientation truth table (reversed/upside-down flag).
+	ReversedNetFlags int `json:"reversedNetFlags"`
+	Total            int `json:"total"`
 }
 
 type checkReport struct {
@@ -200,8 +203,8 @@ func checkLevelTag(level string) string {
 
 func renderCheckReport(rep checkReport, w io.Writer) {
 	s := rep.Summary
-	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s), %d missing-partition, %d folded-net-label(s), %d redundant-net-marker(s)\n",
-		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps, s.MissingPartitions, s.FoldedNetLabels, s.RedundantNetMarkers)
+	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s), %d missing-partition, %d folded-net-label(s), %d redundant-net-marker(s), %d reversed-net-flag(s)\n",
+		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps, s.MissingPartitions, s.FoldedNetLabels, s.RedundantNetMarkers, s.ReversedNetFlags)
 
 	for _, f := range rep.Findings {
 		tag := checkLevelTag(f.Level)

@@ -6,6 +6,25 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.5] - 2026-08-12
+
+### Fixed
+- **wire-crossing 对平台合并线(segment-array)的伪交叉误报**:collectWireSegments
+  把段数组当折线读,在无关段端点之间捏造对角伪段——4 段正交 GND 合流树被报
+  「自己跟自己交叉」(伪对角中点)。与 0.24.1 dangling 修复同款解析:偶数顶点
+  ≥4 按段对(stride 4),奇数回退折线(stride 2)。wire-over-pin 同管道受益。
+
+### Added(CLI 侧,check 补两个视觉盲区判据——用户第二轮肉眼抓出)
+- **reversed-net-flag**:netflag 的 stored rotation 与桩线方向按 orientation
+  真值表不符(倒挂/侧翻)→ WARN。此前朝向判据只活在 layout-score(非门),
+  gate 的 check 关抓不到反旗;Go 侧表与 orientation.json 的一致性单测钉死
+  (再分叉 = 再度双盲)。现场首跑即抓到 EPAD 的 GND 倒挂旗(块 wiring 老表遗毒)。
+- **marker-overlap 文字带建模**:平台 getPrimitivesBBox 只包旗符号本体(实测
+  GND 旗 10×21,"GND" 文字不在内)——两支旗符号相切、文字互叠时 overlap=0
+  静默(U2 双 GND pin 挤成一坨、POWER 区 U1 左三支旗互叠共 4 处全漏)。netflag
+  判定 bbox 现 = 符号 ∪ 文字带(位置按朝向:水平旗文字在锚内侧线上方,竖旗
+  文字在符号外端居中;宽 6/字符)。现场首跑抓全 4 处。
+
 ## [0.24.4] - 2026-08-12
 
 ### Fixed

@@ -52,7 +52,11 @@ type layoutComp struct {
 	// active page only). See issue #146.
 	X, Y            float64
 	AnchorAvailable bool // both x/y were present, numeric, and finite
-	BBox            *layoutBBox
+	// Rotation is the stored primitive rotation when the connector reported one
+	// (markers carry it; the reversed-net-flag rule reads it against the
+	// orientation truth table). Nil when absent/non-numeric.
+	Rotation *float64
+	BBox     *layoutBBox
 	Pins            []layoutPin
 	PinsAvailable   bool // true when the connector confirmed the pins read succeeded
 	PinsProofKnown  bool // true only for the explicit pinsAvailable connector contract
@@ -629,6 +633,9 @@ func parseLayoutComps(result map[string]any) ([]layoutComp, error) {
 			c.X, c.Y, c.AnchorAvailable = x, y, true
 		} else {
 			c.GeometryErrors = append(c.GeometryErrors, "anchor x/y missing, non-numeric, or non-finite")
+		}
+		if rot, rotOK := finiteFloat(m["rotation"]); rotOK {
+			c.Rotation = &rot
 		}
 		if c.ID == "" {
 			c.GeometryErrors = append(c.GeometryErrors, "primitiveId is empty")

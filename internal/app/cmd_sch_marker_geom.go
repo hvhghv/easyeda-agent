@@ -94,6 +94,93 @@ func foldedNetLabelFindings(comps []layoutComp) []checkFinding {
 	return findings
 }
 
+// reversedNetFlagFindings 抓**反挂的旗**:netflag 的 stored rotation 与其桩线
+// 方向按真值表(flagBodyRotation ← orientation.json)不符 = 倒挂/侧翻。此前
+// 朝向判据只活在 layout-score / lint.sh(非门);而 2026-08-12 真值表修正前,
+// 生成侧与校验侧共享同一份错表(双盲)——旗倒挂两个月 gate 全绿,用户肉眼
+// 才抓出。此规则把朝向下沉进 `sch check`(gate 的 check 关会拦)。
+// 桩方向 = 锚点所在 wire 上「锚 − 相邻顶点」的主轴向(旗 body 沿桩朝外);
+// 锚不在任何 wire 端点上的旗跳过(orphan-flag 已管)。
+func reversedNetFlagFindings(comps []layoutComp, wires []schGroupWire) []checkFinding {
+	var out []checkFinding
+	for _, c := range comps {
+		if c.ComponentType != "netflag" || c.Rotation == nil || !c.AnchorAvailable {
+			continue
+		}
+		family := ""
+		switch tidyNetClass(c.Net) {
+		case "power":
+			family = "power"
+		case "ground":
+			family = "ground"
+		default:
+			continue
+		}
+		// 找锚点 = wire 某端顶点的线,取相邻顶点定桩方向。
+		dir := ""
+		for _, w := range wires {
+			pts := w.Points
+			if len(pts) < 4 {
+				continue
+			}
+			for i := 0; i+1 < len(pts); i += 2 {
+				if math.Abs(pts[i]-c.X) > 0.5 || math.Abs(pts[i+1]-c.Y) > 0.5 {
+					continue
+				}
+				// 相邻顶点:段数组任意序,取同一段的另一端(段 = [i..i+3] 对)。
+				var nx, ny float64
+				if i%4 == 0 && i+3 < len(pts) {
+					nx, ny = pts[i+2], pts[i+3]
+				} else {
+					nx, ny = pts[i-2], pts[i-1]
+				}
+				dx, dy := c.X-nx, c.Y-ny
+				if dx == 0 && dy == 0 {
+					continue
+				}
+				if math.Abs(dx) >= math.Abs(dy) {
+					if dx > 0 {
+						dir = "right"
+					} else {
+						dir = "left"
+					}
+				} else {
+					if dy > 0 {
+						dir = "up"
+					} else {
+						dir = "down"
+					}
+				}
+				break
+			}
+			if dir != "" {
+				break
+			}
+		}
+		if dir == "" {
+			continue
+		}
+		want := flagBodyRotation[family][dir]
+		got := math.Mod(math.Mod(*c.Rotation, 360)+360, 360)
+		if got == want {
+			continue
+		}
+		out = append(out, checkFinding{
+			Type:          "reversed-net-flag",
+			Level:         "warn",
+			PrimitiveId:   c.ID,
+			ComponentType: c.ComponentType,
+			MarkerNet:     c.Net,
+			BBox:          c.BBox,
+			At:            &checkPoint{X: c.X, Y: c.Y},
+			Message: fmt.Sprintf("%s 旗反挂:桩朝 %s 而旗 rot=%g(应为 %g)— `sch disconnect` 后 `sch connect --direction %s` 重连(或该 pin `sch autoconnect --replace`)",
+				c.Net, dir, got, want, dir),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PrimitiveId < out[j].PrimitiveId })
+	return out
+}
+
 // duplicateNetMarkerFindings groups net markers by (kind, net, quantized anchor)
 // and reports every group of 2+ as one finding carrying ALL coincident primitive
 // IDs plus a keep/delete suggestion. Different kinds, nets, or anchors never merge,
@@ -190,15 +277,84 @@ func titleblockOverlapFindings(comps []layoutComp, titleBlock *layoutBBox, eps f
 	return out
 }
 
+// flagBodyRotation:netflag 正确朝向的 stored rotation 真值表(power/ground 全
+// 四向)。SSOT 是 skills/easyeda-agent/references/orientation.json(2026-08-12
+// 五点实测重校准);TestFlagBodyRotationMatchesOrientationJSON 断言两份不漂移。
+var flagBodyRotation = map[string]map[string]float64{
+	"power":  {"up": 0, "left": 90, "down": 180, "right": 270},
+	"ground": {"up": 180, "left": 270, "down": 0, "right": 90},
+}
+
+// flagDirectionOf 由 stored rotation 反查旗的实际朝向(family 相关)。
+func flagDirectionOf(family string, rot float64) (string, bool) {
+	table, ok := flagBodyRotation[family]
+	if !ok {
+		return "", false
+	}
+	r := math.Mod(math.Mod(rot, 360)+360, 360)
+	for dir, v := range table {
+		if v == r {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+// flagTextBand 估算 netflag 的**文字带**:平台 getPrimitivesBBox 只包旗符号本体
+// (实测 2026-08-12:GND 旗 bbox 10×21,"GND" 文字不在内)——两支旗符号相切、
+// 文字互叠时 overlap=0,check 静默(用户肉眼抓出 U2 双 GND pin 挤成一坨)。
+// 文字位置按实际渲染:水平旗文字在锚点内侧(pin 方向)桩线上方,竖直旗文字在
+// 符号外端水平居中。宽按 6/字符估,高 12。
+func flagTextBand(c layoutComp) *layoutBBox {
+	if c.ComponentType != "netflag" || c.Rotation == nil || c.BBox == nil || !c.AnchorAvailable || c.Net == "" {
+		return nil
+	}
+	family := ""
+	switch tidyNetClass(c.Net) {
+	case "power":
+		family = "power"
+	case "ground":
+		family = "ground"
+	default:
+		return nil
+	}
+	dir, ok := flagDirectionOf(family, *c.Rotation)
+	if !ok {
+		return nil
+	}
+	l := 6 * float64(len(c.Net))
+	const h = 12.0
+	switch dir {
+	case "right": // 符号在锚右,文字在锚左侧(pin 方向)线上方
+		return &layoutBBox{MinX: c.X - l, MinY: c.Y, MaxX: c.X, MaxY: c.Y + h}
+	case "left":
+		return &layoutBBox{MinX: c.X, MinY: c.Y, MaxX: c.X + l, MaxY: c.Y + h}
+	case "up": // 符号在锚上方,文字在符号顶上居中
+		return &layoutBBox{MinX: c.X - l/2, MinY: c.BBox.MaxY, MaxX: c.X + l/2, MaxY: c.BBox.MaxY + h}
+	case "down":
+		return &layoutBBox{MinX: c.X - l/2, MinY: c.BBox.MinY - h, MaxX: c.X + l/2, MaxY: c.BBox.MinY}
+	}
+	return nil
+}
+
 // markerOverlapFindings reports pairwise positive-area intersections where at
 // least one side is a net marker (marker×part or marker×marker); part×part is
 // already `sch layout-lint`'s overlap rule. Only overlaps whose smaller axis
 // exceeds eps are reported — edge grazing and parallel-port float noise are below.
+// netflag 的判定 bbox = 符号本体 ∪ 文字带(flagTextBand)——符号相切文字互叠
+// 的拥挤对此前漏报。
 func markerOverlapFindings(comps []layoutComp, eps float64) []checkFinding {
 	withBox := make([]layoutComp, 0, len(comps))
 	for _, c := range comps {
 		if c.BBox == nil || c.ComponentType == "sheet" {
 			continue
+		}
+		if band := flagTextBand(c); band != nil {
+			merged := layoutBBox{
+				MinX: math.Min(c.BBox.MinX, band.MinX), MinY: math.Min(c.BBox.MinY, band.MinY),
+				MaxX: math.Max(c.BBox.MaxX, band.MaxX), MaxY: math.Max(c.BBox.MaxY, band.MaxY),
+			}
+			c.BBox = &merged
 		}
 		withBox = append(withBox, c)
 	}
@@ -310,9 +466,10 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 	// from the active page).
 	if !allPages {
 		if wires, werr := fetchSchWirePolylinesStable(cfg, window, ""); werr != nil {
-			fmt.Fprintf(stderr, "sch check: redundant-marker skipped — wire read failed: %v\n", werr)
+			fmt.Fprintf(stderr, "sch check: redundant-marker/reversed-flag skipped — wire read failed: %v\n", werr)
 		} else {
 			geo = append(geo, redundantNetMarkerFindings(comps, wires)...)
+			geo = append(geo, reversedNetFlagFindings(comps, wires)...)
 		}
 	}
 
@@ -342,6 +499,8 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 			rep.Summary.MissingPartitions++
 		case "redundant-net-marker":
 			rep.Summary.RedundantNetMarkers++
+		case "reversed-net-flag":
+			rep.Summary.ReversedNetFlags++
 		case "folded-net-label":
 			rep.Summary.FoldedNetLabels++
 		}

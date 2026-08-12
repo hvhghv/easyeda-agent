@@ -2583,7 +2583,14 @@ interface NetlistComponentInfo {
 	pinInfoMap?: Record<string, NetlistPinInfo>;
 }
 
-// Flatten every wire's polyline (getState_Line → flat [x0,y0,x1,y1,…]) into segments.
+// Flatten every wire's line into segments. The platform MERGES same-net wires
+// sharing endpoints into ONE primitive whose line is a SEGMENT ARRAY
+// ((x1,y1,x2,y2)×N, arbitrary order) — reading that as a polyline fabricates
+// diagonal pseudo-segments between unrelated segment endpoints, which the
+// wire-crossing rule then reports as phantom crossings (live 2026-08-12: a
+// 4-segment orthogonal GND merge tree "crossed itself" at the pseudo-diagonal's
+// midpoint). Same parse rule as the dangling fix: an EVEN vertex count ≥4 is a
+// segment array (stride 4); odd counts chain as a polyline (stride 2).
 function collectWireSegments(wires: Array<{ getState_Line: () => Array<number>; getState_Net?: () => string; getState_PrimitiveId?: () => string }>): Array<CheckWireSegment> {
 	const segs: Array<CheckWireSegment> = [];
 	for (const w of wires) {
@@ -2597,7 +2604,9 @@ function collectWireSegments(wires: Array<{ getState_Line: () => Array<number>; 
 		catch { /* optional */ }
 		try { net = String(w.getState_Net?.() ?? ''); }
 		catch { /* optional */ }
-		for (let i = 0; i + 3 < line.length; i += 2) {
+		const verts = Math.floor(line.length / 2);
+		const stride = verts >= 4 && verts % 2 === 0 ? 4 : 2;
+		for (let i = 0; i + 3 < line.length; i += stride) {
 			segs.push({ seg: [line[i], line[i + 1], line[i + 2], line[i + 3]], wirePrimitiveId, net });
 		}
 	}

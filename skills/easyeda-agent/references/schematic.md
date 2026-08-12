@@ -293,8 +293,13 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
   失明(实测:竖直旗 rotation 真值反了两个月,connect_pin 放倒挂旗、linter 判
   它正确,gate 全绿,用户肉眼才抓出)。视觉清单:① 同排竖放去耦顶线/底线双齐
   ② 旗向直立(3V3 朝上、GND 朝下,倒挂=旋转真值病,别只调单件)③ 行左对齐、
-  无孤行大留白 ④ 说明文字不压器件、分区框完整包裹 ⑤ 各区风格统一。看出新的
-  「不舒服」→ 翻译成几何判据下沉到 lint/score,别停在肉眼。
+  无孤行大留白 ④ 说明文字不压器件、分区框完整包裹 ⑤ 各区风格统一 ⑥ 相邻旗
+  文字不叠(`reversed-net-flag` / marker-overlap 文字带判据已下沉进 check,
+  但新形态的拥挤仍先靠眼)。看出新的「不舒服」→ 翻译成几何判据下沉,别停在肉眼。
+- **IC 多个相邻电源/地脚的画法**:同侧相邻 GND pin(如模组 pin1/40 相距 10)
+  各自引旗必然文字互叠——合流:两桩引到同一竖线相接,再引出挂**一支**旗;
+  EPAD 单独向下引旗。同侧密集异网旗(AMS1117 左侧 GND/3V3/+5V 三连)用阶梯
+  offset 错列(20/50/80),`sch connect --offset` 显式给。
 
 ## Module-aware autolayout — place parts by module zone
 
