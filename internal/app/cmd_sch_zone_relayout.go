@@ -31,6 +31,9 @@ const (
 	// relayoutRailPitch:竖放去耦行的节距(件锚到件锚)。竖放件左右无文字,
 	// 40 是符号+呼吸;60 留位号文字。
 	relayoutRailPitch = 60.0
+	// relayoutRailPortPitch:带 netport 的竖放件与左邻的节距——netport 从上/下
+	// pin 水平朝左引出(桩 30 + 长条 31 + 文字),110 让它不压左邻本体。
+	relayoutRailPortPitch = 110.0
 	// relayoutRowGap:横放信号链行的行距(基线到基线)。链的上/下竖旗伸出
 	// ~63(桩 30 + 旗体 21 + 文字 12);两行相向旗(下行 GND 下伸 vs 上行 3V3 上伸)需 ≥126,130 留缝。
 	relayoutRowGap = 130.0
@@ -41,76 +44,100 @@ const (
 	relayoutColGap = 100.0
 )
 
-// planZoneRelayoutPositions 是区级排位纯函数:锚不动,power 件(竖放)在锚右
-// 同顶一行等距,signal 件(横放)在其下行排、行内基线共线(同 y)。返回
-// designator → 器件锚坐标;放不下(超出 band 右缘/底缘)返回错误,不硬塞。
-func planZoneRelayoutPositions(anchor tidyAnchor, anchorBBox *layoutBBox, powerDesigs, signalDesigs []string,
-	signalWidth map[string]float64, band layoutBBox) (map[string][2]float64, error) {
+// relayoutRailItem 是竖放行的一个成员:HasPort 的件其 netport 从上/下 pin 水平
+// 朝左引出,与左邻的间距要容 netport 文字(pitch 110);纯双旗件 60 紧凑。
+type relayoutRailItem struct {
+	Desig   string
+	HasPort bool
+}
+
+// planZoneRelayoutPositions 是区级排位纯函数(用户拍板「全部外围平行对齐」):
+// **所有**外围件竖放、同一行、同顶等距——电源端朝上、地端朝下、netport 端水平
+// 引出;器件锚 y 全同(本体/顶旗/底旗三条线全对齐)。返回 designator → 器件锚
+// 坐标;放不下(超出 band 右缘)返回错误,不硬塞。
+func planZoneRelayoutPositions(anchor tidyAnchor, anchorBBox *layoutBBox, rail []relayoutRailItem,
+	band layoutBBox) (map[string][2]float64, error) {
 	out := map[string][2]float64{}
 	startX := anchor.X + anchor.HalfWidth + relayoutColGap
 	topY := anchor.Y // 无 bbox 时退锚 y
 	if anchorBBox != nil {
 		topY = anchorBBox.MaxY
 	}
-	// 竖放行:器件锚 y = 行顶 - 50(统一总高 100 的中点,旗顶与锚顶平)。
+	// 器件锚 y = 行顶 - 50(统一总高 100 的中点,顶旗与锚顶平)。
 	railY := snap5(topY - 50)
 	x := startX
-	for _, d := range powerDesigs {
+	for i, it := range rail {
+		if i > 0 { // 与左邻的间距:本件带 netport(朝左伸文字)要 110,否则 60
+			if it.HasPort {
+				x += relayoutRailPortPitch
+			} else {
+				x += relayoutRailPitch
+			}
+		}
 		if x > band.MaxX {
-			return nil, fmt.Errorf("竖放行超出区带右缘(%s @ x=%.0f > %.0f)— 区带太窄", d, x, band.MaxX)
+			return nil, fmt.Errorf("竖放行超出区带右缘(%s @ x=%.0f > %.0f)— 区带太窄", it.Desig, x, band.MaxX)
 		}
-		out[d] = [2]float64{snap5(x), railY}
-		x += relayoutRailPitch
-	}
-	// 横放行:竖放行底(topY-100)以下,行距 relayoutRowGap,行内基线共线。
-	rowY := snap5(topY - 100 - relayoutRowGap/2)
-	x = startX
-	for _, d := range signalDesigs {
-		w := signalWidth[d]
-		if w <= 0 {
-			w = 160
-		}
-		if x+w > band.MaxX { // 行满换行
-			rowY = snap5(rowY - relayoutRowGap)
-			x = startX
-		}
-		if rowY < band.MinY {
-			return nil, fmt.Errorf("横放行超出区带底缘(%s @ y=%.0f < %.0f)— 区带太矮", d, rowY, band.MinY)
-		}
-		// 器件锚 x = 链左缘 + 左标签预留;链宽 w 已含标签,锚放中段。
-		out[d] = [2]float64{snap5(x + w*0.6), rowY}
-		x += w + relayoutChainGap
+		out[it.Desig] = [2]float64{snap5(x), railY}
 	}
 	return out, nil
 }
 
-// relayoutSignalWidth 估一条信号链的占位宽:左 netport(文字 6/字符 + 长条 31)
-// + 桩 18 + pin 距 + 尾旗(竖直,占宽 ~20)。
-func relayoutSignalWidth(m tidyLiveMember) float64 {
-	maxNet := 3
-	for _, p := range m.Pins {
-		if p.Conn.Flag == "netport" && len(p.Conn.Net) > maxNet {
-			maxNet = len(p.Conn.Net)
+// relayoutVerticalizeSignal 把一件 signal 类(单电源/地旗 + netport)转成竖放
+// 计划(与去耦件平行对齐,用户拍板):电源旗端朝上 / 地旗端朝下(定 Top/Bottom
+// 消解判据),netport 从另一端水平朝左引出(netport 永不竖放)。两端都是
+// netport(无电源轴)转不了,返回 false 留在横放路径。
+func relayoutVerticalizeSignal(m tidyLiveMember) (tidyMemberPlan, bool) {
+	var railPin, portPin *tidyLivePin
+	railClass := ""
+	for i := range m.Pins {
+		p := &m.Pins[i]
+		switch p.Conn.Flag {
+		case "netflag":
+			if c := tidyNetClass(p.Conn.Net); c == "power" || c == "ground" {
+				if railPin != nil {
+					return tidyMemberPlan{}, false // 双旗件不该在 signal 类
+				}
+				railPin, railClass = p, c
+			}
+		case "netport":
+			if portPin != nil {
+				return tidyMemberPlan{}, false // 双 netport:无电源轴,保持横放
+			}
+			portPin = p
 		}
 	}
-	// pinSpan 用 pin 实测跨度(bbox 含旧标签会高估 60-80,链宽虚胖 → 明明能
-	// 同行的两条链被挤成一列,实测踩坑)。
-	pinSpan := 40.0
-	if len(m.Pins) >= 2 {
-		minX, maxX := m.Pins[0].X, m.Pins[0].X
-		for _, p := range m.Pins[1:] {
-			if p.X < minX {
-				minX = p.X
-			}
-			if p.X > maxX {
-				maxX = p.X
-			}
-		}
-		if s := maxX - minX; s > 0 {
-			pinSpan = s
-		}
+	if railPin == nil || portPin == nil {
+		return tidyMemberPlan{}, false
 	}
-	return float64(6*maxNet) + 31 + 18 + pinSpan + 20
+	// 电源旗端朝上(top)/ 地旗端朝下(bottom);netport 占另一端,水平朝左。
+	topPin, bottomPin := railPin.Conn.Pin, portPin.Conn.Pin
+	railDir := "up"
+	if railClass == "ground" {
+		topPin, bottomPin = portPin.Conn.Pin, railPin.Conn.Pin
+		railDir = "down"
+	}
+	railRot, err := tidyLabelRotation(railClass, railDir)
+	if err != nil {
+		return tidyMemberPlan{}, false
+	}
+	portRot, err := tidyLabelRotation("netport", "left")
+	if err != nil {
+		return tidyMemberPlan{}, false
+	}
+	railKind := "power"
+	if railClass == "ground" {
+		railKind = "ground"
+	}
+	return tidyMemberPlan{
+		Designator:         m.Comp.Designator,
+		RotationCandidates: [2]float64{90, 270},
+		PowerPin:           topPin, // 消解判据语义:期望在上的 pin
+		GndPin:             bottomPin,
+		Pins: []tidyPinTarget{
+			{Pin: railPin.Conn.Pin, Direction: railDir, Kind: railKind, Net: railPin.Conn.Net, LabelRotation: railRot},
+			{Pin: portPin.Conn.Pin, Direction: "left", Kind: "net_port_bi", Net: portPin.Conn.Net, LabelRotation: portRot},
+		},
+	}, true
 }
 
 func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, stdout, stderr io.Writer) error {
@@ -171,52 +198,60 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 		band = zoneTidyGrowBand(band, *partPlan, zoneName, defaultPartitionOpts())
 	}
 
-	// 区级排位:锚不动,power 竖放行 + signal 横放行。
+	// 区级排位:锚不动,**全部外围竖放一行平行对齐**(用户拍板)。signal 件转
+	// 竖放(电源/地端竖直、netport 水平朝左);转不了的(双 netport)留横放。
 	var anchorBBox *layoutBBox
 	if plan.AnchorDesig != "" {
 		if m, ok := members[strings.ToUpper(plan.AnchorDesig)]; ok {
 			anchorBBox = m.Comp.BBox
 		}
 	}
-	var powerDesigs, signalDesigs []string
-	for _, mp := range plan.Power {
-		powerDesigs = append(powerDesigs, strings.ToUpper(mp.Designator))
-	}
-	sort.SliceStable(powerDesigs, func(i, j int) bool { return tidyDesignatorLess(powerDesigs[i], powerDesigs[j]) })
-	signalWidth := map[string]float64{}
+	hasPort := map[string]bool{}
+	var keptSignal []tidySignalPlan
 	for _, sp := range plan.Signal {
 		d := strings.ToUpper(sp.Designator)
-		signalDesigs = append(signalDesigs, d)
-		if m, ok := members[d]; ok {
-			signalWidth[d] = relayoutSignalWidth(m)
+		m, ok := members[d]
+		if !ok {
+			keptSignal = append(keptSignal, sp)
+			continue
+		}
+		if vp, ok := relayoutVerticalizeSignal(m); ok {
+			plan.Power = append(plan.Power, vp)
+			hasPort[d] = true
+		} else {
+			keptSignal = append(keptSignal, sp)
 		}
 	}
-	sort.SliceStable(signalDesigs, func(i, j int) bool { return tidyDesignatorLess(signalDesigs[i], signalDesigs[j]) })
+	plan.Signal = keptSignal
+	var rail []relayoutRailItem
+	for _, mp := range plan.Power {
+		d := strings.ToUpper(mp.Designator)
+		rail = append(rail, relayoutRailItem{Desig: d, HasPort: hasPort[d]})
+	}
+	sort.SliceStable(rail, func(i, j int) bool { return tidyDesignatorLess(rail[i].Desig, rail[j].Desig) })
 
 	fmt.Fprintf(stderr, "band=(%.0f,%.0f)..(%.0f,%.0f)\n", band.MinX, band.MinY, band.MaxX, band.MaxY)
-	pos, err := planZoneRelayoutPositions(plan.Anchor, anchorBBox, powerDesigs, signalDesigs, signalWidth, band)
+	pos, err := planZoneRelayoutPositions(plan.Anchor, anchorBBox, rail, band)
 	if err != nil {
 		return err
 	}
-	// 注入区级坐标:power 件改 X/Y;signal 件加 pose。
 	for i := range plan.Power {
 		if p, ok := pos[strings.ToUpper(plan.Power[i].Designator)]; ok {
 			plan.Power[i].X, plan.Power[i].Y = p[0], p[1]
 		}
 	}
-	for i := range plan.Signal {
-		if p, ok := pos[strings.ToUpper(plan.Signal[i].Designator)]; ok {
-			plan.Signal[i].HasPose, plan.Signal[i].X, plan.Signal[i].Y = true, p[0], p[1]
-		}
-	}
 
-	fmt.Fprintf(stdout, "zone relayout [%s] placement-first — 锚 %s 不动,%d 竖放 + %d 横放:\n",
-		zoneName, plan.AnchorDesig, len(powerDesigs), len(signalDesigs))
-	for _, d := range powerDesigs {
-		fmt.Fprintf(stdout, "  %-6s 竖放 → (%g,%g) 上电下地,总高 100\n", d, pos[d][0], pos[d][1])
+	fmt.Fprintf(stdout, "zone relayout [%s] placement-first — 锚 %s 不动,%d 件竖放平行对齐(%d 带水平 netport):\n",
+		zoneName, plan.AnchorDesig, len(rail), len(hasPort))
+	for _, it := range rail {
+		tag := "上电下地"
+		if it.HasPort {
+			tag = "电源轴竖直 + netport 水平朝左"
+		}
+		fmt.Fprintf(stdout, "  %-6s 竖放 → (%g,%g) %s\n", it.Desig, pos[it.Desig][0], pos[it.Desig][1], tag)
 	}
-	for _, d := range signalDesigs {
-		fmt.Fprintf(stdout, "  %-6s 横放 → (%g,%g) 左入右出,链端电源旗竖直\n", d, pos[d][0], pos[d][1])
+	for _, sp := range plan.Signal {
+		fmt.Fprintf(stdout, "  %-6s 横放保留(双 netport 无电源轴)\n", sp.Designator)
 	}
 	for _, d := range plan.Skipped {
 		fmt.Fprintf(stdout, "  %-6s skip(未建模连接,原位不动)\n", d)
@@ -238,7 +273,7 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 			}
 		}
 	}
-	fmt.Fprintf(stdout, "✓ zone relayout applied:%d 件 placement-first 重排,自检绿\n", len(powerDesigs)+len(signalDesigs))
+	fmt.Fprintf(stdout, "✓ zone relayout applied:%d 件 placement-first 重排,自检绿\n", len(rail))
 	return nil
 }
 

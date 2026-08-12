@@ -261,9 +261,9 @@ stubs; `sch connect` stays for when you deliberately override the geometry.
 
 ```bash
 easyeda sch zone relayout --zone MCU --apply    # ★首选:placement-first 区级重排——锚 IC 不动,
-                                                #   外围纯计算落位(去耦竖放同顶/信号链同行基线共线),
-                                                #   sweep 删净旧桩旗后一遍性重连。不搬带线的图元,
-                                                #   没有组刚移的 merge 撕裂问题
+                                                #   外围电容电阻**全员竖放同行平行对齐**(电上地下,
+                                                #   netport 水平朝左引出),sweep 删净旧桩旗后一遍性
+                                                #   重连。不搬带线图元,没有组刚移的 merge 撕裂问题
 easyeda sch group tidy --group g5 --apply       # 组内:竖放/上电下地/文字朝外;--deep 连残线清扫
 easyeda sch zone tidy --zone MCU --deep --apply # 区内增量:组间 pack(保持连线不重生成时用;
                                                 #   注意组刚移有暂态 merge 风险,relayout 更稳)
