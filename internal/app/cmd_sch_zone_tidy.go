@@ -574,6 +574,35 @@ type zoneTidyReport struct {
 	Diag       *zonePackDiag         `json:"diag,omitempty"`
 }
 
+// zoneTidyGroupRefs(--deep 用):区内持久化组的 id 列表(确定性升序)。散件没有
+// 组内布局可做,跳过;跨区组由 zoneTidyUnits 的既有校验拒绝。
+func zoneTidyGroupRefs(pinned *appConfig, win, docUUID, zoneRef string) ([]string, error) {
+	zones, project, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+	if err != nil {
+		return nil, err
+	}
+	_, claim, err := findZoneTidyClaim(zones, zoneRef)
+	if err != nil {
+		return nil, err
+	}
+	st, err := loadPcbStageState(project)
+	if err != nil {
+		return nil, err
+	}
+	units, err := zoneTidyUnits(claim.Parts, st.GroupsForPage(docUUID))
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, u := range units {
+		if u.IsGroup {
+			refs = append(refs, u.Ref)
+		}
+	}
+	sort.Strings(refs)
+	return refs, nil
+}
+
 // computeZoneTidy 读一次几何快照(components.list + 稳定桩线读),把区成员切成
 // 刚体单元、求每单元全集 bbox、定 band、跑 planZonePack。只读不 mutate。
 // 第三个返回值 = 计划期标记的双认领桩线/旗 id 集,--apply 侧用它做差集过滤,
@@ -997,7 +1026,7 @@ func applyZoneTidy(pinned *appConfig, win, docUUID string, rep *zoneTidyReport, 
 func newSchZoneTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var zone string
 	var hGap, vGap float64
-	var apply, dryRun, asJSON bool
+	var apply, dryRun, asJSON, deep bool
 	c := &cobra.Command{
 		Use:   "tidy",
 		Short: "组间叠加布局:把功能区内的组与散件当刚体在区带内重排(默认 dry-run;--apply 执行)",
@@ -1032,6 +1061,25 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 			if err != nil {
 				return err
 			}
+			// --deep(一键):组间 pack 之前先逐组跑 group tidy(组内布局计算),
+			// 把每个虚拟组内部整理成规范形态(竖放/上电下地/文字朝外/深度清扫
+			// 残段),然后再排组。深度失败即停(组内没整好,组间排了也是白排)。
+			if deep {
+				if !apply {
+					return fmt.Errorf("--deep 需要 --apply(逐组 tidy 是 mutation;先单独 dry-run 看各组计划:`sch group tidy --group <id>`)")
+				}
+				groupRefs, derr := zoneTidyGroupRefs(pinned, win, docUUID, zone)
+				if derr != nil {
+					return derr
+				}
+				for _, ref := range groupRefs {
+					fmt.Fprintf(stdout, "── deep:group tidy %s ──\n", ref)
+					if terr := runSchGroupTidy(pinned, win, ref, "auto", 50, true, stdout, stderr); terr != nil {
+						return fmt.Errorf("--deep 在组 %s 处停止:%w", ref, terr)
+					}
+					time.Sleep(350 * time.Millisecond) // 组间 settle(铁则2)
+				}
+			}
 			rep, unitByRef, sharedIDs, err := computeZoneTidy(pinned, win, docUUID, zone, hGap, vGap, stderr)
 			if err != nil {
 				return err
@@ -1063,6 +1111,7 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "compute and report only (this is already the default; explicit flag for scripts)")
 	c.Flags().BoolVar(&apply, "apply", false, "execute the plan: per-group rigid moves with settle, then layout-lint + bridge-check; rollback in reverse order on red")
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the plan as JSON")
+	c.Flags().BoolVar(&deep, "deep", false, "一键:组间 pack 前先对区内每个组跑 `group tidy --apply`(组内竖放/上电下地/文字朝外/深度清扫)——需与 --apply 同用")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }

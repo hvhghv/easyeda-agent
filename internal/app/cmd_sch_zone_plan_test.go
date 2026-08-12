@@ -14,12 +14,12 @@ func TestPlanPartitions_RealA4SixModules(t *testing.T) {
 	sheet := layoutBBox{0, 0, 1170, 825}
 	keepout := &layoutBBox{912.6, 0, 1170, 115.5}
 	mods := []partitionModule{
-		{"音频接口", layoutBBox{104.5, 579.5, 285.5, 660.5}},
-		{"调试接口", layoutBBox{574.5, 584.5, 600.5, 655.5}},
-		{"RGB与编码器", layoutBBox{954.45, 509.5, 995.5, 694.5}},
-		{"用户输入", layoutBBox{104.5, 184.5, 255.5, 262}},
-		{"显示接口", layoutBBox{499.5, 369.5, 600.5, 460.5}},
-		{"马达驱动", layoutBBox{909.5, 149.5, 1035.5, 273}},
+		{Name: "音频接口", BBox: layoutBBox{104.5, 579.5, 285.5, 660.5}},
+		{Name: "调试接口", BBox: layoutBBox{574.5, 584.5, 600.5, 655.5}},
+		{Name: "RGB与编码器", BBox: layoutBBox{954.45, 509.5, 995.5, 694.5}},
+		{Name: "用户输入", BBox: layoutBBox{104.5, 184.5, 255.5, 262}},
+		{Name: "显示接口", BBox: layoutBBox{499.5, 369.5, 600.5, 460.5}},
+		{Name: "马达驱动", BBox: layoutBBox{909.5, 149.5, 1035.5, 273}},
 	}
 	plan := planPartitions(sheet, keepout, mods, defaultPartitionOpts())
 	if len(plan.Partitions) == 0 {
@@ -53,8 +53,8 @@ func TestPlanPartitions_RealA4SixModules(t *testing.T) {
 func TestPlanPartitions_TwoModules(t *testing.T) {
 	sheet := layoutBBox{0, 0, 1170, 825}
 	mods := []partitionModule{
-		{"主MCU", layoutBBox{456.5, 279.5, 713.5, 663.5}},
-		{"复位", layoutBBox{173.5, 146.5, 255.5, 270.5}},
+		{Name: "主MCU", BBox: layoutBBox{456.5, 279.5, 713.5, 663.5}},
+		{Name: "复位", BBox: layoutBBox{173.5, 146.5, 255.5, 270.5}},
 	}
 	plan := planPartitions(sheet, nil, mods, defaultPartitionOpts())
 	if len(plan.Partitions) < 1 {

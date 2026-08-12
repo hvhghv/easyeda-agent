@@ -1103,22 +1103,7 @@ func tidyPinNumbers(targets []tidyPinTarget) []string {
 // (x,y)+rot 候选1 → settle 实测 → 电源 pin 不在上则换候选2 再实测 → 显式坐标
 // connect(铁则1/2/3 全程落实)。
 func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, mp tidyMemberPlan, stdout io.Writer) error {
-	for _, t := range mp.Pins {
-		lp := live.pin(t.Pin)
-		if lp == nil || !lp.HasMarker {
-			continue // 无旗可拆(计划仍会给它连上目标旗)
-		}
-		res, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
-			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect")
-		if err != nil {
-			return fmt.Errorf("disconnect %s:%s:%w", live.Comp.Designator, t.Pin, err)
-		}
-		// F2/铁则5:整树删除连带断开共享导线上的邻件 pin = 立即按错误处理
-		// (触发调用方的逐步回滚),不许静默丢弃 alsoDisconnectedPins。
-		if gerr := tidyGuardDisconnect(live.Comp.Designator, t.Pin, res.Result); gerr != nil {
-			return gerr
-		}
-	}
+	// 旧桩/旗已由 tidyDeepSweep 整树删净(共享树在 sweep 期即拒),此处直接落位。
 	usedRot := mp.RotationCandidates[0]
 	if err := tidyModifyPose(cfg, win, docUUID, live.Comp.ID, mp.X, mp.Y, usedRot); err != nil {
 		return fmt.Errorf("modify %s → (%g,%g) rot %g:%w", live.Comp.Designator, mp.X, mp.Y, usedRot, err)
@@ -1169,17 +1154,7 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 // tidyExecSignalMember 执行一件 signal-row:只拆竖放的 netport(铁则4)→
 // settle 实测 → 按左入右出水平重连(器件位置/rotation 不动)。
 func tidyExecSignalMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, sp tidySignalPlan, stdout io.Writer) error {
-	for _, t := range sp.Pins {
-		res, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
-			map[string]any{"designator": live.Comp.Designator, "pin": t.Pin}, docUUID, "tidy disconnect")
-		if err != nil {
-			return fmt.Errorf("disconnect %s:%s:%w", live.Comp.Designator, t.Pin, err)
-		}
-		// F2/铁则5:同 power 路径 —— 连带断开邻件 pin 非空立即错,触发回滚。
-		if gerr := tidyGuardDisconnect(live.Comp.Designator, t.Pin, res.Result); gerr != nil {
-			return gerr
-		}
-	}
+	// 旧竖桩已由 tidyDeepSweep 整树删净(共享树 sweep 期即拒)。
 	pins, err := tidySettledPins(cfg, win, docUUID, live.Comp.Designator)
 	if err != nil {
 		return err
@@ -1232,7 +1207,171 @@ func tidySelfCheck(cfg *appConfig, win, docUUID string) error {
 }
 
 // tidyApply 顺序执行计划,每步先记前几何;任一步失败或收尾自检红 → 逆序回滚。
-func tidyApply(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, stdout, stderr io.Writer) error {
+// tidyDeepSweepPlan classifies, per tidy member, every wire TREE that touches the
+// member's pins or grazes its bbox: a tree that also touches a NON-member part
+// pin is a shared rail (same F2 semantics — refuse, the neighbour would be cut);
+// everything else (old stubs, stacked repair flags, dangling remnants like the
+// grey half-segment live-reported 2026-08-12) is debris to delete wholesale
+// before rebuilding. Pure function — table-testable.
+func tidyDeepSweepPlan(memberDesigs map[string]bool, comps []layoutComp, wires []schGroupWire) (deleteIDs []string, sharedErr error) {
+	const eps = 0.5
+	const graze = 2.0
+	// Union-find over wires (same touch semantics as the group expansion family).
+	parent := make([]int, len(wires))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	for i := 0; i < len(wires); i++ {
+		for j := i + 1; j < len(wires); j++ {
+			touched := false
+			for k := 0; k+1 < len(wires[i].Points) && !touched; k += 2 {
+				if pointOnPolyline(wires[i].Points[k], wires[i].Points[k+1], wires[j].Points, eps) {
+					touched = true
+				}
+			}
+			for k := 0; k+1 < len(wires[j].Points) && !touched; k += 2 {
+				if pointOnPolyline(wires[j].Points[k], wires[j].Points[k+1], wires[i].Points, eps) {
+					touched = true
+				}
+			}
+			if touched {
+				parent[find(i)] = find(j)
+			}
+		}
+	}
+	// Member pin set, member bboxes, and NON-member part pins.
+	type pt struct{ x, y float64 }
+	var memberPins []pt
+	var memberBoxes []layoutBBox
+	var otherPins []pt
+	for _, c := range comps {
+		isPart := c.ComponentType == "" || c.ComponentType == schLayoutPartType
+		if !isPart {
+			continue
+		}
+		if memberDesigs[strings.ToUpper(c.Designator)] {
+			for _, p := range c.Pins {
+				memberPins = append(memberPins, pt{p.X, p.Y})
+			}
+			if c.BBox != nil {
+				memberBoxes = append(memberBoxes, *c.BBox)
+			}
+		} else {
+			for _, p := range c.Pins {
+				otherPins = append(otherPins, pt{p.X, p.Y})
+			}
+		}
+	}
+	inGrazeBox := func(x, y float64) bool {
+		for _, b := range memberBoxes {
+			if x >= b.MinX-graze && x <= b.MaxX+graze && y >= b.MinY-graze && y <= b.MaxY+graze {
+				return true
+			}
+		}
+		return false
+	}
+	// Tree membership: touches member pin OR grazes member bbox → candidate;
+	// also touches a non-member pin → shared (refuse).
+	treeTouchesMember := map[int]bool{}
+	treeTouchesOther := map[int]bool{}
+	for wi, w := range wires {
+		root := find(wi)
+		for _, p := range memberPins {
+			if pointOnPolyline(p.x, p.y, w.Points, eps) {
+				treeTouchesMember[root] = true
+			}
+		}
+		for k := 0; k+1 < len(w.Points); k += 2 {
+			if inGrazeBox(w.Points[k], w.Points[k+1]) {
+				treeTouchesMember[root] = true
+			}
+		}
+		for _, p := range otherPins {
+			if pointOnPolyline(p.x, p.y, w.Points, eps) {
+				treeTouchesOther[root] = true
+			}
+		}
+	}
+	for root := range treeTouchesMember {
+		if treeTouchesOther[root] {
+			return nil, fmt.Errorf("成员的连线树同时触及非成员器件 pin(共享导线)— 深度清扫会切断邻件,拒绝(先手工梳理该树或把邻件一并入组)")
+		}
+	}
+	// Collect: all wires of member trees + all markers anchored on those trees.
+	seen := map[string]bool{}
+	for wi, w := range wires {
+		if treeTouchesMember[find(wi)] && !seen[w.ID] {
+			seen[w.ID] = true
+			deleteIDs = append(deleteIDs, w.ID)
+		}
+	}
+	for _, c := range comps {
+		if !isSchMarker(c.ComponentType) || !c.AnchorAvailable {
+			continue
+		}
+		for wi, w := range wires {
+			if treeTouchesMember[find(wi)] && pointOnPolyline(c.X, c.Y, w.Points, eps) {
+				if !seen[c.ID] {
+					seen[c.ID] = true
+					deleteIDs = append(deleteIDs, c.ID)
+				}
+				break
+			}
+		}
+	}
+	sort.Strings(deleteIDs)
+	return deleteIDs, nil
+}
+
+// tidyDeepSweep executes the sweep: one prim-delete for the whole debris set.
+// Replaces the old per-pin disconnect loop — that loop missed dangling remnants
+// that touch no pin (the grey half-segment), and its "No stub wire found" error
+// was a false failure on already-clean pins (live 2026-08-12).
+func tidyDeepSweep(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, comps []layoutComp, stdout, stderr io.Writer) error {
+	memberSet := map[string]bool{}
+	for _, mp := range plan.Power {
+		memberSet[strings.ToUpper(mp.Designator)] = true
+	}
+	for _, sp := range plan.Signal {
+		memberSet[strings.ToUpper(sp.Designator)] = true
+	}
+	if len(memberSet) == 0 {
+		return nil
+	}
+	wires, err := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if err != nil {
+		return fmt.Errorf("deep-sweep wire read:%w", err)
+	}
+	ids, err := tidyDeepSweepPlan(memberSet, comps, wires)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
+		map[string]any{"primitiveIds": ids}, docUUID, "tidy deep-sweep"); err != nil {
+		return fmt.Errorf("deep-sweep delete %d primitive(s):%w", len(ids), err)
+	}
+	fmt.Fprintf(stdout, "  深度清扫:删除 %d 个旧桩/旗/残段(整树)\n", len(ids))
+	return nil
+}
+
+func tidyApply(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, comps []layoutComp, stdout, stderr io.Writer) error {
+	// 深度清扫先行:成员的整树(旧桩+旧旗+不触 pin 的残段)一次删净,重建才
+	// 从干净地基开始;共享树(触非成员 pin)拒绝 —— F2 同语义,零 mutation。
+	if err := tidyDeepSweep(cfg, win, docUUID, plan, members, comps, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return err
+	}
 	var executed []tidyStepRecord
 	fail := func(err error) error {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -1387,5 +1526,5 @@ func runSchGroupTidy(cfg *appConfig, window, groupRef, pattern string, spacing f
 		fmt.Fprintln(stdout, "dry-run(默认):未改画布 —— 加 --apply 落地")
 		return nil
 	}
-	return tidyApply(pinned, win, docUUID, plan, members, stdout, stderr)
+	return tidyApply(pinned, win, docUUID, plan, members, comps, stdout, stderr)
 }

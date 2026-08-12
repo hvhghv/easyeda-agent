@@ -908,3 +908,42 @@ func TestNewSchGroupTidyCommand(t *testing.T) {
 		t.Errorf("--spacing default = %q, want 50", got)
 	}
 }
+
+// TestTidyDeepSweepPlan: the sweep must collect the member's whole trees —
+// including the dangling remnant that touches NO pin (the grey half-segment,
+// live 2026-08-12) and every marker on those trees — while refusing a tree
+// shared with a non-member pin (F2 semantics), and leaving unrelated trees alone.
+func TestTidyDeepSweepPlan(t *testing.T) {
+	comps := []layoutComp{
+		{ID: "c3", Designator: "C3", ComponentType: "part", AnchorAvailable: true,
+			BBox: &layoutBBox{MinX: 262, MinY: 425, MaxX: 279, MaxY: 445},
+			Pins: []layoutPin{{Number: "1", X: 270, Y: 455}, {Number: "2", X: 270, Y: 415}}},
+		{ID: "u9", Designator: "U9", ComponentType: "part", AnchorAvailable: true,
+			Pins: []layoutPin{{Number: "1", X: 600, Y: 455}}},
+		{ID: "fOld", ComponentType: "netflag", Net: "3V3", X: 270, Y: 505, AnchorAvailable: true}, // on C3's stub
+		{ID: "fFar", ComponentType: "netflag", Net: "3V3", X: 800, Y: 300, AnchorAvailable: true}, // unrelated
+	}
+	wires := []schGroupWire{
+		{ID: "wStub", Points: []float64{270, 455, 270, 505}},   // C3:1 stub (tree A)
+		{ID: "wFrag", Points: []float64{270, 443, 270, 448}},   // dangling remnant grazing C3 bbox, no pin (tree B)
+		{ID: "wElse", Points: []float64{800, 300, 840, 300}},   // unrelated tree
+	}
+	ids, err := tidyDeepSweepPlan(map[string]bool{"C3": true}, comps, wires)
+	if err != nil {
+		t.Fatalf("clean sweep errored: %v", err)
+	}
+	want := []string{"fOld", "wFrag", "wStub"}
+	if len(ids) != len(want) {
+		t.Fatalf("sweep ids = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("sweep ids = %v, want %v", ids, want)
+		}
+	}
+	// Shared rail: extend the stub tree to also touch U9's pin → refuse.
+	shared := append(wires, schGroupWire{ID: "wRail", Points: []float64{270, 505, 600, 505, 600, 455}})
+	if _, err := tidyDeepSweepPlan(map[string]bool{"C3": true}, comps, shared); err == nil {
+		t.Fatal("shared tree must be refused")
+	}
+}

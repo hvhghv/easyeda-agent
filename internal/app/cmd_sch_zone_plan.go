@@ -27,7 +27,21 @@ import (
 // partitionModule is one functional module: a name + the union bbox of its parts.
 type partitionModule struct {
 	Name string     `json:"name"`
-	BBox layoutBBox `json:"bbox"`
+	// BBox 是画框口径(器件 ∪ 近旁 marker——旗要被框住,live 2026-08-12:GND 全
+	// 垂出框外);CoreBBox 是校验口径(仅器件):moduleOutsideZone / titleBlockHits
+	// / labelCollisions 用它——旗贴图签安全带或与区名带擦边是注释级余量问题,
+	// 不该 hard-block 整个分区框。CoreBBox 零值时回退 BBox(手写测试兼容)。
+	BBox     layoutBBox `json:"bbox"`
+	CoreBBox layoutBBox `json:"coreBBox,omitempty"`
+}
+
+// moduleCoreBBox 返回校验口径 bbox(CoreBBox 未设置时回退 BBox)。
+func moduleCoreBBox(m partitionModule) layoutBBox {
+	z := layoutBBox{}
+	if m.CoreBBox == z {
+		return m.BBox
+	}
+	return m.CoreBBox
 }
 
 // partitionRect is one planned partition: the rectangle, its title band, and the
@@ -200,10 +214,20 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 		// frame's job is to contain its modules — if a module itself intrudes the
 		// safety band, keep it contained and let validation flag the titleBlockHit
 		// (refusing to draw and pointing at the real fix: move the module up).
+		// Clamp on the CORE (parts-only) bottom, not the draw bbox: when a member's
+		// downward flag folds into the draw bbox and dips into the safety band, the
+		// frame must still stop at the band (the flag may stick out slightly) —
+		// better a flag toe over the line than the whole frame over the 图签.
 		if safe != nil && boxesOverlap(rect, *safe) {
+			coreMinY := moduleCoreBBox(modules[cells[k][0]]).MinY
+			for _, i := range cells[k][1:] {
+				if b := moduleCoreBBox(modules[i]); b.MinY < coreMinY {
+					coreMinY = b.MinY
+				}
+			}
 			lift := safe.MaxY
-			if lift > content.MinY {
-				lift = content.MinY
+			if lift > coreMinY {
+				lift = coreMinY
 			}
 			if lift > rect.MinY && lift < rect.MaxY {
 				rect.MinY = lift
@@ -329,7 +353,7 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 	}
 	for _, m := range modules {
 		pb, ok := partOf[m.Name]
-		if !ok || !bboxContains(pb, m.BBox) {
+		if !ok || !bboxContains(pb, moduleCoreBBox(m)) {
 			v.ModuleOutsideZone++
 		}
 	}
@@ -337,7 +361,7 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 	// symbol (label collision).
 	for _, p := range ps {
 		for _, m := range modules {
-			if strInSlice(p.Modules, m.Name) && boxesOverlap(p.TitleBBox, m.BBox) {
+			if strInSlice(p.Modules, m.Name) && boxesOverlap(p.TitleBBox, moduleCoreBBox(m)) {
 				v.LabelCollisions++
 			}
 		}
@@ -357,11 +381,36 @@ func strInSlice(ss []string, s string) bool {
 // modulesFromClaims builds the planner input from `sch zones` claims: each module's
 // bbox is the union of its parts' live bboxes. Modules whose parts aren't on the
 // active page (no bbox) are skipped.
+// schModuleMarkerReach is how far beyond a claimed part's bbox its net markers
+// (stub flags) are folded into the module bbox: stub offset (~18-24) + flag body
+// (~21-35). Without this the partition frame hugs the PART bboxes only and every
+// downward GND flag dangles OUTSIDE the frame (live 2026-08-12: all three POWER
+// caps' GND rendered below the frame).
+const schModuleMarkerReach = 60.0
+
 func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp) []partitionModule {
 	byDesig := map[string]layoutComp{}
 	for _, c := range comps {
 		if c.Designator != "" && c.BBox != nil {
 			byDesig[strings.ToUpper(c.Designator)] = c
+		}
+	}
+	// Markers with a bbox, for the marker-reach fold below.
+	var markers []layoutComp
+	for _, c := range comps {
+		if isSchMarker(c.ComponentType) && c.BBox != nil && c.AnchorAvailable {
+			markers = append(markers, c)
+		}
+	}
+	foldMarkers := func(u *layoutBBox) {
+		for _, m := range markers {
+			if m.X >= u.MinX-schModuleMarkerReach && m.X <= u.MaxX+schModuleMarkerReach &&
+				m.Y >= u.MinY-schModuleMarkerReach && m.Y <= u.MaxY+schModuleMarkerReach {
+				u.MinX = minF(u.MinX, m.BBox.MinX)
+				u.MinY = minF(u.MinY, m.BBox.MinY)
+				u.MaxX = maxF(u.MaxX, m.BBox.MaxX)
+				u.MaxY = maxF(u.MaxY, m.BBox.MaxY)
+			}
 		}
 	}
 	var names []string
@@ -392,7 +441,9 @@ func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp) []par
 			u.MaxY = maxF(u.MaxY, c.BBox.MaxY)
 		}
 		if u != nil {
-			out = append(out, partitionModule{Name: name, BBox: *u})
+			core := *u
+			foldMarkers(u) // 画框口径:框住成员挂的旗(GND/3V3 不再垂出框外)
+			out = append(out, partitionModule{Name: name, BBox: *u, CoreBBox: core})
 		}
 	}
 	return out
