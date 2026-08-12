@@ -6,6 +6,13 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added(CLI 侧,锚 IC 电源旗也守「电上地下」)
+- **relayout 收尾把锚 IC 的横躺电源/地旗竖直化**(用户点名:外围都守约定,中心
+  器件不能例外)。安全判:竖直桩不穿本件相邻 pin(列顶电源脚/列底地脚才安全),
+  不安全的保持横躺并报告。横躺判据用旗**自身 rot**(0/180=竖直)而非 pin→锚
+  方向——L 形合流树(pin 横引再竖下挂旗)的竖直旗按方向近似会被误判横躺、
+  重连拆散合流(实测 U2 双 GND 合流被误报)。
+
 ### Added(CLI 侧,`sch zone relayout` —— placement-first 区级重排,用户点名的正确顺序)
 - **新命令 `sch zone relayout --zone X [--apply]`**:与 zone tidy(挪带线的组)
   的根本差别是顺序——①锚 IC 定位定向(V1 不动)→ ②外围器件按角色**纯计算**

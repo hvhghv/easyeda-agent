@@ -228,8 +228,84 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	if err := tidyApply(pinned, win, docUUID, plan, members, comps, stdout, stderr); err != nil {
 		return err
 	}
+	// 锚 IC 的横躺电源/地旗也竖直化(与外围统一「电上地下」;用户点名:外围都
+	// 遵守约定,中心器件不能例外)。仅当竖直桩不穿本件其他 pin(列顶的电源脚 /
+	// 列底的地脚才安全);不安全的保持横躺并报告。
+	if plan.AnchorDesig != "" {
+		if am, ok := members[strings.ToUpper(plan.AnchorDesig)]; ok {
+			if err := relayoutAnchorRails(pinned, win, docUUID, am, stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "⚠ 锚电源旗竖直化未完成:%v(横躺旗保留,手动 `sch disconnect`+`sch connect --direction up|down`)\n", err)
+			}
+		}
+	}
 	fmt.Fprintf(stdout, "✓ zone relayout applied:%d 件 placement-first 重排,自检绿\n", len(powerDesigs)+len(signalDesigs))
 	return nil
+}
+
+// relayoutAnchorRails 把锚 IC 的横躺 power/gnd 旗重连为竖直(power up / gnd
+// down)。安全判:竖直桩路径(pin ±3 x 带、伸出 50)上不得有本件其他 pin。
+func relayoutAnchorRails(cfg *appConfig, win, docUUID string, anchor tidyLiveMember, stdout, stderr io.Writer) error {
+	rails := tidyHorizontalRailPins(anchor)
+	if len(rails) == 0 {
+		return nil
+	}
+	for _, r := range rails {
+		var px, py float64
+		found := false
+		for _, p := range anchor.Pins {
+			if p.Conn.Pin == r.Pin {
+				px, py, found = p.X, p.Y, true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		dir := "up"
+		if r.Class == "ground" {
+			dir = "down"
+		}
+		safe := true
+		for _, p := range anchor.Pins {
+			if p.Conn.Pin == r.Pin || mathAbs(p.X-px) > 3 {
+				continue
+			}
+			if (dir == "up" && p.Y > py && p.Y <= py+50) || (dir == "down" && p.Y < py && p.Y >= py-50) {
+				safe = false
+				break
+			}
+		}
+		if !safe {
+			fmt.Fprintf(stderr, "  ⚠ %s:%s(%s)竖直桩会穿本件相邻 pin — 保持横躺\n", anchor.Comp.Designator, r.Pin, r.Net)
+			continue
+		}
+		rot, err := tidyLabelRotation(r.Class, dir)
+		if err != nil {
+			return err
+		}
+		if _, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
+			map[string]any{"pinX": px, "pinY": py}, docUUID, "relayout anchor rail disconnect"); err != nil {
+			return fmt.Errorf("disconnect %s:%s:%w", anchor.Comp.Designator, r.Pin, err)
+		}
+		kind := "power"
+		if r.Class == "ground" {
+			kind = "ground"
+		}
+		if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
+			map[string]any{"pinX": px, "pinY": py, "kind": kind, "net": r.Net, "direction": dir, "rotation": rot, "offset": 30.0},
+			docUUID, "relayout anchor rail connect"); err != nil {
+			return fmt.Errorf("connect %s:%s → %s %s:%w", anchor.Comp.Designator, r.Pin, dir, r.Net, err)
+		}
+		fmt.Fprintf(stdout, "  ✓ 锚 %s:%s %s 旗竖直化(%s)\n", anchor.Comp.Designator, r.Pin, r.Net, dir)
+	}
+	return nil
+}
+
+func mathAbs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func newSchZoneRelayoutCommand(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {

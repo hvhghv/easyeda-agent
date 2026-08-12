@@ -734,6 +734,16 @@ func tidyHorizontalRailPins(m tidyLiveMember) []tidyRailPin {
 		if class != "power" && class != "ground" {
 			continue
 		}
+		// 判据是旗**自身 rot**(0/180 = 竖直形态),不是 pin→锚方向:L 形连接
+		// (合流树:pin 横引再竖下挂旗)的旗已竖直,按 pin→锚主轴会误判横躺、
+		// 重连把合流树拆散(实测 U2 双 GND 合流被误报)。rot 不可得时退回方向近似。
+		if p.Marker.Rotation != nil {
+			r := math.Mod(math.Mod(*p.Marker.Rotation, 360)+360, 360)
+			if r != 0 && r != 180 {
+				out = append(out, tidyRailPin{Pin: p.Conn.Pin, Class: class, Net: p.Conn.Net})
+			}
+			continue
+		}
 		dir, _ := tidyStubDirection(p.X, p.Y, p.Marker.X, p.Marker.Y)
 		if dir == "left" || dir == "right" {
 			out = append(out, tidyRailPin{Pin: p.Conn.Pin, Class: class, Net: p.Conn.Net})
