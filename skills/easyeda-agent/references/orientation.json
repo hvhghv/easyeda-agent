@@ -21,13 +21,38 @@
     "incorrectly (fixed there too). The confirmed visual cycle is",
     "up->right->down->left with power/ground anchors swapped so ONLY the up/down",
     "numbers move; every left/right number is byte-identical to before. This",
-    "stored-rotation truth is independent of endpoint coordinate signs."
+    "stored-rotation truth is independent of endpoint coordinate signs.",
+    "2026-08-12 VERTICAL RE-CALIBRATION (live ceshi board, connector 0.24.3): five rendered ground truths (power up stored=0 [C6 3V3], power right=270 [R2], power left=90 [U2], ground down=0 [C6], ground left=270 [LED1]) contradict the 2026-06-29 table's vertical values (it said power up=180/ground down=180) while matching its horizontal ones. Root cause: the 06-29 fix reversed the CYCLE and compensated with swapped anchors — horizontal happened to line up, vertical stayed inverted, and the linter has been blessing reversed vertical flags ever since (an autoconnect-placed 3V3 stored 180 rendered upside-down and scored clean). The counter-clockwise cycle up->left->down->right with NATURAL anchors (power:up, ground:down, port:right) reproduces ALL five measurements; only up/down numbers move vs 06-29, every left/right number is byte-identical."
   ],
-  "rotationCycle": ["up", "right", "down", "left"],
-  "bodyAnchorAtRot0": { "power": "down", "ground": "up", "port": "right" },
+  "rotationCycle": [
+    "up",
+    "left",
+    "down",
+    "right"
+  ],
+  "bodyAnchorAtRot0": {
+    "power": "up",
+    "ground": "down",
+    "port": "right"
+  },
   "frozenTable": {
-    "power":  { "up": 180, "left": 90,  "down": 0,   "right": 270 },
-    "ground": { "down": 180, "right": 90, "up": 0,    "left": 270 },
-    "port":   { "right": 0, "up": 270,   "left": 180, "down": 90  }
+    "power": {
+      "up": 0,
+      "left": 90,
+      "down": 180,
+      "right": 270
+    },
+    "ground": {
+      "up": 180,
+      "left": 270,
+      "down": 0,
+      "right": 90
+    },
+    "port": {
+      "up": 90,
+      "left": 180,
+      "down": 270,
+      "right": 0
+    }
   }
 }

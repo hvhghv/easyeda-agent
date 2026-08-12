@@ -6,6 +6,25 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.4] - 2026-08-12
+
+### Fixed
+- **竖直旗 rotation 真值修正(2026-06-29 校准错了两个月)**:当时把 cycle 方向
+  搞反、用 anchor 对调补救——水平值恰好凑对,竖直值一直反(connect_pin 放的
+  朝上 3V3 存 180 渲染倒挂,而 linter 用同一份错表把它判「正确」——生成侧和
+  校验侧共享同一个错,机械门全绿、视觉不合格,用户肉眼抓出)。五点真机实测
+  (power up=0/right=270/left=90,ground down=0/left=270)确认逆时针 cycle
+  `up→left→down→right` + 自然锚 {power:up, ground:down, port:right} 复现全部
+  12 个数;相对旧表只有 up/down 翻转,left/right 逐字节不变。orientation.json
+  (SSOT)/actions.ts/linter fixtures+goldens 三处同步,derive 一致性单测护住。
+
+### Added(CLI 侧,竖放视觉规整)
+- **竖放去耦统一总高**:group tidy 的 power-updown 桩长按 pin 距补偿
+  (offset=(100−pin距)/2)——同排组高不一(块 wiring 桩 30 vs autoconnect 默认
+  桩 20)顶对齐后底不齐。现在同排竖放组顶线/底线双齐。
+- **竖放桶行内间距 40**:竖放组左右无标签文字,117(相向水平标签安全距)的
+  语义不适用,排出来松散。
+
 ### Added(CLI 侧,zone tidy 组间布局细化)
 - **同形态分桶分行**:竖放组(双电源旗去耦,上电下地)与横放组(带 netport 的
   信号链,netport 只能水平)不再按面积混排一行——桶切换强制换行,竖的一排、

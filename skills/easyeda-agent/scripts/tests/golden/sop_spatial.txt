@@ -16,10 +16,9 @@
   - 引脚 U1.6(IO4) 所在网络只有它自己、且无电源/地/标识 → 空连
   - 引脚 U1.7(IO5) 所在网络只有它自己、且无电源/地/标识 → 空连
 
-🟡 朝向不顺导线 (22):
-  - netflag      +3V3 @(500, 520)  rot=  0 应为 180  (导线朝down, body应朝up, power)
-  - netflag      +3V3 @(550, 520)  rot=  0 应为 180  (导线朝down, body应朝up, power)
-  - netflag      +3V3 @(1490, 520)  rot=  0 应为 180  (导线朝down, body应朝up, power)
+🟡 朝向不顺导线 (21):
+  - netflag       GND @(570, 520)  rot=  0 应为 180  (导线朝down, body应朝up, ground)
+  - netflag       GND @(1510, 520)  rot=  0 应为 180  (导线朝down, body应朝up, ground)
   - netport       SIG @(280, 300)  rot=  0 应为 180  (导线朝right, body应朝left, port)
   - netflag       GND @(940, 960)  rot=  0 应为  90  (导线朝left, body应朝right, ground)
   - netflag       GND @(940, 940)  rot=  0 应为  90  (导线朝left, body应朝right, ground)

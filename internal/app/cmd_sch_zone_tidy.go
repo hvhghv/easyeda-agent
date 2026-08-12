@@ -74,16 +74,22 @@ const zonePackEps = 1e-6
 
 // zonePackGroup 是一个刚体输入:组(或散件的临时单件组)的全集 bbox
 // (= expandSchGroupForMove 展开集的 bbox 并集)。
-// Bucket 是形态桶(0=竖放,1=横放,按 bbox 纵横比推):行排时**同桶同行**——
-// 竖放去耦(上电下地)与横放信号链(netport 只能水平)混排一行,顶对齐后高矮
-// 参差,视觉上"横一个竖一个不规范"(用户点名);桶切换强制换行,竖的一排、
-// 横的一排。全 0(如 sheet 层)时行为不变。
+// Bucket 是形态桶(0=默认/sheet 层,1=竖放,2=横放,按 bbox 纵横比推):行排时
+// **同桶同行**——竖放去耦(上电下地)与横放信号链(netport 只能水平)混排一行,
+// 顶对齐后高矮参差,视觉上"横一个竖一个不规范"(用户点名);桶切换强制换行,
+// 竖的一排、横的一排。竖放桶行内间距用 zonePackHGapVertical(竖放组左右无标签
+// 文字,hGap=117 的"相向水平标签安全距"语义不适用,排出来松散)。全 0 时行为
+// 与分桶前逐字节一致(sheet 层)。
 type zonePackGroup struct {
 	ID       string
 	BBox     layoutBBox
 	IsAnchor bool
 	Bucket   int
 }
+
+// zonePackHGapVertical:竖放桶(Bucket==1)行内水平间距——竖放去耦组左右没有
+// 标签文字,40 已留足呼吸;117 是两个相向水平 netport 标签的安全距,不适用。
+const zonePackHGapVertical = 40.0
 
 // zonePackMove 是一个组的刚移增量(已吸附 zonePackGridSnap 网格)。
 type zonePackMove struct {
@@ -210,7 +216,11 @@ func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, h
 				continue
 			}
 			moves = append(moves, zonePackMove{ID: g.ID, DX: dx, DY: dy})
-			cursor = eff.MaxX + hGap
+			gap := hGap
+			if g.Bucket == 1 { // 竖放桶:左右无标签文字,紧凑并肩
+				gap = zonePackHGapVertical
+			}
+			cursor = eff.MaxX + gap
 			if eff.MinY < rowLow {
 				rowLow = eff.MinY
 			}
@@ -937,11 +947,11 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	unitByRef := map[string]zoneTidyUnit{}
 	bboxByRef := map[string]layoutBBox{}
 	for i, u := range units {
-		// 形态桶按 bbox 纵横比:高>宽 = 竖放(双电源旗去耦,桶 0 排前),
-		// 否则横放(带 netport 的信号链,桶 1)——同桶同行,横竖不混排。
-		bucket := 1
+		// 形态桶按 bbox 纵横比:高>宽 = 竖放(双电源旗去耦,桶 1 排前,行内
+		// 紧凑 gap),否则横放(带 netport 的信号链,桶 2)——同桶同行不混排。
+		bucket := 2
 		if unitBoxes[i].MaxY-unitBoxes[i].MinY > unitBoxes[i].MaxX-unitBoxes[i].MinX {
-			bucket = 0
+			bucket = 1
 		}
 		packGroups[i] = zonePackGroup{ID: u.Ref, BBox: unitBoxes[i], IsAnchor: u.Ref == anchorRef, Bucket: bucket}
 		unitByRef[u.Ref] = u

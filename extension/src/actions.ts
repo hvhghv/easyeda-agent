@@ -4703,10 +4703,15 @@ function defaultDirection(kind: string): Direction {
 // is independent of endpoint coordinate signs. Verified via getPrimitivesBBox on
 // real settled flags; keep byte-identical to orientation.json
 // (rotationCycle + bodyAnchorAtRot0) and orient.py.
-const ROTATION_CYCLE: Direction[] = ['up', 'right', 'down', 'left'];
+// 2026-08-12 re-calibration (see orientation.json _doc): the 06-29 fix reversed
+// the cycle and compensated with swapped anchors — horizontal lined up, vertical
+// stayed inverted (an autoconnect-placed 3V3 stored 180 rendered upside-down and
+// the linter blessed it). Counter-clockwise cycle + NATURAL anchors reproduces
+// all five live measurements; left/right numbers are byte-identical to before.
+const ROTATION_CYCLE: Direction[] = ['up', 'left', 'down', 'right'];
 const BODY_ANCHOR_AT_ROT0: Record<'power' | 'ground' | 'port', Direction> = {
-	power: 'down',
-	ground: 'up',
+	power: 'up',
+	ground: 'down',
 	port: 'right',
 };
 

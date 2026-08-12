@@ -288,6 +288,13 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
   zone/sheet move 才带它走;裸 `sch note` 放的文字在区移动后原地掉队。
 - pin 号 ≠ 坐标序:`disconnect --pin X:2` 按**引脚号**解析(LED1 的 pin1 可能在
   右侧)。删桩前先 `autoconnect --dry-run` 核对该 pin 当前网名,防拆错脚。
+- **tidy 流水线跑完必须 `sch export-image` 做一次视觉复查**——机械门(gate/
+  score)只护「已建模的判据」;生成侧和校验侧共享同一份真值表时,表错则双双
+  失明(实测:竖直旗 rotation 真值反了两个月,connect_pin 放倒挂旗、linter 判
+  它正确,gate 全绿,用户肉眼才抓出)。视觉清单:① 同排竖放去耦顶线/底线双齐
+  ② 旗向直立(3V3 朝上、GND 朝下,倒挂=旋转真值病,别只调单件)③ 行左对齐、
+  无孤行大留白 ④ 说明文字不压器件、分区框完整包裹 ⑤ 各区风格统一。看出新的
+  「不舒服」→ 翻译成几何判据下沉到 lint/score,别停在肉眼。
 
 ## Module-aware autolayout — place parts by module zone
 

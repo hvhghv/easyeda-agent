@@ -1172,6 +1172,20 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 				live.Comp.Designator, mp.RotationCandidates[0], mp.RotationCandidates[1], mp.PowerPin)
 		}
 	}
+	// 竖放去耦统一总高(旗锚线上下取齐):offset=(标准高−pin距)/2 —— 同排组高
+	// 不一(块 wiring 桩 30 vs autoconnect 默认桩 20)顶对齐后底不齐,视觉参差
+	// (用户点名「横着和竖着不规范」的一半)。pin 距超标给不出 ≥15 的桩时退默认。
+	const tidyPowerFlagSpanH = 100.0
+	var stubOffset float64
+	if _, py1, ok1 := tidyPinCoord(pins, mp.PowerPin); ok1 {
+		if _, py2, ok2 := tidyPinCoord(pins, mp.GndPin); ok2 {
+			if d := math.Abs(py1 - py2); d > 0 {
+				if off := (tidyPowerFlagSpanH - d) / 2; off >= 15 {
+					stubOffset = snap5(off)
+				}
+			}
+		}
+	}
 	for _, t := range mp.Pins {
 		px, py, ok := tidyPinCoord(pins, t.Pin)
 		if !ok {
@@ -1180,6 +1194,9 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 		payload := map[string]any{
 			"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
 			"direction": t.Direction, "rotation": t.LabelRotation,
+		}
+		if stubOffset > 0 {
+			payload["offset"] = stubOffset
 		}
 		if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "tidy connect"); err != nil {
 			return fmt.Errorf("connect %s:%s → %s %s(%s):%w", live.Comp.Designator, t.Pin, t.Direction, t.Kind, t.Net, err)
