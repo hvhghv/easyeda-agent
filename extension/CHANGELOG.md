@@ -6,6 +6,20 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added(CLI 侧,`sch zone relayout` —— placement-first 区级重排,用户点名的正确顺序)
+- **新命令 `sch zone relayout --zone X [--apply]`**:与 zone tidy(挪带线的组)
+  的根本差别是顺序——①锚 IC 定位定向(V1 不动)→ ②外围器件按角色**纯计算**
+  终局(去耦竖放锚右同顶等距 60、信号链横放其下同行基线共线、链宽按 pin 实测
+  +网名估)→ ③deep sweep 删净旧桩旗 → 逐件落位 → 一遍性重连(真值表)。
+  全程不搬带线的图元,组刚移的 merge 撕裂整类问题不存在。ceshi MCU 区实测:
+  任意乱局一条命令到终局,自检绿,gate PASS。
+- buildTidyPlan 加 forceAll(全员出计划,幂等 no-op 不短路);tidySignalPlan
+  加 HasPose(signal 件执行时先落位再重连)。
+- **zoneTidyGrowBand 双序生长**:生长顺序决定 L 形空间里矩形的形状(先纵后横
+  把下方长满、右缘被低处图签卡死只剩 404 宽;先横后纵长到 806)。两种顺序都
+  算取面积大者;relayout 的 band 无条件生长(分区 rect 是「当前内容」的函数,
+  不生长就是鸡生蛋——上轮排成一列,band 缩窄,这轮还是一列)。
+
 ### Added(CLI 侧,signal-row 链端电源旗竖直化)
 - **group tidy signal-row 升级**:链末端横躺的 power/gnd netflag(left/right)
   一律重连竖直(power 上/gnd 下)——横躺旗的文字竖排侧向渲染(平台特性),

@@ -1685,6 +1685,7 @@ the selection). Without --ids it exports the whole active page.`,
 		}
 		zone.AddCommand(newSchZoneMoveCommand(cfg, &window, stdout, stderr))
 		zone.AddCommand(newSchZoneTidyCommand(cfg, &window, stdout, stderr))
+		zone.AddCommand(newSchZoneRelayoutCommand(cfg, &window, stdout, stderr))
 		sch.AddCommand(zone)
 		// Sheet 层(最外层):功能区依据纸张排布。
 		sheet := &cobra.Command{

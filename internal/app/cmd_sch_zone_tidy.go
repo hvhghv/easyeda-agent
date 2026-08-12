@@ -634,9 +634,8 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 	if safe := inflatedTitleKeepout(pplan.Keepout); safe != nil {
 		obs = append(obs, *safe)
 	}
-	g := band
-	for round := 0; round < 2; round++ { // 两轮定点:先长的方向让后判的方向看到新范围
-		top := avail.MaxY // 上(+y):夹到最近上方障碍底或纸带顶
+	growV := func(g layoutBBox) layoutBBox { // 纵向夹逼(上+下)
+		top := avail.MaxY
 		for _, o := range obs {
 			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MinY >= g.MaxY-zonePackEps && o.MinY < top {
 				top = o.MinY
@@ -645,7 +644,7 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		if top > g.MaxY {
 			g.MaxY = top
 		}
-		bot := avail.MinY // 下(−y)
+		bot := avail.MinY
 		for _, o := range obs {
 			if o.MinX < g.MaxX && o.MaxX > g.MinX && o.MaxY <= g.MinY+zonePackEps && o.MaxY > bot {
 				bot = o.MaxY
@@ -654,7 +653,10 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		if bot < g.MinY {
 			g.MinY = bot
 		}
-		left := avail.MinX // 左(−x)
+		return g
+	}
+	growH := func(g layoutBBox) layoutBBox { // 横向夹逼(左+右)
+		left := avail.MinX
 		for _, o := range obs {
 			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MaxX <= g.MinX+zonePackEps && o.MaxX > left {
 				left = o.MaxX
@@ -663,7 +665,7 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		if left < g.MinX {
 			g.MinX = left
 		}
-		right := avail.MaxX // 右(+x)
+		right := avail.MaxX
 		for _, o := range obs {
 			if o.MinY < g.MaxY && o.MaxY > g.MinY && o.MinX >= g.MaxX-zonePackEps && o.MinX < right {
 				right = o.MinX
@@ -672,8 +674,19 @@ func zoneTidyGrowBand(band layoutBBox, pplan partitionPlan, zone string, opts pa
 		if right > g.MaxX {
 			g.MaxX = right
 		}
+		return g
 	}
-	return g
+	// 生长顺序决定 L 形空间里矩形的形状:先纵后横会把下方长满、右缘被低处的
+	// 图签卡死(实测:band 下探到 y52 后右缘停在图签左缘 438,宽只剩 404;
+	// 先横后纵则先长到 850 宽、下缘停在图签顶)。两种顺序都算,取面积大者。
+	vh := growH(growV(growV(band)))
+	vh = growH(growV(vh))
+	hv := growV(growH(growH(band)))
+	hv = growV(growH(hv))
+	if (vh.MaxX-vh.MinX)*(vh.MaxY-vh.MinY) >= (hv.MaxX-hv.MinX)*(hv.MaxY-hv.MinY) {
+		return vh
+	}
+	return hv
 }
 
 // zoneTidyContentBand 是降级 band:区内现有内容 bbox 并集外扩 pad。

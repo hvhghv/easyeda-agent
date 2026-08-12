@@ -260,13 +260,21 @@ stubs; `sch connect` stays for when you deliberately override the geometry.
 每层都有 tidy(布局计算)+ move(刚移,携带下层全部内容:器件+桩线+旗+登记 note):
 
 ```bash
+easyeda sch zone relayout --zone MCU --apply    # ★首选:placement-first 区级重排——锚 IC 不动,
+                                                #   外围纯计算落位(去耦竖放同顶/信号链同行基线共线),
+                                                #   sweep 删净旧桩旗后一遍性重连。不搬带线的图元,
+                                                #   没有组刚移的 merge 撕裂问题
 easyeda sch group tidy --group g5 --apply       # 组内:竖放/上电下地/文字朝外;--deep 连残线清扫
-easyeda sch zone tidy --zone MCU --deep --apply # 区内:组间 pack(锚下行排,超高锚自动转锚侧行排;
-                                                #   band 装不下自动向纸面空地生长)
+easyeda sch zone tidy --zone MCU --deep --apply # 区内增量:组间 pack(保持连线不重生成时用;
+                                                #   注意组刚移有暂态 merge 风险,relayout 更稳)
 easyeda sch zone move --zone MCU --dx -510 --dy -95   # 区整体刚移(注册 note 随行,框自动重画)
 easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体依纸张排布(图签作障碍
                                                 #   L 形避让;已达标幂等 no-op;完毕统一重画框)
 ```
+
+**顺序铁则(用户拍板)**:布局混乱时**先 relayout 后连线语义自动跟上**——先确认
+核心器件方向位置,外围电容电阻的方向/间隔纯计算,最后才生成连线;不要在已连线
+的东西上打补丁式挪动。
 
 硬知识(实测踩坑):
 - **顺序**:先 `sheet tidy` 排开各区(给区生长空间),再逐区 `zone tidy --deep`,

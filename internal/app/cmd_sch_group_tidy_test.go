@@ -683,7 +683,7 @@ func TestBuildTidyPlanAuto(t *testing.T) {
 
 	members := map[string]tidyLiveMember{"U1": ic, "C1": capLive, "R3": sig, "R9": skip}
 	order := []string{"U1", "C1", "R3", "R9"}
-	plan, err := buildTidyPlan(members, order, "auto", 50)
+	plan, err := buildTidyPlan(members, order, "auto", 50, false)
 	if err != nil {
 		t.Fatalf("buildTidyPlan: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestBuildTidyPlanAuto(t *testing.T) {
 			Marker: tidyMarker("f5", "netport", "X", 750, 100), HasMarker: true},
 	}
 	members["R4"] = sigOK
-	plan, err = buildTidyPlan(members, append(order, "R4"), "auto", 50)
+	plan, err = buildTidyPlan(members, append(order, "R4"), "auto", 50, false)
 	if err != nil {
 		t.Fatalf("buildTidyPlan (R4): %v", err)
 	}
@@ -731,7 +731,7 @@ func TestBuildTidyPlanAnchorUnresolvable(t *testing.T) {
 			Marker: tidyMarker("f2", "netflag", "GND", 0, -40), HasMarker: true},
 	}
 	members := map[string]tidyLiveMember{"C1": blind}
-	_, err := buildTidyPlan(members, []string{"C1"}, "auto", 50)
+	_, err := buildTidyPlan(members, []string{"C1"}, "auto", 50, false)
 	if err == nil {
 		t.Fatal("锚不可得应报错,got nil")
 	}
@@ -741,7 +741,7 @@ func TestBuildTidyPlanAnchorUnresolvable(t *testing.T) {
 	// 同组只有 skip 件(无人按锚排)→ 锚不可得不阻断(signal-row/skip 不用锚)。
 	skipOnly := tidyLivePart("R9", 0, 0, nil, tidyRoleSkip)
 	skipOnly.Comp.AnchorAvailable = false
-	plan, err := buildTidyPlan(map[string]tidyLiveMember{"R9": skipOnly}, []string{"R9"}, "auto", 50)
+	plan, err := buildTidyPlan(map[string]tidyLiveMember{"R9": skipOnly}, []string{"R9"}, "auto", 50, false)
 	if err != nil {
 		t.Fatalf("纯 skip 组不应因锚报错:%v", err)
 	}

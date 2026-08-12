@@ -456,6 +456,10 @@ type tidySignalMemberIn struct {
 type tidySignalPlan struct {
 	Designator string
 	Pins       []tidyPinTarget
+	// HasPose 时执行侧先 modify 器件到 (X,Y)(rot 保持现值)再重连 —— zone
+	// relayout(placement-first)用;组内 tidy 不动 signal 件位置(HasPose=false)。
+	HasPose bool
+	X, Y    float64
 }
 
 // planSignalRow 计算 signal-row 目标(纯函数):器件不动、netport 一律水平
@@ -816,7 +820,9 @@ type tidyPlanned struct {
 // buildTidyPlan 把 live members 编排成计划(纯函数,I/O 已在调用方完成)。
 // pattern 强制:power-updown 把非 IC 全按双旗排(不合规即错);signal-row 把
 // 全员当 signal 候选(只修竖放 netport);auto 按 classify。
-func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern string, spacing float64) (*tidyPlanned, error) {
+// forceAll:signal 件不做幂等 no-op 短路,全员出计划(zone relayout 的
+// placement-first 全员重排用;组内 tidy 传 false 保持幂等)。
+func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern string, spacing float64, forceAll bool) (*tidyPlanned, error) {
 	p := &tidyPlanned{Pattern: pattern, Spacing: spacing}
 	lives := make([]tidyLiveMember, 0, len(order))
 	for _, d := range order {
@@ -872,9 +878,31 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 			vertical[pin] = true
 		}
 		rails := tidyHorizontalRailPins(m)
-		if len(vertical) == 0 && len(rails) == 0 {
+		if !forceAll && len(vertical) == 0 && len(rails) == 0 {
 			p.SignalNoop = append(p.SignalNoop, strings.ToUpper(m.Comp.Designator))
 			continue
+		}
+		if forceAll { // 全员重排:已竖直的电源/地旗也按目标形态重建
+			for _, lp := range m.Pins {
+				if lp.Conn.Flag != "netflag" {
+					continue
+				}
+				class := tidyNetClass(lp.Conn.Net)
+				if class != "power" && class != "ground" {
+					continue
+				}
+				already := false
+				for _, r := range rails {
+					if r.Pin == lp.Conn.Pin {
+						already = true
+						break
+					}
+				}
+				if !already {
+					rails = append(rails, tidyRailPin{Pin: lp.Conn.Pin, Class: class, Net: lp.Conn.Net})
+				}
+			}
+			sort.Slice(rails, func(i, j int) bool { return rails[i].Pin < rails[j].Pin })
 		}
 		center := m.Comp.X
 		if m.Comp.BBox != nil {
@@ -1266,6 +1294,11 @@ func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMembe
 // settle 实测 → 按左入右出水平重连(器件位置/rotation 不动)。
 func tidyExecSignalMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, sp tidySignalPlan, stdout io.Writer) error {
 	// 旧竖桩已由 tidyDeepSweep 整树删净(共享树 sweep 期即拒)。
+	if sp.HasPose { // placement-first(zone relayout):先落位再重连
+		if err := tidyModifyPose(cfg, win, docUUID, live.Comp.ID, sp.X, sp.Y, live.Rotation); err != nil {
+			return fmt.Errorf("modify %s → (%g,%g):%w", live.Comp.Designator, sp.X, sp.Y, err)
+		}
+	}
 	pins, err := tidySettledPins(cfg, win, docUUID, live.Comp.Designator)
 	if err != nil {
 		return err
@@ -1632,7 +1665,7 @@ func runSchGroupTidy(cfg *appConfig, window, groupRef, pattern string, spacing f
 	if err != nil {
 		return err
 	}
-	plan, err := buildTidyPlan(members, order, pattern, spacing)
+	plan, err := buildTidyPlan(members, order, pattern, spacing, false)
 	if err != nil {
 		return err
 	}
