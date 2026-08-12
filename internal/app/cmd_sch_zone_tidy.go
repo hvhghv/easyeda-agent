@@ -1163,7 +1163,11 @@ func zoneTidyOrderMoves(groups []zoneTidyGroupReport, band layoutBBox) []zoneTid
 	for i, g := range movers {
 		cur[i] = g.BBox
 	}
-	parkX := band.MaxX + 200 // parking 起点:带右外,不与任何在场内容相交
+	// parking 起点:带右外 +500 —— +200 曾把组 park 进右邻功能区腹地(band 右
+	// 外不等于空地!),park 桩与邻区线共点 merge 出跨区短路(实测两次:x1065
+	// 落在 POWER 分区里)。+500 在 A4(宽 1170)上必出纸;纸外无内容可 merge,
+	// 且 park 是同一次 apply 内的暂态,收尾自检前已回到带内终位。
+	parkX := band.MaxX + 500
 	var parkedFinal []zoneTidyMoveStep
 	for remaining := len(movers); remaining > 0; {
 		progress := false

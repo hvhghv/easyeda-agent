@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added(CLI 侧,signal-row 链端电源旗竖直化)
+- **group tidy signal-row 升级**:链末端横躺的 power/gnd netflag(left/right)
+  一律重连竖直(power 上/gnd 下)——横躺旗的文字竖排侧向渲染(平台特性),
+  用户点名三处「文字竖着难看」;竖直化后与去耦列同款风格。已竖直 = no-op。
+- **修 signal-row 重建覆盖缺口**:deep sweep 删的是全件的树(两端),但重建
+  计划只含被修 pin——netport 端删了没重建 → 悬空(实测 C5/R1/R2 三件同炸)。
+  现在有任何修复目标时全部 netport pin 都进重建计划(已水平的按原语义重建)。
+- **staging park 位从带右外 +200 改 +500(出纸)**:+200 曾把组 park 进右邻
+  功能区腹地(band 右外 ≠ 空地),park 桩与邻区线共点 merge 出跨区短路且回滚
+  撕裂扩散到邻区(实测两次,第二次伤到 POWER 的 C3)。纸外无内容可 merge。
+
 ### Added(CLI 侧,zone tidy 行内电气基线对齐)
 - **横放信号链行内基线共线**:行内对齐从「组 bbox 顶」改为「电气基线」(器件
   锚 y = 桩线 y;行首组定行基线,后续组共线)。bbox 顶对齐时两组上伸量不同

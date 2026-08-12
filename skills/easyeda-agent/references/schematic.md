@@ -300,6 +300,10 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
   各自引旗必然文字互叠——合流:两桩引到同一竖线相接,再引出挂**一支**旗;
   EPAD 单独向下引旗。同侧密集异网旗(AMS1117 左侧 GND/3V3/+5V 三连)用阶梯
   offset 错列(20/50/80),`sch connect --offset` 显式给。
+- **信号链末端的电源/地旗必须竖直**(power 上/gnd 下):横躺(left/right)的
+  power/gnd 旗文字竖排侧向渲染(平台特性,极难看)。`sch group tidy` 的
+  signal-row 会自动竖直化;手工 `sch connect` 时 power/gnd 一律 --direction
+  up/down,只有 netport 才 left/right(netport 相反:永不竖放)。
 
 ## Module-aware autolayout — place parts by module zone
 

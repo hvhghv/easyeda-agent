@@ -709,6 +709,36 @@ func tidyVerticalPortPins(m tidyLiveMember) []string {
 	return out
 }
 
+// tidyRailPin 是 signal-row 件上一个待竖直化的电源/地旗 pin。
+type tidyRailPin struct {
+	Pin   string
+	Class string // "power" | "ground"
+	Net   string
+}
+
+// tidyHorizontalRailPins 找 signal-row 件上**横躺的电源/地旗**:链末端 power/
+// gnd netflag 走 left/right 时旗符号横躺、文字竖排侧向(平台渲染特性;用户
+// 点名三处「文字竖着」)。标准画法是链端电源旗一律竖直(power 上/gnd 下),
+// 与去耦列同款风格。已竖直 = no-op(幂等)。
+func tidyHorizontalRailPins(m tidyLiveMember) []tidyRailPin {
+	var out []tidyRailPin
+	for _, p := range m.Pins {
+		if !p.HasMarker || p.Marker.ComponentType != "netflag" {
+			continue
+		}
+		class := tidyNetClass(p.Conn.Net)
+		if class != "power" && class != "ground" {
+			continue
+		}
+		dir, _ := tidyStubDirection(p.X, p.Y, p.Marker.X, p.Marker.Y)
+		if dir == "left" || dir == "right" {
+			out = append(out, tidyRailPin{Pin: p.Conn.Pin, Class: class, Net: p.Conn.Net})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pin < out[j].Pin })
+	return out
+}
+
 // tidyResolveAnchor 定组内锚:优先含 IC(anchor-ic 角色)且 bbox 最大者
 // (IC 不动,横排从其右侧起);无 IC 时取全体成员 bbox 并集的中心。第三返回值
 // ok=false = 锚不可得(全员既无 bbox 又无锚坐标)—— 调用方必须报错而不是拿
@@ -841,7 +871,8 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 		for _, pin := range tidyVerticalPortPins(m) {
 			vertical[pin] = true
 		}
-		if len(vertical) == 0 {
+		rails := tidyHorizontalRailPins(m)
+		if len(vertical) == 0 && len(rails) == 0 {
 			p.SignalNoop = append(p.SignalNoop, strings.ToUpper(m.Comp.Designator))
 			continue
 		}
@@ -850,8 +881,12 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 			center = (m.Comp.BBox.MinX + m.Comp.BBox.MaxX) / 2
 		}
 		in := tidySignalMemberIn{Designator: m.Comp.Designator, CenterX: center}
+		// 有任何修复目标时,执行侧的 deep sweep 会把**全件**的旧桩/旗整树删净
+		// ——所以重建计划必须覆盖该件全部 netport pin(已水平的按原语义重建,
+		// planSignalRow 左入右出与原向一致),否则没被列入的一端被删后悬空
+		// (实测:C5 修 GND 竖直,EN netport 端被 sweep 删掉没重建 → floating)。
 		for _, lp := range m.Pins {
-			if !vertical[lp.Conn.Pin] {
+			if lp.Conn.Flag != "netport" {
 				continue
 			}
 			in.Pins = append(in.Pins, tidySignalPinIn{Pin: lp.Conn.Pin, X: lp.X, Net: lp.Conn.Net, IsPort: true})
@@ -859,6 +894,26 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 		plans, perr := planSignalRow([]tidySignalMemberIn{in})
 		if perr != nil {
 			return nil, perr
+		}
+		// 横躺电源/地旗 → 竖直化目标(power up / gnd down,真值表 rotation)。
+		var railTargets []tidyPinTarget
+		for _, r := range rails {
+			dir, kind := "up", "power"
+			if r.Class == "ground" {
+				dir, kind = "down", "ground"
+			}
+			rot, rerr := tidyLabelRotation(r.Class, dir)
+			if rerr != nil {
+				return nil, rerr
+			}
+			railTargets = append(railTargets, tidyPinTarget{Pin: r.Pin, Direction: dir, Kind: kind, Net: r.Net, LabelRotation: rot})
+		}
+		if len(railTargets) > 0 {
+			if len(plans) > 0 {
+				plans[0].Pins = append(plans[0].Pins, railTargets...)
+			} else {
+				plans = append(plans, tidySignalPlan{Designator: m.Comp.Designator, Pins: railTargets})
+			}
 		}
 		p.Signal = append(p.Signal, plans...)
 	}
@@ -1228,7 +1283,7 @@ func tidyExecSignalMember(cfg *appConfig, win, docUUID string, live tidyLiveMemb
 			return fmt.Errorf("connect %s:%s → %s netport(%s):%w", live.Comp.Designator, t.Pin, t.Direction, t.Net, err)
 		}
 	}
-	fmt.Fprintf(stdout, "  ✓ %s netport 水平化:%d 个 pin\n", live.Comp.Designator, len(sp.Pins))
+	fmt.Fprintf(stdout, "  ✓ %s signal-row 重连 %d 个 pin(netport 水平 / 电源地旗竖直)\n", live.Comp.Designator, len(sp.Pins))
 	return nil
 }
 
