@@ -2947,13 +2947,43 @@ const schematicCheck: Handler = async (payload) => {
 			continue;
 		}
 
-		// Classify each of the wire's TWO extreme endpoints separately: does it touch
-		// a pin, and does it touch a marker (netflag/netport/netlabel) or a DIFFERENT
-		// wire? The old rule collapsed all vertices with `verts.some(...)`, so a stub
-		// with one end on a pin always looked "connected" and orphan stubs (flag
-		// deleted, wire残留) slipped through. Per-end classification lets us tell a
-		// genuine terminus from a pin-anchored stub whose far end floats (issue #51).
-		const endpoints: Array<[number, number]> = [verts[0], verts[verts.length - 1]];
+		// Classify each FREE END of the wire separately: does it touch a pin, and
+		// does it touch a marker or a DIFFERENT wire? Two subtleties, both live-bitten:
+		// (1) issue #51 — per-end classification (not verts.some) so a pin-anchored
+		//     stub with a floating far end is caught;
+		// (2) 2026-08-12 — the platform MERGES same-net wires that share endpoints
+		//     into ONE primitive whose line is a SEGMENT ARRAY ((x1,y1,x2,y2)×N in
+		//     arbitrary order), NOT a polyline. Reading verts[0]/verts[last] as "the
+		//     two ends" then picks interior corner points and a perfectly-connected
+		//     3-segment L-run reports dangling. Free ends are the DEGREE-1 vertices
+		//     of the segment graph. Even vertex counts ≥4 parse as segment pairs
+		//     (the observed merged form; a plain 2-vertex stub is identical either
+		//     way); odd counts fall back to polyline chaining.
+		const endpoints: Array<[number, number]> = (() => {
+			const segs: Array<[[number, number], [number, number]]> = [];
+			if (verts.length >= 4 && verts.length % 2 === 0) {
+				for (let i = 0; i + 1 < verts.length; i += 2) segs.push([verts[i], verts[i + 1]]);
+			}
+			else {
+				for (let i = 0; i + 1 < verts.length; i++) segs.push([verts[i], verts[i + 1]]);
+			}
+			const deg = new Map<string, { v: [number, number]; n: number }>();
+			const keyOf = (v: [number, number]) => `${Math.round(v[0] * 100)}:${Math.round(v[1] * 100)}`;
+			for (const [a, b] of segs) {
+				for (const v of [a, b]) {
+					const k = keyOf(v);
+					const e = deg.get(k);
+					if (e) e.n++;
+					else deg.set(k, { v, n: 1 });
+				}
+			}
+			const free: Array<[number, number]> = [];
+			for (const { v, n } of deg.values()) {
+				if (n === 1) free.push(v);
+			}
+			// A closed loop (no degree-1 vertex) degrades to the old first/last pick.
+			return free.length > 0 ? free : [verts[0], verts[verts.length - 1]];
+		})();
 		const touchOf = (v: [number, number]) => ({
 			touchesPin: allPins.some(p => Math.hypot(v[0] - p.x, v[1] - p.y) <= COINCIDE_TOL),
 			touchesMarker: connectionMarkers.some(m => Math.hypot(v[0] - m.x, v[1] - m.y) <= COINCIDE_TOL)
