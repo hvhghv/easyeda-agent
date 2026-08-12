@@ -52,7 +52,7 @@ func buildSchNoteJS(x, y float64, text, color string, fontSize float64) string {
 
 // newSchNoteCmd builds `sch note`.
 func newSchNoteCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
-	var text, color string
+	var text, color, zoneRef string
 	var x, y, fontSize float64
 	c := &cobra.Command{
 		Use:   "note",
@@ -99,6 +99,16 @@ default is: one short note per module, parked just below/beside its zone frame.
 			if err := saveZoneDocument(pinnedCfg, win, docUUID, "save schematic note"); err != nil {
 				return err
 			}
+			// --zone:把说明登记为功能区的内置对象(Zone = 外框+标题+说明+组+散件,
+			// 用户定义的对象模型)。登记后:分区框把它 fold 进画框口径、zone move
+			// 无条件带走(不再依赖"锚点恰好在框内"的几何猜)。
+			if zoneRef != "" {
+				if rerr := registerSchZoneNote(pinnedCfg, win, docUUID, zoneRef, tid); rerr != nil {
+					return fmt.Errorf("note %s 已创建并保存,但登记到区 %q 失败:%w(可重跑 `sch note` 前先 prim-delete,或忽略登记)", tid, zoneRef, rerr)
+				}
+				fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g), registered to zone %q; schematic saved\n", tid, x, y, zoneRef)
+				return nil
+			}
 			fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g) on page %s; schematic saved\n", tid, x, y, docUUID)
 			return nil
 		},
@@ -108,8 +118,40 @@ default is: one short note per module, parked just below/beside its zone frame.
 	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP)")
 	c.Flags().Float64Var(&fontSize, "font-size", schNoteDefaultFontSize, "font size")
 	c.Flags().StringVar(&color, "color", schNoteDefaultColor, "text color")
+	c.Flags().StringVar(&zoneRef, "zone", "", "register this note as part of a functional zone (`sch zones` claim name) — the partition frame will enclose it and `sch zone move` always carries it")
 	_ = c.MarkFlagRequired("text")
 	_ = c.MarkFlagRequired("x")
 	_ = c.MarkFlagRequired("y")
 	return c
+}
+
+// registerSchZoneNote appends a created note's primitiveId to the zone claim's
+// NoteIDs (idempotent) and persists the workflow state.
+func registerSchZoneNote(cfg *appConfig, window, docUUID, zoneRef, textID string) error {
+	zones, project, err := loadSchZoneClaimsForPage(cfg, window, docUUID)
+	if err != nil {
+		return err
+	}
+	var claim *schZoneClaim
+	for name, zc := range zones {
+		if strings.EqualFold(name, zoneRef) || (zc != nil && strings.EqualFold(zc.Zone, zoneRef)) {
+			claim = zc
+			break
+		}
+	}
+	if claim == nil {
+		return fmt.Errorf("zone %q has no claim on this page (`sch zones status`)", zoneRef)
+	}
+	for _, id := range claim.NoteIDs {
+		if id == textID {
+			return nil
+		}
+	}
+	claim.NoteIDs = append(claim.NoteIDs, textID)
+	st, err := loadPcbStageState(project)
+	if err != nil {
+		return err
+	}
+	st.SetSchZonesForPage(docUUID, zones)
+	return savePcbStageState(st)
 }

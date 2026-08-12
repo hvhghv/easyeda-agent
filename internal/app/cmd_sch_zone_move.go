@@ -691,6 +691,23 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		textPad = schZoneMoveTextPad
 	}
 	notes := selectZoneMoveTexts(parseZoneMoveTexts(tres.Result), zoneMoveInflate(content, textPad), excluded)
+	// 功能区对象模型:登记的说明(claim.NoteIDs)无条件随区走——锚点在不在几何
+	// 框内都算区的内置对象(几何选择只是未登记文本的兜底)。
+	if len(claim.NoteIDs) > 0 {
+		have := map[string]bool{}
+		for _, t := range notes {
+			have[t.ID] = true
+		}
+		reg := map[string]bool{}
+		for _, id := range claim.NoteIDs {
+			reg[id] = true
+		}
+		for _, t := range parseZoneMoveTexts(tres.Result) {
+			if reg[t.ID] && !have[t.ID] && !excluded[t.ID] {
+				notes = append(notes, t)
+			}
+		}
+	}
 
 	// 6) 目的地预检:全展开 bbox(含文本锚点)平移后逐项比对。
 	var notePts [][2]float64

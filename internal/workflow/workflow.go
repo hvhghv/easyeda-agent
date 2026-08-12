@@ -233,6 +233,14 @@ type SchZoneClaim struct {
 	Parts []string `json:"parts"` // designators, upper-case, sorted
 	At    string   `json:"at"`
 	Note  string   `json:"note,omitempty"`
+	// NoteIDs are the circuit-description text primitives (`sch note --zone`)
+	// REGISTERED as belonging to this zone — the zone object model is
+	// frame + title + notes + groups + loose parts (user-defined 2026-08-12).
+	// Registered notes fold into the partition frame's draw bbox and always ride
+	// along on `sch zone move`, wherever their anchor happens to sit; the old
+	// anchor-inside-bbox geometric guess remains only as a fallback for
+	// unregistered text.
+	NoteIDs []string `json:"noteIds,omitempty"`
 }
 
 // SetSchZones writes the legacy project-wide table. Kept for JSON/backward API

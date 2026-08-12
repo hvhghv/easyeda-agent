@@ -130,3 +130,18 @@ func TestClusterSplits_NaturalGap(t *testing.T) {
 		t.Errorf("5-unit band < 12 gutter → no split, got %v", s)
 	}
 }
+
+// TestSchNoteBBoxEstimate + fold:登记的说明(zone 对象模型的内置对象)按内容
+// 估算 bbox 并入模块画框口径;CoreBBox 不动(说明不参与图签/区名硬校验)。
+func TestZoneNoteFoldEstimate(t *testing.T) {
+	nb := schNoteBBoxEstimate(zoneMoveText{X: 330, Y: 640, Content: "AMS1117: 5V→3V3\nC2入/C3出/C1旁路", FontSize: 10})
+	if nb.MinX != 330 || nb.MaxY != 640 {
+		t.Fatalf("anchor must be top-left: %+v", nb)
+	}
+	if nb.MaxX <= 330+80 { // 两行 CJK 混排,最长行应显著宽于 80
+		t.Fatalf("width estimate too small: %+v", nb)
+	}
+	if h := nb.MaxY - nb.MinY; h < 20 || h > 40 { // 2 行 × 10pt × 1.3
+		t.Fatalf("height estimate off: %+v", nb)
+	}
+}

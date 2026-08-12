@@ -595,7 +595,80 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	if len(modules) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no module bboxes resolved — the claimed parts aren't on this page (place them / `doc switch`)")
 	}
+	// 功能区对象模型:登记的说明 note(claim.NoteIDs)是区的内置对象——把它们的
+	// 估算 bbox fold 进对应模块的画框口径(CoreBBox 不动:说明是注释,不参与
+	// 图签/区名带的硬校验)。text 无 bbox API,按内容行数×字号估算;读取失败仅
+	// 降级警告(说明不该阻断画框)。
+	foldZoneNotesIntoModules(cfg, window, docUUID, zones, modules)
 	return planPartitions(*sheet, keepout, modules, opts), zones, nil
+}
+
+// schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左上(y-UP 向下排行),
+// 行高 ≈ fontSize×1.3,宽 ≈ 最长行字符宽(CJK ≈ fontSize,ASCII ≈ 0.55×fontSize)。
+func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {
+	fs := t.FontSize
+	if fs <= 0 {
+		fs = schNoteDefaultFontSize
+	}
+	lines := strings.Split(t.Content, "\n")
+	maxW := 0.0
+	for _, ln := range lines {
+		w := 0.0
+		for _, r := range ln {
+			if r > 0x2E80 { // CJK 全宽
+				w += fs
+			} else {
+				w += fs * 0.55
+			}
+		}
+		if w > maxW {
+			maxW = w
+		}
+	}
+	h := float64(len(lines)) * fs * 1.3
+	return layoutBBox{MinX: t.X, MinY: t.Y - h, MaxX: t.X + maxW, MaxY: t.Y}
+}
+
+// foldZoneNotesIntoModules 把每个区登记的 note bbox 并进该区模块的 BBox(画框
+// 口径)。best-effort:text.list 失败只警告。
+func foldZoneNotesIntoModules(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim, modules []partitionModule) {
+	needed := false
+	for _, zc := range zones {
+		if zc != nil && len(zc.NoteIDs) > 0 {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return
+	}
+	res, err := requestAutolayoutAction(cfg, "schematic.text.list", window, map[string]any{}, docUUID, "read zone notes")
+	if err != nil {
+		return // best-effort:说明 fold 失败不阻断画框
+	}
+	texts := parseZoneMoveTexts(res.Result)
+	byID := map[string]zoneMoveText{}
+	for _, t := range texts {
+		byID[t.ID] = t
+	}
+	for i := range modules {
+		zc := zones[modules[i].Name]
+		if zc == nil {
+			continue
+		}
+		for _, nid := range zc.NoteIDs {
+			t, ok := byID[nid]
+			if !ok {
+				continue // 登记的 note 已被删(stale 登记)——list 时静默跳过
+			}
+			nb := schNoteBBoxEstimate(t)
+			b := &modules[i].BBox
+			b.MinX = minF(b.MinX, nb.MinX)
+			b.MinY = minF(b.MinY, nb.MinY)
+			b.MaxX = maxF(b.MaxX, nb.MaxX)
+			b.MaxY = maxF(b.MaxY, nb.MaxY)
+		}
+	}
 }
 
 func renderPartitionPlan(plan partitionPlan, w io.Writer) {
