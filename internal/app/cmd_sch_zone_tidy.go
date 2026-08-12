@@ -85,6 +85,11 @@ type zonePackGroup struct {
 	BBox     layoutBBox
 	IsAnchor bool
 	Bucket   int
+	// AnchorLineY 是组的**电气基线**(横放信号链 = 器件锚 y = 桩线 y;0 = 无)。
+	// 行内对齐若用 bbox 顶,两组上伸量不同(GND 旗符号 vs 3V3 旗文字)会让同行
+	// 两条链的走线错开 5-10 个单位(用户点名「横竖不齐」)——同行有基线的组
+	// 一律基线共线,bbox 高低差由行间 vGap 吸收。
+	AnchorLineY float64
 }
 
 // zonePackHGapVertical:竖放桶(Bucket==1)行内水平间距——竖放去耦组左右没有
@@ -175,6 +180,7 @@ func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, h
 	cursor := region.MinX
 	firstInRow := true
 	lastBucket := -1
+	rowAnchorLine := 0.0 // 本行电气基线(行首有基线的组落位后设定;0 = 本行无基线)
 	for _, g := range others {
 		// 形态桶切换强制换行(竖放组一排、横放组一排;全同桶时无感)。
 		if !firstInRow && lastBucket >= 0 && g.Bucket != lastBucket {
@@ -199,7 +205,14 @@ func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, h
 				firstInRow = true
 				continue
 			}
-			dy := zonePackFloorGrid(rowTop - g.BBox.MaxY)
+			var dy float64
+			if !firstInRow && rowAnchorLine != 0 && g.AnchorLineY != 0 {
+				// 行内基线共线:同行的信号链走线必须在同一水平线上(bbox 顶
+				// 对齐会因上伸量不同错开走线)。
+				dy = zonePackFloorGrid(rowAnchorLine - g.AnchorLineY)
+			} else {
+				dy = zonePackFloorGrid(rowTop - g.BBox.MaxY)
+			}
 			eff = zonePackOffset(g.BBox, dx, dy)
 			if eff.MinY < region.MinY-zonePackEps {
 				return nil, false // 纵向溢出区域底
@@ -223,6 +236,12 @@ func packRowsInto(others []zonePackGroup, region layoutBBox, obs []layoutBBox, h
 			cursor = eff.MaxX + gap
 			if eff.MinY < rowLow {
 				rowLow = eff.MinY
+			}
+			if firstInRow {
+				rowAnchorLine = 0
+				if g.AnchorLineY != 0 {
+					rowAnchorLine = g.AnchorLineY + dy // 行首落位后定本行基线
+				}
 			}
 			firstInRow = false
 			placed = true
@@ -800,6 +819,7 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 	partPins := map[string][][2]float64{}
 	partBBox := map[string]*layoutBBox{}
 	partSeen := map[string]bool{}
+	partAnchorY := map[string]float64{} // 器件锚 y = 横放链的走线基线(行内共线对齐)
 	var flags []schGroupFlag
 	for _, c := range comps {
 		switch {
@@ -813,6 +833,9 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 				continue
 			}
 			partSeen[d] = true
+			if c.AnchorAvailable {
+				partAnchorY[d] = c.Y
+			}
 			for _, p := range c.Pins {
 				partPins[d] = append(partPins[d], [2]float64{p.X, p.Y})
 			}
@@ -953,7 +976,21 @@ func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap
 		if unitBoxes[i].MaxY-unitBoxes[i].MinY > unitBoxes[i].MaxX-unitBoxes[i].MinX {
 			bucket = 1
 		}
-		packGroups[i] = zonePackGroup{ID: u.Ref, BBox: unitBoxes[i], IsAnchor: u.Ref == anchorRef, Bucket: bucket}
+		// 横放组的电气基线 = 组员器件锚 y 均值(单件组即器件锚;桩线沿此线走)。
+		anchorLine := 0.0
+		if bucket == 2 {
+			sum, n := 0.0, 0
+			for _, m := range u.Members {
+				if ay, ok := partAnchorY[m]; ok {
+					sum += ay
+					n++
+				}
+			}
+			if n > 0 {
+				anchorLine = sum / float64(n)
+			}
+		}
+		packGroups[i] = zonePackGroup{ID: u.Ref, BBox: unitBoxes[i], IsAnchor: u.Ref == anchorRef, Bucket: bucket, AnchorLineY: anchorLine}
 		unitByRef[u.Ref] = u
 		bboxByRef[u.Ref] = unitBoxes[i]
 	}
