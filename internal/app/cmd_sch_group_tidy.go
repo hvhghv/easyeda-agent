@@ -160,6 +160,37 @@ func tidyNetClass(net string) string {
 //
 // 分类只依赖连接(net + 旗类型 + 是否在线上),不依赖当前姿态 —— 已整理过的件
 // 连接不变,分类不变,tidy 幂等。
+// tidySkipHint:对被 skip 的双电源类件给可执行诊断——恰有 power/gnd 旗之一、
+// 其余 pin 悬空(无旗无线)= 疑似断连,报 autoconnect 补连命令。
+func tidySkipHint(designator string, pins []tidyPinConn) string {
+	hasPower, hasGnd := false, false
+	var bare []string
+	for _, p := range pins {
+		if p.Flag == "netflag" {
+			switch tidyNetClass(p.Net) {
+			case "power":
+				hasPower = true
+				continue
+			case "ground":
+				hasGnd = true
+				continue
+			}
+		}
+		if p.Flag == "" && !p.OnWire {
+			bare = append(bare, p.Pin)
+		}
+	}
+	if (hasPower != hasGnd) && len(bare) > 0 { // 恰有一类旗 + 有全裸 pin
+		missing, kind := "GND", "gnd"
+		if hasGnd {
+			missing, kind = "3V3/电源网", "power"
+		}
+		return fmt.Sprintf("疑似断连:pin %s 悬空(另一 pin 已挂旗)— `sch autoconnect --pin %s:%s --kind %s --net %s` 补连后重跑 tidy",
+			strings.Join(bare, ","), designator, bare[0], kind, missing)
+	}
+	return ""
+}
+
 func classifyTidyMember(designator string, pins []tidyPinConn) tidyRole {
 	if strings.EqualFold(designatorPrefix(strings.TrimSpace(designator)), "U") {
 		return tidyRoleAnchorIC
@@ -733,6 +764,10 @@ func tidyResolveAnchor(members []tidyLiveMember) (tidyAnchor, string, bool) {
 type tidyRoleEntry struct {
 	Designator string
 	Role       tidyRole
+	// Hint 是 skip 的可执行原因(疑似断连等)——tidy 不自动补连(悬空 pin 该接
+	// 什么网推断有风险),但必须把病和修法说出来,不许静默(live 2026-08-12:
+	// C4:1/C6:2 断连被幂等 skip 掩过)。
+	Hint string
 }
 
 // tidyPlanned 是整组的 tidy 计划(dry-run 的报告体,--apply 的执行输入)。
@@ -773,7 +808,11 @@ func buildTidyPlan(members map[string]tidyLiveMember, order []string, pattern st
 		case "signal-row":
 			role = tidyRoleSignalRow
 		}
-		p.Roles = append(p.Roles, tidyRoleEntry{Designator: d, Role: role})
+		entry := tidyRoleEntry{Designator: d, Role: role}
+		if role == tidyRoleSkip {
+			entry.Hint = tidySkipHint(m.Comp.Designator, m.conns())
+		}
+		p.Roles = append(p.Roles, entry)
 		switch role {
 		case tidyRolePowerUpdown:
 			powerIns = append(powerIns, tidyMemberIn{Designator: m.Comp.Designator, Pins: m.conns()})
@@ -1422,7 +1461,11 @@ func renderTidyPlan(p *tidyPlanned, g *schGroup, w io.Writer) {
 		fmt.Fprintf(w, "  锚:组 bbox 中心 (%.0f,%.0f)(组内无 IC)\n", p.Anchor.X, p.Anchor.Y)
 	}
 	for _, r := range p.Roles {
-		fmt.Fprintf(w, "  %-6s %s\n", r.Designator, r.Role)
+		if r.Hint != "" {
+			fmt.Fprintf(w, "  %-6s %s  ⚠ %s\n", r.Designator, r.Role, r.Hint)
+		} else {
+			fmt.Fprintf(w, "  %-6s %s\n", r.Designator, r.Role)
+		}
 	}
 	for _, mp := range p.Power {
 		fmt.Fprintf(w, "  → %s 竖放 @ (%g,%g) rot{%g|%g}(实测消解);pin%s up power %s(label %g)/ pin%s down gnd %s(label %g)\n",

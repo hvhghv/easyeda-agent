@@ -947,3 +947,23 @@ func TestTidyDeepSweepPlan(t *testing.T) {
 		t.Fatal("shared tree must be refused")
 	}
 }
+
+// TestTidySkipHint: a two-flag cap with ONE flag present and the other pin bare
+// (live 2026-08-12: C4:1/C6:2 disconnections were silently skipped as
+// "already tidy") must surface an actionable reconnect hint; fully-flagged or
+// fully-bare members stay hint-free.
+func TestTidySkipHint(t *testing.T) {
+	gnd := tidyPinConn{Pin: "2", Flag: "netflag", Net: "GND"}
+	bare := tidyPinConn{Pin: "1"}
+	if h := tidySkipHint("C4", []tidyPinConn{bare, gnd}); h == "" ||
+		!strings.Contains(h, "C4:1") || !strings.Contains(h, "--kind power") {
+		t.Fatalf("one-flag+bare must hint reconnect, got %q", h)
+	}
+	pwr := tidyPinConn{Pin: "1", Flag: "netflag", Net: "3V3"}
+	if h := tidySkipHint("C4", []tidyPinConn{pwr, gnd}); h != "" {
+		t.Fatalf("fully flagged must be hint-free, got %q", h)
+	}
+	if h := tidySkipHint("C4", []tidyPinConn{{Pin: "1"}, {Pin: "2"}}); h != "" {
+		t.Fatalf("fully bare (never wired) must be hint-free, got %q", h)
+	}
+}
