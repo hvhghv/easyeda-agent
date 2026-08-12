@@ -145,9 +145,14 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 	colIvs := make([]axisInterval, len(modules))
 	rowIvs := make([]axisInterval, len(modules))
 	for i, m := range modules {
-		cx[i], cy[i] = bboxCenter(m.BBox)
-		colIvs[i] = axisInterval{m.BBox.MinX, m.BBox.MaxX, cx[i]}
-		rowIvs[i] = axisInterval{m.BBox.MinY, m.BBox.MaxY, cy[i]}
+		// 分割/归属判定用 CORE 口径(器件本体):模块间的结构空隙由本体决定——
+		// draw 口径的旗/说明外伸(如 U2 右侧 netport 与邻区标签交叠)不该抹掉
+		// 本体之间的真实分割空隙(live 2026-08-12:MCU/LED 因此被误合一框)。
+		// 框尺寸仍用 draw 口径(rect 段),外伸物在 cell 边界处被 clamp,微露可容。
+		core := moduleCoreBBox(m)
+		cx[i], cy[i] = bboxCenter(core)
+		colIvs[i] = axisInterval{core.MinX, core.MaxX, cx[i]}
+		rowIvs[i] = axisInterval{core.MinY, core.MaxY, cy[i]}
 	}
 	// Split at the natural EMPTY BAND between module bboxes (edge-to-edge), not the
 	// midpoint of centers — a tall module (主MCU) whose bbox straddles a center-gap
