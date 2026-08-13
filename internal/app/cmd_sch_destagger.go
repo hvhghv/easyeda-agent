@@ -168,6 +168,12 @@ func planDestagger(comps []layoutComp, wires []schGroupWire, eps float64) destag
 		if !ok {
 			continue
 		}
+		// 一条重叠**搬一侧就够**:轮到本 marker 时,先看它的对手是不是已经被前面
+		// 的搬迁让开了。不重判就会两侧都搬(实测 6 条重叠计划搬 11 个 marker),
+		// 每多搬一个就是多一次网络手术 —— 白担风险还多一次视觉扰动。
+		if !stillOverlapping(id, rivals[id], obstacles, eps) {
+			continue
+		}
 		stub, why := stubOfMarker(c, wires)
 		if why != "" {
 			plan.Skips = append(plan.Skips, destaggerSkip{
@@ -175,7 +181,7 @@ func planDestagger(comps []layoutComp, wires []schGroupWire, eps float64) destag
 			})
 			continue
 		}
-		mv, placed := planOneDestagger(*stub, obstacles, eps)
+		mv, placed := planOneDestagger(*stub, obstacles, wires, eps)
 		if !placed {
 			plan.Skips = append(plan.Skips, destaggerSkip{
 				FlagID: id, Net: c.Net, ComponentType: c.ComponentType,
@@ -197,7 +203,7 @@ func planDestagger(comps []layoutComp, wires []schGroupWire, eps float64) destag
 // planOneDestagger 给一个 marker 找不撞人的 (方向, 桩长)。候选 = 该类偏好方向
 // × 递增桩长;步长取自文字带实测尺寸(不是常量)。返回 placed=false 表示所有候选
 // 都被占——此时**宁可不动**也不硬塞(挪了还撞等于白改,还多一次网络手术风险)。
-func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, eps float64) (destaggerMove, bool) {
+func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, wires []schGroupWire, eps float64) (destaggerMove, bool) {
 	c := stub.Flag
 	step := destaggerStep(c)
 	dirs := destaggerDirPreference[destaggerClassOf(c)]
@@ -213,16 +219,23 @@ func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, eps f
 	// 候选序:**先在原方向上拉开桩长**(de-stagger 的本义就是同向错开,视觉扰动
 	// 最小、也不动旗的朝向),原方向排不下才换方向。初版是"方向外层、桩长内层",
 	// 结果一支本可以拉长 45 就避开的 GND 旗被直接扶去了别的方向(2026-08-13 真机)。
+	//
+	// **例外:本来就横躺的 power/gnd 旗不留在原方向** —— 铁律是电源/地旗必须竖直
+	// (横躺文字侧向渲染)。既然已经要动它,顺手扶正,而不是把它"拉得更长地横着"
+	// (实测 autoconnect 会为避让落出横躺旗,destagger 初版又把 right/25 拉成
+	// right/50,横躺原样保留)。
 	type destaggerCand struct {
 		dir string
 		off float64
 	}
 	var cands []destaggerCand
-	for _, off := range offsets {
-		if math.Abs(off-stub.Offset) < 0.5 {
-			continue // 原地不动 = 没解决问题
+	if !destaggerMustStandUp(c, stub.Dir) {
+		for _, off := range offsets {
+			if math.Abs(off-stub.Offset) < 0.5 {
+				continue // 原地不动 = 没解决问题
+			}
+			cands = append(cands, destaggerCand{stub.Dir, off})
 		}
-		cands = append(cands, destaggerCand{stub.Dir, off})
 	}
 	for _, dir := range dirs {
 		if dir == stub.Dir {
@@ -235,6 +248,13 @@ func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, eps f
 	for _, cd := range cands {
 		box := predictMarkerBBox(stub, cd.dir, cd.off)
 		if destaggerCollides(box, c.ID, obstacles, eps) {
+			continue
+		}
+		// 只看 bbox 不够 —— 真机实测(2026-08-13 ceshi,CH340C + 自动下载两块)一批
+		// 搬迁引入了 multiNetWires 0→2:候选位置本身不压任何 bbox,但**新桩线落在
+		// 了别人的导线上**,EasyEDA 把相接共线的线自动合并,两个网就串成一棵树。
+		// 纯几何护栏:新锚点不许落在任何既有导线上、新桩线不许与既有导线相交。
+		if destaggerTouchesWire(stub, cd.dir, cd.off, wires) {
 			continue
 		}
 		return destaggerMove{
@@ -252,6 +272,25 @@ func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, eps f
 		}, true
 	}
 	return destaggerMove{}, false
+}
+
+// stillOverlapping 报告某 marker 在**当前**障碍布局下是否仍与它的任一对手重叠。
+// 前面的搬迁可能已经把重叠解开了,此时本 marker 就不该再动。
+func stillOverlapping(id string, rivals []string, obstacles map[string]layoutBBox, eps float64) bool {
+	box, ok := obstacles[id]
+	if !ok {
+		return false
+	}
+	for _, rid := range rivals {
+		rb, ok := obstacles[rid]
+		if !ok {
+			continue
+		}
+		if ox, oy, hit := overlapExtent(box, rb); hit && math.Min(ox, oy) > eps {
+			return true
+		}
+	}
+	return false
 }
 
 // destaggerCollides 判断候选 bbox 是否与除自己外的任何障碍正面积重叠。
@@ -417,6 +456,19 @@ func destaggerStep(c layoutComp) float64 {
 	return 20
 }
 
+// destaggerMustStandUp 报告这支 marker 是否是**横躺的 power/gnd 旗** —— 那是
+// 要扶正的对象,不能靠"在原方向上拉更长"了事。
+func destaggerMustStandUp(c layoutComp, dir string) bool {
+	if dir != "left" && dir != "right" {
+		return false
+	}
+	switch destaggerClassOf(c) {
+	case "ground", "power":
+		return true
+	}
+	return false
+}
+
 // destaggerSnap 把桩长圆整到连接器栅格,且至少留一格(0 长桩会让旗压在宿主上)。
 func destaggerSnap(v float64) float64 {
 	s := math.Round(v/destaggerGrid) * destaggerGrid
@@ -498,4 +550,40 @@ func destaggerRotationFor(c layoutComp, dir string) (float64, bool) {
 func destaggerPlanSummary(p destaggerPlan) string {
 	return fmt.Sprintf("marker-overlap %d 条 → 计划搬迁 %d 个 marker,跳过 %d 个",
 		p.OverlapsBefore, len(p.Moves), len(p.Skips))
+}
+
+// destaggerTouchesWire 报告候选落点是否会**碰到既有导线** —— 那是 multi-net-wire
+// 短路的直接成因:EasyEDA 会把相接/共线的导线自动合并成一棵树,新桩线一旦搭上
+// 别人的线,两个网就串了(2026-08-13 真机实测 0→2 条)。
+//
+// 两条判据都用纯几何,不需要 wire 的网名(连接器的 wire 读回没带 net):
+//  1. **新锚点**(旗的落点)不许落在任何既有导线上;
+//  2. **新桩线**(宿主端→新锚点)不许与任何既有导线相交/共线搭接。
+//
+// 本 marker 自己那根桩线(stub.WireID)要排除 —— 它会被 disconnect 一起删掉。
+// 宿主端本身通常就压在别的线上(那正是它的连接点),所以第 2 条采样时跳过端点。
+func destaggerTouchesWire(stub destaggerStub, dir string, offset float64, wires []schGroupWire) bool {
+	const eps = 0.5
+	u := destaggerDirs[dir]
+	ax := stub.HostX + u[0]*offset
+	ay := stub.HostY + u[1]*offset
+	for _, w := range wires {
+		if w.ID == stub.WireID {
+			continue // 自己的桩线,搬迁时一并删除
+		}
+		if pointOnPolyline(ax, ay, w.Points, eps) {
+			return true // 落点压在别人的线上 → 合并 → 串网
+		}
+		// 沿新桩线等距采样(跳过两端:宿主端本就在自己的连接点上)。
+		const samples = 12
+		for k := 1; k < samples; k++ {
+			t := float64(k) / float64(samples)
+			px := stub.HostX + u[0]*offset*t
+			py := stub.HostY + u[1]*offset*t
+			if pointOnPolyline(px, py, w.Points, eps) {
+				return true
+			}
+		}
+	}
+	return false
 }

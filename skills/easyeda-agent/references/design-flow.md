@@ -168,9 +168,11 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
    | 1 | `layout-lint` | `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、缺失/畸形几何同样阻断 |
    | 2 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
 
-   > `marker-overlap` 一片时**别手工一个个挪**(直接 modify 标识坐标会把它挪脱导线端点 → 断网):
-   > 跑 `easyeda sch destagger --apply`(#171)——带桩线一起搬、方向/桩长按文字带量算、
-   > 落地后自动 `sch check` 复验,电气项一变差就整批回滚。先 dry-run 看计划。
+   > `marker-overlap` 一片时**别直接 `sch modify` 挪标识坐标**(会把它挪脱导线端点 → 断网):
+   > 跑 `easyeda sch destagger`(#171,dry-run)看计划——它按文字带尺寸量算方向/桩长、
+   > 只动能安全重连的短桩。**`--apply` 当前禁用**(真机三次都因「删桩线触发导线自动合并
+   > → 串网」留下 PARTIAL STATE),按 dry-run 的计划手工 `sch disconnect` + `sch connect`
+   > 逐个改,每改一个跑 `sch check` 复验。
 
    | 3 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag 是告警,strict 下阻塞 |
    | 4 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
