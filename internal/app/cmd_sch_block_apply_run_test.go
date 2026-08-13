@@ -420,7 +420,7 @@ func TestVerifyBlockLayoutAcceptsCompleteCleanGeometry(t *testing.T) {
 	})
 	defer cleanup()
 
-	findings, err := verifyBlockLayout(cfg, "w1", []bapPlacement{
+	findings, _, err := verifyBlockLayout(cfg, "w1", []bapPlacement{
 		{Designator: "LED1", PrimitiveID: "pid-led"},
 		{Designator: "R1", PrimitiveID: "pid-r"},
 	})

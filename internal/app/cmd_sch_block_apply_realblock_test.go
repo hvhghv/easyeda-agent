@@ -154,3 +154,39 @@ func TestBapBlockRect_HalfExtentIsWidthOnly(t *testing.T) {
 		t.Errorf("纵向没有实测半高表,应沿用 bapPartMargin: h=%v want %v", h, 2*bapPartMargin)
 	}
 }
+
+// footprint 估算与网格间距是两件事:显式 --spacing 该左右**件间距**,不该缩小
+// 「这块实际多大」的判断。此前共用一把尺,`--spacing 220` 让模组 footprint 每边
+// 少算 140,Fix A 在这条路径上原样复发。
+func TestBlockFootprintIgnoresExplicitSpacing(t *testing.T) {
+	b, ok, err := blocks.Get("block.esp32s3_wroom1_module")
+	if err != nil || !ok {
+		t.Fatalf("块库缺 wroom1: %v", err)
+	}
+	roles := make([]string, 0, len(b.Parts))
+	for r := range b.Parts {
+		roles = append(roles, r)
+	}
+	// planBlockApply 里显式 --spacing 的分支:halfOf 为 nil。
+	explicit := bapHalfExtentFn(220, nil)
+	if got := explicit("U"); got != 110 {
+		t.Fatalf("前提变了:显式 spacing 下网格半宽应为 spacing/2=110, got %v", got)
+	}
+	// footprint 用的那把尺必须仍然看得见模组的真实半宽。
+	real := func(role string) float64 {
+		if p, ok := b.Parts[role]; ok {
+			return math.Max(bapRoleHalfExtent(p.Part), bapPartMargin)
+		}
+		return float64(bapPartMargin)
+	}
+	if real("U") != 250 {
+		t.Errorf("footprint 尺必须用真实半宽 250,不受 --spacing 影响: got %v", real("U"))
+	}
+	offsets := map[string]bapRoleOffset{"U": {dx: 0, dy: 0}}
+	thin, _ := bboxSize(bapBlockRect(0, 0, offsets, explicit))
+	fat, _ := bboxSize(bapBlockRect(0, 0, offsets, real))
+	if !(fat > thin) {
+		t.Errorf("真实半宽算出的 footprint 必须更大: spacing 尺=%v 真实尺=%v", thin, fat)
+	}
+	_ = roles
+}

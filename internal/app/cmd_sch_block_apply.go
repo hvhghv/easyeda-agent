@@ -609,9 +609,18 @@ func planBlockApply(in bapInput) (bapPlan, error) {
 	// origin to us (the old blind 4-column grid at 400,300 was a top overlap
 	// source — every second apply landed on the first).
 	offsets := bapRoleOffsets(roles, in.Layout, spacing, perRow, halfOf)
-	// half 与网格排布同源(bapHalfExtentFn):footprint 估算和件间距必须用同一把尺,
-	// 否则螺旋搜索的"空位"放完会 overlap(issue #180 Fix A)。
-	half := bapHalfExtentFn(spacing, halfOf)
+	// **footprint 估算与网格间距是两件事**,不能共用一把尺:
+	//   - 网格间距回答「调用方想要多宽」——显式 `--spacing` 时就该听调用方的;
+	//   - footprint 回答「这块实际占多大」——物理事实,与 --spacing 无关。
+	// 此前两者共用 bapHalfExtentFn:显式 `--spacing 220` 让 half=110,把模组
+	// (真实半宽 250)的 footprint 每边低估 140,螺旋判"没撞"、放完实测撞、
+	// 撞硬门整单回滚 —— 正是 Fix A 要根治的病在 --spacing 路径上原样复发。
+	half := func(role string) float64 {
+		if p, ok := in.Block.Parts[role]; ok {
+			return math.Max(bapRoleHalfExtent(p.Part), bapPartMargin)
+		}
+		return float64(bapPartMargin)
+	}
 	originX, originY, origin, warns := bapResolveOrigin(in, offsets, half)
 	plan.Origin = origin
 	plan.Warnings = append(plan.Warnings, warns...)

@@ -130,7 +130,10 @@ func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *
 // This is a wiring gate, not telemetry: every read/parse/geometry-completeness
 // failure is returned as an error. A missing bbox or pins array means the page
 // was not actually checked, so it must never collapse into "no findings".
-func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]layoutFinding, error) {
+// 返回值分两组:blocking(重叠/引脚重合 —— wiring 前硬门,触发整单回滚)与
+// advisory(出图纸 —— 与 `sch layout-lint` 的分档一致,只警告不回滚:块比图纸大
+// 是版面决策,不该让 apply 变成不可能)。
+func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]layoutFinding, []layoutFinding, error) {
 	// includePins is load-bearing: PIN COINCIDENCE is the failure this check exists
 	// for. Two parts can sit at a clean bbox distance and still land a pin of one
 	// exactly on a pin of the other — an implicit short with no wire to show for it,
@@ -140,24 +143,31 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]
 	res, err := requestAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true, "includePins": true})
 	if err != nil {
-		return nil, fmt.Errorf("read components with real bbox/pin geometry: %w", err)
+		return nil, nil, fmt.Errorf("read components with real bbox/pin geometry: %w", err)
 	}
 	if err := validateBlockLayoutResult(res.Result); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	comps, err := parseLayoutComps(res.Result)
 	if err != nil {
-		return nil, fmt.Errorf("parse components with real bbox/pin geometry: %w", err)
+		return nil, nil, fmt.Errorf("parse components with real bbox/pin geometry: %w", err)
 	}
 	kept, _ := filterLayoutComps(comps, false)
 	// minGap 0 → true overlaps only (tight spacing is not this gate's business);
 	// pinEps 0 → strict pin equality, the same default `sch layout-lint` uses.
 	rep := analyzeLayout(kept, 0, 0)
+	// 出图纸判据也在这里跑,用的是**实测 bbox**。此前 block-apply 自己这条链上
+	// 只有事后拿**锚点**比 sheet 的一条 warning —— 锚点在框内而 body 探出框外
+	// 就漏报,而且要等用户另跑一次 layout-lint 才看得见(issue #180)。
+	// sheet 必须从**未过滤**的 comps 取:filterLayoutComps 把 sheet 本身滤掉了。
+	if sheet := sheetBBoxOf(comps); sheet != nil {
+		rep.OutOfSheet = detectOutOfSheet(kept, *sheet, sheetEdgeMinGap)
+	}
 	mineIDs := map[string]bool{}
 	mineLabels := map[string]bool{}
 	for _, p := range placed {
 		if strings.TrimSpace(p.PrimitiveID) == "" {
-			return nil, fmt.Errorf("placed component %s has no primitiveId; layout ownership and rollback cannot be proven", p.Designator)
+			return nil, nil, fmt.Errorf("placed component %s has no primitiveId; layout ownership and rollback cannot be proven", p.Designator)
 		}
 		mineIDs[p.PrimitiveID] = true
 		mineLabels[strings.ToUpper(p.Designator)] = true
@@ -179,15 +189,23 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return nil, fmt.Errorf("layout read-back did not contain placed primitiveId(s): %s", strings.Join(missing, ", "))
+		return nil, nil, fmt.Errorf("layout read-back did not contain placed primitiveId(s): %s", strings.Join(missing, ", "))
 	}
-	var out []layoutFinding
+	mine := func(f layoutFinding) bool {
+		return mineLabels[strings.ToUpper(f.A)] || mineLabels[strings.ToUpper(f.B)]
+	}
+	var blocking, advisory []layoutFinding
 	for _, f := range append(append([]layoutFinding{}, rep.Overlaps...), rep.PinCoincidences...) {
-		if mineLabels[strings.ToUpper(f.A)] || mineLabels[strings.ToUpper(f.B)] {
-			out = append(out, f)
+		if mine(f) {
+			blocking = append(blocking, f)
 		}
 	}
-	return out, nil
+	for _, f := range rep.OutOfSheet {
+		if mine(f) {
+			advisory = append(advisory, f)
+		}
+	}
+	return blocking, advisory, nil
 }
 
 // validateBlockLayoutResult enforces the data contract needed to prove a clean
@@ -567,27 +585,10 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	if err != nil {
 		return err
 	}
-	// A big block on a small sheet silently ran off the page (a 21-part block at
-	// 220 pitch reached y=1400 on an 825-tall A4). Parts off the frame still wire
-	// up and still net-reconcile, so nothing downstream catches it — say it out loud
-	// instead. Not an error: the sheet size is the caller's decision, and the fix
-	// (bigger sheet / split across pages / a schematic_layout template) is theirs too.
-	if sheetBBox != nil {
-		var off []string
-		for _, p := range plan.Placements {
-			if p.X < sheetBBox.MinX || p.X > sheetBBox.MaxX || p.Y < sheetBBox.MinY || p.Y > sheetBBox.MaxY {
-				off = append(off, fmt.Sprintf("%s(%.0f,%.0f)", p.Designator, p.X, p.Y))
-			}
-		}
-		if len(off) > 0 {
-			w := fmt.Sprintf("%d part(s) land OUTSIDE the sheet frame [%.0f,%.0f]-[%.0f,%.0f]: %s "+
-				"— they wire up and reconcile normally but are off the printed page; use a bigger sheet, "+
-				"split the block across pages, or give the block a schematic_layout template",
-				len(off), sheetBBox.MinX, sheetBBox.MinY, sheetBBox.MaxX, sheetBBox.MaxY, strings.Join(off, " "))
-			plan.Warnings = append(plan.Warnings, w)
-			fmt.Fprintf(stderr, "warn: %s\n", w)
-		}
-	}
+	// 出图纸的判定统一走**放置后的实测 bbox**(verifyBlockLayout → detectOutOfSheet),
+	// 不再在这里拿规划坐标的**锚点**比 sheet:锚点在框内而 body 探出框外就漏报 ——
+	// 2026-08-13 实测,同一次 apply 锚点判据只报 LED2,bbox 判据报 LED2+R8。
+	// dry-run 没有实测几何,那条路径靠 bapResolveOrigin 的 --at 越界警告兜底。
 	if plan.Origin != nil && plan.Origin.Relocated {
 		fmt.Fprintf(stderr, "origin: %.0f,%.0f → %.0f,%.0f (%s)\n",
 			plan.Origin.RequestedX, plan.Origin.RequestedY, plan.Origin.X, plan.Origin.Y, plan.Origin.Reason)
@@ -699,11 +700,19 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// A pin coincidence reports OvX/OvY 0 (it is a point, not an area) — call it out
 	// by name, because it shorts two nets with no wire to show for it and is far more
 	// dangerous than the bbox overlap it hides behind.
-	findings, verifyErr := verifyBlockLayout(cfg, window, plan.Placements)
+	findings, offSheet, verifyErr := verifyBlockLayout(cfg, window, plan.Placements)
 	if verifyErr != nil {
 		fmt.Fprintf(stderr, "layout ✗ verification unavailable: %v\n", verifyErr)
 		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
 			fmt.Errorf("layout verification failed: %w", verifyErr), asJSON, stdout, stderr)
+	}
+	// 出图纸:按**实测 bbox** 判(取代事后拿锚点比 sheet 的老 warning —— 锚点在框内
+	// 而 body 探出框外就漏报)。只警告不回滚,与 layout-lint 的分档一致。
+	for _, f := range offSheet {
+		w := fmt.Sprintf("%s 越出图纸可用区(图框内缩 %.0f 单位),该件照样连线、netlist 也对得上,但印不出来 — 换大图纸/拆页/给块加 schematic_layout 模板;`sch layout-lint --strict` 会把它判为阻塞",
+			f.A, sheetEdgeMinGap)
+		man.Warnings = append(man.Warnings, w)
+		fmt.Fprintf(stderr, "warn: %s\n", w)
 	}
 	if len(findings) > 0 {
 		man.LayoutOverlaps = findings
