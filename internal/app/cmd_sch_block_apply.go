@@ -410,12 +410,19 @@ func bapBlockRect(originX, originY float64, offsets map[string]bapRoleOffset, ha
 	first := true
 	var minX, maxX, minY, maxY float64
 	for role, o := range offsets {
-		h := float64(bapPartMargin)
+		// **半宽与半高必须分开**:bapRoleHalfExtent 的文档口径是「half a symbol's
+		// rendered WIDTH」——高引脚数芯片的 250 说的是两列引脚拉开的横向尺寸。
+		// 拿它同时外扩纵向会让一个 MCU 顶出 500 高,实测使 4 个块在 A4 上
+		// 「怎么摆都不可能 inBounds」(可用高只有 801),把边界约束变成死锁。
+		// 半高没有实测表,沿用 bapPartMargin 这个通用下限;估算本来就只能给下限,
+		// 真判据是放置后的实测 bbox(verifyBlockLayout)。
+		hw := float64(bapPartMargin)
 		if half != nil {
-			h = math.Max(half(role), bapPartMargin)
+			hw = math.Max(half(role), bapPartMargin)
 		}
-		lo, hi := o.dx-h, o.dx+h
-		bo, to := o.dy-h, o.dy+h
+		hh := float64(bapPartMargin)
+		lo, hi := o.dx-hw, o.dx+hw
+		bo, to := o.dy-hh, o.dy+hh
 		if first {
 			minX, maxX, minY, maxY = lo, hi, bo, to
 			first = false
@@ -459,15 +466,27 @@ func bapResolveOrigin(in bapInput, offsets map[string]bapRoleOffset, half func(s
 	// inBounds/hitsTitle 是 issue #180 三个坑的正解:此前它们给 findSlot 传的是
 	// nil,图纸边界与分区标题带**从未参与搜索**,出界只在事后打 warning(而且比
 	// 的是锚点不是 bbox)。接上之后,"搜出来的空位在图纸外"从构造上不可能。
+	rect := bapBlockRect(in.OriginX, in.OriginY, offsets, half)
 	var inBounds func(layoutBBox) bool
+	var usable layoutBBox
+	var oversize bool
 	if in.Sheet != nil {
-		usable := layoutBBox{
+		usable = layoutBBox{
 			MinX: in.Sheet.MinX + sheetEdgeMinGap, MinY: in.Sheet.MinY + sheetEdgeMinGap,
 			MaxX: in.Sheet.MaxX - sheetEdgeMinGap, MaxY: in.Sheet.MaxY - sheetEdgeMinGap,
 		}
-		inBounds = func(b layoutBBox) bool { return boxInside(b, usable) }
+		// **块比图纸还大时不许让 inBounds 连坐掉避让**:此时它恒 false,96 个候选
+		// 全否决 → 回落原坐标 → 压在已有器件上 → wiring 前硬门整单回滚。也就是
+		// 说「放不下」会被升级成「连躲都不躲」,比不加边界约束更差。
+		// 正确行为:降级为只避器件,并单独说清楚为什么。
+		bw, bh := bboxSize(rect)
+		uw, uh := bboxSize(usable)
+		if bw > uw || bh > uh {
+			oversize = true
+		} else {
+			inBounds = func(b layoutBBox) bool { return boxInside(b, usable) }
+		}
 	}
-	rect := bapBlockRect(in.OriginX, in.OriginY, offsets, half)
 	fits := !collides(rect) && (inBounds == nil || inBounds(rect))
 	if fits {
 		return in.OriginX, in.OriginY, origin, nil
@@ -493,13 +512,31 @@ func bapResolveOrigin(in bapInput, offsets map[string]bapRoleOffset, half func(s
 		return bapBlockRect(nx, ny, offsets, half)
 	}
 	slot, _, ok := findSlotNormalized(rect, cx, cy, step, true, normalize, collides, inBounds, nil, nil)
+	if !ok && inBounds != nil {
+		// 螺旋的步长 = max(w,h)/2 + 2*gap,**随块尺寸放大**;而合法原点窗口
+		// = 可用区跨度 − 块跨度,**随块尺寸缩小**。两者反向,中等块就交叉:
+		// 实测 ch340c(step 380)在 A4 上 96 个候选一个都落不进可用区,而 5 格
+		// 暴力扫描能找到距请求原点仅 170 的合法位置。所以螺旋落空**不等于放不下**,
+		// 补一次有界扫描把假阴性救回来 —— 否则回落原坐标压在别人身上,撞硬门整单回滚。
+		if nx, ny, found := bapScanOrigin(in.OriginX, in.OriginY, offsets, half, usable, collides); found {
+			origin.X, origin.Y = nx, ny
+			origin.Relocated = true
+			origin.Reason = "默认原点与已有器件重叠,螺旋步长对本块过粗,已按网格扫描移到最近的合法空位(显式传 --at 可固定原点)"
+			return nx, ny, origin, nil
+		}
+	}
 	if !ok {
 		why := "与已有器件重叠"
-		if inBounds != nil {
+		switch {
+		case oversize:
+			bw, bh := bboxSize(rect)
+			uw, uh := bboxSize(usable)
+			why = fmt.Sprintf("与已有器件重叠;另注:本块估算 %.0f×%.0f 大于图纸可用区 %.0f×%.0f,已只按器件避让、不判图纸边界(换大图纸/拆页/给块加 schematic_layout 模板)", bw, bh, uw, uh)
+		case inBounds != nil:
 			why = "与已有器件重叠或超出图纸可用区"
 		}
 		return in.OriginX, in.OriginY, origin, []string{
-			fmt.Sprintf("默认原点%s,且螺旋搜索 %d 个候选后仍无空位 — 按原坐标放置,预期有 overlap/出图,放完必须跑 `sch layout-lint --strict`", why, alMaxRing*len(alDirsVertical)),
+			fmt.Sprintf("默认原点%s,且螺旋搜索 %d 个候选 + 网格扫描后仍无空位 — 按原坐标放置,预期有 overlap/出图,放完必须跑 `sch layout-lint --strict`", why, alMaxRing*len(alDirsVertical)),
 		}
 	}
 	ncx, ncy := bboxCenter(slot)
@@ -864,3 +901,50 @@ func bapUnconsumed(b blocks.Block) []string {
 	sort.Strings(out)
 	return out
 }
+
+// bapScanOrigin 是螺旋搜索的**兜底**:在图纸可用区内按连接网格枚举原点,取第一个
+// 「块完全在可用区内 且 与任何已有器件保持 bapObstacleGap」的位置,按到请求原点的
+// 距离取最近。
+//
+// 为什么需要它:findSlot 的候选是 8 条射线 × 12 环 = 96 个点,步长
+// max(w,h)/2 + 2*gap **随块尺寸放大**,而合法原点窗口 = 可用区跨度 − 块跨度
+// **随块尺寸缩小**——两者反向,中等块(ch340c 680×310,step 380)在 A4 上就已经
+// 一个候选都落不进可用区,而合法位置其实距请求原点只有 170。没有这层兜底,
+// 「螺旋落空」会被当成「放不下」回落原坐标,压在已有器件上撞 wiring 前硬门,
+// 把 apply 从「搬个位置」变成「整单回滚」。
+//
+// 判定坐标 = 落地坐标:枚举的就是吸附后的 origin,rect 由同一个 bapBlockRect 算,
+// 不存在「判完再吸附」的半格漂移。纯函数。
+func bapScanOrigin(reqX, reqY float64, offsets map[string]bapRoleOffset, half func(string) float64,
+	usable layoutBBox, collides func(layoutBBox) bool) (float64, float64, bool) {
+
+	// rect 相对 origin 的偏移(与 origin 无关,算一次即可)。
+	rel := bapBlockRect(0, 0, offsets, half)
+	// origin 的合法区间:让 rect 完全落进 usable。
+	loX, hiX := usable.MinX-rel.MinX, usable.MaxX-rel.MaxX
+	loY, hiY := usable.MinY-rel.MinY, usable.MaxY-rel.MaxY
+	if loX > hiX || loY > hiY {
+		return 0, 0, false // 块比可用区还大,调用方已按 oversize 分支处理
+	}
+	best, bestX, bestY := math.Inf(1), 0.0, 0.0
+	for y := snapAnchor(loY); y <= hiY; y += bapScanStep {
+		for x := snapAnchor(loX); x <= hiX; x += bapScanStep {
+			r := bapBlockRect(x, y, offsets, half)
+			if !boxInside(r, usable) || collides(r) {
+				continue
+			}
+			if d := math.Hypot(x-reqX, y-reqY); d < best {
+				best, bestX, bestY = d, x, y
+			}
+		}
+	}
+	if math.IsInf(best, 1) {
+		return 0, 0, false
+	}
+	return bestX, bestY, true
+}
+
+// bapScanStep 是兜底扫描的步长:4 个连接网格。取 20 而不是 5 是纯算力权衡
+// (A4 可用区 1146×801 → 约 2300 个候选,离线毫秒级);落点仍在 5 格网格上,
+// 因为 20 是 schAnchorGrid 的整数倍。
+const bapScanStep = 4 * schAnchorGrid
