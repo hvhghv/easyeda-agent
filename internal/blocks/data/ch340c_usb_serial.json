@@ -116,6 +116,18 @@
       "default_net": "USB_RTS"
     }
   },
+  "schematic_layout": {
+    "note": "信号流左入右出:USB-C(J_USB) → D±(D_ESD 并联对地) → U(CH340C) → TXD/RXD/DTR#/RTS# 出主控。y-UP(+dy=上),偏移落 5 格。去耦贴脚:C_VCC 在 U 右上(VCC=pin16 在右列顶),C_V3 在 U 左下(V3=pin4 在左列,往下引避开 D± 的横向走线);CC 下拉电阻贴 J_USB 正下方。竖放件 rotation 270 = pin1 朝上(电)、pin2 朝下(地),与 orientation 真值表一致。间距按 ceshi 实测 bbox 校核:U 72×92、J_USB 70×70、D_ESD 48×56、C0402 20×16、R0402 20×8 —— 0 overlap by construction。**偏移一律非负**:block-apply 的 origin 螺旋搜索不把负偏移计进块 footprint,用负偏移会把最左件推出图纸左边界(实测 J_USB 落到 x=-20)",
+    "roles": {
+      "R_CC1": { "dx": 0, "dy": 0, "rotation": 270 },
+      "R_CC2": { "dx": 70, "dy": 0, "rotation": 270 },
+      "C_V3": { "dx": 300, "dy": 10, "rotation": 270 },
+      "J_USB": { "dx": 0, "dy": 120 },
+      "U": { "dx": 420, "dy": 120 },
+      "D_ESD": { "dx": 200, "dy": 150 },
+      "C_VCC": { "dx": 540, "dy": 210, "rotation": 270 }
+    }
+  },
   "schematic_notes": [
     "每个对外 port 落 netflag 必须带真实 wire(重叠坐标不算连接,DRC 看不到)——见 easyeda-wire-required 记忆。",
     "TXD/RXD 是交叉的:CH340.TXD→MCU.RX,CH340.RXD→MCU.TX,别直连同名。",

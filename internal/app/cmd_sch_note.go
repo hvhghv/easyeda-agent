@@ -64,15 +64,17 @@ names a module, but a reviewer still needs the one or two lines that say what
 the block does and what its key parameters are. The skill's schematic layout
 default is: one short note per module, parked just below/beside its zone frame.
 
+  - **省略 --x/--y = 自动落点(推荐)**:说明文字和器件、marker、已有文字、图签
+    keep-out 是**同级的布局对象**,一起进同一张碰撞表求解 —— 优先贴该区内容
+    下沿(读图习惯:先看电路再看下面那行说明),排不下依次试区内上沿/区外侧/
+    区正下方,最后整页从左下往上扫。放不下就报错**拒绝画**,不把说明糊在电路上。
+  - 显式给 --x/--y 时坐标一字不改,但仍会回读碰撞;压到东西会明确警告(不静默)。
   - Multi-line: a literal \n in --text becomes a real line break.
   - Coordinates are schematic units, y-UP (larger y = higher on the sheet).
-    Read the target zone frame / part bbox first (sch list --include-bbox,
-    sch zones status) and park the note where it does not overlap the circuit;
-    verify with sch layout-lint afterwards.
   - Notes are plain text primitives: enumerate with sch text-list, remove with
     sch prim-delete --ids. The schematic is saved after a successful create.`,
-		Example: `  easyeda sch note --text "LDO: 5V→3V3 1A\n输入 22µF / 输出 22µF" --x 120 --y 300
-  easyeda sch note --doc P2 --text "BOOT: GPIO0 拉低进烧录" --x 640 --y 210 --font-size 9`,
+		Example: `  easyeda sch note --zone POWER --text "LDO: 5V→3V3 1A\n输入 22µF / 输出 22µF"   # 自动落点
+  easyeda sch note --text "BOOT: GPIO0 拉低进烧录" --x 640 --y 210 --font-size 9        # 显式坐标`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if strings.TrimSpace(text) == "" {
@@ -87,6 +89,15 @@ default is: one short note per module, parked just below/beside its zone frame.
 			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
 			if err != nil {
 				return err
+			}
+			// 不给坐标 = 让代码算:说明与器件/marker/已有文字/图签 keep-out 同级
+			// 参与碰撞求解(用户纠偏 2026-08-13)。给了坐标就一字不改地照放,
+			// 但仍然回读一次碰撞并在压到东西时明确警告 —— 不静默画上去。
+			auto := !cmd.Flags().Changed("x") && !cmd.Flags().Changed("y")
+			if hit, aerr := placeSchNote(pinnedCfg, win, docUUID, zoneRef, content, fontSize, auto, &x, &y); aerr != nil {
+				return aerr
+			} else if hit != "" {
+				fmt.Fprintf(stderr, "warning: %s\n", hit)
 			}
 			v, err := execAutolayoutZoneJS(pinnedCfg, win, docUUID, "create schematic note", buildSchNoteJS(x, y, content, color, fontSize))
 			if err != nil {
@@ -114,14 +125,12 @@ default is: one short note per module, parked just below/beside its zone frame.
 		},
 	}
 	c.Flags().StringVar(&text, "text", "", "note content; a literal \\n becomes a line break (required)")
-	c.Flags().Float64Var(&x, "x", 0, "text anchor x (schematic units)")
-	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP)")
+	c.Flags().Float64Var(&x, "x", 0, "text anchor x (schematic units) — 省略 --x/--y 即自动落点(推荐):说明与器件/marker/已有文字/图签 keep-out 同级参与碰撞求解,自己找不压任何东西的位置")
+	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP) — 省略即自动落点")
 	c.Flags().Float64Var(&fontSize, "font-size", schNoteDefaultFontSize, "font size")
 	c.Flags().StringVar(&color, "color", schNoteDefaultColor, "text color")
 	c.Flags().StringVar(&zoneRef, "zone", "", "register this note as part of a functional zone (`sch zones` claim name) — the partition frame will enclose it and `sch zone move` always carries it")
 	_ = c.MarkFlagRequired("text")
-	_ = c.MarkFlagRequired("x")
-	_ = c.MarkFlagRequired("y")
 	return c
 }
 

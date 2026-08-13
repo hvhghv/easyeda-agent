@@ -610,28 +610,11 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 
 // schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左上(y-UP 向下排行),
 // 行高 ≈ fontSize×1.3,宽 ≈ 最长行字符宽(CJK ≈ fontSize,ASCII ≈ 0.55×fontSize)。
+// 尺寸口径由 noteSizeOf 独家提供 —— `sch note` 的自动落点求解器用同一个函数
+// 估算候选 bbox。两套估算一旦分家,就会出现"求解时说不撞、画框时说撞"。
 func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {
-	fs := t.FontSize
-	if fs <= 0 {
-		fs = schNoteDefaultFontSize
-	}
-	lines := strings.Split(t.Content, "\n")
-	maxW := 0.0
-	for _, ln := range lines {
-		w := 0.0
-		for _, r := range ln {
-			if r > 0x2E80 { // CJK 全宽
-				w += fs
-			} else {
-				w += fs * 0.55
-			}
-		}
-		if w > maxW {
-			maxW = w
-		}
-	}
-	h := float64(len(lines)) * fs * 1.3
-	return layoutBBox{MinX: t.X, MinY: t.Y - h, MaxX: t.X + maxW, MaxY: t.Y}
+	w, h := noteSizeOf(t.Content, t.FontSize)
+	return noteAnchorBBox(t.X, t.Y, w, h)
 }
 
 // foldZoneNotesIntoModules 把每个区登记的 note bbox 并进该区模块的 BBox(画框
