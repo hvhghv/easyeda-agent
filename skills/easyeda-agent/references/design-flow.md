@@ -165,7 +165,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
    | # | stage | 阻塞判据 |
    |---|---|---|
-   | 1 | `layout-lint` | `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、缺失/畸形几何同样阻断 |
+   | 1 | `layout-lint` | `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、**out-of-sheet**(件越出图纸可用区,印不出来)、缺失/畸形几何、以及 zone/sheet check `unavailable` 同样阻断 |
    | 2 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
 
    > `marker-overlap` 一片时**别直接 `sch modify` 挪标识坐标**(会把它挪脱导线端点 → 断网):

@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // ── issue #180 P0:origin 三修 + 出图纸判据 ──────────────────────────────────
 //
@@ -144,5 +147,67 @@ func TestOutOfSheetIsAdvisoryUntilStrict(t *testing.T) {
 	applyLayoutStrictGate(&strict, true)
 	if strict.OK {
 		t.Error("--strict 必须因 out-of-sheet 失败")
+	}
+}
+
+// 每一个能让 OK=false 的判据,都必须出现在**人读**通道里 —— 否则会出现
+// 「所有计数都是 0 却非零退出」的不可归因失败(记忆:真机验的是报告读起来对不对;
+// audit 里实测过 agent 对同一个失败拼出四种不同下一步)。
+func TestOutOfSheetIsVisibleInEveryChannel(t *testing.T) {
+	rep := layoutReport{
+		OK: true, Total: 1, WithBBox: 1,
+		SheetCheckStatus: "checked",
+		ZoneCheckStatus:  "checked",
+		OutOfSheet: []layoutFinding{
+			{Type: "out-of-sheet", A: "R6", X: 510, Y: 880, OvY: 67},
+		},
+	}
+	applyLayoutStrictGate(&rep, true)
+	if rep.OK {
+		t.Fatal("--strict 下 out-of-sheet 必须让报告失败")
+	}
+	var sb strings.Builder
+	renderLayoutReport(rep, &sb)
+	out := sb.String()
+	if !strings.Contains(out, "out-of-sheet") || !strings.Contains(out, "R6") {
+		t.Errorf("文本通道必须逐条打印出图件,实际:\n%s", out)
+	}
+	if !strings.Contains(out, "sheet-check=") {
+		t.Errorf("结论行必须带 sheet-check 状态,实际:\n%s", out)
+	}
+	if !strings.Contains(out, "1 out-of-sheet") {
+		t.Errorf("结论行的计数必须包含 out-of-sheet,实际:\n%s", out)
+	}
+}
+
+// 「没检查」不许显得像「查了干净」:sheet-check unavailable 在 --strict 下本身即
+// 阻塞(与 zone-check 同态),且必须带得出原因。
+func TestSheetCheckUnavailableBlocksUnderStrict(t *testing.T) {
+	rep := layoutReport{OK: true, SheetCheckStatus: "unavailable", SheetCheckError: "本页读不到图纸边框"}
+	applyLayoutStrictGate(&rep, true)
+	if rep.OK {
+		t.Error("--strict 下 sheet-check unavailable 必须阻塞(zone-check 同态)")
+	}
+	lenient := layoutReport{OK: true, SheetCheckStatus: "unavailable"}
+	applyLayoutStrictGate(&lenient, false)
+	if !lenient.OK {
+		t.Error("默认档不该因 unavailable 失败")
+	}
+}
+
+// out-of-sheet 复用 OvX/OvY 表示超出量,必须与 overlap 走同一套 mm 换算 ——
+// 否则同一份 JSON 里同名键两种单位,而报告自报 measurementUnit:"mm"。
+func TestOutOfSheetOverExtentConvertsToMM(t *testing.T) {
+	raw := layoutReport{
+		Overlaps:   []layoutFinding{{Type: "overlap", A: "a", B: "b", OvX: 10, OvY: 10}},
+		OutOfSheet: []layoutFinding{{Type: "out-of-sheet", A: "R6", OvX: 10, OvY: 10}},
+	}
+	mm := layoutReportInMM(raw)
+	if mm.OutOfSheet[0].OvX != mm.Overlaps[0].OvX {
+		t.Errorf("同名键必须同单位: outOfSheet.OvX=%v overlap.OvX=%v",
+			mm.OutOfSheet[0].OvX, mm.Overlaps[0].OvX)
+	}
+	if mm.OutOfSheet[0].OvX == 10 {
+		t.Error("超出量没有被换算成 mm")
 	}
 }

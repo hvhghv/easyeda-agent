@@ -189,6 +189,7 @@ type layoutReport struct {
 	// 与 zone-violation 同档:默认 advisory,--strict 才判失败。
 	OutOfSheet       []layoutFinding `json:"outOfSheet,omitempty"`
 	SheetCheckStatus string          `json:"sheetCheckStatus"`
+	SheetCheckError  string          `json:"sheetCheckError,omitempty"`
 	ZoneCheckError   string          `json:"zoneCheckError,omitempty"`
 	UncheckedPins    []string        `json:"uncheckedPins,omitempty"`
 	UnprovenPins     []string        `json:"unprovenPins,omitempty"`
@@ -329,6 +330,7 @@ func applyLayoutStrictGate(rep *layoutReport, strict bool) {
 		len(rep.GridViolations) > 0 ||
 		len(rep.ZoneViolations) > 0 ||
 		len(rep.OutOfSheet) > 0 ||
+		rep.SheetCheckStatus == "unavailable" ||
 		len(rep.NoBBox) > 0 ||
 		len(rep.UncheckedPins) > 0 ||
 		len(rep.UnprovenPins) > 0 ||
@@ -350,6 +352,12 @@ func layoutReportInMM(rep layoutReport) layoutReport {
 	rep.MinGap = schematicUnitsToMM(rep.MinGap)
 	if rep.PinEps >= 0 {
 		rep.PinEps = schematicUnitsToMM(rep.PinEps)
+	}
+	// out-of-sheet 复用 OvX/OvY 表示「超出量」,必须与 overlap 同口径换算 ——
+	// 否则同一份 JSON 里同名键两种单位,而报告自报 measurementUnit:"mm"。
+	for i := range rep.OutOfSheet {
+		rep.OutOfSheet[i].OvX = schematicUnitsToMM(rep.OutOfSheet[i].OvX)
+		rep.OutOfSheet[i].OvY = schematicUnitsToMM(rep.OutOfSheet[i].OvY)
 	}
 	for i := range rep.Overlaps {
 		rep.Overlaps[i].OvX = schematicUnitsToMM(rep.Overlaps[i].OvX)
@@ -559,11 +567,13 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 	}
 
 	if !rep.OK {
-		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s",
+		// 每一个能让 OK=false 的判据都必须出现在这句里 —— 少一个就会出现
+		// 「所有计数都是 0 却非零退出」的不可归因失败(记忆:真机验的是报告读起来对不对)。
+		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s",
 			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.NoBBox),
+			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet), len(rep.NoBBox),
 			len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
-			rep.ZoneCheckStatus)
+			rep.ZoneCheckStatus, rep.SheetCheckStatus)
 	}
 	return nil
 }
@@ -653,8 +663,10 @@ func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, al
 	switch {
 	case allPages:
 		rep.SheetCheckStatus = "unavailable"
+		rep.SheetCheckError = "--all-pages 下各页图纸边框无法与器件一一对应;逐页 lint(`doc switch` 后单页跑)才能判出图"
 	case sheet == nil:
 		rep.SheetCheckStatus = "unavailable"
+		rep.SheetCheckError = "本页读不到图纸边框(sheet)bbox —— 无法判断器件是否越出图纸;`easyeda doc switch` 到该原理图页后重跑"
 	default:
 		rep.SheetCheckStatus = "checked"
 		rep.OutOfSheet = detectOutOfSheet(realParts, *sheet, sheetEdgeMinGap)
@@ -858,6 +870,13 @@ func renderLayoutReport(rep layoutReport, w io.Writer) {
 		fmt.Fprintf(w, "  %s  zone-violation  %s at %.0f,%.0f outside its claimed zone %s — S0 拍板的分区没有落实(`sch zones status` 看认领)\n",
 			softSeverity, f.A, f.X, f.Y, f.B)
 	}
+	for _, f := range rep.OutOfSheet {
+		fmt.Fprintf(w, "  %s  out-of-sheet  %s at %.0f,%.0f 越出图纸可用区(图框内缩 %.0f 单位)%s — 该件照样连线、netlist 也对得上,但印不出来\n",
+			softSeverity, f.A, f.X, f.Y, sheetEdgeMinGap, layoutOverExtent(f, unit))
+	}
+	if rep.SheetCheckStatus == "unavailable" {
+		fmt.Fprintf(w, "  %s  sheet-check unavailable: %s\n", softSeverity, rep.SheetCheckError)
+	}
 	if rep.SkippedNonParts > 0 {
 		fmt.Fprintf(w, "  note: %d non-part primitive(s) excluded (sheet/title-frame, netflag/netport/…); pass --include-non-parts to include\n", rep.SkippedNonParts)
 	}
@@ -885,12 +904,27 @@ func renderLayoutReport(rep layoutReport, w io.Writer) {
 		skipCaveat = fmt.Sprintf("; %d component(s) NOT checked (skipped ≠ confirmed clear)", len(rep.NoBBox))
 	}
 	if rep.OK {
-		fmt.Fprintf(w, "✓ placement gate passed; %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), zone-check=%s%s\n",
-			len(rep.TightPairs), len(rep.GridViolations), len(rep.ZoneViolations), rep.ZoneCheckStatus, skipCaveat)
+		fmt.Fprintf(w, "✓ placement gate passed; %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, zone-check=%s sheet-check=%s%s\n",
+			len(rep.TightPairs), len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet),
+			rep.ZoneCheckStatus, rep.SheetCheckStatus, skipCaveat)
 	} else {
-		fmt.Fprintf(w, "✗ %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s%s\n",
+		fmt.Fprintf(w, "✗ %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s%s\n",
 			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.UncheckedPins),
-			len(rep.UnprovenPins), len(rep.InvalidGeometry), rep.ZoneCheckStatus, skipCaveat)
+			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet), len(rep.UncheckedPins),
+			len(rep.UnprovenPins), len(rep.InvalidGeometry), rep.ZoneCheckStatus, rep.SheetCheckStatus, skipCaveat)
 	}
+}
+
+// layoutOverExtent 把 out-of-sheet 的超出量渲染成「(右侧超出 3.2mm)」这类人话。
+// 只打非零轴 —— 一个件通常只在一两个方向越线,四轴全打是噪声。
+func layoutOverExtent(f layoutFinding, unit string) string {
+	switch {
+	case f.OvX > 0 && f.OvY > 0:
+		return fmt.Sprintf(" 横向超出 %.2f %s、纵向超出 %.2f %s", f.OvX, unit, f.OvY, unit)
+	case f.OvX > 0:
+		return fmt.Sprintf(" 横向超出 %.2f %s", f.OvX, unit)
+	case f.OvY > 0:
+		return fmt.Sprintf(" 纵向超出 %.2f %s", f.OvY, unit)
+	}
+	return ""
 }

@@ -311,11 +311,17 @@ Workspace → Project → **Board** → schematic + PCB. Map to `eda.dmt_Board.*
     subset and reject misspelled stage names rather than silently gating on
     fewer checks; `--fail-fast`. The four single commands stay for spot checks.
   - **`easyeda sch layout-lint`** — pairwise bbox overlap/pin coincidence
-    (ERROR), tight spacing/off-grid/zone violation (WARN), with corrected
-    mm↔0.01-inch conversion and schema-v2 unit metadata. `--strict` also fails
+    (ERROR), tight spacing/off-grid/zone violation/**out-of-sheet** (WARN), with
+    corrected mm↔0.01-inch conversion and schema-v2 unit metadata. `out-of-sheet`
+    (issue #180) catches parts whose **bbox** (not anchor — a body can stick out
+    while the anchor sits inside) leaves the sheet frame inset by 12 units:
+    nothing caught this before, because an off-page part still wires up and still
+    reconciles against the netlist — it simply does not print. `sheetCheckStatus`
+    mirrors the zone check's honest disclosure (`unavailable` + reason when the
+    sheet bbox is unreadable or under `--all-pages`). `--strict` also fails
     warnings, missing/malformed/unproven anchor/bbox/pin geometry, and an
-    unavailable configured zone check, so `0 overlap` can no longer stand in
-    for a proven layout. Strict proof is active-page/real-part only and rejects
+    unavailable configured zone **or sheet** check, so `0 overlap` can no longer
+    stand in for a proven layout. Strict proof is active-page/real-part only and rejects
     `--all-pages` or `--include-non-parts`.
   - **`easyeda sch autoconnect`** — pin-aware connect planner: score every
     (direction × offset) candidate against real geometry, pick the lowest cost,
