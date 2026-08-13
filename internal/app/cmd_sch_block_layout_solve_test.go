@@ -175,16 +175,20 @@ func TestBslAttachSide(t *testing.T) {
 }
 
 // 种子点必须把 marker 的伸出让出来 —— 这是「贴脚不撞标签」的算术依据。
-func TestBslAttachSeed_LeavesRoomForMarker(t *testing.T) {
-	const pinX, pinY, ownHalf = 1000, 500, 10
+func TestBslAttachSeed_HugsThePin(t *testing.T) {
+	const pinX, pinY, ownHalf float64 = 1000, 500, 10
 	net := "3V3"
 	x, y := bslAttachSeed(pinX, pinY, "right", net, ownHalf)
 	if y != pinY {
 		t.Errorf("右贴时 y 应与引脚齐平: %v", y)
 	}
-	want := pinX + bslReach(net) + bslPartGap + ownHalf
+	// attach = 同网直连,中间不挂 marker,所以只留「间隙 + 自身半宽」。
+	want := pinX + bslPartGap + ownHalf
 	if math.Abs(x-want) > 0.001 {
-		t.Errorf("x = %v, want %v(reach+gap+半宽)", x, want)
+		t.Errorf("x = %v, want %v(gap+半宽,不含 marker 伸出)", x, want)
+	}
+	if x-pinX > bslReach(net) {
+		t.Errorf("贴脚距离不该大到能塞下一个 marker(%v > %v)", x-pinX, bslReach(net))
 	}
 	// 左贴是镜像
 	lx, _ := bslAttachSeed(pinX, pinY, "left", net, ownHalf)

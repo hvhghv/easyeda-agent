@@ -117,16 +117,14 @@
     }
   },
   "schematic_layout": {
-    "note": "信号流左入右出:USB-C(J_USB) → D±(D_ESD 并联对地) → U(CH340C) → TXD/RXD/DTR#/RTS# 出主控。y-UP(+dy=上),偏移落 5 格。去耦贴脚:C_VCC 在 U 右上(VCC=pin16 在右列顶),C_V3 在 U 左下(V3=pin4 在左列,往下引避开 D± 的横向走线);CC 下拉电阻贴 J_USB 正下方。竖放件 rotation 270 = pin1 朝上(电)、pin2 朝下(地),与 orientation 真值表一致。间距按 ceshi 实测 bbox 校核:U 72×92、J_USB 70×70、D_ESD 48×56、C0402 20×16、R0402 20×8 —— 0 overlap by construction。偏移目前写成非负是**权宜**:实测 J_USB 曾落到 x=-20 出图纸左界,当时误判为「螺旋搜索不计负偏移」——**归因是错的**(bapBlockRect 用 min/max,负偏移一直被正确计入)。真因是 origin 螺旋搜索**完全没有图纸边界约束**(cmd_sch_block_apply.go 的 findSlot 三个谓词 inBounds/hitsTitle/hitsLane 全传 nil),出界只在事后打 warning。修法见 issue #180 的 Fix B;那之后负偏移即可正常使用",
-    "roles": {
-      "R_CC1": { "dx": 0, "dy": 0, "rotation": 270 },
-      "R_CC2": { "dx": 70, "dy": 0, "rotation": 270 },
-      "C_V3": { "dx": 300, "dy": 10, "rotation": 270 },
-      "J_USB": { "dx": 0, "dy": 120 },
-      "U": { "dx": 420, "dy": 120 },
-      "D_ESD": { "dx": 200, "dy": 150 },
-      "C_VCC": { "dx": 540, "dy": 210, "rotation": 270 }
-    }
+    "note": "关系形态(issue #180):只声明意图,坐标由布局求解器算 —— 吃锚件的实测引脚坐标、页面碰撞表、图纸边界。信号流 USB-C → D±(经 ESD) → CH340C;去耦贴各自的电源脚(C_VCC 贴 VCC、C_V3 贴 V3);CC 下拉电阻等距并列。**不要在这里手算 dx/dy** —— 写模板时根本不知道实例会落在页面哪里、旁边有什么、图纸多大,legacy 绝对偏移正是因此踩过三个坑(负偏移出图纸左界/块太高出上界/去耦顶到分区标题带)。",
+    "anchor": "U",
+    "flow": ["J_USB", "D_ESD", "U"],
+    "attach": {
+      "C_VCC": "U.VCC",
+      "C_V3": "U.V3"
+    },
+    "pair": [["R_CC1", "R_CC2"]]
   },
   "schematic_notes": [
     "每个对外 port 落 netflag 必须带真实 wire(重叠坐标不算连接,DRC 看不到)——见 easyeda-wire-required 记忆。",

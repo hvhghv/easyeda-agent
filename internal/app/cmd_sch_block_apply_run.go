@@ -631,7 +631,26 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// part, so the plan is remapped onto reality before anything downstream runs.
 	renames := map[string]string{}
 	var created []bapPlacement
+	// 关系形态:把锚件排到最前面。它先落地、被回读出实测引脚,其余件的位姿才算得出来
+	// (attach 贴的是**具体引脚**,而引脚坐标只有放下去才知道)。issue #180 P2。
+	if plan.Relational && plan.AnchorRole != "" {
+		for i := range plan.Placements {
+			if plan.Placements[i].Role == plan.AnchorRole {
+				plan.Placements[0], plan.Placements[i] = plan.Placements[i], plan.Placements[0]
+				plan.Placements[0].Source = "anchor"
+				break
+			}
+		}
+	}
 	for i := range plan.Placements {
+		// 锚件落地后回读一次,用实测引脚求解其余件 —— 只回读这一次:后续件的尺寸
+		// 用估算(只保证下限),最终由放置后的硬门用真实 bbox 兜底。每件都回读会让
+		// 稠密页上的 SDK 往返变成 O(件数 × 页组件数)。
+		if plan.Relational && i == 1 {
+			if notes := bslResolveLive(cfg, window, &plan, sheetBBox, stderr); len(notes) > 0 {
+				plan.Warnings = append(plan.Warnings, notes...)
+			}
+		}
 		p := plan.Placements[i]
 		payload := map[string]any{
 			"libraryUuid": p.LibraryUUID,

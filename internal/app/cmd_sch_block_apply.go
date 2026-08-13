@@ -209,6 +209,10 @@ type bapPlan struct {
 	// Unconsumed names the block's constraint maps that this command does NOT
 	// execute, so a caller never reads a successful apply as "block fully honoured".
 	Unconsumed []string `json:"unconsumedConstraints,omitempty"`
+	// Relational/AnchorRole 标记这是关系形态模板:落地时先放锚件、回读它的实测
+	// 引脚,再用求解器算其余件的位姿(issue #180 P2)。
+	Relational bool   `json:"relationalLayout,omitempty"`
+	AnchorRole string `json:"anchorRole,omitempty"`
 }
 
 // ── the planner ─────────────────────────────────────────────────────────────
@@ -624,6 +628,18 @@ func planBlockApply(in bapInput) (bapPlan, error) {
 	originX, originY, origin, warns := bapResolveOrigin(in, offsets, half)
 	plan.Origin = origin
 	plan.Warnings = append(plan.Warnings, warns...)
+	// 关系形态:标记出来并选定锚件。规划阶段所有件仍拿网格坐标(它们是**兜底**),
+	// 真正的位姿在 runBlockApply 里放完锚件、回读实测引脚后由求解器算 —— attach
+	// 需要目标引脚的真实坐标,而那只有把宿主放下去才知道。
+	if rel, ok := bslRelationsFrom(in.Layout); ok {
+		nets := bslBlockNets(in.Block)
+		anchor, aerr := bslAnchorRole(in.Block, rel, nets)
+		if aerr != nil {
+			return plan, aerr
+		}
+		plan.Relational = true
+		plan.AnchorRole = anchor
+	}
 	for _, role := range roles {
 		p := in.Block.Parts[role]
 		if p.Qty != 1 {
