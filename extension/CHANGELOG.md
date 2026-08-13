@@ -6,6 +6,21 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-13
+
+修复立创插件市场审核驳回「README图片未加载成功，请检查存储路径」(0.24.0 被拒)。
+
+### Fixed
+- **README 演示图改用平台图床绝对链接**：三张演示图从包内相对路径
+  `images/demo-*.png|gif` 改为 `https://image.lceda.cn/extensions/images/...`。
+  根因不在路径写法——0.23.0 用同一份 README 过审，包内容三版字节级一致；
+  真因是市场服务端解析 `.eext` 时的「README 抽图 → 转存图床 → 改写链接」
+  那一步偶发失败：过审的 0.23.0 库里 readme 字段是 `image.lceda.cn` 绝对
+  链接，被拒的 0.24.0 则没有 readme 记录，审核员打开就是三个裂图。改用
+  平台自家图床的绝对链接后不再依赖那一步（链接本身正是平台为 0.23.0
+  转存生成的，字节与包内图片一致）。图片文件仍随包发布（`images/` 保留，
+  logo 走 manifest 的 `./images/logo.jpg` 不变）。
+
 ## [0.25.0] - 2026-08-12
 
 原理图布局体系定版:placement-first 区级重排(`sch zone relayout`)+ 串联链
