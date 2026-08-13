@@ -276,7 +276,7 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 			ax := am.Comp.X
 			for _, p := range am.Pins {
 				if p.HasMarker && p.Marker.ComponentType == "netport" && p.Marker.X > ax {
-					if r := 30 + relayoutPortWidth(p.Conn.Net); r > anchorPortReach {
+					if r := schStubLen + relayoutPortWidth(p.Conn.Net); r > anchorPortReach {
 						anchorPortReach = r
 					}
 				}
@@ -445,7 +445,7 @@ func relayoutAnchorRails(cfg *appConfig, win, docUUID string, anchor tidyLiveMem
 			kind = "ground"
 		}
 		if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
-			map[string]any{"pinX": px, "pinY": py, "kind": kind, "net": r.Net, "direction": dir, "rotation": rot, "offset": 30.0},
+			map[string]any{"pinX": px, "pinY": py, "kind": kind, "net": r.Net, "direction": dir, "rotation": rot, "offset": schStubLen},
 			docUUID, "relayout anchor rail connect"); err != nil {
 			return fmt.Errorf("connect %s:%s → %s %s:%w", anchor.Comp.Designator, r.Pin, dir, r.Net, err)
 		}
@@ -750,7 +750,7 @@ func relayoutApplyChain(cfg *appConfig, win, docUUID string, ch relayoutChain, m
 	}
 	if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
 		map[string]any{"pinX": first.leftX, "pinY": first.y, "kind": ch.LeftKind, "net": ch.LeftNet,
-			"direction": ch.LeftDir, "rotation": lRot, "offset": 30.0}, docUUID, "chain left end"); err != nil {
+			"direction": ch.LeftDir, "rotation": lRot, "offset": schStubLen}, docUUID, "chain left end"); err != nil {
 		return fmt.Errorf("chain 左端 %s:%w", ch.LeftNet, err)
 	}
 	rRot, err := tidyLabelRotation(ch.RightKind, ch.RightDir)
@@ -759,7 +759,7 @@ func relayoutApplyChain(cfg *appConfig, win, docUUID string, ch relayoutChain, m
 	}
 	if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win,
 		map[string]any{"pinX": last.rightX, "pinY": last.y, "kind": ch.RightKind, "net": ch.RightNet,
-			"direction": ch.RightDir, "rotation": rRot, "offset": 30.0}, docUUID, "chain right end"); err != nil {
+			"direction": ch.RightDir, "rotation": rRot, "offset": schStubLen}, docUUID, "chain right end"); err != nil {
 		return fmt.Errorf("chain 右端 %s:%w", ch.RightNet, err)
 	}
 	// 链内 pin-to-pin 直线(共线零折弯)。
