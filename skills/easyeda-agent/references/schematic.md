@@ -48,8 +48,17 @@ Use `easyeda-agent` typed actions. Do not write raw EasyEDA JavaScript unless a 
 > ⚠️ **标准外围先查块(铁律 8):** `easyeda blocks show <id>` 给 `internal_nets`(照抄拓扑,引脚用
 > 功能名零改号)+ `ports`(重绑边界网络)+ `schematic_notes`(落线注意);命中就别手接。ESP32
 > 自动下载(双三极管交叉耦合时序易接反)这类电路尤其照块抄,别凭记忆手连。
-> 块若带 `schematic_layout` 模板,`sch block-apply` 直接按模板相对偏移+朝向落件(否则退回网格);
-> 原点自动避开已有器件真实 bbox(显式 `--at` 优先)。每次 place 都记录平台返回的
+> **块的 `schematic_layout` 有两种形态**(#180)。**关系形态(推荐)**只声明意图 ——
+> `flow`(信号流左→右)/ `attach`(角色→目标.引脚,去耦贴电源脚)/ `pair`(等距并列组),
+> **一个坐标都不写**;`sch block-apply` 走**两阶段求解**:先落锚件(五级判据自动选:
+> 被 attach 指向最多者 = 主芯片)→ 回读它的**实测引脚坐标** → 据此算其余件 → 逐个放。
+> 避让是**受约束的**(只沿关系自己的轴推,另一轴钉死),所以 flow 永远共线、pair 躲让
+> 也走整数倍 pitch、attach 永远待在目标引脚那一侧 —— 用环形推让会把关系语义当场
+> 破坏(实测 flow 两件 y 差 220、pair 完全不成对)。**legacy 形态**(`roles` 绝对偏移)
+> 仍受支持但已废弃:块作者写模板时不知道实例会落在页面哪里、图纸多大,手算必踩
+> 出界/顶标题带。原点自动避开已有器件真实 bbox 且**不出图纸**(显式 `--at` 优先);
+> 螺旋搜索落空时还有一层网格扫描兜底(螺旋步长随块尺寸放大,中等块常常一个候选都
+> 落不进可用区,那不等于放不下)。每次 place 都记录平台返回的
 > `primitiveId`,落完回读真实 bbox + pins 作**布线前硬门**:读取/解析/几何不完整、bbox overlap
 > 或异件引脚重合都会在 autoconnect 前失败。命令只按本次返回的 ID 补偿删除并再次读回;
 > 能证明删净报 `failed-rolled-back`,否则报 `failed-partial` + `PARTIAL STATE`,绝不把独立 autosave
