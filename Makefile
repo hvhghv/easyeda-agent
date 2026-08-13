@@ -167,13 +167,21 @@ endif
 	@echo "  packaging skills..."
 	tar --exclude='*/__pycache__' --exclude='*.pyc' -czf $(DIST)/skills.tar.gz -C skills easyeda-agent
 	cp install.sh $(DIST)/install.sh
+	@echo "  hashing assets..."
+	@# checksums.txt is what `easyeda update` verifies the downloaded binary
+	@# against before swapping it in. Names must stay BARE (no dist/ prefix) —
+	@# the updater matches them against the release asset name.
+	@cd $(DIST) && { command -v sha256sum >/dev/null 2>&1 && SHA=sha256sum || SHA="shasum -a 256"; } && \
+	 $$SHA easyeda_darwin_amd64 easyeda_darwin_arm64 easyeda_linux_amd64 easyeda_linux_arm64 \
+	       easyeda_windows_amd64.exe easyeda-agent-connector.eext skills.tar.gz install.sh > checksums.txt && \
+	 echo "  checksums.txt ($$(wc -l < checksums.txt | tr -d ' ') entries)"
 	@echo "  creating GitHub release..."
 	git tag -a $(VERSION) -m "Release $(VERSION)" 2>/dev/null || echo "  (tag $(VERSION) already exists, reusing)"
 	git push origin $(VERSION)
 	@awk '/^## \[$(VERSION:v%=%)\]/{f=1} f&&/^## \[/&&!/^## \[$(VERSION:v%=%)\]/{exit} f' extension/CHANGELOG.md > $(DIST)/changelog-section.md
 	@{ \
 		cat $(DIST)/changelog-section.md; \
-		printf '\n---\n\nOne-line install/update:\n```\ncurl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh\n```\n\nInstalls/updates:\n- easyeda CLI/daemon\n- easyeda-agent skill for Codex (~/.codex/skills) and/or Claude Code (~/.claude/skills) when detected\n- prints EasyEDA connector .eext import URL\n\nSkill targets: set `EASYEDA_INSTALL_SKILLS=codex,claude` to force targets, `none` to skip, or `EASYEDA_SKILL_PRESERVE=1` to keep local edits.\n'; \
+		printf '\n---\n\nAlready installed? Upgrade in place:\n```\neasyeda update          # CLI binary (sha256-verified) + skill dirs\neasyeda update --check  # report only\n```\n\nFirst install:\n```\ncurl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh\n```\n\nInstalls/updates:\n- easyeda CLI/daemon\n- easyeda-agent skill for Codex (~/.codex/skills) and/or Claude Code (~/.claude/skills) when detected\n- prints EasyEDA connector .eext import URL\n\nThe connector .eext is never auto-updated for sideloads — `easyeda update` reports a stale one and prints the re-import URL.\n\nSkill targets: set `EASYEDA_INSTALL_SKILLS=codex,claude` to force targets, `none` to skip, or `EASYEDA_SKILL_PRESERVE=1` to keep local edits.\n\n`checksums.txt` lists sha256 for every asset above.\n'; \
 	} > $(DIST)/release-notes.md
 	gh release create $(VERSION) \
 		$(DIST)/easyeda_darwin_amd64 \
@@ -184,6 +192,7 @@ endif
 		$(DIST)/easyeda-agent-connector.eext \
 		$(DIST)/skills.tar.gz \
 		$(DIST)/install.sh \
+		$(DIST)/checksums.txt \
 		--title "easyeda-agent $(VERSION)" \
 		--notes-file $(DIST)/release-notes.md
 	@echo "  publishing skill to ClawHub..."

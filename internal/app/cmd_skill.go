@@ -31,6 +31,7 @@ func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
 			"  easyeda skill sync                   update present skill dirs to the latest release\n" +
 			"  easyeda skill sync --version 0.9.0   pin a specific version\n\n" +
 			"The daemon also syncs skill dirs on startup (daemon start --auto-update-skill).\n" +
+			"To update the CLI binary as well, use `easyeda update` (skill sync included).\n" +
 			"The connector .eext is NOT covered here (no sideload auto-update) — the daemon\n" +
 			"logs a re-import notice when it detects a stale connector.",
 	}
@@ -79,7 +80,7 @@ func newSkillStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			if rep.Latest != "" {
 				fmt.Fprintf(stdout, "Latest: v%s", rep.Latest)
 				if selfupdate.IsCleanRelease(version.Version) && selfupdate.SemverLess(version.Version, rep.Latest) {
-					fmt.Fprint(stdout, "  (CLI behind — run install.sh to upgrade CLI + connector)")
+					fmt.Fprint(stdout, "  (CLI behind — run `easyeda update`)")
 				}
 				fmt.Fprintln(stdout)
 			} else {

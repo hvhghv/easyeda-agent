@@ -99,7 +99,21 @@ easyeda-agent 是一套**四件套**,四者需**同版本、同时在位**:CLI/d
 curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh
 ```
 
-一键脚本会：安装/更新 `easyeda` CLI/daemon;自动检测已安装的客户端并把 `easyeda-agent` skill 安装/更新到对应目录 —— Codex(`~/.codex/skills/easyeda-agent`)、Claude Code(`~/.claude/skills/easyeda-agent`);打印连接器 `.eext` 导入地址。可用环境变量控制 skill 安装:
+一键脚本会：安装/更新 `easyeda` CLI/daemon;自动检测已安装的客户端并把 `easyeda-agent` skill 安装/更新到对应目录 —— Codex(`~/.codex/skills/easyeda-agent`)、Claude Code(`~/.claude/skills/easyeda-agent`);打印连接器 `.eext` 导入地址。
+
+**装过之后升级不必再跑脚本 —— 用 `easyeda update`:**
+
+```bash
+easyeda update              # CLI 二进制(sha256 校验 + 原子替换)+ skill 目录 → latest
+easyeda update --check      # 只读:cli / skill / connector 三方版本对齐表
+easyeda update --check --exit-code   # 有落后退出码 10(CI/agent 可 gate)
+easyeda update --version 0.25.0      # 钉版本;--skill-only / --cli-only 缩范围
+```
+
+连接器 `.eext` 不在自动升级范围内(侧载无原地更新)—— `update` 会**报出**它落后并打印重导地址。
+dev 构建(git-describe 版本号)默认不覆盖,`--force` 才强升;二进制在 root 目录时用 `sudo easyeda update`。
+
+可用环境变量控制 skill 安装:
 
 ```bash
 EASYEDA_INSTALL_SKILLS=codex,claude curl -fsSL .../install.sh | sh  # 指定目标

@@ -12,6 +12,8 @@ EasyEDA tooling.
 
 > **Source & docs:** https://github.com/zhoushoujianwork/easyeda-agent · Connector
 > 已上架[立创EDA官方插件市场](https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector)(一键装、平台可原地自动更新,但市场版本可能**滞后** CLI 若干 minor —— 四件套严格同版仍以 **GitHub Release 的 `.eext`** 为准)。Install the CLI + connector per the repo README.
+> **升级:`easyeda update`**(CLI 二进制 + skill 目录,sha256 校验后原地替换);
+> `easyeda update --check` 只看不改,连接器只能人工重装 → environment-setup.md §0.5。
 
 > **MCP 可选入口:**若当前 agent 暴露 `easyeda_*` MCP tools,可优先用它们完成 health、
 > action discovery、typed calls、blocks 和 workflow 操作。MCP 只是同一 CLI/daemon 的
@@ -119,8 +121,10 @@ EasyEDA tooling.
 
 按走到的场景/阶段**按需**读对应 reference(渐进式披露),别预加载全部:
 
-- `health` 显示 `windows: []` / `NO_CONNECTOR`,或改了连接器(`extension/`):读
-  `references/environment-setup.md`。web 编辑器(`pro.lceda.cn`)+ chrome-devtools MCP 时
+- `health` 显示 `windows: []` / `NO_CONNECTOR`,或改了连接器(`extension/`),或
+  **版本对不齐**(`connectorVersionOk:false`、`UNKNOWN_ACTION`、用户问「怎么升级」):读
+  `references/environment-setup.md`(§0.5 用 `easyeda update --check` 一次看清 CLI/skill/连接器三方版本)。
+  web 编辑器(`pro.lceda.cn`)+ chrome-devtools MCP 时
   agent 可自举全环境;**桌面客户端 chrome-devtools 够不到窗口,需用户手动开/切工程**(连接器照常附着,typed action 一样)。
 - **整板 / 从零 / >~10 件,或走到某阶段拿不准**:先读 `references/design-flow.md`(流程脊柱 S0–S6 / P0–P10,顶部有阶段 TOC)。含 S0 事前摸底子步 `references/design-pre-analysis.md`(轻量摸底,可选、非门禁)。**S0 方案书 spec 写完必跑 `easyeda spec validate`(无 ERROR 才算过门,`--strict` 交付前用)**——字段形状(含 `flow`/`modules[].kind`/`interfaces[].ref·edge·facing·internal`)在 design-flow S0。
 - **布线阶段(P7)选档 / 关键网先行 / 自动布线对话框清单**:读 `references/design-flow.md` **P7 三档阶梯**——别停在 `pcb.md` 的命令手册(那里只给命令,布线档默认在 design-flow)。

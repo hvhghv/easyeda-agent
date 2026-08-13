@@ -113,7 +113,16 @@ make release VERSION=v0.5.1
 
 # 用户一行安装
 curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh
+
+# 装过之后的升级路径（不必再跑脚本）
+easyeda update            # CLI 二进制 + skill 目录 → latest
+easyeda update --check    # 只读三方版本表（cli / skill / connector）
 ```
+
+**`easyeda update` 与发版的契约**：`make release` 会生成并上传 `checksums.txt`（裸文件名，
+`internal/selfupdate` 按 release asset 名匹配）——`update` 有它就校验 sha256，没有（旧 release）
+就降级成「跑一次下载的二进制、比对版本号」。**改动 release 资产命名 = 改动自更新的输入**，
+两边要一起改：`Makefile` 的 `release` 目标 ↔ `selfupdate.AssetName`。
 
 **版本号约定**：CLI 和 connector 始终用同一版本号（`make release` 负责把 `extension.json` 同步到 VERSION，不需要提前跑 `make eext`）。`make release` 会自动打 git tag、push 并创建 GitHub Release，**并把 skill 同版本发布到 ClawHub**（best-effort，失败不阻断；重试 `make publish-skill VERSION=…`，需已 `clawhub login`）。ClawHub 版本号不可覆盖；`publish-skill` 必须用绝对路径——clawhub 的 workdir 会被全局配置劫持到 `~/clawd`，相对路径会把旧副本发上去（0.8.1 踩过）。skillhub.cn 无 CLI API（纯网页社区），不集成。
 

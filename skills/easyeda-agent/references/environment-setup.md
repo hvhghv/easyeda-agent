@@ -32,6 +32,32 @@ easyeda daemon health
 - `windows[]` 有条目 → 环境就绪,看 `context` 是否是目标工程/文档,不是就
   `easyeda doc switch <name> --project <name>`。
 
+## 0.5 版本对齐 —— CLI / skill / 连接器三方同版
+
+`connectorVersionOk:false`、动作报 `UNKNOWN_ACTION`、或用户问「怎么升级」时,**先对版本,
+别怀疑电路**。一条命令看清三方:
+
+```bash
+easyeda update --check               # 只读:cli / skill:<client> / connector 三行对齐表
+easyeda update --check --exit-code   # 有落后 → 退出码 10(可 gate,0=齐,1=检查本身失败)
+easyeda update                       # 升 CLI 二进制 + skill 目录(--check 之外唯一会写盘的形态)
+easyeda update --skill-only          # 只同步 skill(等价 easyeda skill sync)
+easyeda update --version 0.25.0      # 钉版本(离线场景也可用它跳过 GitHub API)
+```
+
+逐行读法:
+
+| 行 | 状态 | 该做什么 |
+|---|---|---|
+| `cli` | `behind` | `easyeda update` 原地换二进制(下载→有 `checksums.txt` 就 sha256 校验→跑一次确认版本→原子替换)。装在 root 目录时 `sudo easyeda update`。**升完 daemon 仍跑旧二进制,必须重启 daemon**。 |
+| `cli` | `skipped (dev build)` | 开发环境的 git-describe 版本,**故意不覆盖**(air 下一次改 `.go` 就重建);要强升才 `--force`。 |
+| `skill:<client>` | `behind` | `easyeda update` 一并同步(daemon 启动时也会自动同步);本地改过 skill 想保留加 `--preserve`。 |
+| `skill:<client>` | `not-installed` | 该客户端没装过 → `easyeda update --create-missing`。 |
+| `connector` | `behind` | **只能人工重装**——侧载 `.eext` 没有原地更新。按提示 URL 下载 → 扩展管理里**先卸载旧的**(平台按 uuid 去重,不卸载则导入静默失败)→ 导入新的 → **完全退出并重启 EasyEDA**(已开窗口会继续跑旧连接器代码并抢 daemon)。市场版可自动更新但滞后 CLI。 |
+| `connector` | `no-daemon` / `no-window` | 不是版本问题,是环境没起来 → 回 §0。 |
+
+> `--check` 从不写盘;非 `--check` 形态只碰 CLI 二进制和 skill 目录,**永不动 EasyEDA 工程**。
+
 ## 1. 打开 web 编辑器 + 目标工程(chrome-devtools MCP)
 
 桌面客户端没开时,web 编辑器 `https://pro.lceda.cn/editor` 是完全等价的宿主

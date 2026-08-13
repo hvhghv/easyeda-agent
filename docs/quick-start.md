@@ -101,7 +101,15 @@ easyeda daemon health
 
 ## 升级注意事项(务必四件套一起升)
 
-1. **重跑一键脚本** —— 升级 CLI + Skill:
+1. **`easyeda update`** —— 升级 CLI 二进制 + Skill 目录(装过一次之后的常规路径):
+   ```bash
+   easyeda update            # 下载本平台二进制 → sha256 校验(有 checksums.txt 时) → 原子替换 + 同步 skill
+   easyeda update --check    # 只看不改:cli / skill / connector 三方版本一次列清
+   sudo easyeda update       # 二进制装在 /usr/local/bin 等 root 目录时
+   ```
+   升完 **daemon 仍在跑旧二进制,要重启 daemon**;命令会提示。
+   开发机上的 dev 构建(git-describe 版本号)默认不覆盖 —— 这是有意的,`--force` 才强升。
+   一键脚本仍是**首次安装**(和重装连接器)的路径:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main/install.sh | sh
    ```
@@ -125,6 +133,7 @@ easyeda daemon health
   ```bash
   easyeda skill status      # 各 skill 目录版本 vs 最新 release
   easyeda skill sync        # 立即同步到最新(--version 锁版本,--preserve 保留本地改动)
+  easyeda update --check    # 想连 CLI 二进制和连接器一起看时用这个
   ```
 - **连接器落后自动提示**:连接器一注册,daemon 就比对版本;落后时打一条**可操作日志**
   (「stale connector: vX < daemon vY — 重导 .eext + 彻底重启 EasyEDA」)。
@@ -140,6 +149,7 @@ easyeda daemon health
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | 动作全部超时、连不上 | 没开「允许外部交互」 | 设置里打开 |
+| 不确定谁落后了 | CLI / skill / 连接器版本不一致 | `easyeda update --check` 一次列清三方 |
 | `connectorVersionOk:false` | `.eext` 落后 / 旧窗口没重启 | 重导 `.eext` + 彻底重启 EasyEDA |
 | 重导 `.eext` 后没生效 | EasyEDA 按 uuid 去重,旧的没卸载 | 「已安装」里先卸载旧的再导入 |
 | `easyeda: command not found` | `PATH` 没含安装目录 | 把 `/usr/local/bin` 加进 `~/.zshrc` |

@@ -389,6 +389,17 @@ Workspace → Project → **Board** → schematic + PCB. Map to `eda.dmt_Board.*
   `.eext`. `make eext` keeps the uuid **stable** (update-in-place: uninstall old →
   import); `make eext-fresh` mints a **fresh uuid** (imports as a separate entry,
   no uninstall needed) as the fallback when the installed one won't uninstall.
+- **`easyeda update` (alias `upgrade`) — in-place self-update** for the two pieces
+  that *can* be updated programmatically: the **CLI binary** (downloads this
+  platform's release asset, verifies sha256 against the release `checksums.txt`
+  when present, runs the download once to confirm it reports the expected
+  version, then swaps it in with a same-dir rename) and the **skill dirs** (same
+  machinery as `easyeda skill sync`). The **connector `.eext` is reported, never
+  touched** — sideloads have no in-place update, so `update` prints the version
+  it found in each open window plus the re-import URL. `--check` is read-only and
+  `--check --exit-code` exits **10** when anything is behind, so agents/CI can
+  gate on version drift. A **dev build is never overwritten** without `--force`
+  (air rebuilds it anyway; silently replacing it would make the dev loop lie).
 
 ---
 

@@ -114,8 +114,36 @@ fi
 
 # ── install CLI binary ────────────────────────────────────────────────────────
 info "Downloading ${BINARY_NAME}..."
-curl -fsSL "${BASE_URL}/${BINARY_NAME}" -o "${INSTALL_DIR}/easyeda"
-chmod +x "${INSTALL_DIR}/easyeda"
+BIN_TMP="${INSTALL_DIR}/.easyeda-download.$$"
+curl -fsSL "${BASE_URL}/${BINARY_NAME}" -o "$BIN_TMP" \
+  || { rm -f "$BIN_TMP"; fatal "download failed: ${BASE_URL}/${BINARY_NAME}"; }
+
+# sha256 verification. Best-effort by design: releases published before
+# checksums.txt existed, and hosts without a sha256 tool, just skip it — but a
+# MISMATCH is always fatal (that is the case worth aborting for).
+SHA_CMD=""
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  SHA_CMD="shasum -a 256"
+fi
+if [ -n "$SHA_CMD" ] && SUMS=$(curl -fsSL "${BASE_URL}/checksums.txt" 2>/dev/null); then
+  WANT=$(printf '%s\n' "$SUMS" | awk -v n="$BINARY_NAME" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; exit } }')
+  GOT=$($SHA_CMD "$BIN_TMP" | awk '{print $1}')
+  if [ -z "$WANT" ]; then
+    warn "checksums.txt has no entry for ${BINARY_NAME} — skipping verification"
+  elif [ "$WANT" != "$GOT" ]; then
+    rm -f "$BIN_TMP"
+    fatal "checksum mismatch for ${BINARY_NAME} (want ${WANT}, got ${GOT}) — aborted, nothing installed"
+  else
+    ok "sha256 verified"
+  fi
+else
+  warn "sha256 verification skipped (no checksums.txt for ${VERSION}, or no sha256 tool)"
+fi
+
+chmod +x "$BIN_TMP"
+mv "$BIN_TMP" "${INSTALL_DIR}/easyeda"
 ok "CLI installed → ${INSTALL_DIR}/easyeda"
 
 # ── install skills (Codex + Claude Code) ──────────────────────────────────────
@@ -242,4 +270,8 @@ printf '  3. In EasyEDA Pro: 设置 → 允许外部交互 (Allow external inter
 printf '  4. Use the skill in your AI client:\n'
 printf '       /easyeda-agent       (schematic + PCB workflow)\n'
 printf '       Installed for detected clients: Codex (~/.codex/skills) and/or Claude Code (~/.claude/skills)\n\n'
+printf 'Upgrading later? No need to re-run this script:\n'
+printf '       easyeda update           # CLI binary + skill dirs → latest\n'
+printf '       easyeda update --check   # report only (cli / skill / connector)\n'
+printf '     (the connector .eext still needs a manual re-import — `update` prints the URL)\n\n'
 printf 'Full docs: https://github.com/%s\n' "$REPO"

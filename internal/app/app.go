@@ -20,15 +20,32 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	if err := root.ExecuteContext(context.Background()); err != nil {
-		// errActionFailed means the response was already printed to stdout;
-		// no further message needed. All other errors get printed here.
-		if !errors.Is(err, errActionFailed) {
+		// A command that wants a specific exit code (e.g. `update --check
+		// --exit-code` signalling "updates available") has already printed its
+		// report — surface the code only.
+		var ec exitCodeError
+		if errors.As(err, &ec) {
+			return ec.code
+		}
+		// errActionFailed / errQuiet mean the response was already printed to
+		// stdout; no further message needed. All other errors get printed here.
+		if !errors.Is(err, errActionFailed) && !errors.Is(err, errQuiet) {
 			fmt.Fprintln(stderr, err)
 		}
 		return 1
 	}
 	return 0
 }
+
+// errQuiet fails the command without printing anything extra — for commands
+// that already emitted a machine-readable report on stdout.
+var errQuiet = errors.New("command failed (details already reported)")
+
+// exitCodeError carries a specific process exit code out of a RunE, for
+// gate-able commands whose "non-zero" is a verdict rather than a failure.
+type exitCodeError struct{ code int }
+
+func (e exitCodeError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	cfg := &appConfig{
@@ -84,6 +101,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newApiCmd(stdout, stderr),
 		newDebugCmd(cfg, stdout, stderr),
 		newSkillCmd(stdout, stderr),
+		newUpdateCmd(cfg, stdout, stderr),
 	)
 
 	return root

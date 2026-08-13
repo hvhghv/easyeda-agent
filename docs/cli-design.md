@@ -18,6 +18,8 @@ easyeda <domain> <action> [flags]
 | `easyeda lib` | 器件库搜索与选型 |
 | `easyeda daemon` | 守护进程管理（start / health） |
 | `easyeda audit` | 操作日志查看 |
+| `easyeda update` | 自更新（别名 `upgrade`）：CLI 二进制 + skill 目录 → latest；连接器只报不改 |
+| `easyeda skill` | skill 目录单独管理（status / sync；`update` 已含其能力） |
 | `easyeda debug` | 逃生舱（exec-js 等开发/调试命令） |
 
 ## 设计约束

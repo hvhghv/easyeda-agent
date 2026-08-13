@@ -487,9 +487,9 @@ func StartupSync(ctx context.Context, daemonVersion string, logf func(string, ..
 
 	// Nudge the full-suite upgrade when the CLI/connector lag the latest release.
 	if IsCleanRelease(daemonVersion) && SemverLess(daemonVersion, latest) {
-		log("update available: CLI v%s < latest v%s — run install.sh to upgrade the "+
-			"CLI + connector (skill already synced): "+
-			"curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh",
-			SemverCore(daemonVersion), latest, RepoSlug)
+		log("update available: CLI v%s < latest v%s — run `easyeda update` to replace the "+
+			"CLI binary (skill already synced), then restart the daemon; the connector .eext "+
+			"still needs a manual re-import (`easyeda update --check` prints the URL)",
+			SemverCore(daemonVersion), latest)
 	}
 }
