@@ -68,13 +68,53 @@ type SchematicLayoutHint struct {
 	Rotation float64 `json:"rotation,omitempty"` // 0 | 90 | 180 | 270
 }
 
-// SchematicLayout is a block's human-authored schematic placement template: the
-// reviewed-once relative geometry (信号流左入右出、去耦贴主芯片) that replaces the
-// blind fallback grid when present. Roles must cover every part in the block —
-// a partial template is an authoring mistake, not a feature.
+// SchematicLayout is a block's schematic placement template. It has TWO forms:
+//
+//   - **relational**(推荐):只声明**意图** —— flow/attach/pair,坐标由布局求解器
+//     算(吃引脚实测坐标、碰撞表、图纸边界、分区矩形)。
+//   - **legacy**(roles: 绝对偏移,已废弃但仍受支持):块作者手算 dx/dy。
+//
+// 为什么关系形态取代绝对偏移(issue #180):块作者写模板时**根本不知道**实例最终
+// 落在页面哪里、旁边有什么、图纸多大、分区标题带在哪 —— 那些信息只有落地时才有。
+// 2026-08-13 同一轮就踩了三个坑:负偏移把件推出图纸左界、块太高顶出上界、去耦
+// 电容顶到分区标题带。三个都是几何问题,本就该由求解器处理。
+//
+// 两种形态**互斥**:同时声明是数据错误(两条关系给同一个件两个种子点,求解器要么
+// 随机选要么放两次)。
 type SchematicLayout struct {
-	Note  string                         `json:"note,omitempty"`
-	Roles map[string]SchematicLayoutHint `json:"roles"`
+	Note string `json:"note,omitempty"`
+
+	// Roles(legacy)是绝对偏移表。新块不要再写。
+	Roles map[string]SchematicLayoutHint `json:"roles,omitempty"`
+
+	// Anchor 是块的锚件 role(可选)。缺省由求解器推导:被 attach 指向次数最多的
+	// role —— 那正是「谁是主芯片」的电路学定义(去耦挂在谁身上谁就是主角)。
+	Anchor string `json:"anchor,omitempty"`
+	// Flow 是信号流顺序(左→右),不要求覆盖全部 role:没进任何关系的件走 residual
+	// 布局是合法的(bulk 电容不该被迫塞进 flow)。
+	Flow []string `json:"flow,omitempty"`
+	// Attach 是「角色 → 目标.引脚」:去耦贴电源脚、ESD 贴数据脚。值必须是
+	// ROLE.PIN,且**不许带 `*`** —— attach 要的是一个点,同名多脚是歧义。
+	Attach map[string]string `json:"attach,omitempty"`
+	// Pair 是等距并列组(CC1/CC2 这种同型号同角色器件)。组内成员必须同 part。
+	Pair [][]string `json:"pair,omitempty"`
+	// Orient 只说**意图**(竖放/横放),不说角度 —— 具体 90 还是 270 由求解器按
+	// 引脚朝向消解。
+	Orient map[string]string `json:"orient,omitempty"`
+}
+
+// IsRelational reports whether the template declares relationships (the form the
+// layout solver consumes).
+func (l *SchematicLayout) IsRelational() bool {
+	if l == nil {
+		return false
+	}
+	return len(l.Flow) > 0 || len(l.Attach) > 0 || len(l.Pair) > 0
+}
+
+// IsLegacy reports whether the template declares absolute offsets.
+func (l *SchematicLayout) IsLegacy() bool {
+	return l != nil && len(l.Roles) > 0
 }
 
 // SchematicLayout parses the block's optional schematic_layout template out of

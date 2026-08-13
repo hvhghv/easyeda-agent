@@ -907,6 +907,20 @@ func bapUnconsumed(b blocks.Block) []string {
 			out = append(out, k)
 		}
 	}
+	// 关系形态的 schematic_layout(flow/attach/pair)**本版尚未执行** —— 数据模型
+	// 与校验先落地(issue #180 P1),求解器是 P2。块库因此可以先收关系数据而不必
+	// 等求解器,但一落库 agent 就会当真,所以必须在 manifest 里明说"声明了没执行"
+	// (本项目的诚实性铁律:命令绝不能让人以为做到了没做到的事)。
+	if layout, err := b.SchematicLayout(); err == nil && layout.IsRelational() {
+		// 单返回值类型断言在失败时会 panic —— 用双返回值形式,块数据是外部输入。
+		if sl, ok := raw["schematic_layout"].(map[string]any); ok {
+			for _, k := range []string{"flow", "attach", "pair"} {
+				if v, ok := sl[k]; ok && v != nil {
+					out = append(out, "schematic_layout."+k)
+				}
+			}
+		}
+	}
 	sort.Strings(out)
 	return out
 }

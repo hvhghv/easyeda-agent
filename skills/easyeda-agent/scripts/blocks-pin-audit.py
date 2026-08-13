@@ -60,6 +60,20 @@ def load_refs():
                 if pk:
                     parts.add(pk)
                 items.append((role, pin, pk))
+        # schematic_layout.attach 的目标也是**引脚引用**,必须一起审 —— 否则
+        # attach 里的引脚名拼错了没人管(#145 的教训:块标着 verified 却静默
+        # 错接了十几天)。Go 侧的 V4 只验"有没有电气依据",引脚名对不对得上
+        # 真实符号,得靠这张引脚真值表(issue #180)。
+        layout = b.get('schematic_layout')
+        if isinstance(layout, dict):
+            for key, target in (layout.get('attach') or {}).items():
+                if not isinstance(target, str) or '.' not in target:
+                    continue
+                role, pin = target.split('.', 1)
+                pk = roles.get(role)
+                if pk:
+                    parts.add(pk)
+                items.append((role, pin.rstrip('*'), pk))
         refs[bid] = items
     return refs, sorted(parts)
 

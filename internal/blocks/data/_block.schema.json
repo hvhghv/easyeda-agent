@@ -74,8 +74,8 @@
   "additionalProperties": true,
   "$defs": {
     "schematic_layout": {
+      "description": "布局模板,两种互斥形态:relational(flow/attach/pair — 只说意图,坐标由求解器算,推荐)与 legacy(roles 绝对偏移,已废弃)。见 issue #180。⚠ 本 schema 没有机器消费者,真正的门是 internal/blocks/validate.go 的 validateSchematicLayout —— 改这里必须同步改那里。",
       "type": "object",
-      "required": ["roles"],
       "properties": {
         "note": {"type": "string"},
         "roles": {
@@ -91,8 +91,36 @@
             },
             "additionalProperties": false
           }
+        },
+        "anchor": {"type": "string", "minLength": 1},
+        "flow": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "attach": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "string", "pattern": "^[^.*]+\\.[^.*]+$"}
+        },
+        "pair": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        },
+        "orient": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"enum": ["vertical", "horizontal"]}
         }
       },
+      "anyOf": [
+        {"required": ["roles"]},
+        {"required": ["flow"]},
+        {"required": ["attach"]},
+        {"required": ["pair"]}
+      ],
+      "allOf": [
+        {"not": {"required": ["roles", "flow"]}},
+        {"not": {"required": ["roles", "attach"]}},
+        {"not": {"required": ["roles", "pair"]}}
+      ],
       "additionalProperties": false
     },
     "part": {

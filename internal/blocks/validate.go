@@ -155,10 +155,15 @@ var validSchLayoutRotations = map[float64]bool{0: true, 90: true, 180: true, 270
 // connect_pin stubs, so it is a data error, not a runtime surprise.
 const schLayoutGrid = 5
 
-// validateSchematicLayout checks the optional schematic placement template:
-// every referenced role must exist, every part role must be covered (a partial
-// template silently mixes template and fallback-grid geometry — an authoring
-// mistake), offsets must land on the placement grid, rotations must be legal.
+// validateSchematicLayout dispatches by TEMPLATE FORM. The two forms' rules are
+// **mutually exclusive semantics**, so they must not share one loop:
+//
+//   - legacy(roles): 必须覆盖**每一个** part —— 半张模板会让模板几何与 fallback
+//     网格几何静默混用,那是作者失误;
+//   - relational(flow/attach/pair): flow **不要求**覆盖全部 role —— 没进任何关系
+//     的件走 residual 布局是合法的。
+//
+// 同时声明两种形态是数据错误(见 SchematicLayout 的注释)。
 func validateSchematicLayout(b Block, add func(string, string)) {
 	layout, err := b.SchematicLayout()
 	if err != nil {
@@ -168,10 +173,22 @@ func validateSchematicLayout(b Block, add func(string, string)) {
 	if layout == nil {
 		return
 	}
-	if len(layout.Roles) == 0 {
-		add("schematic_layout.roles", "must contain at least one role")
-		return
+	switch {
+	case layout.IsLegacy() && layout.IsRelational():
+		add("schematic_layout", "roles(绝对偏移)与 flow/attach/pair(关系)不可混用 —— "+
+			"两种形态会给同一个件两个种子点;legacy 已废弃,新块只写关系")
+	case layout.IsRelational():
+		validateSchLayoutRelational(b, layout, add)
+	case layout.IsLegacy():
+		validateSchLayoutLegacy(b, layout, add)
+	default:
+		add("schematic_layout", "must declare either roles(legacy 绝对偏移)or flow/attach/pair(关系)")
 	}
+}
+
+// validateSchLayoutLegacy 是原样搬过来的 legacy 判据 —— 一字不改,现有 4 个带
+// 模板的块的行为必须逐字节不变。
+func validateSchLayoutLegacy(b Block, layout *SchematicLayout, add func(string, string)) {
 	onGrid := func(v float64) bool {
 		m := v / schLayoutGrid
 		return m == float64(int64(m))
@@ -279,4 +296,155 @@ func ValidateAll(blocks []Block) []error {
 		errs = append(errs, Validate(b)...)
 	}
 	return errs
+}
+
+// ── 关系形态模板的校验(issue #180 P1)──────────────────────────────────────
+//
+// 判据 V1–V7 全部**离线可判**,不需要连接器、不需要放置。这层是"数据一落库
+// agent 就当真"的唯一防线:块库先收关系数据、求解器慢一步落地,期间
+// bapUnconsumed 会诚实披露"已声明但本版未执行"。
+func validateSchLayoutRelational(b Block, layout *SchematicLayout, add func(string, string)) {
+	nets := blockInternalNets(b)
+
+	// role 引用必须存在(V1)——与 legacy 的 role 校验同口径。
+	checkRole := func(field, role string) bool {
+		if _, ok := b.Parts[role]; !ok {
+			add(field, fmt.Sprintf("references unknown role %q", role))
+			return false
+		}
+		return true
+	}
+
+	// V7: anchor 若显式给出必须是真 role。fail-closed —— 给了个不存在的锚
+	// 却悄悄回退到推导,等于让作者以为自己指定生效了。
+	if layout.Anchor != "" {
+		checkRole("schematic_layout.anchor", layout.Anchor)
+	}
+
+	// V2: 一个 role 最多出现在**一种**关系里。两条关系给同一个件两个种子点,
+	// 求解器要么随机选要么放两次 —— 数据层禁掉比运行期消解便宜。
+	seenIn := map[string]string{}
+	claim := func(field, role, kind string) {
+		if prev, ok := seenIn[role]; ok && prev != kind {
+			add(field, fmt.Sprintf("role %q 同时出现在 %s 与 %s 里 —— 一个件只能由一种关系定位", role, prev, kind))
+			return
+		}
+		seenIn[role] = kind
+	}
+
+	for i, role := range layout.Flow {
+		field := fmt.Sprintf("schematic_layout.flow[%d]", i)
+		if checkRole(field, role) {
+			claim(field, role, "flow")
+		}
+	}
+
+	for key, target := range layout.Attach {
+		field := "schematic_layout.attach." + key
+		if !checkRole(field, key) {
+			continue
+		}
+		claim(field, key, "attach")
+
+		// V3: 值必须是 ROLE.PIN;不许自贴;不许带 `*`。
+		if strings.Contains(target, pinFanoutSuffix) {
+			add(field, fmt.Sprintf("目标 %q 带 %q —— attach 要的是**一个点**,同名多脚是歧义;"+
+				"USB-C 双 VBUS 这类请写引脚编号", target, pinFanoutSuffix))
+			continue
+		}
+		tRole, tPin, ok := splitPinRef(target)
+		if !ok {
+			add(field, fmt.Sprintf("目标 %q 不是 ROLE.PIN 形式", target))
+			continue
+		}
+		if !checkRole(field, tRole) {
+			continue
+		}
+		if tRole == key {
+			add(field, "不能贴到自己身上")
+			continue
+		}
+		if strings.TrimSpace(tPin) == "" {
+			add(field, fmt.Sprintf("目标 %q 缺引脚名", target))
+			continue
+		}
+		// V4: attach 必须有**电气依据** —— internal_nets 里存在一条网,同时含
+		// 目标引脚和 key 的任一脚。这是「去耦贴电源脚」的可机械判定形式,抓的是
+		// 拼写错和「贴到一个跟自己没关系的脚上」(#145 的教训:块标着 verified
+		// 却静默错接了十几天)。
+		if !attachHasElectricalBasis(nets, key, target) {
+			add(field, fmt.Sprintf("没有电气依据:internal_nets 里没有任何一条网同时连着 %s 和 %s 的引脚 —— "+
+				"attach 表达的是「贴着它连的那个脚」,不是随便挨着放", target, key))
+		}
+	}
+
+	for i, group := range layout.Pair {
+		field := fmt.Sprintf("schematic_layout.pair[%d]", i)
+		if len(group) < 2 {
+			add(field, "并列组至少要两个成员")
+			continue
+		}
+		var part string
+		for _, role := range group {
+			if !checkRole(field, role) {
+				continue
+			}
+			claim(field, role, "pair")
+			// V5: 组内必须同 part —— 「等距并列」的等距 pitch 合法性来自同型号
+			// 同尺寸(求解器用第一个成员的实测宽度当全组 pitch)。
+			p := b.Parts[role].Part
+			if part == "" {
+				part = p
+			} else if p != part {
+				add(field, fmt.Sprintf("成员 %q 的 part 是 %q,与组内其他成员的 %q 不同 —— "+
+					"等距并列要求同型号(pitch 取自实测宽度,对全组通用)", role, p, part))
+			}
+		}
+	}
+
+	for role, o := range layout.Orient {
+		field := "schematic_layout.orient." + role
+		checkRole(field, role)
+		if o != "vertical" && o != "horizontal" {
+			add(field, fmt.Sprintf("must be vertical|horizontal, got %q", o))
+		}
+	}
+	// V6 是**没有**全覆盖判据 —— 与 legacy 相反,这里刻意不检查"每个 part 都被
+	// 关系覆盖":没进关系的件走 residual 布局是合法的。
+}
+
+// blockInternalNets 解析块的 internal_nets(校验用;解析失败交给 validateTopology
+// 报,这里静默返回空 —— 同一个错误不重复报两遍)。
+func blockInternalNets(b Block) [][]string {
+	var doc struct {
+		InternalNets [][]string `json:"internal_nets"`
+	}
+	if err := json.Unmarshal(b.Raw, &doc); err != nil {
+		return nil
+	}
+	return doc.InternalNets
+}
+
+// attachHasElectricalBasis 报告是否存在一条内部网,同时连着 target 引脚与
+// keyRole 的任一引脚。`*`(fanout)在两侧都按同一个边界处理。
+func attachHasElectricalBasis(nets [][]string, keyRole, target string) bool {
+	tgt := strings.TrimSuffix(target, pinFanoutSuffix)
+	for _, net := range nets {
+		hasTarget, hasKey := false, false
+		for _, m := range net {
+			if strings.HasPrefix(m, "PORT:") {
+				continue
+			}
+			if strings.TrimSuffix(m, pinFanoutSuffix) == tgt {
+				hasTarget = true
+			}
+			if r, _, ok := splitPinRef(m); ok && r == keyRole {
+				hasKey = true
+			}
+		}
+		if hasTarget && hasKey {
+			return true
+		}
+	}
+	return false
 }

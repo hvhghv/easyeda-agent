@@ -25,14 +25,39 @@
   **对单脚是恒等**(展开成 1 条),所以电源/地/屏蔽脚可以放心加星,不必先知道器件有几个同名脚。
 - **器件指回 `standard-parts.json`**:块不重复存 LCSC C 号,料号单一来源。
 
-字段完整定义见 `internal/blocks/data/_schema.json`。核心段:`parts` / `internal_nets`
+字段完整定义见 `internal/blocks/data/_block.schema.json`(注意不是 `_schema.json`,那是共享 _doc/libraryUuid)。核心段:`parts` / `internal_nets`
 / `ports` / `schematic_notes`(原理图链接注意)/ 元信息,外加一族**可拓展的约束 map**:
 
-- `schematic_layout` —— **原理图摆放模板**(`{note, roles: {<ROLE>: {dx,dy,rotation}}}`):
-  role 相对块原点(`--at`)的偏移+朝向，画布 y-UP（`+dy` 向上），**dx/dy 必须落 5 格**、rotation 限 0/90/180/270、
-  **必须覆盖块内全部 role**(部分覆盖是数据错误,`go test` 校验)。审美约定:信号流左入右出、
-  电源上 GND 下、去耦贴主芯片电源脚。有模板的块 `sch block-apply` 直接按模板落件;没有则退回
-  盲网格——**贡献新块请尽量带模板**(在真板上摆好一次,把实测相对坐标写回来)。
+- `schematic_layout` —— **原理图摆放模板**,两种**互斥**形态:
+
+  **① 关系形态(推荐,issue #180)** —— 只说**意图**,坐标由布局求解器算:
+  ```json
+  "schematic_layout": {
+    "flow":   ["J_USB", "D_ESD", "U"],          // 信号流左→右;不必覆盖全部 role
+    "attach": { "C_VCC": "U.VCC" },              // 角色 → 目标.引脚(去耦贴电源脚)
+    "pair":   [["R_CC1", "R_CC2"]],              // 等距并列组(组内必须同 part)
+    "anchor": "U",                               // 可选;缺省取被 attach 指向最多者
+    "orient": { "C_VCC": "vertical" }            // 可选;只说竖/横,不说角度
+  }
+  ```
+  **不要手算坐标。** 块作者写模板时根本不知道实例最终落在页面哪里、旁边有什么、
+  图纸多大、分区标题带在哪 —— 那些信息只有落地时才有。2026-08-13 手算模板同一轮
+  就踩了三个坑:负偏移把件推出图纸左界、块太高顶出上界、去耦电容顶到分区标题带。
+  校验(`go test ./internal/blocks/`,非零退出可 gate)会查:role 必须存在、一个 role
+  只能被一种关系定位、`attach` 目标必须是 `ROLE.PIN` 且**不许带 `*`**(要的是一个点)、
+  **`attach` 必须有电气依据**(`internal_nets` 里存在同时连着目标引脚与该角色任一脚的网
+  —— 这条抓拼写错和「贴到一个跟自己没关系的脚上」)、`pair` 组内同 part。
+  `make blocks-audit` 另外把 `attach` 的引脚名拿去和**真实符号引脚表**对账。
+
+  **② legacy 绝对偏移(已废弃,仍受支持)** —— `{roles: {<ROLE>: {dx,dy,rotation}}}`:
+  相对块原点(`--at`)的偏移+朝向,y-UP(`+dy` 向上),**dx/dy 必须落 5 格**、rotation 限
+  0/90/180/270、**必须覆盖块内全部 role**(与关系形态相反:那边 `flow` 不必全覆盖)。
+  新块不要再写这种。
+
+  两种形态**同时声明是数据错误**(会给同一个件两个种子点)。审美约定不变:信号流左入
+  右出、电源上 GND 下、去耦贴主芯片电源脚。**当前状态**:关系数据已可入库并受校验,
+  但求解器是下一步 —— `sch block-apply` 会在 manifest 的 `NOT applied` 里如实列出
+  `schematic_layout.flow/attach/pair`,此期间几何仍走 legacy 模板或 fallback 网格。
 - `pcb_layout` —— 通用布局规则(列表 `{rule,target,constraint,value,severity}`)。
 - `placement` —— **结构件摆放**(按 `<ROLE>` 键):连接器/端子/USB/天线/按键/指示灯等
   **要不要靠板边、靠哪条边(`edge`)、放哪个铜面(`side` top/bottom)**、朝向。
