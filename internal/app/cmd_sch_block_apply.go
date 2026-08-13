@@ -236,6 +236,11 @@ type bapInput struct {
 	// sheet bbox is known; nil → not enforced. Treated as an extra obstacle so the
 	// block origin never lands on the title block (issue #141).
 	TitleBlock *layoutBBox
+	// Sheet 是图纸边框 bbox。**它必须参与螺旋搜索**,不能只做事后 warning:
+	// origin 搜索从前给 findSlot 的 inBounds 传 nil,于是"最近的空位"可以在图纸
+	// 外面 —— 实测把 J_USB 放到 x=-20、把 R6 放到 y=880(sheet 上界 825)。
+	// nil → 不约束(并在 manifest 里如实说明未强制)。见 issue #180 Fix B。
+	Sheet *layoutBBox
 }
 
 // bapRoleOffset is one role's resolved offset from the block origin.
@@ -315,6 +320,28 @@ func bapGridSpacing(roles []string, b blocks.Block) float64 {
 // widen EVERY cell, so a 21-part block at the IC's 220 pitch ran to y=1400 on an
 // 825-tall A4 sheet. Sizing each cell to its own part keeps the decoupling caps
 // tight and only pays the wide pitch where a wide part actually sits.
+// bapHalfExtentFn 是块内某个 role 的**半宽估算的唯一来源**:fallback 网格排布
+// (bapRoleOffsets)与块 footprint 估算(bapBlockRect)必须共用它。
+//
+// 两套估算一旦分家就会「螺旋搜索说没撞、放完实测撞」——那正是 bapBlockRect 此前
+// 的病:它统一按 bapPartMargin(50)外扩,不看 bapRoleHalfExtent(模组/MCU 半宽
+// 250、IC 100、连接器 90),含 WROOM 的块每边低估 200,螺旋判定"空位"的地方放完
+// 必然 overlap → 撞硬门 → 整单回滚(issue #180)。
+//
+// halfOf 为 nil(调用方显式给了 --spacing)时,所有件按 spacing/2 一刀切,这是
+// 调用方的显式决定;有 halfOf 时逐件用自己的实测/查表半宽。
+func bapHalfExtentFn(spacing float64, halfOf map[string]float64) func(role string) float64 {
+	return func(role string) float64 {
+		if halfOf == nil {
+			return spacing / 2
+		}
+		if h, ok := halfOf[role]; ok {
+			return h
+		}
+		return float64(bapPartMargin)
+	}
+}
+
 func bapRoleOffsets(roles []string, layout *blocks.SchematicLayout, spacing float64, perRow int,
 	halfOf map[string]float64) map[string]bapRoleOffset {
 
@@ -344,15 +371,7 @@ func bapRoleOffsets(roles []string, layout *blocks.SchematicLayout, spacing floa
 		}
 	}
 
-	half := func(role string) float64 {
-		if halfOf == nil {
-			return spacing / 2
-		}
-		if h, ok := halfOf[role]; ok {
-			return h
-		}
-		return float64(bapPartMargin)
-	}
+	half := bapHalfExtentFn(spacing, halfOf)
 
 	// Walk row by row, advancing x by the two neighbours' half extents plus a gap,
 	// and dropping y by the tallest part in the row just finished.
@@ -378,23 +397,38 @@ func bapRoleOffsets(roles []string, layout *blocks.SchematicLayout, spacing floa
 }
 
 // bapBlockRect is the block's estimated footprint rectangle at a given origin.
-func bapBlockRect(originX, originY float64, offsets map[string]bapRoleOffset) layoutBBox {
+// bapBlockRect 估算整块落地后占的矩形(螺旋搜索用它当刚体)。
+//
+// **负 dx/dy 一直是被正确计入的**(math.Min/Max 覆盖负值)——不要照 issue #180
+// 正文最初那句「螺旋搜索不把负偏移计进 footprint」去"修"这里,那条归因是错的,
+// 已在 issue 评论里订正:件出图纸的真机制是 bapResolveOrigin 从前给 findSlot 的
+// inBounds/hitsTitle 传了 nil(边界谓词根本没接上)。
+//
+// half 是每个 role 的半宽(bapHalfExtentFn,与网格排布同源);传 nil 退回旧的
+// 统一 bapPartMargin 外扩,只为老调用点兼容——新代码一律传 half。
+func bapBlockRect(originX, originY float64, offsets map[string]bapRoleOffset, half func(string) float64) layoutBBox {
 	first := true
-	var minDX, maxDX, minDY, maxDY float64
-	for _, o := range offsets {
+	var minX, maxX, minY, maxY float64
+	for role, o := range offsets {
+		h := float64(bapPartMargin)
+		if half != nil {
+			h = math.Max(half(role), bapPartMargin)
+		}
+		lo, hi := o.dx-h, o.dx+h
+		bo, to := o.dy-h, o.dy+h
 		if first {
-			minDX, maxDX, minDY, maxDY = o.dx, o.dx, o.dy, o.dy
+			minX, maxX, minY, maxY = lo, hi, bo, to
 			first = false
 			continue
 		}
-		minDX = math.Min(minDX, o.dx)
-		maxDX = math.Max(maxDX, o.dx)
-		minDY = math.Min(minDY, o.dy)
-		maxDY = math.Max(maxDY, o.dy)
+		minX = math.Min(minX, lo)
+		maxX = math.Max(maxX, hi)
+		minY = math.Min(minY, bo)
+		maxY = math.Max(maxY, to)
 	}
 	return layoutBBox{
-		MinX: originX + minDX - bapPartMargin, MinY: originY + minDY - bapPartMargin,
-		MaxX: originX + maxDX + bapPartMargin, MaxY: originY + maxDY + bapPartMargin,
+		MinX: originX + minX, MinY: originY + minY,
+		MaxX: originX + maxX, MaxY: originY + maxY,
 	}
 }
 
@@ -404,43 +438,68 @@ func bapBlockRect(originX, originY float64, offsets map[string]bapRoleOffset) la
 // It always returns a usable origin — on failure it keeps the request and says
 // so in the warnings, because a placed-but-overlapping block is diagnosable by
 // layout-lint while a refused apply loses all the work.
-func bapResolveOrigin(in bapInput, offsets map[string]bapRoleOffset) (float64, float64, *bapOrigin, []string) {
+func bapResolveOrigin(in bapInput, offsets map[string]bapRoleOffset, half func(string) float64) (float64, float64, *bapOrigin, []string) {
 	origin := &bapOrigin{
 		RequestedX: in.OriginX, RequestedY: in.OriginY,
 		X: in.OriginX, Y: in.OriginY,
 	}
-	if len(in.Obstacles) == 0 && in.TitleBlock == nil {
-		return in.OriginX, in.OriginY, origin, nil
-	}
+	// 间隙判定一律走 boxesGapOverlap:旧代码用 rectGap(欧氏角距,math.Hypot),
+	// 对角方向名义留 20 实际只保证 ~14 单轴 —— 判据必须逐轴。
 	collides := func(b layoutBBox) bool {
-		if in.TitleBlock != nil {
-			if boxesOverlap(b, *in.TitleBlock) || rectGap(b, *in.TitleBlock) < bapObstacleGap {
-				return true
-			}
+		if in.TitleBlock != nil && boxesGapOverlap(b, *in.TitleBlock, bapObstacleGap) {
+			return true
 		}
 		for _, o := range in.Obstacles {
-			if boxesOverlap(b, o) || rectGap(b, o) < bapObstacleGap {
+			if boxesGapOverlap(b, o, bapObstacleGap) {
 				return true
 			}
 		}
 		return false
 	}
-	rect := bapBlockRect(in.OriginX, in.OriginY, offsets)
-	if !collides(rect) {
+	// inBounds/hitsTitle 是 issue #180 三个坑的正解:此前它们给 findSlot 传的是
+	// nil,图纸边界与分区标题带**从未参与搜索**,出界只在事后打 warning(而且比
+	// 的是锚点不是 bbox)。接上之后,"搜出来的空位在图纸外"从构造上不可能。
+	var inBounds func(layoutBBox) bool
+	if in.Sheet != nil {
+		usable := layoutBBox{
+			MinX: in.Sheet.MinX + sheetEdgeMinGap, MinY: in.Sheet.MinY + sheetEdgeMinGap,
+			MaxX: in.Sheet.MaxX - sheetEdgeMinGap, MaxY: in.Sheet.MaxY - sheetEdgeMinGap,
+		}
+		inBounds = func(b layoutBBox) bool { return boxInside(b, usable) }
+	}
+	rect := bapBlockRect(in.OriginX, in.OriginY, offsets, half)
+	fits := !collides(rect) && (inBounds == nil || inBounds(rect))
+	if fits {
 		return in.OriginX, in.OriginY, origin, nil
 	}
 	if in.AtExplicit {
-		return in.OriginX, in.OriginY, origin, []string{
-			"--at 指定的原点与已有器件或标题栏图签重叠 — 按你的坐标照常放置(显式 --at 优先);放完请跑 `sch layout-lint` 确认",
+		msg := "--at 指定的原点与已有器件或标题栏图签重叠 — 按你的坐标照常放置(显式 --at 优先);放完请跑 `sch layout-lint` 确认"
+		if inBounds != nil && !inBounds(rect) {
+			msg = fmt.Sprintf("--at 指定的原点会让这一块超出图纸可用区(块估算范围 [%.0f,%.0f]-[%.0f,%.0f],图纸 [%.0f,%.0f]-[%.0f,%.0f] 内缩 %.0f)— 按你的坐标照常放置(显式 --at 优先);放完必须跑 `sch layout-lint --strict` 看 out-of-sheet",
+				rect.MinX, rect.MinY, rect.MaxX, rect.MaxY,
+				in.Sheet.MinX, in.Sheet.MinY, in.Sheet.MaxX, in.Sheet.MaxY, sheetEdgeMinGap)
 		}
+		return in.OriginX, in.OriginY, origin, []string{msg}
 	}
 	w, h := bboxSize(rect)
 	step := math.Max(w, h)/2 + 2*bapObstacleGap
 	cx, cy := bboxCenter(rect)
-	slot, _, ok := findSlot(rect, cx, cy, step, true, collides, nil, nil, nil)
+	// normalize:候选中心换算回 origin 后吸附 5 格再还原成 box —— 判定坐标必须
+	// 等于落地坐标,否则吸附引入的 ±2.5 会让"判定说不撞、放下去撞"。
+	normalize := func(cand layoutBBox) layoutBBox {
+		ccx, ccy := bboxCenter(cand)
+		nx := snapAnchor(in.OriginX + (ccx - cx))
+		ny := snapAnchor(in.OriginY + (ccy - cy))
+		return bapBlockRect(nx, ny, offsets, half)
+	}
+	slot, _, ok := findSlotNormalized(rect, cx, cy, step, true, normalize, collides, inBounds, nil, nil)
 	if !ok {
+		why := "与已有器件重叠"
+		if inBounds != nil {
+			why = "与已有器件重叠或超出图纸可用区"
+		}
 		return in.OriginX, in.OriginY, origin, []string{
-			fmt.Sprintf("默认原点与已有器件重叠,且螺旋搜索 %d 个候选后仍无空位 — 按原坐标放置,预期有 overlap,放完必须跑 `sch layout-lint`", alMaxRing*len(alDirsVertical)),
+			fmt.Sprintf("默认原点%s,且螺旋搜索 %d 个候选后仍无空位 — 按原坐标放置,预期有 overlap/出图,放完必须跑 `sch layout-lint --strict`", why, alMaxRing*len(alDirsVertical)),
 		}
 	}
 	ncx, ncy := bboxCenter(slot)
@@ -513,7 +572,10 @@ func planBlockApply(in bapInput) (bapPlan, error) {
 	// origin to us (the old blind 4-column grid at 400,300 was a top overlap
 	// source — every second apply landed on the first).
 	offsets := bapRoleOffsets(roles, in.Layout, spacing, perRow, halfOf)
-	originX, originY, origin, warns := bapResolveOrigin(in, offsets)
+	// half 与网格排布同源(bapHalfExtentFn):footprint 估算和件间距必须用同一把尺,
+	// 否则螺旋搜索的"空位"放完会 overlap(issue #180 Fix A)。
+	half := bapHalfExtentFn(spacing, halfOf)
+	originX, originY, origin, warns := bapResolveOrigin(in, offsets, half)
 	plan.Origin = origin
 	plan.Warnings = append(plan.Warnings, warns...)
 	for _, role := range roles {

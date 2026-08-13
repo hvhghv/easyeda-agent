@@ -557,6 +557,10 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		// plus the A4 title-block keep-out so a right/bottom origin never lands
 		// on the 图签 (issue #141).
 		in.Obstacles, in.TitleBlock, sheetBBox = fetchSchObstaclesAndKeepout(cfg, window)
+		// 图纸边框必须**进搜索**,不能只留给事后 warning:origin 螺旋从前把
+		// findSlot 的 inBounds 传成 nil,于是"最近的空位"可以落在图纸外
+		// (实测 J_USB→x=-20、R6→y=880 而图纸上界 825)。issue #180 Fix B。
+		in.Sheet = sheetBBox
 	}
 
 	plan, err := planBlockApply(in)

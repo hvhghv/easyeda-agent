@@ -55,12 +55,12 @@ type layoutComp struct {
 	// Rotation is the stored primitive rotation when the connector reported one
 	// (markers carry it; the reversed-net-flag rule reads it against the
 	// orientation truth table). Nil when absent/non-numeric.
-	Rotation *float64
-	BBox     *layoutBBox
-	Pins            []layoutPin
-	PinsAvailable   bool // true when the connector confirmed the pins read succeeded
-	PinsProofKnown  bool // true only for the explicit pinsAvailable connector contract
-	GeometryErrors  []string
+	Rotation       *float64
+	BBox           *layoutBBox
+	Pins           []layoutPin
+	PinsAvailable  bool // true when the connector confirmed the pins read succeeded
+	PinsProofKnown bool // true only for the explicit pinsAvailable connector contract
+	GeometryErrors []string
 }
 
 // schLayoutPartType is the componentType of a real placed device. Only these
@@ -123,6 +123,9 @@ func (f layoutFinding) MarshalJSON() ([]byte, error) {
 		out["x"], out["y"] = f.X, f.Y
 	case "zone-violation":
 		out["b"], out["x"], out["y"] = f.B, f.X, f.Y
+	case "out-of-sheet":
+		// OvX/OvY 复用为「超出量」(每轴超出图纸可用区多少),X/Y 是锚点。
+		out["x"], out["y"], out["overlapX"], out["overlapY"] = f.X, f.Y, f.OvX, f.OvY
 	default:
 		if f.B != "" {
 			out["b"] = f.B
@@ -180,12 +183,18 @@ type layoutReport struct {
 	// They are advisory in default mode and fail the report under --strict.
 	ZoneViolations  []layoutFinding `json:"zoneViolations,omitempty"`
 	ZoneCheckStatus string          `json:"zoneCheckStatus"`
-	ZoneCheckError  string          `json:"zoneCheckError,omitempty"`
-	UncheckedPins   []string        `json:"uncheckedPins,omitempty"`
-	UnprovenPins    []string        `json:"unprovenPins,omitempty"`
-	InvalidGeometry []string        `json:"invalidGeometry,omitempty"`
-	PinEps          float64         `json:"pinEps"`
-	Summary         string          `json:"summary"`
+	// OutOfSheet 是 bbox 越出图纸可用区(边框内缩 sheetEdgeMinGap)的器件。
+	// 此前**没有任何判据抓这个**:出图的件照样连线、照样 netlist 对账通过,
+	// 只是印不出来(实测 block-apply 把件放到 x=-20 / y=880 而图纸 0..825)。
+	// 与 zone-violation 同档:默认 advisory,--strict 才判失败。
+	OutOfSheet       []layoutFinding `json:"outOfSheet,omitempty"`
+	SheetCheckStatus string          `json:"sheetCheckStatus"`
+	ZoneCheckError   string          `json:"zoneCheckError,omitempty"`
+	UncheckedPins    []string        `json:"uncheckedPins,omitempty"`
+	UnprovenPins     []string        `json:"unprovenPins,omitempty"`
+	InvalidGeometry  []string        `json:"invalidGeometry,omitempty"`
+	PinEps           float64         `json:"pinEps"`
+	Summary          string          `json:"summary"`
 }
 
 // analyzeLayout is the pure core: given components and thresholds in native
@@ -319,6 +328,7 @@ func applyLayoutStrictGate(rep *layoutReport, strict bool) {
 	if len(rep.TightPairs) > 0 ||
 		len(rep.GridViolations) > 0 ||
 		len(rep.ZoneViolations) > 0 ||
+		len(rep.OutOfSheet) > 0 ||
 		len(rep.NoBBox) > 0 ||
 		len(rep.UncheckedPins) > 0 ||
 		len(rep.UnprovenPins) > 0 ||
@@ -355,11 +365,11 @@ func layoutReportInMM(rep layoutReport) layoutReport {
 	rep.MeasurementUnit = "mm"
 	rep.CoordinateUnit = "0.01inch"
 	rep.AnchorGridUnit = "0.01inch"
-	rep.Summary = fmt.Sprintf("strict=%t: %d components (%d with bbox): %d overlap, %d tight (<%.2fmm), %d pin-coincidence, %d off-grid, %d zone-violation, %d unchecked-bbox, %d unchecked-pins, %d unproven-pins, %d invalid-geometry; zoneCheck=%s",
+	rep.Summary = fmt.Sprintf("strict=%t: %d components (%d with bbox): %d overlap, %d tight (<%.2fmm), %d pin-coincidence, %d off-grid, %d zone-violation, %d out-of-sheet, %d unchecked-bbox, %d unchecked-pins, %d unproven-pins, %d invalid-geometry; zoneCheck=%s sheetCheck=%s",
 		rep.Strict, rep.Total, rep.WithBBox, len(rep.Overlaps), len(rep.TightPairs), rep.MinGap,
-		len(rep.PinCoincidences), len(rep.GridViolations), len(rep.ZoneViolations),
+		len(rep.PinCoincidences), len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet),
 		len(rep.NoBBox), len(rep.UncheckedPins), len(rep.UnprovenPins),
-		len(rep.InvalidGeometry), rep.ZoneCheckStatus)
+		len(rep.InvalidGeometry), rep.ZoneCheckStatus, rep.SheetCheckStatus)
 	return rep
 }
 
@@ -368,6 +378,44 @@ func validateLayoutDistanceFlag(name string, v float64) error {
 		return fmt.Errorf("%s must be a finite value >= 0mm", name)
 	}
 	return nil
+}
+
+// detectOutOfSheet flags parts whose rendered bbox leaves the printed sheet's
+// usable area (the frame inset by `inset`).
+//
+// 为什么需要它:出图纸的件**照样连线、照样 netlist 对账通过**,下游没有任何判据
+// 会响 —— 它只是印不出来。实测 block-apply 把 J_USB 放到 x=-20、把 R6 放到
+// y=880(图纸 0..825),layout-lint 当时全绿(issue #180)。
+//
+// 判据是 bbox 而不是锚点:锚点在框内、body 探出框外一样是出图(块 apply 事后那条
+// warning 比的就是锚点,所以漏报)。没有 bbox 的件跳过 —— 那是 NoBBox 的职责。
+// 纯函数。
+func detectOutOfSheet(comps []layoutComp, sheet layoutBBox, inset float64) []layoutFinding {
+	usable := layoutBBox{
+		MinX: sheet.MinX + inset, MinY: sheet.MinY + inset,
+		MaxX: sheet.MaxX - inset, MaxY: sheet.MaxY - inset,
+	}
+	var out []layoutFinding
+	for _, c := range comps {
+		if c.BBox == nil {
+			continue
+		}
+		b := *c.BBox
+		// 每轴的超出量:两侧都可能出,取更大的那侧(0 = 该轴没出)。
+		ovX := math.Max(usable.MinX-b.MinX, b.MaxX-usable.MaxX)
+		ovY := math.Max(usable.MinY-b.MinY, b.MaxY-usable.MaxY)
+		if ovX <= 0 && ovY <= 0 {
+			continue
+		}
+		out = append(out, layoutFinding{
+			Type: "out-of-sheet",
+			A:    label(c),
+			X:    round2(c.X), Y: round2(c.Y),
+			OvX: round2(math.Max(0, ovX)), OvY: round2(math.Max(0, ovY)),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].A < out[j].A })
+	return out
 }
 
 // detectPinCoincidence finds pins from DIFFERENT components that land on the same
@@ -597,6 +645,19 @@ func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, al
 	default:
 		rep.ZoneCheckStatus = "checked"
 		rep.ZoneViolations = findSchZoneViolations(zones, *sheet, realParts)
+	}
+	// 出图纸判据(issue #180 Fix C):与 zone 同档诚实披露 —— 读不到图纸 bbox 就
+	// 说 unavailable,绝不因为"没检查"而显得干净。allPages 下逐页图纸无法对应,
+	// 与 zone-check 同理不判。sheet 取自**未过滤**的 comps(filterLayoutComps 会
+	// 把 componentType=="sheet" 滤掉)。
+	switch {
+	case allPages:
+		rep.SheetCheckStatus = "unavailable"
+	case sheet == nil:
+		rep.SheetCheckStatus = "unavailable"
+	default:
+		rep.SheetCheckStatus = "checked"
+		rep.OutOfSheet = detectOutOfSheet(realParts, *sheet, sheetEdgeMinGap)
 	}
 	applyLayoutStrictGate(&rep, strict)
 	return layoutReportInMM(rep), nil
