@@ -114,6 +114,61 @@ func TestPlanDestagger_TwoGroundFlagsSeparate(t *testing.T) {
 	}
 }
 
+// **power/gnd 旗永远不许被扶去横躺**(2026-08-13 真机验收抓到的真缺陷:初版把
+// left/right 也列进地/电的候选方向,规划器真把一支 GND 旗扶去了 left)。横躺的
+// power/gnd 旗文字竖排侧向渲染 —— skill conventions 的铁律「信号链末端的电源/
+// 地旗必须竖直」。netport 不受此限(顺导线方向摆布)。
+func TestPlanDestagger_PowerGroundStayVertical(t *testing.T) {
+	// 一排挤在一起的地/电旗,逼规划器把候选方向翻遍。
+	var comps []layoutComp
+	var wires []schGroupWire
+	for i, spec := range []struct {
+		id, net, fam string
+	}{
+		{"g1", "GND", "ground"}, {"g2", "GND", "ground"}, {"g3", "GND", "ground"},
+		{"p1", "+5V", "power"}, {"p2", "+5V", "power"},
+	} {
+		x := 100 + float64(i)*10
+		dir := 1.0 // power 朝上
+		if spec.fam == "ground" {
+			dir = -1
+		}
+		c, w := dsFlag(spec.id, spec.net, x, 500, x, 500+dir*40, spec.fam)
+		comps = append(comps, c)
+		wires = append(wires, w)
+	}
+	plan := planDestagger(comps, wires, 1)
+	if len(plan.Moves) == 0 {
+		t.Fatalf("fixture must produce moves; skips=%+v", plan.Skips)
+	}
+	for _, m := range plan.Moves {
+		if m.ToDir == "left" || m.ToDir == "right" {
+			t.Errorf("%s(%s) planned to %s — power/gnd flags must stay vertical (up/down)",
+				m.Net, m.FlagID, m.ToDir)
+		}
+	}
+}
+
+// de-stagger 的本义是**同向错开**:原方向拉得开就别换朝向(视觉扰动最小)。
+// 初版"方向外层、桩长内层"的循环把一支本可拉长 45 就避开的 GND 旗直接扶去了
+// 别的方向 —— 2026-08-13 真机 dry-run 抓到。
+func TestPlanDestagger_PrefersLongerStubOverTurning(t *testing.T) {
+	g1, w1 := dsFlag("g1", "GND", 300, 950, 300, 910, "ground") // 朝下
+	g2, w2 := dsFlag("g2", "GND", 310, 950, 310, 910, "ground")
+	plan := planDestagger([]layoutComp{g1, g2}, []schGroupWire{w1, w2}, 1)
+	if len(plan.Moves) == 0 {
+		t.Fatalf("fixture must produce a move; skips=%+v", plan.Skips)
+	}
+	moved := plan.Moves[0]
+	if moved.ToDir != moved.FromDir {
+		t.Errorf("%s turned %s→%s; an open column below should be solved by a longer stub instead",
+			moved.FlagID, moved.FromDir, moved.ToDir)
+	}
+	if moved.ToOffset <= moved.FromOffset {
+		t.Errorf("same-direction move must lengthen the stub: %v → %v", moved.FromOffset, moved.ToOffset)
+	}
+}
+
 // 幂等:本来就不重叠的页,一个都不许动(参考 #50 autoconnect 不幂等的教训)。
 func TestPlanDestagger_IdempotentOnCleanPage(t *testing.T) {
 	g1, w1 := dsFlag("g1", "GND", 100, 200, 100, 240, "ground")

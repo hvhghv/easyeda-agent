@@ -55,13 +55,16 @@ var destaggerDirs = map[string][2]float64{
 	"right": {1, 0},
 }
 
-// destaggerDirPreference 给出每类 marker 的候选方向优先序。地朝下、电朝上是
-// 项目既有约定(「电上地下」,见 skill conventions);netport 顺导线方向左右优先
-// (2026-08-12 用户拍板 netport 顺方向摆布)。第一个候选 = 该类的"正位",
-// 只有正位被占才退而求其次。
+// destaggerDirPreference 给出每类 marker 的候选方向优先序。
+//
+// **power/gnd 只许竖直**(2026-08-13 真机验收抓到的缺陷:初版把 left/right 也列
+// 进候选,规划器真的把一支 GND 旗扶去了 left)——横躺的 power/gnd 旗文字竖排
+// 侧向渲染,是平台特性,极难看,skill conventions 早有铁律「信号链末端的电源/地
+// 旗必须竖直」。地朝下、电朝上是正位(「电上地下」),另一竖直方向兜底。
+// netport 顺导线方向摆布,四向都合法(2026-08-12 用户拍板)。
 var destaggerDirPreference = map[string][]string{
-	"ground": {"down", "left", "right", "up"},
-	"power":  {"up", "right", "left", "down"},
+	"ground": {"down", "up"},
+	"power":  {"up", "down"},
 	"port":   {"right", "left", "up", "down"},
 }
 
@@ -201,35 +204,52 @@ func planOneDestagger(stub destaggerStub, obstacles map[string]layoutBBox, eps f
 	if len(dirs) == 0 {
 		dirs = []string{"down", "up", "left", "right"}
 	}
-	// 桩长候选:先试原长(只换方向,视觉扰动最小),再逐级加一个文字带。
-	// 全部圆整到连接器栅格 —— 计划里的桩长就是平台会采用的桩长。
+	// 桩长候选:原长 + 逐级加一个文字带,全部圆整到连接器栅格 —— 计划里的桩长
+	// 就是平台会采用的桩长。
 	offsets := []float64{destaggerSnap(stub.Offset)}
-	for k := 1; k <= 3; k++ {
+	for k := 1; k <= 4; k++ {
 		offsets = append(offsets, destaggerSnap(stub.Offset+float64(k)*step))
 	}
-	for _, dir := range dirs {
-		for _, off := range offsets {
-			if dir == stub.Dir && math.Abs(off-stub.Offset) < 0.5 {
-				continue // 原地不动 = 没解决问题
-			}
-			box := predictMarkerBBox(stub, dir, off)
-			if destaggerCollides(box, c.ID, obstacles, eps) {
-				continue
-			}
-			return destaggerMove{
-				FlagID:        c.ID,
-				Net:           c.Net,
-				ComponentType: c.ComponentType,
-				Kind:          destaggerKindOf(c),
-				HostX:         stub.HostX,
-				HostY:         stub.HostY,
-				FromDir:       stub.Dir,
-				FromOffset:    round2(stub.Offset),
-				ToDir:         dir,
-				ToOffset:      round2(off),
-				NewBBox:       box,
-			}, true
+	// 候选序:**先在原方向上拉开桩长**(de-stagger 的本义就是同向错开,视觉扰动
+	// 最小、也不动旗的朝向),原方向排不下才换方向。初版是"方向外层、桩长内层",
+	// 结果一支本可以拉长 45 就避开的 GND 旗被直接扶去了别的方向(2026-08-13 真机)。
+	type destaggerCand struct {
+		dir string
+		off float64
+	}
+	var cands []destaggerCand
+	for _, off := range offsets {
+		if math.Abs(off-stub.Offset) < 0.5 {
+			continue // 原地不动 = 没解决问题
 		}
+		cands = append(cands, destaggerCand{stub.Dir, off})
+	}
+	for _, dir := range dirs {
+		if dir == stub.Dir {
+			continue
+		}
+		for _, off := range offsets {
+			cands = append(cands, destaggerCand{dir, off})
+		}
+	}
+	for _, cd := range cands {
+		box := predictMarkerBBox(stub, cd.dir, cd.off)
+		if destaggerCollides(box, c.ID, obstacles, eps) {
+			continue
+		}
+		return destaggerMove{
+			FlagID:        c.ID,
+			Net:           c.Net,
+			ComponentType: c.ComponentType,
+			Kind:          destaggerKindOf(c),
+			HostX:         stub.HostX,
+			HostY:         stub.HostY,
+			FromDir:       stub.Dir,
+			FromOffset:    round2(stub.Offset),
+			ToDir:         cd.dir,
+			ToOffset:      round2(cd.off),
+			NewBBox:       box,
+		}, true
 	}
 	return destaggerMove{}, false
 }
