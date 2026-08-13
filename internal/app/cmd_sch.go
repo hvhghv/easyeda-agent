@@ -1322,7 +1322,7 @@ prior versions emitted a bare {passed,summary,findings}).`,
 		c.Flags().BoolVar(&stay, "stay", false, "with --page, stay on the target page after checking instead of switching back")
 		c.Flags().BoolVar(&strict, "strict", false, "exit non-zero when there are findings (gate mode)")
 		c.Flags().BoolVar(&asJSON, "json", false, "emit the report in the {id,type,version,ok,result} envelope (findings under result.findings)")
-		c.Flags().Float64Var(&overlapEps, "overlap-eps", 0.5, "min positive-area extent (mm, smaller axis) for the marker-overlap/titleblock-overlap rules — below it, edge grazing and parallel-port float noise are ignored (issue #148)")
+		c.Flags().Float64Var(&overlapEps, "overlap-eps", schMarkerOverlapEps, "min positive-area extent (mm, smaller axis) for the marker-overlap/titleblock-overlap rules — below it, edge grazing and parallel-port float noise are ignored (issue #148)")
 		sch.AddCommand(c)
 	}
 
@@ -1695,6 +1695,9 @@ the selection). Without --ids it exports the whole active page.`,
 		sheet.AddCommand(newSchSheetTidyCommand(cfg, &window, stdout, stderr))
 		sch.AddCommand(sheet)
 	}
+	// marker-overlap 的**修复**侧(#171):检测在 `sch check`(#148),这里负责安全
+	// 批量搬迁(带桩线一起挪 + 真实 check 复验 + 恶化回滚)。
+	sch.AddCommand(newSchDestaggerCommand(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchAlignCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchDistributeCmd(cfg, &window, stdout, stderr))
 	// 布局质量打分(诊断视角,不是门):折叠/反向/贴核心/长链可识别,归因带可
