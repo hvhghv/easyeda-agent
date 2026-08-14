@@ -664,3 +664,28 @@ func bslDirVec(side string) (dx, dy float64) {
 		return 0, 1
 	}
 }
+
+// bslDidSolve reports whether the solver actually consumed the relational
+// template. bslResolveLive 的降级路径一律以「关系求解跳过」开头,那时件是按网格
+// 坐标落的,关系确实没被执行。(名字不叫 bslSolved —— 那是求解出的位姿类型。)
+func bslDidSolve(notes []string) bool {
+	for _, n := range notes {
+		if strings.HasPrefix(n, "关系求解跳过") {
+			return false
+		}
+	}
+	return true
+}
+
+// bapDropRelationalLayout removes the schematic_layout.* entries from a
+// NOT-applied list — called only when the solver did consume them.
+func bapDropRelationalLayout(in []string) []string {
+	out := in[:0:0]
+	for _, k := range in {
+		if strings.HasPrefix(k, "schematic_layout.") {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}

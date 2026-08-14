@@ -647,8 +647,20 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		// 用估算(只保证下限),最终由放置后的硬门用真实 bbox 兜底。每件都回读会让
 		// 稠密页上的 SDK 往返变成 O(件数 × 页组件数)。
 		if plan.Relational && i == 1 {
-			if notes := bslResolveLive(cfg, window, &plan, sheetBBox, stderr); len(notes) > 0 {
+			notes := bslResolveLive(cfg, window, &plan, sheetBBox, stderr)
+			if len(notes) > 0 {
 				plan.Warnings = append(plan.Warnings, notes...)
+				man.Warnings = plan.Warnings
+			}
+			// 「NOT applied」这行是诚实性出口,它自己必须诚实:求解器**真的**消费了
+			// flow/attach/pair 时(LAYOUT 列写着 anchor/flow/attach/pair),就不能再
+			// 说没执行 —— 那段文案是 P1 只落数据模型时写的,P2 求解器上线后它反过来
+			// 在撒谎。只有降级回网格坐标时,关系才确实没被执行。
+			if bslDidSolve(notes) {
+				man.Unconsumed = bapDropRelationalLayout(man.Unconsumed)
+				if len(man.Unconsumed) == 0 {
+					man.Note = ""
+				}
 			}
 		}
 		p := plan.Placements[i]

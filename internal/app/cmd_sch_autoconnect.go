@@ -198,10 +198,17 @@ func isNetPortKind(canonicalKind string) bool {
 	return false
 }
 
-func markerBBoxProfile(canonicalKind string) acMarkerBBoxProfile {
+// markerBBoxProfile takes the net name because a **netport renders as wide as
+// its label**: relayoutPortWidth = 6*len(net)+8, floor 31. The old fixed
+// Far=40.5 hard-coded that floor, so every net name longer than 3 chars was
+// under-predicted — "C7_N3" really spans 38, i.e. 7 units past the prediction.
+// The scorer therefore computed "just clear" for positions that render
+// touching, which is exactly the 1.00–11.00-unit grazing overlaps sch check
+// kept reporting. ground/power are fixed-size symbols and ignore net.
+func markerBBoxProfile(canonicalKind, net string) acMarkerBBoxProfile {
 	switch canonicalKind {
 	case "net_port_in", "net_port_out", "net_port_bi", "netport":
-		return acMarkerBBoxProfile{Near: 9.5, Far: 40.5, Cross: 5.5}
+		return acMarkerBBoxProfile{Near: 9.5, Far: 9.5 + relayoutPortWidth(net), Cross: 5.5}
 	case "ground", "analog_ground", "protective_ground", "protect_ground", "gnd", "agnd", "pgnd":
 		return acMarkerBBoxProfile{Near: 9.5, Far: 19.5, Cross: 10.5}
 	default: // power and any future netflag family: conservative power envelope
@@ -285,14 +292,59 @@ func outwardDirection(pin acPin) string {
 // predictedMarkerBBox returns the conservative rendered body bbox for a marker
 // placed at endpoint (x,y), keyed by its family and visual stub direction.
 //
-// Horizontal bbox coordinates follow direction literally. Live native bbox
-// coordinates on the calibrated build report the vertical body on the opposite
-// numeric side of the visual direction: "up" occupies y-Far..y-Near, while
-// "down" occupies y+Near..y+Far. Keep this measured mapping separate from
-// endpointFor's y-UP wire geometry; changing it to the semantic sign recreates
-// the marker-overlap misses this predictor exists to prevent.
-func predictedMarkerBBox(x, y float64, canonicalKind, direction string) layoutBBox {
-	p := markerBBoxProfile(canonicalKind)
+// **全部四个方向都按 y-UP 语义**:'up' 的 body 在端点上方(y 更大),'down' 在下方
+// (y 更小),与 endpointFor / 连接器 schematicPowerConnectPin 同一口径。
+//
+// 这段注释以前写的是反的("up occupies y-Far..y-Near"),还警告不要改成语义符号
+// —— 实测推翻了它:`sch connect --x 200 --y 200 --kind gnd --direction down
+// --offset 40` 落到端点 (200,160),旗的真实 bbox 是 y 140.5..150.5,在端点**下方**
+// (Near=9.5 / Far=19.5,与 ground profile 吻合)。原注释和当时的代码一起把竖直
+// 碰撞检查指到了空位置。改这两支前请照上面那条命令实测,别照注释推理。
+func predictedMarkerBBox(x, y float64, canonicalKind, direction, net string) layoutBBox {
+	body := predictedMarkerBody(x, y, canonicalKind, direction, net)
+	if band := predictedFlagTextBand(x, y, body, canonicalKind, direction, net); band != nil {
+		return layoutBBox{
+			MinX: math.Min(body.MinX, band.MinX), MinY: math.Min(body.MinY, band.MinY),
+			MaxX: math.Max(body.MaxX, band.MaxX), MaxY: math.Max(body.MaxY, band.MaxY),
+		}
+	}
+	return body
+}
+
+// predictedFlagTextBand mirrors flagTextBand (cmd_sch_marker_geom.go) — the net
+// name rendered next to a power/ground flag. **判定与生成必须同一把尺**:
+// `sch check` 的 marker-overlap 判的是「符号本体 ∪ 文字带」,评分器过去只预测
+// 符号本体,于是它挑出的"干净"位置在 check 眼里照样重叠 —— 剩余那批
+// 1.00×12.00 / 22.50×12.50 的重叠量,12 就是文字带高度本身。
+// netport 的名字画在本体内,没有额外文字带(与 flagTextBand 同口径)。
+func predictedFlagTextBand(x, y float64, body layoutBBox, canonicalKind, direction, net string) *layoutBBox {
+	if net == "" {
+		return nil
+	}
+	switch canonicalKind {
+	case "ground", "analog_ground", "protective_ground", "protect_ground", "gnd", "agnd", "pgnd",
+		"power", "vcc", "vdd":
+	default:
+		return nil
+	}
+	l := 6 * float64(len(net))
+	const h = 12.0
+	switch direction {
+	case "right": // 符号在锚右,文字在锚左侧线上方
+		return &layoutBBox{MinX: x - l, MinY: y, MaxX: x, MaxY: y + h}
+	case "left":
+		return &layoutBBox{MinX: x, MinY: y, MaxX: x + l, MaxY: y + h}
+	case "up": // 符号在锚上方,文字在符号顶上居中
+		return &layoutBBox{MinX: x - l/2, MinY: body.MaxY, MaxX: x + l/2, MaxY: body.MaxY + h}
+	case "down":
+		return &layoutBBox{MinX: x - l/2, MinY: body.MinY - h, MaxX: x + l/2, MaxY: body.MinY}
+	}
+	return nil
+}
+
+// predictedMarkerBody is the symbol body alone (no text band).
+func predictedMarkerBody(x, y float64, canonicalKind, direction, net string) layoutBBox {
+	p := markerBBoxProfile(canonicalKind, net)
 	switch direction {
 	case "left":
 		return layoutBBox{
@@ -463,7 +515,7 @@ func stubTouchesForeignWire(pinX, pinY, endX, endY float64, targetNet string, wi
 // reason this is unit-testable.
 func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, targetNet string, scene acScene, rules autoconnectRules) acCandidate {
 	endX, endY := endpointFor(pin.X, pin.Y, offset, dir)
-	lbl := predictedMarkerBBox(endX, endY, canonicalKind, dir)
+	lbl := predictedMarkerBBox(endX, endY, canonicalKind, dir, targetNet)
 	var reasons []acReason
 
 	// +10000 endpoint/label overlaps a real part bbox.
@@ -602,12 +654,23 @@ var acDirections = []string{"up", "down", "left", "right"}
 // direction lexical (down<left<right<up), then offset asc — so the same scene +
 // spec always yields the same selection (acceptance: "deterministic result").
 func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, rules autoconnectRules) []acCandidate {
-	offsets := candidateOffsets(rules)
-	all := make([]acCandidate, 0, len(acDirections)*len(offsets))
-	for _, dir := range acDirections {
-		for _, off := range offsets {
-			all = append(all, scoreCandidate(pin, dir, off, canonicalKind, targetNet, scene, rules))
+	score := func(offsets []float64) []acCandidate {
+		out := make([]acCandidate, 0, len(acDirections)*len(offsets))
+		for _, dir := range acDirections {
+			for _, off := range offsets {
+				out = append(out, scoreCandidate(pin, dir, off, canonicalKind, targetNet, scene, rules))
+			}
 		}
+		return out
+	}
+	all := score(candidateOffsets(rules))
+	// **密集区兜底**:如果常规档位里**每一个**候选都与已有 marker 相撞,那不是
+	// 「挑一个最不差的」的场合 —— 挑出来的就是一处真实的标签重叠。此时把桩线
+	// 拉长继续找:人工画法本来就是这样(skill conventions:同侧密集旗用阶梯 offset
+	// 错列 20/50/80)。扩展档位照样过全部判据(穿件/触异网线/折叠端口都还在),
+	// 所以「更远」不等于「更差」,只有真正干净的位置才会赢。
+	if noCleanCandidate(all) {
+		all = append(all, score(extendedOffsets(rules))...)
 	}
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Score != all[j].Score {
@@ -619,6 +682,51 @@ func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, r
 		return all[i].Offset < all[j].Offset
 	})
 	return all
+}
+
+// noCleanCandidate reports whether the regular offset range holds NO candidate
+// that is both selectable (not hard-rejected) and free of marker collision.
+//
+// 判据有两处容易写窄:
+//   - 「最优的撞了」不够 —— 最优候选可能因别的原因(穿件/折叠)排在后面;
+//   - 「每一个都撞」也不对 —— 被 #64 硬拒绝的候选**根本不可选**,把它们算作
+//     「还有干净位置」会让扩展在真正需要的时候不触发。实测:D1(SOT23 三脚)
+//     相邻脚的 marker 一直挤在一起,就是因为存在「不撞但会短路」的候选。
+//
+// 所以判据是:有没有一个**既可选又干净**的候选。一个都没有才拉长桩线。
+func noCleanCandidate(cands []acCandidate) bool {
+	for _, c := range cands {
+		if !candidateHardRejected(c) && !candidateCollidesWithMarker(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// candidateCollidesWithMarker reports whether this候选 carries the flag/label
+// collision penalty.
+func candidateCollidesWithMarker(c acCandidate) bool {
+	for _, r := range c.Reasons {
+		if r.Cost == costFlagCollision {
+			return true
+		}
+	}
+	return false
+}
+
+// extendedOffsets are the longer stubs tried only when the regular range has no
+// collision-free slot at all. 上界取 3×OffsetMax:再长的桩线本身就成了视觉噪声,
+// 那时「重叠」反而是更小的代价,交给 layout-lint / sch check 去报。
+func extendedOffsets(rules autoconnectRules) []float64 {
+	step := rules.OffsetStep
+	if step <= 0 {
+		step = 6
+	}
+	var out []float64
+	for o := rules.OffsetMax + step; o <= 3*rules.OffsetMax+acOverlapEps; o += step {
+		out = append(out, round2(o))
+	}
+	return out
 }
 
 // candidateHardRejected reports whether a candidate carries a hard-reject cost

@@ -42,11 +42,12 @@ func newFakeBatchDaemon(t *testing.T) (*appConfig, func()) {
 			result = map[string]any{"components": []any{
 				map[string]any{
 					"componentType": "part", "designator": "U1",
-					// U1 的 GND 脚在 y=62、朝下引出。按**真机实测**的方向口径
-					// (2026-08-14 订正:down 让 y 减小,body 在端点下方),down@18 的
-					// 端点是 44、ground body 落在 y=24.5..34.5 —— 所以 U2 的 bbox
-					// 上界必须留在 24.5 以下,否则这条用例会从「批内桩线互斥」变成
-					// 「marker 压 part」,两条连接各选一边、根本不再冲突。
+					// U1 的 GND 脚在 y=62、朝下引出。「U1 选 down」是本用例的前提,
+					// 但它曾经只是评分巧合 —— predictedMarkerBBox 每次变精确
+					// (up/down 订正、netport 宽度跟网名、并入文字带)U1 就改选一次,
+					// fixture 跟着调了两轮。现在改用**几何强制**:左右两侧的异网线
+					// 把 left/right 硬拒死,up 撞进 U1 自己的 bbox,down 成为唯一
+					// 干净方向。这样评分再怎么精确,用例验的仍是批内互斥本身。
 					"bbox": map[string]any{"minX": 0.0, "minY": 65.0, "maxX": 20.0, "maxY": 93.0},
 					"pins": []any{
 						map[string]any{"pinNumber": "1", "pinName": "GND", "x": 10.0, "y": 62.0, "net": ""},
@@ -54,15 +55,23 @@ func newFakeBatchDaemon(t *testing.T) (*appConfig, func()) {
 				},
 				map[string]any{
 					"componentType": "part", "designator": "U2",
-					// maxY 24(原 28):给 U1 朝下的 ground body(24.5..34.5)让开,
-					// 这样 U1 仍会选 down、与 U2 朝上的桩线在 y=44..48 相撞 ——
-					// 那正是本用例要验的批内冲突。
-					"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 24.0},
+					// maxY 12:给 U1 朝下的 ground **本体 + 文字带**(文字带落在
+					// 12.5..24.5)一起让开 —— 判定侧 marker-overlap 算的就是
+					// 「本体 ∪ 文字带」,预测侧现在同尺,所以这里必须按合并后的
+					// 范围留白,否则 U1 会改选方向、冲突消失。
+					"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 12.0},
 					"pins": []any{
 						map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 30.0, "net": ""},
 					},
 				},
-			}}
+			},
+				// 左右两道异网线:把两个器件的 left/right 通道**在任何 offset 上**
+				// 都堵死(含扩展档位),于是方向选择由几何决定而非评分权重。
+				"wires": []any{
+					map[string]any{"x0": -2.0, "y0": -300.0, "x1": -2.0, "y1": 300.0, "net": "X"},
+					map[string]any{"x0": 22.0, "y0": -300.0, "x1": 22.0, "y1": 300.0, "net": "X"},
+				},
+			}
 		case "schematic.power.connect_pin":
 			result = map[string]any{"wirePrimitiveId": "w", "flagPrimitiveId": "f"}
 		default:
@@ -227,8 +236,8 @@ func TestAutoconnect_BatchRegistersPredictedMarkerBBox(t *testing.T) {
 	if second.Direction != "right" || second.Offset != 54 {
 		t.Fatalf("second port should clear the first measured body at right@54, got %s@%.0f", second.Direction, second.Offset)
 	}
-	a := predictedMarkerBBox(first.EndPoint.X, first.EndPoint.Y, "net_port_bi", first.Direction)
-	b := predictedMarkerBBox(second.EndPoint.X, second.EndPoint.Y, "net_port_bi", second.Direction)
+	a := predictedMarkerBBox(first.EndPoint.X, first.EndPoint.Y, "net_port_bi", first.Direction, "N1")
+	b := predictedMarkerBBox(second.EndPoint.X, second.EndPoint.Y, "net_port_bi", second.Direction, "N1")
 	if boxesOverlap(a, b) {
 		t.Fatalf("batch-selected marker bodies still overlap: first=%+v second=%+v", a, b)
 	}
@@ -265,10 +274,10 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 					},
 					map[string]any{
 						"componentType": "part", "designator": "U2",
-						// maxY 24(原 28):同上,给 U1 朝下的 ground body(24.5..34.5)
-						// 让开,U1 才会选 down 从而**占掉 up 通道**——这条用例要验的
-						// 正是「四个方向全堵死时大声失败」。
-						"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 24.0},
+						// maxY 12:给 U1 朝下的 ground **本体 + 文字带**一起让开
+						// (文字带落在 12.5..24.5),U1 才会选 down 从而**占掉 up
+						// 通道**——这条用例要验的正是「四个方向全堵死时大声失败」。
+						"bbox": map[string]any{"minX": 0.0, "minY": 0.0, "maxX": 20.0, "maxY": 12.0},
 						"pins": []any{
 							map[string]any{"pinNumber": "1", "pinName": "VCC", "x": 10.0, "y": 30.0, "net": ""},
 						},
@@ -278,9 +287,14 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 				// corridors; only "up" is geometrically clean — until U1:1's
 				// batch stub claims it.
 				"wires": []any{
-					map[string]any{"x0": -2.0, "y0": 18.0, "x1": -2.0, "y1": 42.0, "net": "X"},
-					map[string]any{"x0": 22.0, "y0": 18.0, "x1": 22.0, "y1": 42.0, "net": "X"},
-					map[string]any{"x0": 0.0, "y0": 10.0, "x1": 20.0, "y1": 10.0, "net": "X"},
+					// 三面围栏开到 ±300:桩线在密集区可以拉长到 3×OffsetMax,短围栏
+					// 会被长桩线绕过去,这条用例就从「无路可走必须失败」退化成
+					// 「绕远了但成功」。围栏必须比最长的候选桩线还长,语义才成立。
+					// 横线放在 y=20(pin 30 与最短端点 12 之间),于是**每一个** down
+					// 候选都必须穿过它。
+					map[string]any{"x0": -2.0, "y0": -300.0, "x1": -2.0, "y1": 300.0, "net": "X"},
+					map[string]any{"x0": 22.0, "y0": -300.0, "x1": 22.0, "y1": 300.0, "net": "X"},
+					map[string]any{"x0": -300.0, "y0": 20.0, "x1": 300.0, "y1": 20.0, "net": "X"},
 				},
 			}
 		case "schematic.power.connect_pin":
@@ -317,5 +331,73 @@ func TestAutoconnect_BatchStubAllBlockedFailsLoud(t *testing.T) {
 	}
 	if !strings.Contains(report.Connections[1].Error, "no safe candidate") {
 		t.Fatalf("second connection must refuse with 'no safe candidate', got: %+v", report.Connections[1])
+	}
+}
+
+// ── 密集区扩展 offset(marker 错开)──────────────────────────────────────────
+//
+// 常规档位(18..80)全被已有 marker 占满时,评分器过去只能「挑一个最不差的」——
+// 挑出来的就是一处真实标签重叠。现在它会把桩线拉长继续找。
+
+// 造一堵墙:把 pin 右侧常规 offset 能到的位置全用已有 flag 占住,
+// 只在扩展区(>80)留一个空。左/上/下用 part 堵死,逼它必须向右找。
+func TestPlanConnection_DenseArea_ExtendsBeyondOffsetMax(t *testing.T) {
+	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
+	rules := defaultAutoconnectRules()
+	// 围一圈已有 marker:上/下/左三面堵死,右面只堵到 x=100 —— 于是常规档位
+	// (18..80)四个方向全撞,唯一干净的位置在 offset>90 的右侧扩展区。
+	flags := []layoutBBox{
+		{MinX: -300, MinY: -300, MaxX: 300, MaxY: -15}, // 下半平面
+		{MinX: -300, MinY: 15, MaxX: 300, MaxY: 300},   // 上半平面
+		{MinX: -300, MinY: -15, MaxX: -5, MaxY: 15},    // 左
+		{MinX: 5, MinY: -15, MaxX: 100, MaxY: 15},      // 右(只堵到 100)
+	}
+	scene := acScene{Flags: flags}
+	got := planConnection(pin, "gnd", "GND", scene, rules)
+	if len(got) == 0 {
+		t.Fatal("没有候选")
+	}
+	best := got[0]
+	if candidateCollidesWithMarker(best) {
+		t.Fatalf("常规档位全被占时应拉长桩线找到干净位置,却仍选了重叠的: dir=%s off=%v",
+			best.Direction, best.Offset)
+	}
+	if best.Offset <= rules.OffsetMax {
+		t.Errorf("干净位置只存在于扩展区,选中的 offset=%v 应 > OffsetMax(%v)",
+			best.Offset, rules.OffsetMax)
+	}
+}
+
+// 只要常规档位里**还有一个**干净位置,就不许拉长 —— 扩展是兜底不是常态。
+func TestPlanConnection_NotDense_StaysWithinOffsetMax(t *testing.T) {
+	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
+	rules := defaultAutoconnectRules()
+	got := planConnection(pin, "gnd", "GND", acScene{}, rules)
+	if len(got) == 0 {
+		t.Fatal("没有候选")
+	}
+	if got[0].Offset > rules.OffsetMax {
+		t.Errorf("空场景不该动用扩展档位: offset=%v", got[0].Offset)
+	}
+}
+
+// 扩展档位照样过硬拒绝:拉长后的桩线碰到异网线,仍必须被 hard-reject
+// (#64 的短路保护不能被「找干净标签位」绕过)。
+func TestPlanConnection_ExtendedOffsetsStillHardRejected(t *testing.T) {
+	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
+	rules := defaultAutoconnectRules()
+	flags := []layoutBBox{ // 连扩展区也堵满 → 必然全撞,一定会动用扩展档位
+		{MinX: -400, MinY: -400, MaxX: 400, MaxY: -15},
+		{MinX: -400, MinY: 15, MaxX: 400, MaxY: 400},
+		{MinX: -400, MinY: -15, MaxX: -5, MaxY: 15},
+		{MinX: 5, MinY: -15, MaxX: 400, MaxY: 15},
+	}
+	// 一条横跨的异网线,任何向右的桩线都会碰到它
+	wires := []wireSegment{{X0: 5, Y0: -50, X1: 5, Y1: 50, Net: "OTHER"}}
+	got := planConnection(pin, "gnd", "GND", acScene{Flags: flags, Wires: wires}, rules)
+	for _, c := range got {
+		if c.Direction == "right" && !candidateHardRejected(c) {
+			t.Fatalf("向右的桩线穿过异网线却没被硬拒绝: off=%v", c.Offset)
+		}
 	}
 }

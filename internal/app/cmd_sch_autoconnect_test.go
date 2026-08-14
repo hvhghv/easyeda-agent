@@ -101,6 +101,26 @@ func TestScoreCandidate_TitleBlockClearNotRejected(t *testing.T) {
 	}
 }
 
+// netport 的 body **跟着网名变长** —— 与 relayoutPortWidth 同一把尺。写死 31
+// (旧行为)会把任何长于 3 字符的网名少算,评分器于是算出「刚好不撞」而渲染出来
+// 擦在一起:实测 C7_N3 真实跨度 38,比预测多 7 个单位。
+func TestPredictedMarkerBBox_NetPortWidthTracksNetName(t *testing.T) {
+	short := predictedMarkerBody(100, 200, "net_port_bi", "right", "N1")
+	long := predictedMarkerBody(100, 200, "net_port_bi", "right", "C7_N3")
+	if !(long.MaxX > short.MaxX) {
+		t.Errorf("长网名的 netport 必须更宽: short=%v long=%v", short.MaxX, long.MaxX)
+	}
+	if got, want := long.MaxX-100, 9.5+relayoutPortWidth("C7_N3"); got != want {
+		t.Errorf("netport 伸出 = %v, want %v(与 relayoutPortWidth 同尺)", got, want)
+	}
+	// ground/power 是固定符号,不该跟网名走
+	g1 := predictedMarkerBody(100, 200, "ground", "right", "GND")
+	g2 := predictedMarkerBody(100, 200, "ground", "right", "A_VERY_LONG_GROUND_NAME")
+	if g1 != g2 {
+		t.Errorf("ground 是固定尺寸符号,不该跟网名变: %v vs %v", g1, g2)
+	}
+}
+
 // ⚠ 竖直两支的期望值 2026-08-14 按**真机实测**订正过:在 ceshi 用
 // `sch connect --x 200 --y 200 --kind gnd --direction down --offset 40` 落一支旗,
 // 端点 (200,160),读回来的真实 bbox 是 y 140.5..150.5 —— body 在端点**下方**
@@ -108,6 +128,39 @@ func TestScoreCandidate_TitleBlockClearNotRejected(t *testing.T) {
 // 而这条测试(名字就叫 live calibration)把反的行为锁住了:于是所有竖直方向的
 // marker 碰撞检查都在一个空位置上做,朝下的 GND 旗互相重合而评分器毫无反应。
 // left/right 一直是对的,所以只在电源/地旗(恰恰全是竖直的)上显形。
+// 评分器用的框必须 = 符号本体 ∪ 文字带,与 `sch check` 的 marker-overlap 判定
+// (flagTextBand)同一把尺。少算文字带 → 评分器挑的「干净」位置在 check 眼里
+// 照样重叠,实测剩余那批重叠量里的 12.00 就是文字带高度本身。
+func TestPredictedMarkerBBox_IncludesTextBandLikeSchCheck(t *testing.T) {
+	const x, y = 100.0, 200.0
+	for _, dir := range []string{"left", "right", "up", "down"} {
+		body := predictedMarkerBody(x, y, "ground", dir, "GND")
+		full := predictedMarkerBBox(x, y, "ground", dir, "GND")
+		if full == body {
+			t.Errorf("%s: 预测框没有并入文字带", dir)
+		}
+		// 文字带算法与 flagTextBand 逐字对齐:长 6*len(net),高 12
+		band := predictedFlagTextBand(x, y, body, "ground", dir, "GND")
+		if band == nil {
+			t.Fatalf("%s: ground 必须有文字带", dir)
+		}
+		if got := band.MaxY - band.MinY; dir == "up" || dir == "down" {
+			if got != 12 {
+				t.Errorf("%s: 文字带高 %v, want 12", dir, got)
+			}
+		}
+		if dir == "left" || dir == "right" {
+			if got, want := band.MaxX-band.MinX, 6*float64(len("GND")); got != want {
+				t.Errorf("%s: 文字带长 %v, want %v", dir, got, want)
+			}
+		}
+	}
+	// netport 的名字画在本体内,没有额外文字带(与 flagTextBand 同口径)
+	if predictedFlagTextBand(x, y, layoutBBox{}, "net_port_bi", "right", "C7_N3") != nil {
+		t.Error("netport 不该有额外文字带")
+	}
+}
+
 func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -115,6 +168,8 @@ func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T)
 		direction string
 		want      layoutBBox
 	}{
+		// netport 期望值按 net="N1" 给:relayoutPortWidth("N1")=20 落到下限 31,
+		// 也就是这张表原本写死的那个宽度。长网名另有专测(见下一条)。
 		// netport: live body is 31×11 horizontally / 11×31 vertically,
 		// starting 9.5 units beyond the endpoint and extending to 40.5.
 		{"netport-left", "net_port_bi", "left", layoutBBox{59.5, 194.5, 90.5, 205.5}},
@@ -136,7 +191,7 @@ func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := predictedMarkerBBox(100, 200, tt.kind, tt.direction)
+			got := predictedMarkerBody(100, 200, tt.kind, tt.direction, "N1")
 			if got != tt.want {
 				t.Fatalf("predictedMarkerBBox = %+v, want %+v", got, tt.want)
 			}
@@ -168,7 +223,7 @@ func TestScoreCandidate_UsesDirectionShiftedNetportBBox(t *testing.T) {
 // box never overlapped at 10 pitch, so parallel markers stacked silently.
 func TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch(t *testing.T) {
 	// A marker already placed to the left of pin1 (endpoint 82,200), registered.
-	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left")}}
+	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left", "GND")}}
 	// pin2 sits 10 above pin1; its left marker at the SAME offset lands at (82,210).
 	pin2 := acPin{X: 100, Y: 210}
 	c := scoreCandidate(pin2, "left", 18, "ground", "N2", scene, rulesFor())
@@ -187,7 +242,7 @@ func TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch(t *testing.T) {
 // the planner's best candidate must avoid overlapping it (stagger to another
 // offset/direction), not stack on top with only a soft penalty.
 func TestPlanConnection_StaggersAwayFromRegisteredMarker(t *testing.T) {
-	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left")}}
+	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left", "GND")}}
 	pin2 := acPin{X: 100, Y: 210}
 	sel := planConnection(pin2, "ground", "N2", scene, rulesFor())[0]
 	for _, r := range sel.Reasons {
