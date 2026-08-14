@@ -93,6 +93,43 @@ USB 在左、串口在右、去耦贴 VCC),为塞进空档把它重排成竖条 
 功能区之间的留白是**可读性的组成部分**。标准是「区内紧凑、区间有隔」,不是密度
 最大化。
 
+## 落地机制:place 与 connect_pin 之间的时间窗
+
+(2026-08-14 补,来自一次十路 agent 的代码侦察 + 对抗评审。)
+
+「marker 挤死时把压力反推成器件位置调整」曾被认为与「无 undo」冲突。**不冲突** ——
+存在一个时间窗让挪件零风险:
+
+```
+place 全部件  ─────────┬─────────  connect_pin
+                      ↑
+        器件已落地:有实测 bbox、最终位号、最终网名
+        marker 一根都还没建:没有桩线可被合并,挪件 = 一次 component.modify(实测 10–23ms)
+```
+
+**这个窗口是整套反馈机制成立的唯一原因**。窗口之外挪件都要面对「删桩线 → EasyEDA
+合并相邻共线导线 → 当场串网」(已三次真机失败,`sch destagger --apply` 因此禁用)。
+
+配套事实(侦察实证):
+
+- **批1→批2 之间只有 3 个字符串过河**:block-apply 把整个块计划压扁成
+  `[]acConnSpec{PinRef,Kind,Net}` 交给 autoconnect(`cmd_sch_block_apply_run.go:773-784`)。
+  几何、role、块身份、关系**全部丢弃**,marker 规划器只能重新从画布猜「C8 是贴在
+  U1:VCC 上的去耦」。所以边界不是「没数据」,是**数据被丢弃后重读**:同一份场景在
+  一轮 apply 里被读了 4 次(`:101`、`bslResolveLive`、`verifyBlockLayout`、autoconnect 自己)。
+- **重叠的性质**:实测最密真页 68 处重叠**全部是 marker×marker,part×part 为 0**,
+  且 marker 到最近器件的距离中位数恰好 30(= `schStubLen`)——所有人挤在同一条桩长上。
+  **同侧 lane 错列**(lane 间距按该侧最宽 marker 的实宽,netport 用 `relayoutPortWidth`)
+  取代「每 pin 独立贪心 44–148 候选」,是有实测支撑的解法。
+- **注释/区框读不回来**:文本走 `schematic.text.list` 且平台**不给 bbox**(只能按字数估);
+  矩形框**没有任何枚举 action**,只有 primitiveId 记在磁盘状态里(无几何)。所以
+  「注释/区框同级参与碰撞」**不能靠读回,只能由求解器自己持有几何**。
+- **唯一已存在的「位置与 marker 一起决定」的管线**是 `sch zone relayout --apply`
+  (`cmd_sch_zone_relayout.go` → `tidyApply`):删净成员桩线/旗 → modify 落位 →
+  `connect_pin` 一遍性重连 → 自检失败逐步回滚。统一求解器的落地管线**复用它,不另造**。
+- **同一个部件今天有三套尺寸**(保守半宽 `bapRoleHalfExtent` / 贴脚紧凑半宽 `tightHalf`
+  / 实测 bbox)——「判定与生成同一把尺」这条定律的**第三次显形**。
+
 ## Consequences
 
 **必须修的断链(实现缺口)**:`block-apply` 完成后**不登记虚拟组** —— 第一步的产物

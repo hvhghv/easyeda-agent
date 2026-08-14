@@ -798,3 +798,32 @@ func TestScoreCandidate_FoldedNetPortPenalty(t *testing.T) {
 		t.Fatalf("ground marker must stay exempt: %+v", c.Reasons)
 	}
 }
+
+// 电路说明(自由文本)是页面上的同级占位对象(ADR-0003),marker 不许压上去。
+// 这条过去是个静默漏洞:buildScene 只吃 components.list,而平台的 components.list
+// **不返回文本**,于是文字对落点评分完全隐形。
+func TestScoreCandidate_TextNoteIsAnObstacle(t *testing.T) {
+	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
+	rules := defaultAutoconnectRules()
+	// 说明必须挡在**默认最优方向**上,用例才证明得了东西:gnd 默认朝下,
+	// 所以把说明铺在 pin 下方,盖住 down 档位的 ground body。
+	note := layoutBBox{MinX: -100, MinY: -120, MaxX: 100, MaxY: -10}
+
+	clean := planConnection(pin, "gnd", "GND", acScene{}, rules)
+	withNote := planConnection(pin, "gnd", "GND", acScene{Texts: []layoutBBox{note}}, rules)
+	if len(clean) == 0 || len(withNote) == 0 {
+		t.Fatal("没有候选")
+	}
+	// 有说明时,最优候选不该落在说明上
+	best := withNote[0]
+	ex, ey := endpointFor(pin.X, pin.Y, best.Offset, best.Direction)
+	lbl := predictedMarkerBBox(ex, ey, "gnd", best.Direction, "GND")
+	if boxesOverlap(lbl, note) {
+		t.Errorf("最优候选压在电路说明上: dir=%s off=%v lbl=%+v note=%+v",
+			best.Direction, best.Offset, lbl, note)
+	}
+	// 且这个约束确实改变了选择(否则用例证明不了什么)
+	if clean[0].Direction == best.Direction && clean[0].Offset == best.Offset {
+		t.Errorf("说明没有影响落点选择,用例失效: %s@%v", best.Direction, best.Offset)
+	}
+}

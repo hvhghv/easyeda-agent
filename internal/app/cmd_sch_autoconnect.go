@@ -92,9 +92,15 @@ type wireSegment struct {
 // acScene is the full geometric context one autoconnect run reasons against.
 // Flags grows as connections are placed so later labels stagger off earlier ones.
 type acScene struct {
-	Parts                 []layoutBBox  // real part bboxes (componentType "part")
-	Pins                  []acPin       // every pin across all parts
-	Flags                 []layoutBBox  // existing netflag/netport/netlabel bboxes
+	Parts []layoutBBox // real part bboxes (componentType "part")
+	Pins  []acPin      // every pin across all parts
+	Flags []layoutBBox // existing netflag/netport/netlabel bboxes
+	// Texts are existing free text notes (电路说明) — schematic.text.list, sized by
+	// noteSizeOf because the platform gives text primitives NO bbox. 它们过去完全
+	// 不在 scene 里,于是 marker 可以正大光明压在电路说明上,只有事后 layout-score
+	// 的 frame-fit 维度才隐约发现。注释是页面上的**同级占位对象**(ADR-0003),
+	// 不是背景装饰。
+	Texts                 []layoutBBox
 	Wires                 []wireSegment // existing wire segments (issue #64)
 	Components            []acComponent // every part seen (by designator), even pin-less off-page ones
 	TitleBlock            *layoutBBox   // derived keep-out (nil if not applied)
@@ -522,6 +528,15 @@ func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, target
 	for _, p := range scene.Parts {
 		if boxesOverlap(lbl, p) {
 			reasons = append(reasons, acReason{costPartOverlap, "label overlaps a part bbox"})
+			break
+		}
+	}
+
+	// +10000 endpoint/label overlaps an existing text note (电路说明). 与压器件同级:
+	// 一个盖住说明文字的网络标签,和一个盖住器件的网络标签,对读图的人是同一种破坏。
+	for _, t := range scene.Texts {
+		if boxesOverlap(lbl, t) {
+			reasons = append(reasons, acReason{costPartOverlap, "label overlaps a text note (电路说明)"})
 			break
 		}
 	}

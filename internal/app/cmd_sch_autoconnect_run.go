@@ -361,6 +361,17 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 		return err
 	}
 	scene := buildScene(res.Result)
+	// 电路说明(自由文本)也是页面上的占位对象 —— components.list **不返回文本**,
+	// 必须单独拉一次 text.list,否则 marker 会直接压在说明上(ADR-0003:注释与器件
+	// 同级)。平台不给文本 bbox,用 schNoteBBoxEstimate 按字数估;读不到就退化成
+	// 「看不见文字」的旧行为,不阻断连线。
+	if tres, terr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); terr == nil {
+		for _, t := range parseZoneMoveTexts(tres.Result) {
+			scene.Texts = append(scene.Texts, schNoteBBoxEstimate(t))
+		}
+	} else {
+		fmt.Fprintf(stderr, "warn: 取不到页面文本(%v)—— 本轮 marker 落点看不见电路说明,可能压在说明上\n", terr)
+	}
 	// "DESIG:NAME*" fans out to every pin carrying that function name (a connector's
 	// redundant VBUS/GND/shield pins) before anything is planned, so each resulting
 	// connection is an ordinary unambiguous pin-number spec.
