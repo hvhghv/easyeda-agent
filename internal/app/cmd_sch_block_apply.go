@@ -746,6 +746,52 @@ func planBlockApply(in bapInput) (bapPlan, error) {
 		})
 	}
 
+	// 3. **端口兜底**:internal_nets 只覆盖「块内至少两个东西相连」的网,而**边界端口
+	//    完全可以指向一个块内孤立的引脚** —— ch340c 的 ports.DTR → U.DTR# 就是:
+	//    片内没有任何别的元件连它,它的全部意义就是引出去给别人用。
+	//
+	//    过去这类端口被彻底忽略:网只从 internal_nets 构造,于是
+	//    (a) 端口引脚放下来就是悬空的,用户不知道该从哪接;
+	//    (b) `--bind DTR=USB_DTR` **静默无效** —— 校验只看「块有没有这个端口」,
+	//        而后面根本没有对应的网可以改名,不报错也不建网。
+	//    多块设计的核心就是块间互联,这个缺口让每两块之间都得人工补线。
+	//
+	//    现在给每个未覆盖的端口补一条**单成员网**,网名走同一套规则(--bind 优先 →
+	//    default_net → 端口名),于是端口该有的 marker 一定会出现,--bind 也真的生效。
+	covered := map[string]bool{}
+	for _, n := range plan.Nets {
+		if n.Port != "" {
+			covered[n.Port] = true
+		}
+	}
+	uncovered := make([]string, 0, len(in.Block.Ports))
+	for portName := range in.Block.Ports {
+		if !covered[portName] {
+			uncovered = append(uncovered, portName)
+		}
+	}
+	sort.Strings(uncovered) // map 遍历随机 —— 计划必须可复现
+	for _, portName := range uncovered {
+		p := in.Block.Ports[portName]
+		role, pin, ok := strings.Cut(p.At, ".")
+		if !ok {
+			return plan, fmt.Errorf("port %q: bad `at` %q(应形如 ROLE.PIN)", portName, p.At)
+		}
+		d, ok := roleDesig[role]
+		if !ok {
+			return plan, fmt.Errorf("port %q: `at` 指向未知 role %q", portName, role)
+		}
+		name, bound := bapNetName(in, portName, 0)
+		kind := bapFlagKind(name)
+		if k, ok := in.KindOver[strings.ToUpper(name)]; ok {
+			kind = k
+		}
+		plan.Nets = append(plan.Nets, bapNet{
+			Net: name, Kind: kind, Port: portName, Bound: bound,
+			Members: []string{d + ":" + pin}, Roles: []string{p.At},
+		})
+	}
+
 	plan.Unconsumed = bapUnconsumed(in.Block)
 	return plan, nil
 }

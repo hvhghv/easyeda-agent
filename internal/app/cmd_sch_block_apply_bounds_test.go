@@ -1,8 +1,11 @@
 package app
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 )
 
 // ── issue #180 P0:origin 三修 + 出图纸判据 ──────────────────────────────────
@@ -265,5 +268,138 @@ func TestBapResolveOrigin_ExplicitAtStillWinsOverMereOverlap(t *testing.T) {
 	}
 	if len(warns) == 0 {
 		t.Error("重叠仍要警告")
+	}
+}
+
+// ── 边界端口必须被引出(块间互联的前提)──────────────────────────────────────
+
+func bapPortTestBlock(t *testing.T) blocks.Block {
+	t.Helper()
+	raw := map[string]any{
+		"id": "block.port_test", "desc": "t",
+		"parts": map[string]any{
+			"U": map[string]any{"part": "led.red_0805", "qty": 1},
+			"C": map[string]any{"part": "res.1k_0402", "qty": 1},
+		},
+		// 只有一条内部网,且**不带 PORT 标记**
+		"internal_nets": []any{[]any{"U.VCC", "C.1"}},
+		"ports": map[string]any{
+			// DTR 指向块内**孤立**的引脚 —— 没有任何 internal_net 提到它
+			"DTR": map[string]any{"dir": "out", "at": "U.DTR#", "desc": "下载控制"},
+			"VCC": map[string]any{"dir": "in", "at": "U.VCC", "desc": "供电", "default_net": "5V"},
+		},
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blk blocks.Block
+	if err := json.Unmarshal(b, &blk); err != nil {
+		t.Fatal(err)
+	}
+	blk.Raw = b
+	return blk
+}
+
+// **指向孤立引脚的端口必须成网**。它是块对外的接口,片内没人连它正是它的常态
+// (ch340c 的 DTR#);过去这类端口被彻底忽略,引脚放下来就是悬空的。
+func TestBapPlan_UncoveredPortStillGetsANet(t *testing.T) {
+	plan, err := planBlockApply(bapInput{
+		Block: bapPortTestBlock(t), Topology: [][]string{{"U.VCC", "C.1"}},
+		Devices: fixtureDevices(), Existing: map[string]bool{},
+		OriginX: 400, OriginY: 300, Spacing: 100, PerRow: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dtr *bapNet
+	for i := range plan.Nets {
+		if plan.Nets[i].Port == "DTR" {
+			dtr = &plan.Nets[i]
+		}
+	}
+	if dtr == nil {
+		t.Fatalf("指向孤立引脚的 DTR 端口必须成网,否则引脚悬空、--bind 无处生效: %+v", plan.Nets)
+	}
+	if len(dtr.Members) != 1 || !strings.HasSuffix(dtr.Members[0], ":DTR#") {
+		t.Errorf("端口网的成员应是它 at 指向的那个引脚: %+v", dtr.Members)
+	}
+	if dtr.Net != "DTR" {
+		t.Errorf("未绑定时网名取端口名: %q", dtr.Net)
+	}
+}
+
+// **--bind 必须真的生效**,而不是校验通过后静默无事发生。
+func TestBapPlan_BindOnUncoveredPortActuallyBinds(t *testing.T) {
+	plan, err := planBlockApply(bapInput{
+		Block: bapPortTestBlock(t), Topology: [][]string{{"U.VCC", "C.1"}},
+		Devices: fixtureDevices(), Existing: map[string]bool{},
+		OriginX: 400, OriginY: 300, Spacing: 100, PerRow: 4,
+		Bind: map[string]string{"DTR": "USB_DTR"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range plan.Nets {
+		if n.Port == "DTR" {
+			if n.Net != "USB_DTR" {
+				t.Errorf("--bind DTR=USB_DTR 必须改到宿主网名, got %q", n.Net)
+			}
+			if !n.Bound {
+				t.Error("绑定过的网必须标 Bound,否则报告说不清它接到了哪")
+			}
+			return
+		}
+	}
+	t.Fatal("DTR 端口没有成网 —— --bind 又静默失效了")
+}
+
+// 已被 internal_nets 覆盖的端口**不许重复成网**(否则同一引脚挂两个 marker)。
+func TestBapPlan_CoveredPortIsNotDuplicated(t *testing.T) {
+	blk := bapPortTestBlock(t)
+	plan, err := planBlockApply(bapInput{
+		Block: blk,
+		// 这次 VCC 那条内部网带上 PORT 标记 → VCC 端口已被覆盖
+		Topology: [][]string{{"U.VCC", "C.1", "PORT:VCC"}},
+		Devices:  fixtureDevices(), Existing: map[string]bool{},
+		OriginX: 400, OriginY: 300, Spacing: 100, PerRow: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, n := range plan.Nets {
+		if n.Port == "VCC" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("已覆盖的端口只该有一条网, got %d: %+v", count, plan.Nets)
+	}
+}
+
+// 计划必须可复现:端口是 map,遍历顺序随机。
+func TestBapPlan_UncoveredPortsAreDeterministic(t *testing.T) {
+	var first []string
+	for i := 0; i < 15; i++ {
+		plan, err := planBlockApply(bapInput{
+			Block: bapPortTestBlock(t), Topology: [][]string{{"U.VCC", "C.1"}},
+			Devices: fixtureDevices(), Existing: map[string]bool{},
+			OriginX: 400, OriginY: 300, Spacing: 100, PerRow: 4,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var order []string
+		for _, n := range plan.Nets {
+			order = append(order, n.Net)
+		}
+		if first == nil {
+			first = order
+			continue
+		}
+		if strings.Join(order, ",") != strings.Join(first, ",") {
+			t.Fatalf("端口成网顺序不稳定: %v vs %v", order, first)
+		}
 	}
 }
