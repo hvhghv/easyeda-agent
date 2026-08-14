@@ -185,10 +185,20 @@ kind-default bonuses), picks the lowest-cost one, and delegates the mutation to
 "no safe candidate" 拒绝落笔。多域脚器件仍建议 power 上/gnd 下方向分治,给
 规划器留出错开空间。**标签 stagger 用真实 marker bbox 预测(#148 Phase-2):**
 预测框按 family + direction 使用活体 `getPrimitivesBBox` 标定值,并相对连接端点朝
-body 所在一侧偏移,不再用旧的端点居中 24×11 框:netport 横/竖为
-31×11/11×31、ground 为 10×21/21×10、power 为 6×11/11×6。故
+body 所在一侧偏移,不再用旧的端点居中 24×11 框:ground 为 10×21/21×10、
+power 为 6×11/11×6;**netport 的长度跟网名走**(`6*len(net)+8`,下限 31)——
+写死 31 会让任何长于 3 字符的网名少算,评分器于是算出「刚好不撞」而渲染出来擦在
+一起。**预测框 = 符号本体 ∪ 文字带**:`sch check` 的 marker-overlap 判的就是合并
+后的框(power/ground 的网名画在符号旁,长 `6*len(net)`、高 12),判定与生成必须
+同一把尺,否则评分器挑的「干净」位置在 check 眼里照样重叠。故
 **10-unit pitch 平行脚上相邻 marker 会触发 stagger,自动挑不同 offset 错开**;
 候选打分与同批后续连接注册回 scene 使用同一预测函数。
+
+**密集区会拉长桩线超出 `--offset-max`。** 常规档位里一个「既可选(未被 #64 硬
+拒绝)又不撞 marker」的候选都没有时,规划器把候选范围扩到 **3×offsetMax** 继续
+找干净位置 —— 人工画法本就如此(同侧密集旗阶梯 offset 错列)。所以看到某根桩线
+明显比同页其他的长,那是**让开标签**的结果,不是失控;扩展候选照样过全部判据,
+#64 短路保护不会被绕过。真机 ceshi 单块回归:markerOverlaps 12 → 3。
 残留不可避免的密集重叠由 `sch check` 的 marker-overlap 门捕获(见 Actions)。
 
 **Hard rejects (issue #64):** two hazards are never soft penalties — they make a
