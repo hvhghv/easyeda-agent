@@ -29,3 +29,13 @@ After registration, restart the MCP client so it discovers the new server. Run
 `easyeda_health` first, then use `easyeda_actions` to select the exact typed
 action. The Skill's inspect-before-mutate, save, reload, DRC, and workflow-gate
 rules continue to apply to MCP calls.
+
+## DeepSeek Harness (DSH) 集成
+
+DSH 原生支持 skill 与 MCP client 两种形态，本仓库两者都已具备，接入是配置级
+工作：详见 [`docs/dsh-integration.md`](../docs/dsh-integration.md)。要点：skill
+软链到 `~/.dsh/skills/` 即被发现；MCP 在 profile 的 `cordis.patch.yml` 加一个
+`@deepseek-ai/dsh-mcp-client` 实例（`serverName: easyeda`，指向本目录
+`src/server.mjs`）即可，工具以 `mcp__easyeda__easyeda_*` 命名。注意 in-box
+插件无需 pnpm 安装（fallback 从 dsh 安装目录解析），profile 里误装旧版会遮蔽
+fallback。
