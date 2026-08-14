@@ -132,10 +132,11 @@ place 全部件  ─────────┬─────────  conn
 
 ## Consequences
 
-**必须修的断链(实现缺口)**:`block-apply` 完成后**不登记虚拟组** —— 第一步的产物
-是一堆散件,第二步 `zone tidy` 手里没有刚体可排。基础设施齐备(group 已持久化在
-`~/.easyeda-agent/workflow/<project>.json`,与 zones claims 同一个 store),只差接上。
-这是本 ADR 的第一件实现工作。
+**断链已接上(58c1da1,真机验过)**:`block-apply` 完成后**不登记虚拟组**,第一步的
+产物是一堆散件,第二步 `zone tidy` 手里没有刚体可排。现已在 apply 收尾处登记持久
+虚拟组(`grouped ✓ g1 (ch340c_usb_serial(C7)) — 7 件`),fail-soft。顺带修出一个真
+bug:`sch clear` 删光图元却不清组表,留下指向已不存在器件的孤儿组,下一次 apply 想
+登记同名位号会被自己上一轮的残留挡住。
 
 **保留复用**:关系语义(`flow`/`attach`/`pair`)、实测引脚驱动的两阶段、
 `bslReach`/`bslFlowGap` 这类**从数据算间距**的函数、marker 落点评分(含
