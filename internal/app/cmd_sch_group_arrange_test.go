@@ -152,14 +152,14 @@ func TestArrangeGroups_DeltasSnapToGrid(t *testing.T) {
 // 实质:第二层排的是这个盒子,于是框和说明的地方在求解时就留出来了。
 func TestGroupAnnotatedExtent_ReservesRoomForFrameAndNote(t *testing.T) {
 	dev := layoutBBox{MinX: 100, MinY: 200, MaxX: 500, MaxY: 400}
-	bare := groupAnnotatedExtent(dev, 0)
+	bare := groupAnnotatedExtent(dev, nil)
 	if bare.MinX >= dev.MinX || bare.MaxX <= dev.MaxX || bare.MinY >= dev.MinY {
 		t.Errorf("区框必须四周留白: %+v vs 器件 %+v", bare, dev)
 	}
 	if bare.MaxY <= dev.MaxY+groupFramePad {
 		t.Errorf("顶上要额外留组名标签带: %+v", bare)
 	}
-	withNote := groupAnnotatedExtent(dev, 2)
+	withNote := groupAnnotatedExtent(dev, []string{"a", "b"})
 	if withNote.MinY >= bare.MinY {
 		t.Errorf("有说明时下方必须再让出说明带: 无说明 %v, 两行说明 %v", bare.MinY, withNote.MinY)
 	}
@@ -168,20 +168,31 @@ func TestGroupAnnotatedExtent_ReservesRoomForFrameAndNote(t *testing.T) {
 	}
 }
 
-// 反推的区框只包器件,不含标签带和说明带 —— 否则框会把说明圈进去。
-func TestGroupFrameOf_ExcludesLabelAndNoteBands(t *testing.T) {
+// 框必须把**标题、器件、说明全包进去** —— 它们是功能区之下的同级成员。
+// 曾经把标签带/说明带从框里减掉,说明就飘到框外面去了。
+func TestGroupFrameOf_ContainsLabelDeviceAndNotes(t *testing.T) {
 	dev := layoutBBox{MinX: 100, MinY: 200, MaxX: 500, MaxY: 400}
-	full := groupAnnotatedExtent(dev, 2)
+	full := groupAnnotatedExtent(dev, []string{"a", "b"})
 	frame := groupFrameOf(full, 2)
-	if frame.MaxY != dev.MaxY+groupFramePad {
-		t.Errorf("框上沿应贴器件留白处,不含标签带: got %v want %v", frame.MaxY, dev.MaxY+groupFramePad)
+	if frame != full {
+		t.Errorf("框应等于完整占地(全包): frame=%+v full=%+v", frame, full)
 	}
-	if frame.MinY != dev.MinY-groupFramePad {
-		t.Errorf("框下沿不该含说明带: got %v want %v", frame.MinY, dev.MinY-groupFramePad)
-	}
-	// 框必须真的把器件包住
 	if !boxInside(dev, frame) {
 		t.Errorf("框没包住器件: 框 %+v 器件 %+v", frame, dev)
+	}
+	// 两行说明的基线都必须落在框内,且在器件下方(不压电路)
+	for i := 0; i < 2; i++ {
+		y := groupNoteYFor(frame, i, 2)
+		if y < frame.MinY || y > frame.MaxY {
+			t.Errorf("第 %d 行说明落在框外: y=%v 框 %+v", i, y, frame)
+		}
+		if y > dev.MinY {
+			t.Errorf("第 %d 行说明压到器件了: y=%v 器件下沿 %v", i, y, dev.MinY)
+		}
+	}
+	// 阅读顺序:第 0 行在上
+	if groupNoteYFor(frame, 0, 2) <= groupNoteYFor(frame, 1, 2) {
+		t.Error("说明应按阅读顺序自上而下")
 	}
 }
 
@@ -192,8 +203,8 @@ func TestArrangeGroups_FramesDoNotOverlapNeighbours(t *testing.T) {
 	devA := layoutBBox{MinX: 0, MinY: 0, MaxX: 400, MaxY: 200}
 	devB := layoutBBox{MinX: 0, MinY: 0, MaxX: 300, MaxY: 150}
 	items := []bslGroupItem{
-		{ID: "a", Name: "A", DeviceBox: devA, BBox: groupAnnotatedExtent(devA, 2), NoteLines: []string{"x", "y"}},
-		{ID: "b", Name: "B", DeviceBox: devB, BBox: groupAnnotatedExtent(devB, 1), NoteLines: []string{"z"}},
+		{ID: "a", Name: "A", DeviceBox: devA, BBox: groupAnnotatedExtent(devA, []string{"x", "y"}), NoteLines: []string{"x", "y"}},
+		{ID: "b", Name: "B", DeviceBox: devB, BBox: groupAnnotatedExtent(devB, []string{"z"}), NoteLines: []string{"z"}},
 	}
 	got, err := arrangeGroups(items, bounds, 40)
 	if err != nil {
@@ -207,5 +218,55 @@ func TestArrangeGroups_FramesDoNotOverlapNeighbours(t *testing.T) {
 	}
 	if _, _, overlap := overlapExtent(boxes[0], boxes[1]); overlap {
 		t.Errorf("两组的框/说明区重叠了: %+v vs %+v", boxes[0], boxes[1])
+	}
+}
+
+// **说明可能比电路还宽** —— 框必须跟着变宽,否则文字从右边溢出去(真机踩过:
+// g2 的「交叉耦合真值表…」比它那四个三极管加起来都长)。
+func TestGroupAnnotatedExtent_WidensForLongNotes(t *testing.T) {
+	dev := layoutBBox{MinX: 0, MinY: 0, MaxX: 200, MaxY: 100}
+	short := groupAnnotatedExtent(dev, []string{"短"})
+	long := groupAnnotatedExtent(dev, []string{"交叉耦合真值表(DTR,RTS→EN,IO0):(1,1)→(1,1) 正常运行;(0,0)→(1,1) 正常;(1,0)→(1,0) 进下载"})
+	if long.MaxX <= short.MaxX {
+		t.Errorf("长说明必须把框撑宽: short=%v long=%v", short.MaxX, long.MaxX)
+	}
+	// 撑宽之后,说明整行必须真的装得下
+	w, _ := noteSizeOf("交叉耦合真值表(DTR,RTS→EN,IO0):(1,1)→(1,1) 正常运行;(0,0)→(1,1) 正常;(1,0)→(1,0) 进下载", groupNoteFontSize)
+	if long.MaxX-long.MinX < w {
+		t.Errorf("框宽 %v 装不下说明宽 %v", long.MaxX-long.MinX, w)
+	}
+}
+
+// 说明该去适应电路宽度,而不是把框撑到一页装不下(真机:不折行时两个组换行后
+// 第二行差 6 个单位,直接报「装不下」)。
+func TestWrapNoteLines_FitsWithinDeviceWidth(t *testing.T) {
+	long := "交叉耦合真值表(DTR,RTS→EN,IO0):(1,1)→(1,1) 正常运行;(0,0)→(1,1) 正常;(1,0)→(1,0) 进下载(IO0 拉低、EN 高)"
+	const width = 300.0
+	got := wrapNoteLines([]string{long}, width)
+	if len(got) < 2 {
+		t.Fatalf("超宽的说明必须折行: %v", got)
+	}
+	for i, line := range got {
+		if w, _ := noteSizeOf(line, groupNoteFontSize); w > width {
+			t.Errorf("第 %d 行仍超宽: %v > %v (%q)", i, w, width, line)
+		}
+	}
+	// 内容不许丢
+	joined := ""
+	for _, l := range got {
+		joined += l
+	}
+	if joined != long {
+		t.Errorf("折行丢内容了:\n原 %q\n后 %q", long, joined)
+	}
+}
+
+// 器件很窄时不该把说明切成一字一行。
+func TestWrapNoteLines_HasAFloor(t *testing.T) {
+	got := wrapNoteLines([]string{"这是一段说明文字用来测试下限"}, 10)
+	for _, l := range got {
+		if len([]rune(l)) < 2 {
+			t.Errorf("行太碎: %q (全部 %v)", l, got)
+		}
 	}
 }

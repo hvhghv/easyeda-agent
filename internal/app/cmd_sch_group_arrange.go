@@ -302,10 +302,12 @@ func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun, annotat
 			fmt.Fprintf(stderr, "warn: 组 %s 在本页找不到任何成员器件,跳过(位号可能已过时)\n", describeSchGroup(g))
 			continue
 		}
-		notes := groupNoteLinesFor(g.Name, annotate)
+		// 先按**器件宽度**折行,再算占地:说明是功能区里的成员,该去适应电路的宽度,
+		// 而不是反过来把框撑到一页装不下。
+		notes := wrapNoteLines(groupNoteLinesFor(g.Name, annotate), box.MaxX-box.MinX)
 		items = append(items, bslGroupItem{
 			ID: g.ID, Name: describeSchGroup(g),
-			BBox:      groupAnnotatedExtent(box, len(notes)),
+			BBox:      groupAnnotatedExtent(box, notes),
 			DeviceBox: box, NoteLines: notes, Members: g.Members,
 		})
 	}
@@ -397,6 +399,35 @@ func groupNoteLinesFor(name string, annotate bool) []string {
 	return out
 }
 
+// wrapNoteLines 把说明折成不超过 maxWidth 的短行(与 noteSizeOf 同一把尺:
+// CJK 全宽、ASCII 半宽)。maxWidth 太小时至少保证每行有内容,不做无限切碎。
+func wrapNoteLines(notes []string, maxWidth float64) []string {
+	if maxWidth < 120 {
+		maxWidth = 120 // 器件很窄时也别切成一字一行
+	}
+	var out []string
+	for _, n := range notes {
+		runes := []rune(n)
+		line, w := make([]rune, 0, len(runes)), 0.0
+		for _, r := range runes {
+			rw := groupNoteFontSize * 0.55
+			if r > 0x2E80 { // CJK 全宽,与 noteSizeOf 同口径
+				rw = groupNoteFontSize
+			}
+			if w+rw > maxWidth && len(line) > 0 {
+				out = append(out, string(line))
+				line, w = line[:0], 0
+			}
+			line = append(line, r)
+			w += rw
+		}
+		if len(line) > 0 {
+			out = append(out, string(line))
+		}
+	}
+	return out
+}
+
 // drawGroupAnnotations 画每个组的区框 + 组名 + 说明。
 // **幂等**:画之前先删掉这些组上一次画的(id 记在组的持久状态里)—— 平台不提供
 // 矩形/文本的枚举接口,不自己记就没法清理,重排一次多一层框。
@@ -441,7 +472,13 @@ func drawGroupAnnotations(cfg *appConfig, win, docUUID string, plan []bslGroupPl
 	if err != nil {
 		return err
 	}
-	created := parseAnnotationIDs(res.Result)
+	created, drawErr := parseAnnotationIDs(res.Result)
+	if drawErr != nil {
+		// 自清理已经把半成品删干净了 —— 这里必须**报错**而不是接着说"已画"。
+		// 第一版只解析 rects/texts 不看 ok,于是脚本抛错、cleanup 删光之后,
+		// 命令照样打印「✓ 2 个组已画」,而画布上一个框都没有。
+		return drawErr
+	}
 	// 把新 id 记回组:下一次重排才删得掉。逐组记不了(exec_js 只回总表),
 	// 全部挂到第一个组上 —— 清理是整批做的,归属不影响正确性。
 	if len(groups) > 0 {
@@ -457,29 +494,46 @@ func drawGroupAnnotations(cfg *appConfig, win, docUUID string, plan []bslGroupPl
 	return nil
 }
 
-// parseAnnotationIDs 从 exec_js 结果里取出创建的 primitiveId。epilogue 返回的是
-// 对象(不是字符串),两种形态都认。
-func parseAnnotationIDs(result map[string]any) []string {
+// parseAnnotationIDs 从 exec_js 结果里取出创建的 primitiveId,**并判定这一次绘制
+// 到底成没成**。epilogue 的 catch 路径会先把已创建的图元删干净再返回
+// {ok:false, error, ...},所以只看 rects/texts 会把一次彻底失败读成成功。
+func parseAnnotationIDs(result map[string]any) ([]string, error) {
 	v, ok := result["value"]
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("绘制脚本没有返回值")
 	}
 	var payload struct {
-		Rects []string `json:"rects"`
-		Texts []string `json:"texts"`
+		OK              bool     `json:"ok"`
+		Error           string   `json:"error"`
+		Rects           []string `json:"rects"`
+		Texts           []string `json:"texts"`
+		CleanupSurvived []string `json:"cleanupSurvived"`
 	}
+	var raw []byte
 	switch t := v.(type) {
 	case string:
-		if json.Unmarshal([]byte(t), &payload) != nil {
-			return nil
-		}
+		raw = []byte(t)
 	default:
-		raw, err := json.Marshal(t)
-		if err != nil || json.Unmarshal(raw, &payload) != nil {
-			return nil
+		b, err := json.Marshal(t)
+		if err != nil {
+			return nil, fmt.Errorf("绘制结果无法解析:%w", err)
 		}
+		raw = b
 	}
-	return append(payload.Rects, payload.Texts...)
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("绘制结果无法解析:%w", err)
+	}
+	if !payload.OK {
+		msg := payload.Error
+		if msg == "" {
+			msg = "未知错误"
+		}
+		if len(payload.CleanupSurvived) > 0 {
+			return nil, fmt.Errorf("绘制失败(%s);自清理没删干净,残留 %d 个图元需手工删除", msg, len(payload.CleanupSurvived))
+		}
+		return nil, fmt.Errorf("绘制失败(%s);已自动清理,画布未留残件", msg)
+	}
+	return append(payload.Rects, payload.Texts...), nil
 }
 
 // resolveStageProjectQuiet 取项目名,失败返回空(调用方已有降级路径)。
@@ -526,32 +580,54 @@ const (
 	groupLabelBand = 22.0
 	// groupNoteLine 是说明每行的高度。
 	groupNoteLine = 16.0
+	// groupNoteFontSize 是说明字号 —— 宽度估算与绘制必须用同一个值,
+	// 否则算出来的框装不下画出来的字(判定与生成同一把尺)。
+	groupNoteFontSize = 10.2
 )
 
 // groupAnnotatedExtent 把器件包络扩成**连同区框和说明一起**的完整占地。
 // 排布用的是这个 —— 于是框和说明的空间在第二层求解时就被计入,而不是画的时候
 // 才发现没地方。
-func groupAnnotatedExtent(deviceBox layoutBBox, noteLines int) layoutBBox {
+func groupAnnotatedExtent(deviceBox layoutBBox, notes []string) layoutBBox {
 	b := layoutBBox{
 		MinX: deviceBox.MinX - groupFramePad,
 		MinY: deviceBox.MinY - groupFramePad,
 		MaxX: deviceBox.MaxX + groupFramePad,
 		MaxY: deviceBox.MaxY + groupFramePad + groupLabelBand, // 顶上给组名留一条
 	}
-	if noteLines > 0 {
-		b.MinY -= float64(noteLines) * groupNoteLine // 说明挂在框下沿之外
+	if len(notes) > 0 {
+		b.MinY -= float64(len(notes)) * groupNoteLine // 框内下部给说明留一条带
+	}
+	// **说明不许把框撑宽**。一行「交叉耦合真值表…」比四个三极管加起来还长,让框
+	// 跟着它变宽,两个组就一页装不下了(真机:换行后第二行差 6 个单位报「装不下」)。
+	// 人工画法里说明本来就是几行短句 —— 所以调用方先按器件宽度折行(wrapNoteLines),
+	// 这里只做兜底:万一还是更宽,才让框跟上,总比文字溢到框外强。
+	widest := 0.0
+	for _, n := range notes {
+		if w, _ := noteSizeOf(n, groupNoteFontSize); w > widest {
+			widest = w
+		}
+	}
+	if need := b.MinX + widest + 2*groupFramePad; need > b.MaxX {
+		b.MaxX = need
 	}
 	return b
 }
 
-// groupFrameOf 从**完整占地**反推区框矩形(去掉标签带和说明带,框只包器件)。
+// groupFrameOf 就是**完整占地本身** —— 框把标题、器件、说明**全包进去**。
+//
+// 曾经把标签带和说明带从框里减掉,于是说明落在框外面,读图的人看到的是「一个框
+// 旁边飘着两行字」,而不是「这个功能区在说什么」。用户的判词:标题和 note
+// **身份等同于虚拟组**,是功能区之下的成员,得跟器件一起待在框里。
 func groupFrameOf(full layoutBBox, noteLines int) layoutBBox {
-	f := full
-	f.MaxY -= groupLabelBand
-	if noteLines > 0 {
-		f.MinY += float64(noteLines) * groupNoteLine
-	}
-	return f
+	return full
+}
+
+// groupNoteYFor 是框内第 i 行说明的基线:贴着框的下沿往上排,顺序与阅读一致
+// (第 0 行在最上)。说明带的高度在 groupAnnotatedExtent 里已经让出来了,
+// 所以这里落下去不会压到器件。
+func groupNoteYFor(frame layoutBBox, i, total int) float64 {
+	return frame.MinY + float64(total-i)*groupNoteLine - groupNoteLine*0.75
 }
 
 // buildGroupAnnotationJS 画一组的区框 + 组名 + 说明,并返回创建出来的 primitiveId。
@@ -573,10 +649,10 @@ func buildGroupAnnotationJS(frames []groupAnnotationDraw, color string, fontSize
 		fmt.Fprintf(&b, "{ const tx = await eda.sch_PrimitiveText.create(%g, %g, %q, 0, %s, null, %g);\n",
 			f.Rect.MinX+4, f.Rect.MaxY-fontSize-4, f.Label, colorJS, fontSize)
 		fmt.Fprintf(&b, "  if (tx) { const tid = tx.getState_PrimitiveId(); if (tid) texts.push(tid); } }\n")
-		// 说明:挂在框下沿之外,逐行往下
+		// 说明:在**框内**贴下沿排列(与标题一样是功能区的成员)
 		for i, line := range f.NoteLines {
 			fmt.Fprintf(&b, "{ const tx = await eda.sch_PrimitiveText.create(%g, %g, %q, 0, %s, null, %g);\n",
-				f.Rect.MinX+4, f.Rect.MinY-groupNoteLine*float64(i+1), line, colorJS, fontSize*0.85)
+				f.Rect.MinX+8, groupNoteYFor(f.Rect, i, len(f.NoteLines)), line, colorJS, groupNoteFontSize)
 			fmt.Fprintf(&b, "  if (tx) { const tid = tx.getState_PrimitiveId(); if (tid) texts.push(tid); } }\n")
 		}
 	}
