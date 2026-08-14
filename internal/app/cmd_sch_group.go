@@ -1197,3 +1197,26 @@ at most one group per page.`,
 
 	return group
 }
+
+// dropSchGroupsForPage 作废一页的虚拟组表 —— `sch clear` 删光图元后调用。
+// **fail-soft**:清页本身已经成功,组表没清干净只是留下孤儿引用,不该把一次成功
+// 的 clear 变成报错。失败时明确告诉用户怎么手工收拾。
+func dropSchGroupsForPage(project, docUUID string, stderr io.Writer) {
+	if project == "" || docUUID == "" {
+		return
+	}
+	st, err := loadPcbStageState(project)
+	if err != nil {
+		fmt.Fprintf(stderr, "warn: 页已清空,但取不到分组表(%v)—— 可能残留孤儿组,用 `sch group list` 查、`sch group ungroup` 清\n", err)
+		return
+	}
+	existing := st.GroupsForPage(docUUID)
+	if len(existing) == 0 {
+		return
+	}
+	if err := saveSchGroups(st, docUUID, nil); err != nil {
+		fmt.Fprintf(stderr, "warn: 页已清空,但 %d 个虚拟组未能作废(%v)—— 它们现在指向已不存在的器件,用 `sch group ungroup` 逐个清\n", len(existing), err)
+		return
+	}
+	fmt.Fprintf(stderr, "同时作废了这一页的 %d 个虚拟组(其成员已随清页删除)\n", len(existing))
+}

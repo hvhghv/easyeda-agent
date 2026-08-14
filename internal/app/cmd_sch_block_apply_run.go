@@ -42,6 +42,10 @@ type bapManifest struct {
 	Warnings   []string       `json:"warnings,omitempty"`
 	Unconsumed []string       `json:"unconsumedConstraints,omitempty"`
 	Note       string         `json:"note,omitempty"`
+	// GroupID is the persistent virtual group this instance was registered as
+	// (ADR-0003 第一步:归组即封刚体)。空 = 登记失败,已在 stderr 说明原因。
+	GroupID   string `json:"groupId,omitempty"`
+	GroupName string `json:"groupName,omitempty"`
 	// Reconciled is true when the post-apply netlist read-back matched every
 	// planned net (issue #135); Diffs carries the mismatches when it did not.
 	Reconciled bool         `json:"reconciled,omitempty"`
@@ -820,6 +824,12 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		fmt.Fprintf(stderr, "reconcile ✓ %d net(s) match the live netlist\n", len(plan.Nets))
 	}
 
+	// 9. 归组 —— ADR-0003 的第一步产物必须是**一个刚体**,不是一堆散件。
+	// 次序在这里而不是更早:组的 bbox 必须已经包含连线和 marker(放件→连线→
+	// 挂 marker→封组),上层(zone tidy / zone-plan)拿到的刚体尺寸才是真实占地,
+	// 也才不需要另算「四侧引出通道」。
+	bapRegisterGroup(cfg, window, plan, &man, stderr)
+
 	return emitBapManifest(man, asJSON, stdout)
 }
 
@@ -1083,4 +1093,60 @@ func parseXY(s string) (float64, float64, error) {
 		return 0, 0, fmt.Errorf("--at %q: bad y", s)
 	}
 	return x, y, nil
+}
+
+// bapRegisterGroup 把刚落地的这批器件登记成一个持久虚拟组(ADR-0003 第一步)。
+//
+// 为什么必须有这一步:在此之前 block-apply 的产物是**散件** —— 第二层
+// (`sch zone tidy`)接手时手里没有刚体可排,只能把它们当独立零件重新摊开,
+// 组内相对位置(flow 共线 / attach 贴脚 / pair 等距)当场作废。链子断在这里。
+//
+// **fail-soft**:走到这一步器件已经放好、线已经连上、netlist 已经对账通过。
+// 登记失败只是「上层少了一个刚体」,绝不能把一次成功的 apply 变成报错回滚
+// (部分应用约定 #151:画布已变后绝不抛错)。失败原因写 stderr,并给出手工补登
+// 的命令。
+func bapRegisterGroup(cfg *appConfig, window string, plan bapPlan, man *bapManifest, stderr io.Writer) {
+	members := make([]string, 0, len(plan.Placements))
+	for _, p := range plan.Placements {
+		// 位号取 plan.Placements 而不是块配方里的 role —— place 会回读并 remap
+		// 真实位号(#144),用配方名会登记出一组页面上不存在的位号。
+		if d := strings.TrimSpace(p.Designator); d != "" {
+			members = append(members, d)
+		}
+	}
+	if len(members) == 0 {
+		return
+	}
+	pinned, win, docUUID, _, st, groups, err := loadSchGroupsContext(cfg, window)
+	if err != nil {
+		fmt.Fprintf(stderr, "warn: 归组跳过(取不到页面分组表:%v)—— 器件与连线均已落地,上层布局会把它们当散件;可手工补登:easyeda sch group create --name %q --members %s\n",
+			err, bapGroupName(plan), strings.Join(members, ","))
+		return
+	}
+	_ = pinned
+	_ = win
+	name := bapGroupName(plan)
+	next, g, cerr := groupsCreate(groups, name, members)
+	if cerr != nil {
+		fmt.Fprintf(stderr, "warn: 归组跳过(%v)—— 器件与连线均已落地,上层布局会把它们当散件\n", cerr)
+		return
+	}
+	if serr := saveSchGroups(st, docUUID, next); serr != nil {
+		fmt.Fprintf(stderr, "warn: 归组未能落盘(%v)—— 器件与连线均已落地;可手工补登:easyeda sch group create --name %q --members %s\n",
+			serr, name, strings.Join(members, ","))
+		return
+	}
+	man.GroupID = g.ID
+	man.GroupName = g.Name
+	fmt.Fprintf(stderr, "grouped ✓ %s (%s) — %d 件已封成刚体,上层可整体摆布\n", g.ID, name, len(members))
+}
+
+// bapGroupName 是这个实例的人类可读组名:块名(去 block. 前缀)+ 实例号,
+// 例如 ch340c_usb_serial(C7)。
+func bapGroupName(plan bapPlan) string {
+	id := strings.TrimPrefix(plan.BlockID, "block.")
+	if plan.Instance == "" {
+		return id
+	}
+	return fmt.Sprintf("%s(%s)", id, plan.Instance)
 }

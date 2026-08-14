@@ -309,10 +309,26 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
   easyeda sch clear --dry-run            # report what would be deleted, delete nothing
   easyeda sch clear --no-preserve-sheet  # also delete the sheet/title block`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return dispatch(cfg, "schematic.page.clear", window, map[string]any{
+				// 清页会把图元全删掉,而虚拟组表存的是**位号引用** —— 不一起作废
+				// 就会留下一批指向已不存在器件的孤儿组,下一次 block-apply 想登记
+				// 同名位号时会撞上「该位号已属于组 gN」而拒绝归组(ADR-0003 落地
+				// 时真机踩到)。先记下当前页,清成功后再作废它的组表。
+				var docUUID, project string
+				if !dryRun {
+					if _, _, d, pr, _, _, err := loadSchGroupsContext(cfg, window); err == nil {
+						docUUID, project = d, pr
+					}
+				}
+				if err := dispatch(cfg, "schematic.page.clear", window, map[string]any{
 					"preserveSheet": !noPreserveSheet,
 					"dryRun":        dryRun,
-				}, stdout, stderr)
+				}, stdout, stderr); err != nil {
+					return err
+				}
+				if !dryRun && docUUID != "" {
+					dropSchGroupsForPage(project, docUUID, stderr)
+				}
+				return nil
 			},
 		}
 		c.Flags().BoolVar(&dryRun, "dry-run", false, "report counts without deleting anything")
@@ -1211,9 +1227,9 @@ pull fresh ids before any follow-up mutation on it.`,
 	{
 		var idsRaw string
 		c := &cobra.Command{
-			Use:   "select",
-			Short: "Select schematic primitives by ID",
-			Args:  cobra.NoArgs,
+			Use:     "select",
+			Short:   "Select schematic primitives by ID",
+			Args:    cobra.NoArgs,
 			Example: `  easyeda sch select --ids id1,id2`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if idsRaw == "" {
