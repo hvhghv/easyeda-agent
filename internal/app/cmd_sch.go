@@ -339,7 +339,7 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 	// ── group-arrange:第二层(组与组之间按跨组信号关系排布,ADR-0003)────────
 	{
 		var gap float64
-		var dryRun bool
+		var dryRun, annotate bool
 		c := &cobra.Command{
 			Use:   "group-arrange",
 			Short: "第二层排布:把虚拟组当刚体,按**跨组信号网**关系铺进图纸可用区(ADR-0003)",
@@ -357,11 +357,12 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 			Example: `  easyeda sch group-arrange --dry-run    # 只看计划(耦合强度 + 落位)
   easyeda sch group-arrange              # 执行`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return runGroupArrange(cfg, window, gap, dryRun, stdout, stderr)
+				return runGroupArrange(cfg, window, gap, dryRun, annotate, stdout, stderr)
 			},
 		}
 		c.Flags().Float64Var(&gap, "gap", 60, "组与组之间的可见间隙(区内紧凑、区间有隔;填满纸张不是目标)")
 		c.Flags().BoolVar(&dryRun, "dry-run", false, "只打印计划,不改动画布")
+		c.Flags().BoolVar(&annotate, "annotate", true, "同时画功能区框 + 组名 + 电路说明(它们的空间在排布时已计入,不是事后捡缝)")
 		sch.AddCommand(c)
 	}
 

@@ -305,6 +305,10 @@ type Group struct {
 	Name    string   `json:"name,omitempty"` // optional human-readable label
 	Members []string `json:"members"`        // designators, upper-case, sorted
 	At      string   `json:"at,omitempty"`
+	// Annotations are the primitiveIds of this group's drawn frame + labels.
+	// 平台**不提供矩形/文本的枚举接口**(只能创建,不能列出),所以它们的身份只能
+	// 由我们自己记住 —— 不记就无法在重排时删掉上一次画的框,画一次多一层。
+	Annotations []string `json:"annotations,omitempty"`
 }
 
 // GroupsForPage returns one document's persistent groups (nil when none).

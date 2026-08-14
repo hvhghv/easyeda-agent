@@ -1,11 +1,15 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 )
 
 // ── 第二层:组与组之间的排布(ADR-0003)──────────────────────────────────────
@@ -21,10 +25,15 @@ import (
 // **占地是实测的并集**(成员 + 桩线 + 旗),不是估算 —— 第一层封组时 marker 已经
 // 挂上,所以组的 bbox 天然含 marker(ADR §5),这里直接量。
 type bslGroupItem struct {
-	ID      string
-	Name    string
-	BBox    layoutBBox
-	Members []string
+	ID   string
+	Name string
+	// BBox 是**排布用的完整占地**:器件 + marker + 区框 + 说明带。第二层排的就是它,
+	// 所以区框和说明的地方在求解时就被留出来了(ADR §2:注释与器件同级)。
+	BBox layoutBBox
+	// DeviceBox 是器件 + marker 的包络(不含区框/说明),画框时用。
+	DeviceBox layoutBBox
+	NoteLines []string
+	Members   []string
 }
 
 // bslGroupPlacement 是排布结果:该组应该整体平移多少。
@@ -252,7 +261,7 @@ func arrangeGroups(ordered []bslGroupItem, bounds layoutBBox, gap float64) ([]bs
 // 落地刻意复用 groupMoveRebuild(删净→modify→重连→电气自检)而不是另造:那条路径
 // 的两条刚体判据(位移逐件一致、网表逐引脚不变)是真机验过的,自造一条等于把同一个
 // 「带线搬必断线」的坑再踩一次。
-func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun bool, stdout, stderr io.Writer) error {
+func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun, annotate bool, stdout, stderr io.Writer) error {
 	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
 	if err != nil {
 		return err
@@ -293,7 +302,12 @@ func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun bool, st
 			fmt.Fprintf(stderr, "warn: 组 %s 在本页找不到任何成员器件,跳过(位号可能已过时)\n", describeSchGroup(g))
 			continue
 		}
-		items = append(items, bslGroupItem{ID: g.ID, Name: describeSchGroup(g), BBox: box, Members: g.Members})
+		notes := groupNoteLinesFor(g.Name, annotate)
+		items = append(items, bslGroupItem{
+			ID: g.ID, Name: describeSchGroup(g),
+			BBox:      groupAnnotatedExtent(box, len(notes)),
+			DeviceBox: box, NoteLines: notes, Members: g.Members,
+		})
 	}
 	if len(items) == 0 {
 		return fmt.Errorf("没有一个组能在本页找到成员 —— 用 `sch group list` 核对位号")
@@ -341,7 +355,140 @@ func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun bool, st
 		moved++
 	}
 	fmt.Fprintf(stdout, "✓ 第二层落地:%d 个组已按跨组信号关系排布\n", moved)
+	if annotate {
+		if err := drawGroupAnnotations(cfg, win, docUUID, plan, byID, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "warn: 区框/说明未画上(%v)—— 器件位置已经落好,空间也留出来了,补画即可\n", err)
+		}
+	}
 	return nil
+}
+
+// groupNoteLinesFor 取一个组的电路说明。组名形如 "ch340c_usb_serial(C7)",
+// 前缀就是块 id —— block 是**虚拟组的配方**(ADR §1),说明自然从配方来。
+func groupNoteLinesFor(name string, annotate bool) []string {
+	if !annotate || name == "" {
+		return nil
+	}
+	id := name
+	if i := strings.IndexByte(id, '('); i > 0 {
+		id = id[:i]
+	}
+	b, ok, err := blocks.Get(id)
+	if err != nil || !ok {
+		return nil
+	}
+	// schematic_notes 在 schema 里有,Go 结构没解析 —— 直接从 Raw 取,不为一个
+	// 可选字段动块的公共类型。
+	var raw struct {
+		Notes []string `json:"schematic_notes"`
+	}
+	if err := json.Unmarshal(b.Raw, &raw); err != nil {
+		return nil
+	}
+	var out []string
+	for _, n := range raw.Notes {
+		if s := strings.TrimSpace(n); s != "" {
+			out = append(out, s)
+		}
+		if len(out) >= 2 { // 一个模块 1~2 行,再多就成了文档
+			break
+		}
+	}
+	return out
+}
+
+// drawGroupAnnotations 画每个组的区框 + 组名 + 说明。
+// **幂等**:画之前先删掉这些组上一次画的(id 记在组的持久状态里)—— 平台不提供
+// 矩形/文本的枚举接口,不自己记就没法清理,重排一次多一层框。
+func drawGroupAnnotations(cfg *appConfig, win, docUUID string, plan []bslGroupPlacement,
+	byID map[string]bslGroupItem, stdout, stderr io.Writer) error {
+
+	st, err := loadPcbStageState(resolveStageProjectQuiet(cfg, win))
+	if err != nil {
+		return fmt.Errorf("取分组状态:%w", err)
+	}
+	groups := st.GroupsForPage(docUUID)
+	var stale []string
+	for _, g := range groups {
+		stale = append(stale, g.Annotations...)
+	}
+	if len(stale) > 0 {
+		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
+			map[string]any{"primitiveIds": stale}, docUUID, "清除上一次的区框/说明"); err != nil {
+			fmt.Fprintf(stderr, "warn: 上一次的区框没删掉(%v)—— 可能出现重叠的框\n", err)
+		}
+	}
+
+	var draws []groupAnnotationDraw
+	for _, p := range plan {
+		it := byID[p.ID]
+		full := layoutBBox{
+			MinX: it.BBox.MinX + p.DX, MinY: it.BBox.MinY + p.DY,
+			MaxX: it.BBox.MaxX + p.DX, MaxY: it.BBox.MaxY + p.DY,
+		}
+		rect := groupFrameOf(full, len(it.NoteLines))
+		draws = append(draws, groupAnnotationDraw{
+			GroupID: p.ID, Rect: rect, Label: it.Name,
+			LabelX: rect.MinX + 4, LabelY: rect.MaxY + 4,
+			NoteLines: it.NoteLines,
+		})
+	}
+	if len(draws) == 0 {
+		return nil
+	}
+	res, err := requestActionTimed(cfg, "debug.exec_js", win,
+		map[string]any{"code": buildGroupAnnotationJS(draws, "#7B7B7B", 12)}, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	created := parseAnnotationIDs(res.Result)
+	// 把新 id 记回组:下一次重排才删得掉。逐组记不了(exec_js 只回总表),
+	// 全部挂到第一个组上 —— 清理是整批做的,归属不影响正确性。
+	if len(groups) > 0 {
+		for _, g := range groups {
+			g.Annotations = nil
+		}
+		groups[0].Annotations = created
+		if err := saveSchGroups(st, docUUID, groups); err != nil {
+			fmt.Fprintf(stderr, "warn: 区框 id 没记下来(%v)—— 下次重排会叠一层框,手工删\n", err)
+		}
+	}
+	fmt.Fprintf(stdout, "✓ 区框与说明:%d 个组已画(空间在排布时已计入,不是事后捡缝)\n", len(draws))
+	return nil
+}
+
+// parseAnnotationIDs 从 exec_js 结果里取出创建的 primitiveId。epilogue 返回的是
+// 对象(不是字符串),两种形态都认。
+func parseAnnotationIDs(result map[string]any) []string {
+	v, ok := result["value"]
+	if !ok {
+		return nil
+	}
+	var payload struct {
+		Rects []string `json:"rects"`
+		Texts []string `json:"texts"`
+	}
+	switch t := v.(type) {
+	case string:
+		if json.Unmarshal([]byte(t), &payload) != nil {
+			return nil
+		}
+	default:
+		raw, err := json.Marshal(t)
+		if err != nil || json.Unmarshal(raw, &payload) != nil {
+			return nil
+		}
+	}
+	return append(payload.Rects, payload.Texts...)
+}
+
+// resolveStageProjectQuiet 取项目名,失败返回空(调用方已有降级路径)。
+func resolveStageProjectQuiet(cfg *appConfig, win string) string {
+	p, err := resolveStageProject(cfg, win)
+	if err != nil {
+		return ""
+	}
+	return p
 }
 
 // arrangeBoundsOf 把图纸几何换算成可用区:减去边距,再减去图签 keep-out 的那一条。
@@ -359,4 +506,91 @@ func arrangeBoundsOf(sheet *layoutBBox) (layoutBBox, bool) {
 		b.MinY = ko.MaxY
 	}
 	return b, b.MaxX > b.MinX && b.MaxY > b.MinY
+}
+
+// ── P2:区框与说明是**同级占位对象**(ADR-0003 §2)────────────────────────────
+//
+// 用户的原话:「每个编组对象还有 title 注释 属于同级别的,他们在计算摆放位置的
+// 时候可以计算现有的虚拟组的 xy 位置和他的长宽碰撞,计算出来对齐和层叠方式」。
+//
+// 关键不是「画得好看」,而是**排布时就把它们的地方留出来**。事后画的框只能捡缝,
+// 缝不够就压电路 —— 那正是 `sch note` / `sch zone-draw` 今天的处境。
+//
+// 硬约束:平台**不给文本 bbox**(只能按字数估)、**矩形连枚举接口都没有**,所以这些
+// 几何只能由求解器自己持有(画完把 primitiveId 记进组),不能靠读回。
+
+const (
+	// groupFramePad 是区框离器件包络的距离:框贴着器件会像是器件的一部分。
+	groupFramePad = 20.0
+	// groupLabelBand 是框顶标签带的高度(组名)。
+	groupLabelBand = 22.0
+	// groupNoteLine 是说明每行的高度。
+	groupNoteLine = 16.0
+)
+
+// groupAnnotatedExtent 把器件包络扩成**连同区框和说明一起**的完整占地。
+// 排布用的是这个 —— 于是框和说明的空间在第二层求解时就被计入,而不是画的时候
+// 才发现没地方。
+func groupAnnotatedExtent(deviceBox layoutBBox, noteLines int) layoutBBox {
+	b := layoutBBox{
+		MinX: deviceBox.MinX - groupFramePad,
+		MinY: deviceBox.MinY - groupFramePad,
+		MaxX: deviceBox.MaxX + groupFramePad,
+		MaxY: deviceBox.MaxY + groupFramePad + groupLabelBand, // 顶上给组名留一条
+	}
+	if noteLines > 0 {
+		b.MinY -= float64(noteLines) * groupNoteLine // 说明挂在框下沿之外
+	}
+	return b
+}
+
+// groupFrameOf 从**完整占地**反推区框矩形(去掉标签带和说明带,框只包器件)。
+func groupFrameOf(full layoutBBox, noteLines int) layoutBBox {
+	f := full
+	f.MaxY -= groupLabelBand
+	if noteLines > 0 {
+		f.MinY += float64(noteLines) * groupNoteLine
+	}
+	return f
+}
+
+// buildGroupAnnotationJS 画一组的区框 + 组名 + 说明,并返回创建出来的 primitiveId。
+// 复用 zone-draw 的自清理前后缀:中途抛错会把已创建的图元删干净,不留半张框。
+func buildGroupAnnotationJS(frames []groupAnnotationDraw, color string, fontSize float64) string {
+	var b strings.Builder
+	writeZoneDrawPrelude(&b)
+	colorJS := fmt.Sprintf("%q", color)
+	for _, f := range frames {
+		w, h := f.Rect.MaxX-f.Rect.MinX, f.Rect.MaxY-f.Rect.MinY
+		if w <= 0 || h <= 0 {
+			continue
+		}
+		// 参数与 zone-draw 同源(sch_PrimitiveRectangle.create 的 y 取**上沿**)。
+		fmt.Fprintf(&b, "{ const rc = await eda.sch_PrimitiveRectangle.create(%g, %g, %g, %g, 0, 0, %s, null, 1, 1);\n",
+			f.Rect.MinX, f.Rect.MaxY, w, h, colorJS)
+		fmt.Fprintf(&b, "  if (rc) { const rid = rc.getState_PrimitiveId(); if (rid) rects.push(rid); } }\n")
+		// 组名:贴在框内左上角(文本锚点在左下、向上生长)
+		fmt.Fprintf(&b, "{ const tx = await eda.sch_PrimitiveText.create(%g, %g, %q, 0, %s, null, %g);\n",
+			f.Rect.MinX+4, f.Rect.MaxY-fontSize-4, f.Label, colorJS, fontSize)
+		fmt.Fprintf(&b, "  if (tx) { const tid = tx.getState_PrimitiveId(); if (tid) texts.push(tid); } }\n")
+		// 说明:挂在框下沿之外,逐行往下
+		for i, line := range f.NoteLines {
+			fmt.Fprintf(&b, "{ const tx = await eda.sch_PrimitiveText.create(%g, %g, %q, 0, %s, null, %g);\n",
+				f.Rect.MinX+4, f.Rect.MinY-groupNoteLine*float64(i+1), line, colorJS, fontSize*0.85)
+			fmt.Fprintf(&b, "  if (tx) { const tid = tx.getState_PrimitiveId(); if (tid) texts.push(tid); } }\n")
+		}
+	}
+	// prelude 开了 `try {` —— 必须用配套的 epilogue 闭合,否则整段是语法错误
+	// (症状就是 exec_js failed 而没有任何 detail)。
+	writeZoneDrawEpilogue(&b)
+	return b.String()
+}
+
+// groupAnnotationDraw 是一个组要画的东西。
+type groupAnnotationDraw struct {
+	GroupID        string
+	Rect           layoutBBox
+	Label          string
+	LabelX, LabelY float64
+	NoteLines      []string
 }

@@ -145,3 +145,67 @@ func TestArrangeGroups_DeltasSnapToGrid(t *testing.T) {
 		}
 	}
 }
+
+// ── P2:区框与说明必须**在排布时占地**,不是事后捡缝 ─────────────────────────
+
+// 完整占地必须比器件包络大出「区框 + 标签带 + 说明带」——这正是"同级参与求解"的
+// 实质:第二层排的是这个盒子,于是框和说明的地方在求解时就留出来了。
+func TestGroupAnnotatedExtent_ReservesRoomForFrameAndNote(t *testing.T) {
+	dev := layoutBBox{MinX: 100, MinY: 200, MaxX: 500, MaxY: 400}
+	bare := groupAnnotatedExtent(dev, 0)
+	if bare.MinX >= dev.MinX || bare.MaxX <= dev.MaxX || bare.MinY >= dev.MinY {
+		t.Errorf("区框必须四周留白: %+v vs 器件 %+v", bare, dev)
+	}
+	if bare.MaxY <= dev.MaxY+groupFramePad {
+		t.Errorf("顶上要额外留组名标签带: %+v", bare)
+	}
+	withNote := groupAnnotatedExtent(dev, 2)
+	if withNote.MinY >= bare.MinY {
+		t.Errorf("有说明时下方必须再让出说明带: 无说明 %v, 两行说明 %v", bare.MinY, withNote.MinY)
+	}
+	if got, want := bare.MinY-withNote.MinY, 2*groupNoteLine; got != want {
+		t.Errorf("说明带高度应随行数增长: got %v want %v", got, want)
+	}
+}
+
+// 反推的区框只包器件,不含标签带和说明带 —— 否则框会把说明圈进去。
+func TestGroupFrameOf_ExcludesLabelAndNoteBands(t *testing.T) {
+	dev := layoutBBox{MinX: 100, MinY: 200, MaxX: 500, MaxY: 400}
+	full := groupAnnotatedExtent(dev, 2)
+	frame := groupFrameOf(full, 2)
+	if frame.MaxY != dev.MaxY+groupFramePad {
+		t.Errorf("框上沿应贴器件留白处,不含标签带: got %v want %v", frame.MaxY, dev.MaxY+groupFramePad)
+	}
+	if frame.MinY != dev.MinY-groupFramePad {
+		t.Errorf("框下沿不该含说明带: got %v want %v", frame.MinY, dev.MinY-groupFramePad)
+	}
+	// 框必须真的把器件包住
+	if !boxInside(dev, frame) {
+		t.Errorf("框没包住器件: 框 %+v 器件 %+v", frame, dev)
+	}
+}
+
+// 排布用完整占地时,相邻两组之间的间距必须**同时容纳两边的框和说明**,
+// 不能出现"框画出去压到隔壁"。
+func TestArrangeGroups_FramesDoNotOverlapNeighbours(t *testing.T) {
+	bounds := layoutBBox{MinX: 0, MinY: 0, MaxX: 2000, MaxY: 900}
+	devA := layoutBBox{MinX: 0, MinY: 0, MaxX: 400, MaxY: 200}
+	devB := layoutBBox{MinX: 0, MinY: 0, MaxX: 300, MaxY: 150}
+	items := []bslGroupItem{
+		{ID: "a", Name: "A", DeviceBox: devA, BBox: groupAnnotatedExtent(devA, 2), NoteLines: []string{"x", "y"}},
+		{ID: "b", Name: "B", DeviceBox: devB, BBox: groupAnnotatedExtent(devB, 1), NoteLines: []string{"z"}},
+	}
+	got, err := arrangeGroups(items, bounds, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 平移后各自的**完整占地**(含框与说明)不许相交
+	boxes := make([]layoutBBox, len(got))
+	for i, p := range got {
+		b := items[i].BBox
+		boxes[i] = layoutBBox{MinX: b.MinX + p.DX, MinY: b.MinY + p.DY, MaxX: b.MaxX + p.DX, MaxY: b.MaxY + p.DY}
+	}
+	if _, _, overlap := overlapExtent(boxes[0], boxes[1]); overlap {
+		t.Errorf("两组的框/说明区重叠了: %+v vs %+v", boxes[0], boxes[1])
+	}
+}
