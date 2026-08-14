@@ -496,13 +496,34 @@ func bapResolveOrigin(in bapInput, offsets map[string]bapRoleOffset, half func(s
 		return in.OriginX, in.OriginY, origin, nil
 	}
 	if in.AtExplicit {
-		msg := "--at 指定的原点与已有器件或标题栏图签重叠 — 按你的坐标照常放置(显式 --at 优先);放完请跑 `sch layout-lint` 确认"
+		// **出界与重叠不是一回事,不能同等对待**:
+		//   - 重叠:图还能读,人也能事后挪 → 尊重「显式 --at 优先」,警告了事。
+		//   - 出界:落在图纸外的器件在导出/打印/评审里根本不存在,是**废图**。
+		//     坐标是偏好,不出界是**硬约束**,偏好不该覆盖约束。
+		// 所以出界时不照放,自动移到距你给的坐标最近的合法位置(同一套网格扫描,
+		// 判定坐标=落地坐标),并把「为什么动了你的坐标」说清楚。
 		if inBounds != nil && !inBounds(rect) {
-			msg = fmt.Sprintf("--at 指定的原点会让这一块超出图纸可用区(块估算范围 [%.0f,%.0f]-[%.0f,%.0f],图纸 [%.0f,%.0f]-[%.0f,%.0f] 内缩 %.0f)— 按你的坐标照常放置(显式 --at 优先);放完必须跑 `sch layout-lint --strict` 看 out-of-sheet",
-				rect.MinX, rect.MinY, rect.MaxX, rect.MaxY,
-				in.Sheet.MinX, in.Sheet.MinY, in.Sheet.MaxX, in.Sheet.MaxY, sheetEdgeMinGap)
+			if nx, ny, found := bapScanOrigin(in.OriginX, in.OriginY, offsets, half, usable, collides); found {
+				origin.X, origin.Y = nx, ny
+				origin.Relocated = true
+				origin.Reason = "--at 会让这一块超出图纸可用区 — 出界是硬约束不是偏好,已移到距你指定坐标最近的合法位置"
+				return nx, ny, origin, []string{fmt.Sprintf(
+					"--at (%.0f,%.0f) 会让这一块超出图纸可用区(块估算范围 [%.0f,%.0f]-[%.0f,%.0f],图纸 [%.0f,%.0f]-[%.0f,%.0f] 内缩 %.0f)— 已移到最近的合法原点 (%.0f,%.0f)",
+					in.OriginX, in.OriginY,
+					rect.MinX, rect.MinY, rect.MaxX, rect.MaxY,
+					in.Sheet.MinX, in.Sheet.MinY, in.Sheet.MaxX, in.Sheet.MaxY, sheetEdgeMinGap,
+					nx, ny)}
+			}
+			// 连有界扫描都找不到:图纸真的塞不下这一块。此刻画布**还没动过**,
+			// 大声说出来比放到纸外强 —— 出界的块后面每一步(分区、导出、评审)都是坏的。
+			return in.OriginX, in.OriginY, origin, []string{fmt.Sprintf(
+				"--at (%.0f,%.0f) 会让这一块超出图纸可用区,且整张图纸都找不到放得下的位置(块估算 %.0f×%.0f,可用区 %.0f×%.0f)— 照你的坐标放置,但这张图是废的:换更大图纸、拆到别的页,或先清出空间",
+				in.OriginX, in.OriginY,
+				rect.MaxX-rect.MinX, rect.MaxY-rect.MinY,
+				usable.MaxX-usable.MinX, usable.MaxY-usable.MinY)}
 		}
-		return in.OriginX, in.OriginY, origin, []string{msg}
+		return in.OriginX, in.OriginY, origin, []string{
+			"--at 指定的原点与已有器件或标题栏图签重叠 — 按你的坐标照常放置(显式 --at 优先);放完请跑 `sch layout-lint` 确认"}
 	}
 	w, h := bboxSize(rect)
 	step := math.Max(w, h)/2 + 2*bapObstacleGap

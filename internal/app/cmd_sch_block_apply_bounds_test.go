@@ -211,3 +211,59 @@ func TestOutOfSheetOverExtentConvertsToMM(t *testing.T) {
 		t.Error("超出量没有被换算成 mm")
 	}
 }
+
+// **显式 --at 不能凌驾于「不出界」之上**。坐标是偏好,出界是硬约束:落在图纸外
+// 的器件在导出/打印/评审里根本不存在,那是废图,而重叠还能人工挪。
+// 旧行为是「按你的坐标照常放置(显式 --at 优先)」+ 一条 warning —— 于是每次给一个
+// 越界的 --at,块就真的被放到纸外面去。
+func TestBapResolveOrigin_ExplicitAtStillCannotLeaveTheSheet(t *testing.T) {
+	sheet := &layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	offsets := map[string]bapRoleOffset{
+		"A": {dx: 0, dy: 0},
+		"B": {dx: 300, dy: 0},
+	}
+	half := func(string) float64 { return 0 }
+	in := bapInput{
+		OriginX: 1100, OriginY: 400, // B 会落到 1400,远超 1170
+		Sheet:      sheet,
+		AtExplicit: true, // ← 关键:显式指定
+	}
+	x, y, origin, warns := bapResolveOrigin(in, offsets, half)
+	rect := bapBlockRect(x, y, offsets, half)
+	usable := layoutBBox{
+		MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+		MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+	}
+	if !boxInside(rect, usable) {
+		t.Fatalf("显式 --at 也不许把块放到图纸外: rect=%+v usable=%+v", rect, usable)
+	}
+	if !origin.Relocated {
+		t.Error("动了用户给的坐标就必须标 Relocated,否则调用方无从得知")
+	}
+	if len(warns) == 0 {
+		t.Error("必须告诉用户坐标被改了以及为什么")
+	}
+}
+
+// 只是**重叠**(没出界)时,仍然尊重「显式 --at 优先」—— 两种失败不同等对待。
+func TestBapResolveOrigin_ExplicitAtStillWinsOverMereOverlap(t *testing.T) {
+	sheet := &layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	offsets := map[string]bapRoleOffset{"A": {dx: 0, dy: 0}}
+	half := func(string) float64 { return 0 }
+	in := bapInput{
+		OriginX: 500, OriginY: 400, // 图纸正中,不会出界
+		Sheet:      sheet,
+		AtExplicit: true,
+		Obstacles:  []layoutBBox{{MinX: 450, MinY: 350, MaxX: 550, MaxY: 450}}, // 压在原点上
+	}
+	x, y, origin, warns := bapResolveOrigin(in, offsets, half)
+	if x != 500 || y != 400 {
+		t.Errorf("仅重叠时应尊重显式坐标: got (%v,%v)", x, y)
+	}
+	if origin.Relocated {
+		t.Error("没动坐标就不该标 Relocated")
+	}
+	if len(warns) == 0 {
+		t.Error("重叠仍要警告")
+	}
+}
