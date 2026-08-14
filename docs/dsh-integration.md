@@ -7,12 +7,42 @@ DSH（`@deepseek-ai/dsh`，Cordis 插件化框架）原生支持 skill 与 MCP c
 |---|---|---|---|
 | **Skill**（SKILL.md 自动发现） | `skills/easyeda-agent/SKILL.md` | 软链进 DSH skill 根 | 0 |
 | **MCP client**（`dsh-mcp-client` 桥接） | `mcp/`（stdio MCP server，11 工具） | `cordis.patch.yml` 加一行插件实例 | 几行 YAML |
+| **Bundle 插件包**（`dsh.bundle.patch` 声明） | 仓库根 `package.json` + `cordis.patch.yml` | `dsh plugin add github:zhoushoujianwork/easyeda-agent#<tag>` 一行装 | 已完成 |
 | **原生 Cordis 插件**（`ctx.tools` / client-plugin UI） | 暂无 | 新建 npm 包，注册结构化工具 / daemon 状态面板 | 中等，跟 rc 版本 |
 
-## 团队/他人接入（推荐：一键脚本）
+## 团队/他人接入（推荐：Bundle 一键安装）
 
-**任何同事 clone 仓库后跑一次即可**（幂等，可重复执行；自动探测仓库路径、
-自动合并 patch、防重复）：
+**任何人 `dsh plugin add` 一行装完**（skill + MCP 全部就位，无需 clone、无需改配置）：
+
+```sh
+dsh plugin --profile web add "github:zhoushoujianwork/easyeda-agent#<tag>"
+# 重启 dsh web 生效；升级/卸载走 Settings → Plugins
+```
+
+仓库根声明了 `dsh.bundle.patch`（见根 `cordis.patch.yml`），安装后自动成为
+profile 的活跃 bundle 层，注入两个行：
+
+1. `easyeda-mcp` —— `dsh-mcp-client` 实例（in-box 插件，走 fallback 解析），
+   MCP server 路径由 `!!js` 表达式基于 loader 的 `ctx.baseUrl`（= profile 目录）
+   定位包内 `mcp/src/server.mjs`；`EASYEDA_BIN` 默认取 PATH，可用环境变量覆盖。
+2. `easyeda-skill-fs` —— 独立的 `dsh-skill-filesystem` 实例
+   （`providerName: easyeda`、`includeDefaultRoots: false`），只扫包内
+   `skills/easyeda-agent`，注册进 skill 注册表 global layer（web 下 host 的
+   skill-filesystem 被官方 bundle 禁用、preset 自有发现，故用隔离实例，不冲突）。
+
+**已验证（2026-08-14）**：`dsh plugin add file:...` 到 headless profile → 自动
+提升为 bundle 层 → headless 会话实测模型可见全部 11 个 `mcp__easyeda__*` 工具
++ `easyeda-agent` skill。`.npmignore` 已排除 bin/dist 等构建产物，`github:`
+  安装只会打包 package.json / cordis.patch.yml / mcp/ / skills/ 等。
+
+**版本同步**：根 `package.json` 的 `version` 应与 release tag 对齐（`make release`
+目前不自动改它，发版前手动同步一次即可）。
+
+## 团队/他人接入（兜底：一键脚本）
+
+如果不想走 bundle（比如还没发版、想本地开发态接入），clone 后跑
+`scripts/dsh-install.sh`（幂等；自动探测仓库路径、注入/更新 `cordis.patch.yml`、
+防重复）：
 
 ```bash
 git clone https://github.com/zhoushoujianwork/easyeda-agent.git

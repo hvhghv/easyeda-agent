@@ -1,0 +1,15 @@
+{
+  "name": "easyeda-agent-dsh",
+  "version": "0.25.1",
+  "private": true,
+  "description": "EasyEDA Pro (JLC EDA) automation for DeepSeek Harness: MCP bridge + agent skill bundle",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.17.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

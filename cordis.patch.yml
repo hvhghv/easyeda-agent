@@ -1,0 +1,36 @@
+# easyeda-agent DSH bundle patch.
+#
+# 安装本包后（`dsh plugin --profile <name> add "github:zhoushoujianwork/easyeda-agent#<tag>"`）
+# 自动生效两件事：
+#   1. easyeda-mcp  —— 桥接仓库自带 stdio MCP server（mcp/src/server.mjs），
+#      工具以 mcp__easyeda__easyeda_* 命名。dsh-mcp-client 是 dsh 安装目录的
+#      in-box 插件，无需安装（走 $DSH_HOME/profiles/node_modules fallback）。
+#   2. easyeda-skill-fs —— 独立的 dsh-skill-filesystem 实例（providerName: easyeda），
+#      只扫本包内 skills/easyeda-agent，把 agent skill 注册进 global layer。
+#      web 下 host 的 skill-filesystem 被官方 bundle 禁用（preset 自有发现），
+#      所以这里用 includeDefaultRoots: false 的隔离实例，不与预设冲突。
+#
+# 路径表达式：loader 在激活时求值 `!!js`（with(ctx) 作用域，可访问 ctx.baseUrl
+# = 该 profile 目录的 file:// URL）。包安装后位于 <profile>/node_modules/
+# easyeda-agent-dsh/，因此相对 baseUrl 的 node_modules/easyeda-agent-dsh/...
+# 即包内路径（pnpm 安装 github 依赖会带入整个仓库内容）。
+# 依赖本仓库的 Go CLI：EASYEDA_BIN 环境变量可覆盖，默认取 PATH 上的 easyeda。
+- insert:
+    - id: easyeda-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: easyeda
+        transport: stdio
+        command: node
+        args:
+          - !!js "decodeURIComponent(new URL('node_modules/easyeda-agent-dsh/mcp/src/server.mjs', baseUrl).pathname)"
+        env:
+          EASYEDA_BIN: !!js "process.env.EASYEDA_BIN || 'easyeda'"
+
+    - id: easyeda-skill-fs
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: easyeda
+        includeDefaultRoots: false
+        customSkillDirs:
+          - !!js "decodeURIComponent(new URL('node_modules/easyeda-agent-dsh/skills/easyeda-agent', baseUrl).pathname)"
