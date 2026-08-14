@@ -336,6 +336,35 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 		sch.AddCommand(c)
 	}
 
+	// ── group-arrange:第二层(组与组之间按跨组信号关系排布,ADR-0003)────────
+	{
+		var gap float64
+		var dryRun bool
+		c := &cobra.Command{
+			Use:   "group-arrange",
+			Short: "第二层排布:把虚拟组当刚体,按**跨组信号网**关系铺进图纸可用区(ADR-0003)",
+			Long: `第二层布局:排的是**组**,不是器件。
+
+层次(ADR-0003):part → group → zone → sheet。第一层(block-apply)把每个块解成
+刚体并封组;这一层把组当刚体排。关系**从网表算出来**,不需要块作者声明:
+
+  - 两组之间的**跨组信号网条数** = 耦合强度,强的相邻(USB→桥芯片→下载电路)
+  - 电源/地**不计入**耦合:它们连着几乎每个器件,算进去会把整页揉成一团
+
+落位复用已验证的刚体平移(删净→modify→一遍性重连→电气自检),所以排完之后
+网表逐引脚不变。放不下就明确报错(拆页),不硬塞、不溢出图纸。`,
+			Args: cobra.NoArgs,
+			Example: `  easyeda sch group-arrange --dry-run    # 只看计划(耦合强度 + 落位)
+  easyeda sch group-arrange              # 执行`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return runGroupArrange(cfg, window, gap, dryRun, stdout, stderr)
+			},
+		}
+		c.Flags().Float64Var(&gap, "gap", 60, "组与组之间的可见间隙(区内紧凑、区间有隔;填满纸张不是目标)")
+		c.Flags().BoolVar(&dryRun, "dry-run", false, "只打印计划,不改动画布")
+		sch.AddCommand(c)
+	}
+
 	// ── rename (whole schematic document) ──────────────────────────────────
 	// schematic.rename
 	{
