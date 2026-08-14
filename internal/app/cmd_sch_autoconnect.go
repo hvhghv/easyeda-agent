@@ -158,8 +158,8 @@ const (
 	// costFlagCollision (a folded label DOES beat overlapping a part or another
 	// label). Ground/power markers are near-square and stay exempt.
 	costFoldedPort    = 150
-	costFanoutChannel = 100 // too close to a preserved pin-fanout channel
-	costOffsetPerUnit = 0.1 // +offset * 0.1 — prefer shorter stubs
+	costFanoutChannel = 100  // too close to a preserved pin-fanout channel
+	costOffsetPerUnit = 0.1  // +offset * 0.1 — prefer shorter stubs
 	bonusOutwardSide  = -20  // direction matches the pin's outward side
 	bonusKindDefault  = -10  // direction matches the kind default (GND down / power up / port outward)
 	acCoordEps        = 0.01 // coordinate-equality tolerance
@@ -304,15 +304,20 @@ func predictedMarkerBBox(x, y float64, canonicalKind, direction string) layoutBB
 			MinX: x + p.Near, MinY: y - p.Cross,
 			MaxX: x + p.Far, MaxY: y + p.Cross,
 		}
+	// y-UP:'up' 让 y **增大**、'down' 让 y **减小**(与 endpointFor 的注释和连接器
+	// 的 schematicPowerConnectPin 同一口径)。这两支曾经写反 —— 于是朝下的 GND 旗
+	// 被预测在锚点**上方**,落点评分与 stagger 注册检查的都是一个空位置,真实碰撞
+	// 全数漏检:实测同一片区域里两支 GND 旗重叠 1.00×12.00 而评分器毫无反应。
+	// left/right 一直是对的,所以这个错误只在竖直方向显形(电源/地旗恰恰全是竖直的)。
 	case "up":
-		return layoutBBox{
-			MinX: x - p.Cross, MinY: y - p.Far,
-			MaxX: x + p.Cross, MaxY: y - p.Near,
-		}
-	case "down":
 		return layoutBBox{
 			MinX: x - p.Cross, MinY: y + p.Near,
 			MaxX: x + p.Cross, MaxY: y + p.Far,
+		}
+	case "down":
+		return layoutBBox{
+			MinX: x - p.Cross, MinY: y - p.Far,
+			MaxX: x + p.Cross, MaxY: y - p.Near,
 		}
 	default:
 		// planConnection only supplies the four directions above. Keep a safe

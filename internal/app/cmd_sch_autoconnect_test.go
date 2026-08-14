@@ -101,6 +101,13 @@ func TestScoreCandidate_TitleBlockClearNotRejected(t *testing.T) {
 	}
 }
 
+// ⚠ 竖直两支的期望值 2026-08-14 按**真机实测**订正过:在 ceshi 用
+// `sch connect --x 200 --y 200 --kind gnd --direction down --offset 40` 落一支旗,
+// 端点 (200,160),读回来的真实 bbox 是 y 140.5..150.5 —— body 在端点**下方**
+// (Near 9.5 / Far 19.5,与 ground profile 完全吻合)。此前 up/down 两支写反,
+// 而这条测试(名字就叫 live calibration)把反的行为锁住了:于是所有竖直方向的
+// marker 碰撞检查都在一个空位置上做,朝下的 GND 旗互相重合而评分器毫无反应。
+// left/right 一直是对的,所以只在电源/地旗(恰恰全是竖直的)上显形。
 func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -112,20 +119,20 @@ func TestPredictedMarkerBBox_MatchesLiveFamilyDirectionCalibration(t *testing.T)
 		// starting 9.5 units beyond the endpoint and extending to 40.5.
 		{"netport-left", "net_port_bi", "left", layoutBBox{59.5, 194.5, 90.5, 205.5}},
 		{"netport-right", "net_port_bi", "right", layoutBBox{109.5, 194.5, 140.5, 205.5}},
-		{"netport-up", "net_port_bi", "up", layoutBBox{94.5, 159.5, 105.5, 190.5}},
-		{"netport-down", "net_port_bi", "down", layoutBBox{94.5, 209.5, 105.5, 240.5}},
+		{"netport-up", "net_port_bi", "up", layoutBBox{94.5, 209.5, 105.5, 240.5}},
+		{"netport-down", "net_port_bi", "down", layoutBBox{94.5, 159.5, 105.5, 190.5}},
 
 		// ground: 10×21 horizontally / 21×10 vertically, 9.5..19.5 outward.
 		{"ground-left", "ground", "left", layoutBBox{80.5, 189.5, 90.5, 210.5}},
 		{"ground-right", "ground", "right", layoutBBox{109.5, 189.5, 119.5, 210.5}},
-		{"ground-up", "ground", "up", layoutBBox{89.5, 180.5, 110.5, 190.5}},
-		{"ground-down", "ground", "down", layoutBBox{89.5, 209.5, 110.5, 219.5}},
+		{"ground-up", "ground", "up", layoutBBox{89.5, 209.5, 110.5, 219.5}},
+		{"ground-down", "ground", "down", layoutBBox{89.5, 180.5, 110.5, 190.5}},
 
 		// power: 6×11 horizontally / 11×6 vertically, 4.5..10.5 outward.
 		{"power-left", "power", "left", layoutBBox{89.5, 194.5, 95.5, 205.5}},
 		{"power-right", "power", "right", layoutBBox{104.5, 194.5, 110.5, 205.5}},
-		{"power-up", "power", "up", layoutBBox{94.5, 189.5, 105.5, 195.5}},
-		{"power-down", "power", "down", layoutBBox{94.5, 204.5, 105.5, 210.5}},
+		{"power-up", "power", "up", layoutBBox{94.5, 204.5, 105.5, 210.5}},
+		{"power-down", "power", "down", layoutBBox{94.5, 189.5, 105.5, 195.5}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
