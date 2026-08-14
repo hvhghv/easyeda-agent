@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"io"
-	"math"
 	"sort"
 	"strings"
 )
@@ -73,17 +72,10 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 	if err != nil {
 		return err
 	}
-	for _, c := range comps {
-		if schGroupFlagTypes[c.ComponentType] && groupRebuildFlagBelongs(c, comps, memberSet) {
-			deleteIDs = append(deleteIDs, c.ID)
-		}
-	}
 	if len(deleteIDs) > 0 {
-		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
-			map[string]any{"primitiveIds": deleteIDs}, docUUID, "group-move 清扫"); err != nil {
-			return fmt.Errorf("清扫 %d 个旧桩/旗:%w", len(deleteIDs), err)
+		if err := groupRebuildDeleteVerified(cfg, win, docUUID, deleteIDs, stdout); err != nil {
+			return err
 		}
-		fmt.Fprintf(stdout, "  清扫:删除 %d 个旧桩线/旗(器件保持不动)\n", len(deleteIDs))
 	}
 
 	// 4. 平移器件本体。此刻它们身上没有任何导线,modify 不会触发任何合并。
@@ -195,22 +187,86 @@ func groupRebuildConnSpecs(comps []layoutComp, memberSet map[string]bool,
 	return conns, movable
 }
 
-// groupRebuildFlagBelongs 判断一个 marker 是否属于本组:它的锚点落在某个成员引脚
-// 的桩线可达范围内。保守起见只认「离某成员引脚足够近」的,拿不准就不删 —— 删错
-// 别人的旗会切断组外电路,而少删一个只是留下一个孤儿 marker(check 会报)。
-func groupRebuildFlagBelongs(flag layoutComp, comps []layoutComp, memberSet map[string]bool) bool {
-	const reach = 3 * schStubLen // 桩长上限的宽松包络
-	for _, c := range comps {
-		if c.ComponentType != "part" || !memberSet[strings.ToUpper(c.Designator)] {
-			continue
+// groupRebuildDeleteVerified 删除一批图元,**分批 + 回读验证**。
+//
+// 平台的删除 API 有一个已知的撒谎行为:**大批量提交时会静默 no-op 掉一部分,
+// 却仍然返回成功**。真机实测:一次提交 90 个 id,清扫后页面上还剩 20 个旧旗
+// (30 个应存在 → 实际 50 个),其中一个恰好落在新建的桩线上,把 C7_N6 整条网
+// 并进了 GND —— bridge-check 报 "nets=[GND,C7_N6] pins=[J1:A5]",而删除那步
+// 报告一切正常。所以删完必须**回读**,不能信返回值。
+func groupRebuildDeleteVerified(cfg *appConfig, win, docUUID string, ids []string, stdout io.Writer) error {
+	const batch = 40 // 经验安全批量;超过这个量级平台开始静默丢弃
+	for i := 0; i < len(ids); i += batch {
+		end := i + batch
+		if end > len(ids) {
+			end = len(ids)
 		}
-		for _, p := range c.Pins {
-			if math.Abs(flag.X-p.X) <= reach && math.Abs(flag.Y-p.Y) <= reach {
-				return true
+		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
+			map[string]any{"primitiveIds": ids[i:end]}, docUUID, "group-move 清扫"); err != nil {
+			return fmt.Errorf("清扫第 %d-%d 个旧桩/旗:%w", i+1, end, err)
+		}
+	}
+	// 回读:删除 API 返回成功不代表真删了。
+	left, err := groupRebuildStillPresent(cfg, win, docUUID, ids)
+	if err != nil {
+		fmt.Fprintf(stdout, "  清扫:提交删除 %d 个(回读校验失败 %v —— 若后续报串网,先跑 `sch bridge-check`)\n", len(ids), err)
+		return nil
+	}
+	if len(left) > 0 {
+		// 再补一轮:剩下的通常是首轮被静默丢弃的。
+		for i := 0; i < len(left); i += batch {
+			end := i + batch
+			if end > len(left) {
+				end = len(left)
+			}
+			if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
+				map[string]any{"primitiveIds": left[i:end]}, docUUID, "group-move 清扫补删"); err != nil {
+				return fmt.Errorf("补删残留的 %d 个旧桩/旗:%w", len(left), err)
+			}
+		}
+		still, err2 := groupRebuildStillPresent(cfg, win, docUUID, ids)
+		if err2 == nil && len(still) > 0 {
+			// 残留的旧旗会挂到新桩线上串网,这不是可以「继续试试」的状态。
+			return fmt.Errorf("清扫后仍残留 %d 个旧桩线/旗(平台静默丢弃了删除请求)—— 器件尚未移动,画布还是原样;重试本命令,或先手工删除后再移动", len(still))
+		}
+		fmt.Fprintf(stdout, "  清扫:删除 %d 个旧桩线/旗(补删 %d 个平台首轮静默丢弃的)\n", len(ids), len(left))
+		return nil
+	}
+	fmt.Fprintf(stdout, "  清扫:删除 %d 个旧桩线/旗,回读确认全部消失(器件保持不动)\n", len(ids))
+	return nil
+}
+
+// groupRebuildStillPresent 回读页面,返回 ids 中仍然存在的那些。
+func groupRebuildStillPresent(cfg *appConfig, win, docUUID string, ids []string) ([]string, error) {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	res, err := requestAutolayoutAction(cfg, "schematic.components.list", win,
+		map[string]any{"includeBBox": false, "includePins": false}, docUUID, "group-move 清扫回读")
+	if err != nil {
+		return nil, err
+	}
+	comps, err := parseLayoutComps(res.Result)
+	if err != nil {
+		return nil, err
+	}
+	var left []string
+	for _, c := range comps {
+		if want[c.ID] {
+			left = append(left, c.ID)
+		}
+	}
+	wires, werr := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if werr == nil {
+		for _, w := range wires {
+			if want[w.ID] {
+				left = append(left, w.ID)
 			}
 		}
 	}
-	return false
+	sort.Strings(left)
+	return left, nil
 }
 
 // groupRebuildNetSnapshot 取一份 net → 引脚集合的快照。
