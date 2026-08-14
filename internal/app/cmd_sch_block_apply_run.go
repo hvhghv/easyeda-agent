@@ -785,12 +785,21 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// were rejected and why). Discarding it leaves a bare "1 connection(s) failed"
 	// and forces the caller to re-run each pin by hand to find out anything.
 	// stdout stays clean for the manifest.
+	// **不因一条连接失败就丢掉后续状态固化**(部分应用约定 #151)。平台有一个已知
+	// 的「卡死在 99%」故障:每轮 apply 会随机吃掉一条 connect_pin(7s 超时),而器件
+	// 此刻已全部落地。过去这里直接 return,于是 check / reconcile / **归组** 全部
+	// 跳过 —— 画布上留下 29/30 连好的电路,却没有虚拟组,上层拿不到刚体,而用户看到
+	// 的只是一句 "wire: 1 connection(s) failed"。现在照常走完,最后再统一决定退出码。
+	var wireErr error
 	if err := runAutoconnect(cfg, window, conns, defaultAutoconnectRules(), false, false, false, false, stderr, stderr); err != nil {
-		return fmt.Errorf("wire: %w", err)
+		wireErr = err
 	}
 
 	// 7. check
 	man.OK = "applied"
+	if wireErr != nil {
+		man.OK = "applied-partial"
+	}
 	if _, err := requestAction(cfg, "schematic.check", window, map[string]any{}); err != nil {
 		fmt.Fprintf(stderr, "warn: schematic.check failed to run: %v\n", err)
 	}
@@ -816,12 +825,12 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 				}
 				fmt.Fprintln(stderr)
 			}
-			if err := emitBapManifest(man, asJSON, stdout); err != nil {
-				return err
-			}
-			return fmt.Errorf("block-apply: %d net(s) do not match the plan — run `easyeda sch bridge-check` and fix before trusting this instance", len(diffs))
+		} else {
+			// 只有真的一条 diff 都没有才报 ✓ —— 这行原本靠上面那个 return 守卫,
+			// 改成「部分失败也走完流程」后守卫没了,它一度和 ✗ 同时打印,同一次运行
+			// 给出两个相反结论。报告自相矛盾比报错更伤:人会信后打印的那条。
+			fmt.Fprintf(stderr, "reconcile ✓ %d net(s) match the live netlist\n", len(plan.Nets))
 		}
-		fmt.Fprintf(stderr, "reconcile ✓ %d net(s) match the live netlist\n", len(plan.Nets))
 	}
 
 	// 9. 归组 —— ADR-0003 的第一步产物必须是**一个刚体**,不是一堆散件。
@@ -830,7 +839,19 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// 也才不需要另算「四侧引出通道」。
 	bapRegisterGroup(cfg, window, plan, &man, stderr)
 
-	return emitBapManifest(man, asJSON, stdout)
+	// 10. 统一收尾:状态已经全部固化(连线尽力、对账已做、组已封),**先出 manifest**,
+	// 再按严重程度决定退出码。顺序很重要 —— 调用方即使拿到非零退出码,也必须能从
+	// manifest 读到画布的真实状态,否则「部分应用」就退化成了「不知道发生了什么」。
+	if err := emitBapManifest(man, asJSON, stdout); err != nil {
+		return err
+	}
+	if len(man.Diffs) > 0 {
+		return fmt.Errorf("block-apply: %d net(s) do not match the plan — run `easyeda sch bridge-check` and fix before trusting this instance", len(man.Diffs))
+	}
+	if wireErr != nil {
+		return fmt.Errorf("wire: %w (器件与其余连线均已落地,虚拟组已登记 —— 只需重试上面列出的那几个引脚)", wireErr)
+	}
+	return nil
 }
 
 // readLiveNets pulls the post-wiring truth via schematic.read: live net → set of
