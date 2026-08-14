@@ -995,20 +995,16 @@ pull fresh ids before any follow-up mutation on it.`,
 				if !cmd.Flags().Changed("dx") && !cmd.Flags().Changed("dy") {
 					return fmt.Errorf("at least one of --dx / --dy is required (a zero-move is a no-op)")
 				}
-				var ids []string
+				// --group 走「删净 → 平移 → 一遍性重连 → 电气自检」(ADR-0003)。
+				// **不再带着导线一起搬**:平台会合并共享端点的同网导线,逐根删建时
+				// 新桩线会被邻居吞掉 —— 真机可复现,ch340c 块平移一次静默丢 3 个
+				// GND 引脚而命令报告一切正常。--ids 是裸图元模式,调用方自己负责,
+				// 保持原语义。
 				if groupRef != "" {
-					set, err := expandSchGroupForMove(cfg, window, groupRef)
-					if err != nil {
-						return err
-					}
-					ids = set.AllIDs()
-					fmt.Fprintf(stderr, "group %s expanded: %d component(s) + %d stub wire(s) + %d flag(s)\n",
-						describeSchGroup(set.Group), len(set.ComponentIDs), len(set.Expansion.WireIDs), len(set.Expansion.FlagIDs))
-					if set.Expansion.SharedTrees > 0 {
-						fmt.Fprintf(stderr, "note: %d wire tree(s) also touch non-member pins (real inter-part wiring) — left in place; re-check connectivity after the move (`sch check`)\n",
-							set.Expansion.SharedTrees)
-					}
-				} else {
+					return groupMoveRebuild(cfg, window, groupRef, dx, dy, stdout, stderr)
+				}
+				var ids []string
+				{
 					var err error
 					ids, err = parseIDList(idsRaw)
 					if err != nil {
