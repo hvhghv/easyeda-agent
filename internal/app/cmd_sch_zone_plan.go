@@ -50,6 +50,8 @@ type partitionRect struct {
 	Modules   []string   `json:"modules"`
 	BBox      layoutBBox `json:"bbox"`
 	TitleBBox layoutBBox `json:"titleBBox"`
+	// NoteBBox 是框内底部留给电路说明的一条带(区名在顶、说明在底,都在框内)。
+	NoteBBox layoutBBox `json:"noteBBox"`
 }
 
 // partitionValidation counts every way a plan can be wrong (all should be 0).
@@ -117,14 +119,18 @@ type partitionOpts struct {
 	Margin    float64
 	Gutter    float64
 	TitleBand float64
-	MaxCols   int
-	MaxRows   int
+	// NoteBand 是分区**底部**留给电路说明的一条带。顶上有标题带,底下就该有说明带 ——
+	// 否则说明只能挤在器件缝里,挤不下就掉到框外(实测:自动落点退到框下方 y=215,
+	// 用户一眼看出「说明跑到框外面了」)。版式是:区名左上、说明左下,**都在框内**。
+	NoteBand float64
+	MaxCols  int
+	MaxRows  int
 }
 
 func defaultPartitionOpts() partitionOpts {
 	// Margin 20 → 28 (2026-08-11): at 20 the frame sat 26 units from the sheet
 	// edge, hugging the printed sheet frame like a double line.
-	return partitionOpts{Margin: 28, Gutter: 12, TitleBand: 30, MaxCols: 3, MaxRows: 2}
+	return partitionOpts{Margin: 28, Gutter: 12, TitleBand: 30, NoteBand: 26, MaxCols: 3, MaxRows: 2}
 }
 
 // planPartitions is the pure planner: usable sheet (minus margin) carved into
@@ -210,7 +216,7 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 		}
 		rect := layoutBBox{
 			MinX: math.Max(cell.MinX, content.MinX-partitionContentPad),
-			MinY: math.Max(cell.MinY, content.MinY-partitionContentPad),
+			MinY: math.Max(cell.MinY, content.MinY-partitionContentPad-opts.NoteBand),
 			MaxX: math.Min(cell.MaxX, content.MaxX+partitionContentPad),
 			MaxY: math.Min(cell.MaxY, content.MaxY+partitionContentPad+opts.TitleBand),
 		}
@@ -252,6 +258,9 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 			BBox:    rect,
 			// Title band at the visual TOP (large y).
 			TitleBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MaxY - band, MaxX: rect.MaxX, MaxY: rect.MaxY},
+			// Note band at the visual BOTTOM (small y) —— 说明就放这儿,框内左下。
+			NoteBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MinY, MaxX: rect.MaxX,
+				MaxY: math.Min(rect.MaxY, rect.MinY+opts.NoteBand)},
 		})
 	}
 	plan.Validation = validatePartitions(plan, modules, keepout)

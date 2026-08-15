@@ -46,7 +46,7 @@ func TestPlanNoteAnchor_AvoidsPartsAndTexts(t *testing.T) {
 		{MinX: 60, MinY: 200, MaxX: 400, MaxY: 240},  // 已有说明
 	}
 	w, h := noteSizeOf("测试说明一行", 10)
-	x, y, ok := planNoteAnchor(w, h, obstacles, nil, sheet, nil)
+	x, y, ok := planNoteAnchor(w, h, obstacles, nil, nil, sheet, nil)
 	if !ok {
 		t.Fatal("整页有大片空白,不该求解失败")
 	}
@@ -68,7 +68,7 @@ func TestPlanNoteAnchor_PrefersInsideItsZone(t *testing.T) {
 	// 区内上半被器件占住,下半留白 —— 说明应该落在区内下半。
 	obstacles := []layoutBBox{{MinX: 320, MinY: 480, MaxX: 880, MaxY: 690}}
 	w, h := noteSizeOf("区内说明\n第二行", 9)
-	x, y, ok := planNoteAnchor(w, h, obstacles, &zone, sheet, nil)
+	x, y, ok := planNoteAnchor(w, h, obstacles, &zone, nil, sheet, nil)
 	if !ok {
 		t.Fatal("区内下半有空位,不该失败")
 	}
@@ -91,7 +91,7 @@ func TestPlanNoteAnchor_RespectsTitleBlockKeepout(t *testing.T) {
 		{MinX: 0, MinY: 0, MaxX: 780, MaxY: 240},
 	}
 	w, h := noteSizeOf("不该落在图签上", 10)
-	_, _, ok := planNoteAnchor(w, h, obstacles, nil, sheet, &keepout)
+	_, _, ok := planNoteAnchor(w, h, obstacles, nil, nil, sheet, &keepout)
 	if ok {
 		t.Error("唯一空位是图签 keep-out,应当拒绝落点而不是压上去")
 	}
@@ -102,7 +102,7 @@ func TestPlanNoteAnchor_FailsWhenNoRoom(t *testing.T) {
 	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 400, MaxY: 300}
 	obstacles := []layoutBBox{{MinX: 0, MinY: 0, MaxX: 400, MaxY: 300}}
 	w, h := noteSizeOf("满页无处可放", 10)
-	if _, _, ok := planNoteAnchor(w, h, obstacles, nil, sheet, nil); ok {
+	if _, _, ok := planNoteAnchor(w, h, obstacles, nil, nil, sheet, nil); ok {
 		t.Error("整页被占满时必须求解失败")
 	}
 }

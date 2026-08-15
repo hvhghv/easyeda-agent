@@ -65,7 +65,7 @@ func noteAnchorBBox(x, y, w, h float64) layoutBBox {
 // 整页从下往上扫。zoneRect 为 nil 时直接走整页扫描。
 //
 // 纯函数:障碍、图纸、尺寸进,锚点出,不碰网络。
-func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect *layoutBBox, sheet layoutBBox, keepout *layoutBBox) (x, y float64, ok bool) {
+func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *layoutBBox, sheet layoutBBox, keepout *layoutBBox) (x, y float64, ok bool) {
 	free := func(bx, by float64) bool {
 		b := noteAnchorBBox(bx, by, w, h)
 		if b.MinX < sheet.MinX+noteGap || b.MaxX > sheet.MaxX-noteGap ||
@@ -84,6 +84,13 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect *layoutBBox, 
 	}
 
 	var cands [][2]float64
+	// **说明带优先**:分区框底部留出来的那条带就是给它的(区名在顶、说明在底,
+	// 都在框内)。带里放不下才退到下面那串兜底候选 —— 那些会把说明挤出框外。
+	if noteBand != nil {
+		if y := noteBand.MinY + h + noteGap; free(noteBand.MinX+noteGap, y) {
+			return snapNote(noteBand.MinX + noteGap), snapNote(y), true
+		}
+	}
 	if zoneRect != nil {
 		z := *zoneRect
 		// ① 区内容下沿之下(区内);② 区内上沿之下;③ 区左/右外侧同高;④ 区正下方。
@@ -194,13 +201,15 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef, content string, font
 
 	// 目标区的矩形:优先用 zone-plan 给该区算出的分区框(说明就该待在自己区里),
 	// 拿不到就退化成整页扫描。
-	var zoneRect *layoutBBox
+	var zoneRect, noteBand *layoutBBox
 	if zoneRef != "" {
 		if plan, _, zerr := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts()); zerr == nil {
 			for _, p := range plan.Partitions {
 				if strInSlice(p.Modules, zoneRef) {
 					r := p.BBox
 					zoneRect = &r
+					nb := p.NoteBBox
+					noteBand = &nb
 					break
 				}
 			}
@@ -219,7 +228,7 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef, content string, font
 		return "", nil
 	}
 
-	nx, ny, ok := planNoteAnchor(w, h, obstacles, zoneRect, *sheet, keepout)
+	nx, ny, ok := planNoteAnchor(w, h, obstacles, zoneRect, noteBand, *sheet, keepout)
 	if !ok {
 		return "", fmt.Errorf("这一页找不到能放下这条说明(%.0f×%.0f)且不压任何图元的空位 —— 缩短文字/减小 --font-size,或腾出版面后重试", w, h)
 	}
