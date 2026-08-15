@@ -827,3 +827,90 @@ func TestScoreCandidate_TextNoteIsAnObstacle(t *testing.T) {
 		t.Errorf("说明没有影响落点选择,用例失效: %s@%v", best.Direction, best.Offset)
 	}
 }
+
+// ── 同侧 lane 联合分配 ──────────────────────────────────────────────────────
+
+// 步长必须 ≥ marker 自身 body 长度,否则后一个压在前一个身上。
+func TestLaneStepFor_ExceedsMarkerBody(t *testing.T) {
+	for _, c := range []struct{ kind, net string }{
+		{"netport", "C7_N5"}, {"ground", "GND"}, {"power", "5V"},
+	} {
+		p := markerBBoxProfile(c.kind, c.net)
+		if got, body := laneStepFor(c.kind, c.net), p.Far-p.Near; got <= body {
+			t.Errorf("%s/%s 步长 %v 必须大于 body 长度 %v", c.kind, c.net, got, body)
+		}
+	}
+	// 长网名的 netport body 更长,步长必须跟着变大
+	if laneStepFor("netport", "A_VERY_LONG_NET") <= laneStepFor("netport", "N1") {
+		t.Error("netport 步长必须随网名长度增长")
+	}
+}
+
+// 同一侧第二个 marker 必须错开一个 body 长度 —— 这是相邻脚不互压的唯一办法
+// (改 offset 只动 x,y 范围由引脚决定,不会变)。
+func TestApplyLaneStagger_SecondMarkerOnSameSideStepsOut(t *testing.T) {
+	all := []acCandidate{
+		{Direction: "left", Offset: 18, Score: 1},
+		{Direction: "left", Offset: 24, Score: 2},
+		{Direction: "left", Offset: 60, Score: 5},
+		{Direction: "left", Offset: 90, Score: 9},
+	}
+	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
+	got := applyLaneStagger(all, lanes, "U3", "C7_N5", "netport")
+	need := 18 + laneStepFor("netport", "C7_N5")
+	if got.Offset < need {
+		t.Errorf("同侧第二个必须让开: got offset=%v, 至少要 %v", got.Offset, need)
+	}
+	// 且要挑同方向里**够远之中最省**的那个:C7_N5 的 body 长 38,步长 46,
+	// 所以 60 还不够(18+46=64),90 才是第一个合格的。
+	if got.Offset != 90 {
+		t.Errorf("应挑够远里最省的 90, got %v", got.Offset)
+	}
+}
+
+// 这一侧还没人时不该无故推远。
+func TestApplyLaneStagger_FirstOnSideKeepsBest(t *testing.T) {
+	all := []acCandidate{{Direction: "left", Offset: 18, Score: 1}, {Direction: "left", Offset: 60, Score: 5}}
+	got := applyLaneStagger(all, map[string]float64{}, "U3", "N1", "netport")
+	if got.Offset != 18 {
+		t.Errorf("首个 marker 不该被推远: %v", got.Offset)
+	}
+}
+
+// **错开不能以短路为代价**:够远的候选若被 #64 硬拒绝,必须跳过。
+func TestApplyLaneStagger_NeverPicksAHardReject(t *testing.T) {
+	all := []acCandidate{
+		{Direction: "left", Offset: 18, Score: 1},
+		{Direction: "left", Offset: 90, Score: 2e9,
+			Reasons: []acReason{{costHardReject, "stub touches an existing (foreign-net) wire (hard reject)"}}},
+		{Direction: "up", Offset: 18, Score: 3},
+	}
+	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
+	got := applyLaneStagger(all, lanes, "U3", "N1", "netport")
+	if candidateHardRejected(got) {
+		t.Fatalf("绝不能为了错开选一个会短路的候选: %+v", got)
+	}
+	// 同方向没出路 → 换一个没被占用的方向
+	if got.Direction != "up" {
+		t.Errorf("同侧无出路时应换方向: got %s@%v", got.Direction, got.Offset)
+	}
+}
+
+// **错开不能换一种破坏**:够远但压在器件上的候选必须跳过 —— 第一版只挡短路,
+// 真机当场多出两条「D1(part) 与 MCU_TX(netport) 重叠 26.00×11.00」。
+func TestApplyLaneStagger_NeverPicksACandidateOverAPart(t *testing.T) {
+	all := []acCandidate{
+		{Direction: "left", Offset: 18, Score: 1},
+		{Direction: "left", Offset: 90, Score: 10001,
+			Reasons: []acReason{{costPartOverlap, "label overlaps a part bbox"}}},
+		{Direction: "down", Offset: 18, Score: 3},
+	}
+	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
+	got := applyLaneStagger(all, lanes, "U3", "N1", "netport")
+	if candidateHitsPartOrText(got) {
+		t.Fatalf("为了错开而压器件,等于换一种破坏: %+v", got)
+	}
+	if got.Direction != "down" {
+		t.Errorf("同侧无干净出路时应换方向: got %s@%v", got.Direction, got.Offset)
+	}
+}

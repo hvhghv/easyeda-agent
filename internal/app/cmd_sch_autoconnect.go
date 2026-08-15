@@ -3,6 +3,7 @@ package app
 import (
 	"math"
 	"sort"
+	"strings"
 )
 
 // ── sch autoconnect: pin-aware deterministic connect planner ────────────────
@@ -801,5 +802,91 @@ func dominantReason(c acCandidate) string {
 	if best == "" {
 		return "higher total cost (longer offset / non-default direction)"
 	}
+	return best
+}
+
+// ── 同侧 lane 联合分配 ──────────────────────────────────────────────────────
+//
+// **为什么逐 pin 贪心在相邻脚上必然失败。** SOP/QFN 的引脚间距是 10,而横向
+// netport 的 body 高 11 —— 两个相邻脚各挂一个同向 marker,y 范围**必然重叠 1 个
+// 单位**。这不是判据错误,是几何必然:改 offset 只改变 marker 离引脚多远(x 方向),
+// y 范围由引脚位置决定,一动不动。
+//
+// 人工画法是**同侧阶梯错列**:第 1 个 offset=18、第 2 个 60、第 3 个 102…,步长
+// 大于 marker 自身的 body 长度,于是它们在 x 方向排成一条斜梯,彼此让开。
+//
+// 逐 pin 贪心做不到这件事:每个 pin 只知道自己的最优,挑完注册进 scene,下一个只能
+// 在剩下的缝里找 —— 而这种密度下缝根本不存在。必须记住「这一侧已经落到哪儿了」。
+
+// laneKeyOf 是 lane 台账的键:同一器件的同一侧算一条 lane。
+func laneKeyOf(designator, direction string) string {
+	return strings.ToUpper(designator) + "|" + direction
+}
+
+// laneStepFor 是同一条 lane 上两个 marker 的最小 offset 差:marker 自身的 body
+// 长度 + 一个可见间隙。小于它,后一个的 body 会压在前一个身上。
+func laneStepFor(canonicalKind, net string) float64 {
+	p := markerBBoxProfile(canonicalKind, net)
+	return (p.Far - p.Near) + acLaneGap
+}
+
+// acLaneGap 是同侧相邻 marker 之间的可见间隙。
+const acLaneGap = 8.0
+
+// candidateHitsPartOrText reports whether this候选 covers a real part bbox or a
+// text note —— 两者都是 costPartOverlap 级别的视觉破坏。
+func candidateHitsPartOrText(c acCandidate) bool {
+	for _, r := range c.Reasons {
+		if r.Cost == costPartOverlap {
+			return true
+		}
+	}
+	return false
+}
+
+// applyLaneStagger 在候选里挑一个**尊重同侧 lane** 的:如果这一侧已经落过 marker,
+// 新的必须比它远出一个 body 长度。找不到就退回原来的最优 —— 让位给 #64 那些硬
+// 约束,宁可挤一点也不能短路。
+func applyLaneStagger(all []acCandidate, lanes map[string]float64,
+	designator, net, canonicalKind string) acCandidate {
+
+	if len(all) == 0 {
+		return acCandidate{}
+	}
+	best := all[0]
+	used, ok := lanes[laneKeyOf(designator, best.Direction)]
+	if !ok {
+		return best // 这一侧还没人,首选即可
+	}
+	need := used + laneStepFor(canonicalKind, net)
+	if best.Offset >= need {
+		return best // 首选本来就够远
+	}
+	// 在**同方向**里找第一个够远且不比硬拒绝更差的候选。候选已按分数升序,
+	// 所以第一个命中的就是同方向里最省的。
+	for _, c := range all {
+		if c.Direction != best.Direction || c.Offset < need {
+			continue
+		}
+		// **错开不能以别的破坏为代价**。只挡短路是不够的:第一版只过滤硬拒绝,
+		// 于是把 marker 推远时推到了邻近器件身上 —— 真机当场多出两条
+		// 「D1(part) 与 MCU_TX(netport) 重叠 26.00×11.00」。压器件和压标签一样
+		// 是视觉破坏,换一种破坏不算解决。
+		if candidateHardRejected(c) || candidateHitsPartOrText(c) {
+			continue
+		}
+		return c
+	}
+	// 同方向没有出路时,换个没被占用的方向往往比硬挤强。
+	for _, c := range all {
+		if candidateHardRejected(c) || candidateHitsPartOrText(c) {
+			continue
+		}
+		if _, taken := lanes[laneKeyOf(designator, c.Direction)]; !taken {
+			return c
+		}
+	}
+	// 哪条路都通不了 —— 退回原来的最优。挤一点是可见的、可后修的;短路和压器件
+	// 不是。宁可留一条 marker-overlap 让 `sch check` 报出来。
 	return best
 }

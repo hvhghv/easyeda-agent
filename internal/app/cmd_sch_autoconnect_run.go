@@ -360,6 +360,9 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 	if err != nil {
 		return err
 	}
+	// 同侧 lane 台账:器件+方向 → 该侧已用的最大 offset。逐 pin 贪心在相邻脚上
+	// 必然失败(见 applyLaneStagger),必须记住同一侧已经落到哪儿了。
+	lanes := map[string]float64{}
 	scene := buildScene(res.Result)
 	// 电路说明(自由文本)也是页面上的占位对象 —— components.list **不返回文本**,
 	// 必须单独拉一次 text.list,否则 marker 会直接压在说明上(ADR-0003:注释与器件
@@ -463,7 +466,7 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 		}
 
 		all := planConnection(pin, canonicalKind, c.Net, scene, rules)
-		selected := all[0]
+		selected := applyLaneStagger(all, lanes, pin.Designator, c.Net, canonicalKind)
 		cr.Selected = &selected
 		cr.Rejected = summarizeRejected(all, selected)
 
@@ -498,6 +501,7 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 			cr.FlagPrimitiveID = asString(cres.Result["flagPrimitiveId"])
 		}
 
+		lanes[laneKeyOf(pin.Designator, selected.Direction)] = selected.Offset
 		// Stagger: register the just-placed label so later connections in this
 		// batch avoid stacking on it (clustered-pin staggering).
 		if rules.StaggerLabels {
