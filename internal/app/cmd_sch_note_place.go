@@ -165,8 +165,8 @@ func collectNoteObstacles(comps []layoutComp, texts []zoneMoveText) []layoutBBox
 //
 // 几何读取失败一律降级为「照给定坐标画」并给出提示:说明是注释,不该因为读不到
 // 布局就阻断。
-func placeSchNote(cfg *appConfig, window, docUUID, zoneRef, content string, fontSize float64, auto bool, x, y *float64) (warn string, err error) {
-	w, h := noteSizeOf(content, fontSize)
+func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *string, fontSize float64, auto bool, x, y *float64) (warn string, err error) {
+	w, h := noteSizeOf(*content, fontSize)
 
 	res, rerr := requestAutolayoutAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true}, docUUID, "read layout for note placement")
@@ -200,7 +200,9 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef, content string, font
 	obstacles := collectNoteObstacles(comps, texts)
 
 	// 目标区的矩形:优先用 zone-plan 给该区算出的分区框(说明就该待在自己区里),
-	// 拿不到就退化成整页扫描。
+	// 拿不到就退化成整页扫描。**文字比框宽时先折行** —— 否则说明带塞不下,落点会
+	// 一路退到整页扫描、跑到框外面去(实测 D_ESD 框宽 96,一行说明 200,落到了 x=50)。
+	// 折行口径与区框里的电路说明一致(wrapNoteLines),不新造一套。
 	var zoneRect, noteBand *layoutBBox
 	if zoneRef != "" {
 		if plan, _, zerr := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts()); zerr == nil {
@@ -210,6 +212,10 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef, content string, font
 					zoneRect = &r
 					nb := p.NoteBBox
 					noteBand = &nb
+					if wrapped := strings.Join(wrapNoteLines([]string{*content}, r.MaxX-r.MinX-2*noteGap), "\n"); wrapped != *content {
+						*content = wrapped
+						w, h = noteSizeOf(*content, fontSize)
+					}
 					break
 				}
 			}

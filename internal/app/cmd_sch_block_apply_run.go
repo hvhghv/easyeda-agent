@@ -1187,28 +1187,59 @@ func bapRegisterGroup(cfg *appConfig, window string, plan bapPlan, man *bapManif
 	}
 	_ = pinned
 	_ = win
-	name := bapGroupName(plan)
 	roles := map[string]string{}
 	for _, p := range plan.Placements {
 		if r, d := strings.TrimSpace(p.Role), strings.TrimSpace(p.Designator); r != "" && d != "" {
 			roles[r] = strings.ToUpper(d)
 		}
 	}
-	next, g, cerr := groupsCreate(groups, name, members)
-	if cerr != nil {
-		fmt.Fprintf(stderr, "warn: 归组跳过(%v)—— 器件与连线均已落地,上层布局会把它们当散件\n", cerr)
+	// **按功能子群登记**,不是整块一个组(2026-08-15):块自己就知道哪几件构成一个
+	// 功能单元(flow 的每一级 + 跟着它的去耦/并列组),拆出来之后「把 USB 口那一簇
+	// 整体挪开」才有抓手 —— 整块一个组时 group-move 只能 7 件一起动,组间根本留不出
+	// 通道。拆分规则见 bslFunctionalGroups(全部来自块数据,不靠人手认领)。
+	subs := bapSubgroupsOf(plan)
+	next := groups
+	var created []*schGroup
+	for _, sg := range subs {
+		var mem []string
+		sub := map[string]string{}
+		for _, r := range sg.Roles {
+			if d, ok := roles[r]; ok {
+				mem = append(mem, d)
+				sub[r] = d
+			}
+		}
+		if len(mem) == 0 {
+			continue
+		}
+		gname := bapGroupName(plan)
+		if len(subs) > 1 {
+			gname += "/" + sg.Name
+		}
+		nx, g, cerr := groupsCreate(next, gname, mem)
+		if cerr != nil {
+			fmt.Fprintf(stderr, "warn: 子群 %s 归组跳过(%v)\n", sg.Name, cerr)
+			continue
+		}
+		g.BlockID, g.Instance, g.Roles = plan.BlockID, plan.Instance, sub
+		next, created = nx, append(created, g)
+	}
+	if len(created) == 0 {
+		fmt.Fprintf(stderr, "warn: 归组跳过(没有可登记的子群)—— 器件与连线均已落地\n")
 		return
 	}
-	// 拓扑来源:记下块 id 与 role→位号,`sch reconcile` 据此重新推导应有连接并对账。
-	g.BlockID, g.Roles = plan.BlockID, roles
 	if serr := saveSchGroups(st, docUUID, next); serr != nil {
 		fmt.Fprintf(stderr, "warn: 归组未能落盘(%v)—— 器件与连线均已落地;可手工补登:easyeda sch group create --name %q --members %s\n",
-			serr, name, strings.Join(members, ","))
+			serr, bapGroupName(plan), strings.Join(members, ","))
 		return
 	}
-	man.GroupID = g.ID
-	man.GroupName = g.Name
-	fmt.Fprintf(stderr, "grouped ✓ %s (%s) — %d 件已封成刚体,上层可整体摆布\n", g.ID, name, len(members))
+	man.GroupID, man.GroupName = created[0].ID, created[0].Name
+	for _, g := range created {
+		fmt.Fprintf(stderr, "grouped ✓ %s (%s) — %d 件\n", g.ID, g.Name, len(g.Members))
+	}
+	if len(created) > 1 {
+		fmt.Fprintf(stderr, "grouped: 按功能子群拆成 %d 组 —— 组间留通道用 `sch group-move --group <id>`\n", len(created))
+	}
 }
 
 // bapGroupName 是这个实例的人类可读组名:块名(去 block. 前缀)+ 实例号,

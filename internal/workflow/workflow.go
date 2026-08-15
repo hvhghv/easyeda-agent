@@ -314,8 +314,12 @@ type Group struct {
 	// 有了它,`sch reconcile` 才能在任何时候从块库重新推导「本该怎么连」并与活体网表
 	// 对账 —— 否则「接对了没有」只能靠人肉核对(design-flow S5 的设计意图门此前正是
 	// 唯一没有机械判据的一步)。位号取落地回读值而不是配方 role:place 会 remap(#144)。
-	BlockID string            `json:"blockId,omitempty"`
-	Roles   map[string]string `json:"roles,omitempty"` // ROLE → DESIGNATOR
+	BlockID string `json:"blockId,omitempty"`
+	// Instance 是块实例 id:一个块现在按**功能子群**登记成多个组(USB 口 / ESD /
+	// 桥芯片…),对账时要靠它把同一实例的几个组合起来看,否则跨子群的内部网会被
+	// 判成 unresolved。
+	Instance string            `json:"instance,omitempty"`
+	Roles    map[string]string `json:"roles,omitempty"` // ROLE → DESIGNATOR(本子群的)
 }
 
 // GroupsForPage returns one document's persistent groups (nil when none).

@@ -94,7 +94,7 @@ default is: one short note per module, parked just below/beside its zone frame.
 			// 参与碰撞求解(用户纠偏 2026-08-13)。给了坐标就一字不改地照放,
 			// 但仍然回读一次碰撞并在压到东西时明确警告 —— 不静默画上去。
 			auto := !cmd.Flags().Changed("x") && !cmd.Flags().Changed("y")
-			if hit, aerr := placeSchNote(pinnedCfg, win, docUUID, zoneRef, content, fontSize, auto, &x, &y); aerr != nil {
+			if hit, aerr := placeSchNote(pinnedCfg, win, docUUID, zoneRef, &content, fontSize, auto, &x, &y); aerr != nil {
 				return aerr
 			} else if hit != "" {
 				fmt.Fprintf(stderr, "warning: %s\n", hit)

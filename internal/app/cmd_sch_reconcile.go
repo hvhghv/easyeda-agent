@@ -149,6 +149,15 @@ func runSchReconcile(cfg *appConfig, window string, asJSON bool, stdout, stderr 
 	}
 
 	rep := schReconcileReport{OK: true}
+	// **同一个块实例可能登记成多个功能子群**(USB 口 / ESD / 桥芯片…),对账前先按
+	// (blockId, instance) 合并 role→位号:块的 internal_nets 是跨子群的,拿单个子群
+	// 的部分映射去解析,另一头会被判成 unresolved —— 那是合并没做,不是电路有问题。
+	type inst struct {
+		blockID, instance string
+	}
+	merged := map[inst]map[string]string{}
+	order := []inst{}
+	labels := map[inst][]string{}
 	for _, g := range groups {
 		if g == nil {
 			continue
@@ -157,18 +166,30 @@ func runSchReconcile(cfg *appConfig, window string, asJSON bool, stdout, stderr 
 			rep.Unprovenant = append(rep.Unprovenant, describeSchGroup(g))
 			continue
 		}
-		blk, ok, berr := blocks.Get(g.BlockID)
+		k := inst{g.BlockID, g.Instance}
+		if merged[k] == nil {
+			merged[k] = map[string]string{}
+			order = append(order, k)
+		}
+		for r, d := range g.Roles {
+			merged[k][r] = d
+		}
+		labels[k] = append(labels[k], describeSchGroup(g))
+	}
+	for _, k := range order {
+		blk, ok, berr := blocks.Get(k.blockID)
+		label := strings.Join(labels[k], " + ")
 		if berr != nil || !ok {
-			rep.Unprovenant = append(rep.Unprovenant, describeSchGroup(g)+"(块库里没有 "+g.BlockID+")")
+			rep.Unprovenant = append(rep.Unprovenant, label+"(块库里没有 "+k.blockID+")")
 			continue
 		}
 		nets := bslBlockNets(blk)
-		diffs := reconcileGroupNets(nets, g.Roles, liveNets, pinNumbers)
+		diffs := reconcileGroupNets(nets, merged[k], liveNets, pinNumbers)
 		for i := range diffs {
-			diffs[i].Group, diffs[i].BlockID = describeSchGroup(g), g.BlockID
+			diffs[i].Group, diffs[i].BlockID = label, k.blockID
 		}
 		rep.Groups = append(rep.Groups, schReconcileGroup{
-			Group: describeSchGroup(g), BlockID: g.BlockID, Nets: len(nets), Diffs: diffs})
+			Group: label, BlockID: k.blockID, Nets: len(nets), Diffs: diffs})
 		if len(diffs) > 0 {
 			rep.OK = false
 		}
