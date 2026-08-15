@@ -242,10 +242,17 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
    局部复查仍可直接用 `sch layout-lint` / `sch check` / `sch bridge-check` / `sch drc` 单命令
    (它们原样保留),但**交付门走 gate**。窗口不在前台时 `--skip drc` 先过前三关。
 
-2. **设计意图门** `easyeda sch read --doc <page>`
-   - 新设计逐项对照 spec；整理已连线页面时对照修改前保存的 `DESIGNATOR.pin → net` 黄金表与显式 NC 集合。任何差异都先修复，不能把“布局变化”变成静默改网。
-   - 这道门 gate **不管** —— 它是语义对账,机器判不了「接对了没有」,只能判「接得合不合法」。
-   - 可再跑 `scripts/lint.sh <project>` 做数据 lint，但它不替代上面的活体门。
+2. **设计意图门(已机械化)** `easyeda sch reconcile`
+   - 判「**接对了没有**」——机械门只判「接得合不合法」。
+   - 凡是 `sch block-apply` 落地的模块,块库里写着它的 `internal_nets`,虚拟组记着这一实例的
+     **role→位号**,所以任何时候都能**从块库重新推导本该怎么连**并与活体网表逐条对账。
+     判据是**连通性不是网名**(实例网名 `<INSTANCE>_N<i>` 与 `--bind` 重绑的边界网名都会变,
+     「这几个引脚必须在同一张网上」不会变)。三类差异:`split`(本该同网的分散在多张网 = 真缺陷)、
+     `missing`(没连上)、`unresolved`(块数据与实际器件对不上)。有差异非零退出,可当门禁。
+   - **手工搭的组没有拓扑来源**,命令会如实列出「对不了账」而不是假装通过 —— 那部分仍需
+     `easyeda sch read --doc <page>` 人工对照 spec / 修改前保存的 `DESIGNATOR.pin → net` 黄金表
+     与显式 NC 集合;任何差异都先修复,不能把「布局变化」变成静默改网。
+   - 可再跑 `scripts/lint.sh <project>` 做数据 lint,但它不替代上面的活体门。
 - ⚠️ **判状态看数据(`sch list` / `sch gate`),不看截图**(API 改动后画布可能不重绘 → 截图 stale)。
 
 ### S6 — 调整闭环(立刻调,再验)

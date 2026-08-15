@@ -309,6 +309,13 @@ type Group struct {
 	// 平台**不提供矩形/文本的枚举接口**(只能创建,不能列出),所以它们的身份只能
 	// 由我们自己记住 —— 不记就无法在重排时删掉上一次画的框,画一次多一层。
 	Annotations []string `json:"annotations,omitempty"`
+	// BlockID / Roles 记住这个组是**从哪个块实例化**的、每个 role 落成了哪个位号。
+	//
+	// 有了它,`sch reconcile` 才能在任何时候从块库重新推导「本该怎么连」并与活体网表
+	// 对账 —— 否则「接对了没有」只能靠人肉核对(design-flow S5 的设计意图门此前正是
+	// 唯一没有机械判据的一步)。位号取落地回读值而不是配方 role:place 会 remap(#144)。
+	BlockID string            `json:"blockId,omitempty"`
+	Roles   map[string]string `json:"roles,omitempty"` // ROLE → DESIGNATOR
 }
 
 // GroupsForPage returns one document's persistent groups (nil when none).

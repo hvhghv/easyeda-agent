@@ -1188,11 +1188,19 @@ func bapRegisterGroup(cfg *appConfig, window string, plan bapPlan, man *bapManif
 	_ = pinned
 	_ = win
 	name := bapGroupName(plan)
+	roles := map[string]string{}
+	for _, p := range plan.Placements {
+		if r, d := strings.TrimSpace(p.Role), strings.TrimSpace(p.Designator); r != "" && d != "" {
+			roles[r] = strings.ToUpper(d)
+		}
+	}
 	next, g, cerr := groupsCreate(groups, name, members)
 	if cerr != nil {
 		fmt.Fprintf(stderr, "warn: 归组跳过(%v)—— 器件与连线均已落地,上层布局会把它们当散件\n", cerr)
 		return
 	}
+	// 拓扑来源:记下块 id 与 role→位号,`sch reconcile` 据此重新推导应有连接并对账。
+	g.BlockID, g.Roles = plan.BlockID, roles
 	if serr := saveSchGroups(st, docUUID, next); serr != nil {
 		fmt.Fprintf(stderr, "warn: 归组未能落盘(%v)—— 器件与连线均已落地;可手工补登:easyeda sch group create --name %q --members %s\n",
 			serr, name, strings.Join(members, ","))

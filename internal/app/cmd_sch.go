@@ -1585,6 +1585,10 @@ combine it with neither --all-pages (inactive-page data is shallow) nor
 		sch.AddCommand(c)
 	}
 
+	// ── reconcile ─────────────────────────────────────────────────────────
+	// S5「设计意图门」的机械化:从块库重推应有连接,与活体网表对账。
+	sch.AddCommand(newSchReconcileCmd(cfg, &window, stdout, stderr))
+
 	// ── clusters ──────────────────────────────────────────────────────────
 	// L1 虚拟组判据(器件 + 它自己的 marker/桩线),核心在 cmd_sch_clusters.go。
 	sch.AddCommand(newSchClustersCmd(cfg, &window, stdout, stderr))
