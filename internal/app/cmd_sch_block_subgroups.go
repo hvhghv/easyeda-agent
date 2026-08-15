@@ -170,8 +170,23 @@ func bapSubgroupsOf(plan bapPlan) []bslSubgroup {
 // 保留给它真正独有的职责:布局**之前**给 autolayout 指定模块该落在纸面的哪一格
 // (那时件还没放,谈不上虚拟组)。
 func schGroupModules(cfg *appConfig, window, docUUID string) map[string]*schZoneClaim {
-	_, _, _, _, st, groups, err := loadSchGroupsContext(cfg, window)
-	if err != nil || st == nil || len(groups) == 0 {
+	_, _, ctxDoc, _, st, _, err := loadSchGroupsContext(cfg, window)
+	if err != nil || st == nil {
+		return nil
+	}
+	if docUUID == "" {
+		docUUID = ctxDoc
+	}
+	return schGroupModulesFromState(st, docUUID)
+}
+
+// schGroupModulesFromState 是纯核:把一页的持久虚拟组投影成模块表。无 I/O,可单测。
+//
+// 区名取组名**末段**(`ch340c_usb_serial(U3)/J_USB` → `J_USB`),与 `sch note --zone`
+// 的写回口径必须一致 —— 读得到的区名要写得回去(见 findSchGroupByZoneName)。
+func schGroupModulesFromState(st *pcbStageState, docUUID string) map[string]*schZoneClaim {
+	groups := st.GroupsForPage(docUUID)
+	if len(groups) == 0 {
 		return nil
 	}
 	out := map[string]*schZoneClaim{}
@@ -181,12 +196,39 @@ func schGroupModules(cfg *appConfig, window, docUUID string) map[string]*schZone
 		}
 		name := g.Name
 		if i := strings.LastIndex(name, "/"); i >= 0 && i+1 < len(name) {
-			name = name[i+1:] // ch340c_usb_serial(C7)/J_USB → J_USB
+			name = name[i+1:]
 		}
 		if name == "" {
 			name = g.ID
 		}
-		out[name] = &schZoneClaim{Parts: append([]string(nil), g.Members...)}
+		out[name] = &schZoneClaim{
+			Parts: append([]string(nil), g.Members...),
+			// 说明的归属也在组上 —— 画框要把登记的说明 fold 进去,zone move 要带着它走,
+			// 两者读的都是 claim.NoteIDs,所以在这里把组的说明投影过来,读路径就只有一条。
+			NoteIDs: append([]string(nil), g.NoteIDs...),
+		}
 	}
 	return out
+}
+
+// loadSchZoneModules 是「这一页有哪些功能模块、各由哪些件组成」的**唯一读入口**:
+// 虚拟组优先,没有组才回落到 `sch zones set` 的认领。
+//
+// 为什么必须收敛成一个函数:`computePartitionPlan` 改成组优先之后,另有六处
+// (note 登记 / layout-score 模块围栏 / sheet-tidy / zone-tidy / zone-move /
+// zone-relayout)仍直接读认领表 —— 而 `block-apply` 按设计**不写**认领(那正是被砍掉的
+// 第二份副本),于是块驱动的页在这六条命令里全都报「没有 zone 认领」。同一个问题
+// (归属从哪来)有两份答案,就一定会有一半走错。
+//
+// 例外只有一个:`sch autolayout --engine template` 要的是**格位**(left-top…),
+// 那是布局前的落位目标,那时件还没放下去、谈不上虚拟组,只能读认领。
+func loadSchZoneModules(cfg *appConfig, window, docUUID string) (map[string]*schZoneClaim, string, error) {
+	if zones := schGroupModules(cfg, window, docUUID); len(zones) > 0 {
+		project := ""
+		if _, _, _, p, _, _, err := loadSchGroupsContext(cfg, window); err == nil {
+			project = p
+		}
+		return zones, project, nil
+	}
+	return loadSchZoneClaimsForPage(cfg, window, docUUID)
 }

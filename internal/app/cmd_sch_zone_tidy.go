@@ -720,7 +720,7 @@ func zoneTidyContentBand(boxes []layoutBBox, pad float64) (layoutBBox, bool) {
 // 可用区名。
 func findZoneTidyClaim(zones map[string]*schZoneClaim, ref string) (string, *schZoneClaim, error) {
 	if len(zones) == 0 {
-		return "", nil, fmt.Errorf("no schematic zone claims on this page — run `sch zones set --spec <s0-spec.json>` first")
+		return "", nil, fmt.Errorf("no functional modules on this page — 块驱动的页用 `sch block-apply` 自动归组;手工页 `sch group create` / `sch zones set`")
 	}
 	if zc := zones[ref]; zc != nil {
 		return ref, zc, nil
@@ -775,7 +775,7 @@ type zoneTidyReport struct {
 // zoneTidyGroupRefs(--deep 用):区内持久化组的 id 列表(确定性升序)。散件没有
 // 组内布局可做,跳过;跨区组由 zoneTidyUnits 的既有校验拒绝。
 func zoneTidyGroupRefs(pinned *appConfig, win, docUUID, zoneRef string) ([]string, error) {
-	zones, project, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +806,7 @@ func zoneTidyGroupRefs(pinned *appConfig, win, docUUID, zoneRef string) ([]strin
 // 第三个返回值 = 计划期标记的双认领桩线/旗 id 集,--apply 侧用它做差集过滤,
 // 保证执行与计划的「原地不动」承诺一致。
 func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap float64, stderr io.Writer) (*zoneTidyReport, map[string]zoneTidyUnit, map[string]bool, error) {
-	zones, project, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
 	if err != nil {
 		return nil, nil, nil, err
 	}

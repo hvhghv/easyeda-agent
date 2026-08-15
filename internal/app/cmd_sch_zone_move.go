@@ -511,12 +511,12 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	if err != nil {
 		return err
 	}
-	zones, project, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
 	if err != nil {
 		return err
 	}
 	if len(zones) == 0 {
-		return fmt.Errorf("工程 %q 本页(%s)没有 zone 认领 — 先 `sch zones set --spec <s0-spec.json>`", project, docUUID)
+		return fmt.Errorf("工程 %q 本页(%s)没有功能模块 — 块驱动的页用 `sch block-apply` 自动归组;手工页 `sch group create` 或 `sch zones set`", project, docUUID)
 	}
 	zoneName, claim, err := findZoneMoveClaim(zones, zoneRef)
 	if err != nil {

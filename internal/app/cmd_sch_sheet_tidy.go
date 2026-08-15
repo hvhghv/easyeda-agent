@@ -159,14 +159,14 @@ func newSchSheetTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 				return fmt.Errorf("no sheet bbox on the active page")
 			}
 			keepout, _ := titleBlockKeepout(sheetBB)
-			zonesMap, _, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+			zonesMap, _, err := loadSchZoneModules(pinned, win, docUUID)
 			if err != nil {
 				return err
 			}
 			modules := modulesFromClaims(zonesMap, comps, nil)
 			foldZoneNotesIntoModules(pinned, win, docUUID, zonesMap, modules)
 			if len(modules) == 0 {
-				return fmt.Errorf("no zone modules resolved(先 `sch zones set` 认领)")
+				return fmt.Errorf("no zone modules resolved(块驱动的页用 `sch block-apply` 自动归组;手工页 `sch group create` 或 `sch zones set` 认领)")
 			}
 			pk := planSheetTidy(modules, *sheetBB, keepout, opts, hGap, vGap)
 			for _, mv := range pk.Moves {

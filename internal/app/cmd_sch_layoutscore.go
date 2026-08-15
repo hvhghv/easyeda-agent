@@ -994,15 +994,15 @@ func newSchLayoutScoreCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 	return c
 }
 
-// loadSchModuleClaims 把当前页的 sch zones claims(workflow state 按 documentUuid
-// 存的 模块→位号 认领)摊平成 位号(大写)→模块名,给核心推导做模块围栏。
+// loadSchModuleClaims 把当前页的功能模块(虚拟组优先,回落 zone 认领 ——
+// loadSchZoneModules 是唯一读入口)摊平成 位号(大写)→模块名,给核心推导做模块围栏。
 // 空表返回 nil(= 未分区,coreOf 走全页兜底 + degraded 声明)。
 func loadSchModuleClaims(cfg *appConfig, window string) (map[string]string, error) {
 	pinnedCfg, win, docUUID, err := pinZonePage(cfg, window)
 	if err != nil {
 		return nil, err
 	}
-	zones, _, err := loadSchZoneClaimsForPage(pinnedCfg, win, docUUID)
+	zones, _, err := loadSchZoneModules(pinnedCfg, win, docUUID)
 	if err != nil {
 		return nil, err
 	}

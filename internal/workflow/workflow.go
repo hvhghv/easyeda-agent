@@ -320,6 +320,13 @@ type Group struct {
 	// 判成 unresolved。
 	Instance string            `json:"instance,omitempty"`
 	Roles    map[string]string `json:"roles,omitempty"` // ROLE → DESIGNATOR(本子群的)
+	// NoteIDs 是登记给这个组的电路说明文本(`sch note --zone <组名>`)。
+	//
+	// 与 Annotations 分开存是有意的:Annotations 是**我们画的**框和区名,重排时要
+	// 先删再画;说明是**内容**,重排只该跟着搬。语义同 SchZoneClaim.NoteIDs ——
+	// 组成为模块归属的单一事实来源后,说明的归属也必须跟着落在组上,否则块驱动的页
+	// 根本没有可写回的对象(认领表是空的)。
+	NoteIDs []string `json:"noteIds,omitempty"`
 }
 
 // GroupsForPage returns one document's persistent groups (nil when none).

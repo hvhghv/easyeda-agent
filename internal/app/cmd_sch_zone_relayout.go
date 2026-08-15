@@ -168,13 +168,13 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	if err != nil {
 		return err
 	}
-	zones, _, err := loadSchZoneClaimsForPage(pinned, win, docUUID)
+	zones, _, err := loadSchZoneModules(pinned, win, docUUID)
 	if err != nil {
 		return err
 	}
 	claim := zones[zoneName]
 	if claim == nil || len(claim.Parts) == 0 {
-		return fmt.Errorf("zone %q 无认领件(先 `sch zones set`)", zoneName)
+		return fmt.Errorf("zone %q 无成员件(块页看虚拟组 `sch group list`,手工页 `sch zones set`)", zoneName)
 	}
 
 	comps, extras, wires, err := tidyReadScene(pinned, win, docUUID)

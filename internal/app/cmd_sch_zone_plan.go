@@ -601,14 +601,9 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	// (J_USB / D_ESD / U…),那就是「哪几件是一个功能单元」。让 `sch zones set` 再抄一份
 	// 成员列表只会多一处会漂移的副本 —— 件被 group-move 挪走或删掉,认领不会跟着变。
 	// 没有组时才回落到 zone 认领:手工搭的页,或只想给 autolayout 指定落位目标格的场景。
-	zones := schGroupModules(cfg, window, docUUID)
-	project := ""
-	if len(zones) == 0 {
-		var err error
-		zones, project, err = loadSchZoneClaimsForPage(cfg, window, docUUID)
-		if err != nil {
-			return partitionPlan{}, nil, err
-		}
+	zones, project, err := loadSchZoneModules(cfg, window, docUUID)
+	if err != nil {
+		return partitionPlan{}, nil, err
 	}
 	if len(zones) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("%q 这一页既没有虚拟组也没有 zone 认领 —— 用 `sch block-apply` 落块(自动按功能子群归组),或手工 `sch group create` / `sch zones set`", project)

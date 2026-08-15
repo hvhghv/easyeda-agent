@@ -134,12 +134,34 @@ default is: one short note per module, parked just below/beside its zone frame.
 	return c
 }
 
-// registerSchZoneNote appends a created note's primitiveId to the zone claim's
-// NoteIDs (idempotent) and persists the workflow state.
+// registerSchZoneNote 把新建说明的 primitiveId 记到它所属的功能模块名下(幂等)。
+//
+// **写回要分叉,读不用**:读走 loadSchZoneModules(虚拟组优先),但写必须落到数据
+// 真正的家 —— 命中虚拟组就写 Group.NoteIDs,否则写 zone 认领。schGroupModules
+// 现场构造出来的 claim 是投影,往它上面写会随函数返回一起蒸发,而块驱动的页
+// 认领表本来就是空的,那样等于说明永远登记不上。
 func registerSchZoneNote(cfg *appConfig, window, docUUID, zoneRef, textID string) error {
-	zones, project, err := loadSchZoneClaimsForPage(cfg, window, docUUID)
+	pinned, win, ctxDoc, project, st, groups, gerr := loadSchGroupsContext(cfg, window)
+	if gerr == nil && ctxDoc == docUUID {
+		if g := findSchGroupByZoneName(groups, zoneRef); g != nil {
+			for _, id := range g.NoteIDs {
+				if id == textID {
+					return nil // 幂等
+				}
+			}
+			g.NoteIDs = append(g.NoteIDs, textID)
+			return saveSchGroups(st, docUUID, groups)
+		}
+	}
+	_ = pinned
+	_ = win
+	// 回落到 zone 认领(手工搭的页)。
+	zones, proj, err := loadSchZoneClaimsForPage(cfg, window, docUUID)
 	if err != nil {
 		return err
+	}
+	if project == "" {
+		project = proj
 	}
 	var claim *schZoneClaim
 	for name, zc := range zones {
@@ -149,7 +171,7 @@ func registerSchZoneNote(cfg *appConfig, window, docUUID, zoneRef, textID string
 		}
 	}
 	if claim == nil {
-		return fmt.Errorf("zone %q has no claim on this page (`sch zones status`)", zoneRef)
+		return fmt.Errorf("本页没有名为 %q 的功能模块 —— `sch group list` 看虚拟组,`sch zones status` 看认领", zoneRef)
 	}
 	for _, id := range claim.NoteIDs {
 		if id == textID {
@@ -157,10 +179,29 @@ func registerSchZoneNote(cfg *appConfig, window, docUUID, zoneRef, textID string
 		}
 	}
 	claim.NoteIDs = append(claim.NoteIDs, textID)
-	st, err := loadPcbStageState(project)
+	stc, err := loadPcbStageState(project)
 	if err != nil {
 		return err
 	}
-	st.SetSchZonesForPage(docUUID, zones)
-	return savePcbStageState(st)
+	stc.SetSchZonesForPage(docUUID, zones)
+	return savePcbStageState(stc)
+}
+
+// findSchGroupByZoneName 按**区名**找虚拟组:组名可能带块实例前缀
+// (`ch340c_usb_serial(U3)/J_USB`),而用户写的是末段 `J_USB` —— 与
+// schGroupModules 的取名口径保持一致,否则读得到的区名写不回去。
+func findSchGroupByZoneName(groups []*schGroup, zoneRef string) *schGroup {
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		name := g.Name
+		if i := strings.LastIndex(name, "/"); i >= 0 && i+1 < len(name) {
+			name = name[i+1:]
+		}
+		if strings.EqualFold(name, zoneRef) || strings.EqualFold(g.Name, zoneRef) || strings.EqualFold(g.ID, zoneRef) {
+			return g
+		}
+	}
+	return nil
 }
