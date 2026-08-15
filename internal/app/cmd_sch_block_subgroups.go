@@ -162,3 +162,31 @@ func bapSubgroupsOf(plan bapPlan) []bslSubgroup {
 	}
 	return fallback
 }
+
+// schGroupModules 把这一页的持久虚拟组当成分区模块 —— 组名去掉块实例前缀当区名。
+//
+// 为什么是它而不是 `sch zones set` 的认领:归组时已经确定了「哪几件是一个功能单元」,
+// 认领再抄一份就是**两个事实来源**,而副本不会跟着 group-move / 删件更新。zone 认领
+// 保留给它真正独有的职责:布局**之前**给 autolayout 指定模块该落在纸面的哪一格
+// (那时件还没放,谈不上虚拟组)。
+func schGroupModules(cfg *appConfig, window, docUUID string) map[string]*schZoneClaim {
+	_, _, _, _, st, groups, err := loadSchGroupsContext(cfg, window)
+	if err != nil || st == nil || len(groups) == 0 {
+		return nil
+	}
+	out := map[string]*schZoneClaim{}
+	for _, g := range groups {
+		if g == nil || len(g.Members) == 0 {
+			continue
+		}
+		name := g.Name
+		if i := strings.LastIndex(name, "/"); i >= 0 && i+1 < len(name) {
+			name = name[i+1:] // ch340c_usb_serial(C7)/J_USB → J_USB
+		}
+		if name == "" {
+			name = g.ID
+		}
+		out[name] = &schZoneClaim{Parts: append([]string(nil), g.Members...)}
+	}
+	return out
+}

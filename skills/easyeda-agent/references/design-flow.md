@@ -128,9 +128,12 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
   这里只是把已定的分区落成具体矩形。分区/信号流向规则见 conventions 的
   `schematic-layout-conventions.md`;zone 必须落在 S1 读到的 sheet 可用区内。
 - **认领 + 画框**(动作细节见 [`schematic.md`](./schematic.md) 的 *Functional frames + text labels*):
-  1. `easyeda sch zones set --spec <s0-spec.json>` 把分区**持久化**进项目状态 ——
-     此后 `sch layout-lint` 自动多一条 zone-violation(件落在自己分区外),
-     `sch zones status` 随时查认领与活体违规;
+  1. **模块归属不用手工认领** —— `sch block-apply` 落块时已按**功能子群**把件封成虚拟组
+     (`flow` 的每一级 + 跟着它的 attach 去耦 / pair 并列组),`zone-plan` 直接读组:
+     那是「哪几件是一个功能单元」的**单一事实来源**,不再抄第二份。
+     `sch zones set` 只在两种情况下才需要:**手工搭的页**(没有块、没有组),
+     或**布局之前**给 `sch autolayout` 指定模块该落在纸面的哪一格(那时件还没放,
+     谈不上虚拟组)—— 它的 `zone` 名(left/center/right…)只有这一个消费者了。
   2. `easyeda sch zone-plan --json` 先出方案(纯计算、不落笔,六项 validation 必须全 0),
      再 `easyeda sch zone-draw` 落笔。**分区框一律数据驱动** —— 从活体模块 bbox 反推,
      按模块之间的自然空隙切分整纸、给右下角图签留缺口。固定九宫格模式已废弃
