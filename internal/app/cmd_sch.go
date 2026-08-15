@@ -189,7 +189,14 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 					if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
 						return fmt.Errorf("invalid --data json: %w", err)
 					}
-					payload["titleBlockData"] = data
+					full, needShow, ferr := schTitleBlockMerge(cfg, window, data)
+					if ferr != nil {
+						return ferr
+					}
+					payload["titleBlockData"] = full
+					if needShow && !hide {
+						payload["showTitleBlock"] = true // 图签还没显示,顺手打开
+					}
 				}
 				if len(payload) == 0 {
 					return fmt.Errorf("pass at least one of --show / --hide / --data")

@@ -688,6 +688,7 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 	if data == nil {
 		return nil
 	}
+	shown, _ := res.Result["showTitleBlock"].(bool)
 	valueOf := func(k string) string {
 		m, _ := data[k].(map[string]any)
 		if m == nil {
@@ -696,16 +697,22 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 		return strings.TrimSpace(asString(m["value"]))
 	}
 	var missing []string
-	// 必填三项:标题 / 设计者 / 板名。版本、日期平台会自己填,不强求。
+	// 只判**可写**的必填项。`@` 开头的是系统派生项(@Board Name / @Project Name /
+	// @Page No…),来自工程与板子对象,平台按「无法识别的明细项将被忽略」静默丢弃 ——
+	// 要求它等于要求一件做不到的事(实测写 `@Board Name` 返回 true 但纹丝不动)。
 	if valueOf("Name") == "" {
 		missing = append(missing, "Name(图纸标题)")
 	}
 	if valueOf("Drawed") == "" {
 		missing = append(missing, "Drawed(设计者)")
 	}
-	if b := valueOf("@Board Name"); b == "" || b == "Board1" {
-		missing = append(missing, "@Board Name(仍是默认 Board1)")
+	if valueOf("Description") == "" {
+		missing = append(missing, "Description(图纸说明)")
 	}
+	// **不判 showTitleBlock**:平台两个读接口对它各说各话 —— `getCurrentSchematicPageInfo()`
+	// 报 true 而 `titleblock.get` 报 false(2026-08-15 实测,同一页同一时刻)。
+	// 建立在互相矛盾的读数上的判据只会误报,留给人眼。
+	_ = shown
 	if len(missing) == 0 {
 		return nil
 	}
@@ -713,7 +720,7 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 		Type:    "missing-titleblock",
 		Level:   "warn",
 		Count:   len(missing),
-		Message: fmt.Sprintf("图签未填:%s — 交付图必须能认领(`sch titleblock-set`)", strings.Join(missing, "、")),
+		Message: fmt.Sprintf("图签未填:%s — 交付图必须能认领(`sch titleblock --data '{\"Name\":\"…\",\"Drawed\":\"…\"}'`)", strings.Join(missing, "、")),
 	}
 }
 
