@@ -733,6 +733,20 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 //
 // 现在:框看**我们自己的绘制记录**(平台不提供矩形枚举接口,只能由工具记账),
 // 说明看「自由文本减去区名标签」。两者各报各的。
+// schCircuitNoteCount 是「这一页有几条电路说明」的**唯一口径**:自由文本总数减去
+// 分区框的区名标签。
+//
+// 抽出来是因为它被算过两遍还算岔了(2026-08-16):`sch check` 用的是这个减法,
+// 而 `sch status` 读的是 frame 记账里的 Texts —— 那本身就是区名标签,于是真机上
+// 明明加了四条 note,status 照报「0 页有电路说明」。同一个概念只要有第二处实现,
+// 迟早会漂;靠注释提醒不管用,得让它物理上只有一份。
+func schCircuitNoteCount(freeTexts, zoneLabels int) int {
+	if n := freeTexts - zoneLabels; n > 0 {
+		return n
+	}
+	return 0
+}
+
 func partitionFindingFor(parts, frameRects, labelTexts, textCount int) []*checkFinding {
 	if parts < schPartitionMinParts {
 		return nil
@@ -746,7 +760,7 @@ func partitionFindingFor(parts, frameRects, labelTexts, textCount int) []*checkF
 			Message: fmt.Sprintf("%d 个器件的页没有功能分区框 — 铁律#15:`sch zones set` → `sch zone-draw`(整纸版式 `--mode partition`);交付前必须有", parts),
 		})
 	}
-	if notes := textCount - labelTexts; notes <= 0 {
+	if notes := schCircuitNoteCount(textCount, labelTexts); notes == 0 {
 		out = append(out, &checkFinding{
 			Type:    "missing-note",
 			Level:   "warn",

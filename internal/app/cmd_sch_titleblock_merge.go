@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // tbPreserve 原样回传一个**没被修改**的明细项,但把数字型字符串还原成数字。
@@ -133,36 +132,27 @@ func schTitleBlockMerge(cfg *appConfig, window string, patch map[string]any) (ma
 // 判据不是「命令返回了什么」而是「画布还剩什么」—— 平台会在返回 true 的同时
 // 把图框关掉,只有回读能发现。返回非 nil 表示画布已损坏,调用方应当作失败。
 func warnIfSheetLost(cfg *appConfig, window string, stderr io.Writer) error {
-	// **读不到要重试一次再下结论**。写图签会让平台重建图框,紧接着的那一读常常
-	// 拿不到 sheet 图元 —— 真机实测:同一条命令首次写入(值真的变了)时报「图框没了」,
-	// 而幂等重写(平台不重建)时一路通过,图纸自始至终好好的。
-	//
-	// 这条误报的代价特别大:它会让人照提示去执行「修复」命令,而那次整包回传
-	// 才真有可能把图框写坏 —— 判据把好板子推向危险操作,比不判还糟。
-	// 同类:connect_pin 把「读得太早」当成「平台丢了请求」。
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt > 0 {
-			time.Sleep(400 * time.Millisecond)
-		}
+	// 走 settleRead:写图签会让平台重建图框,紧接着那一读常常拿不到 sheet 图元。
+	// 这条误报的代价特别大 —— 它会让人照提示去执行「整包回传写回 Border/Title
+	// Block」,而那才是唯一真能把图框写坏的操作:判据把好板子推向危险操作。
+	_, ok := settleRead(func() (bool, bool) {
 		res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
 		if err != nil {
-			if attempt > 0 {
-				fmt.Fprintf(stderr, "warning: 写图签后读不回页面几何(%v)—— 无法自检图框是否还在\n", err)
-			}
-			continue
+			return false, false
 		}
 		comps, perr := parseLayoutComps(res.Result)
 		if perr != nil {
-			if attempt > 0 {
-				fmt.Fprintf(stderr, "warning: 写图签后页面几何解析失败(%v)—— 无法自检图框是否还在\n", perr)
-			}
-			continue
+			return false, false
 		}
 		for _, c := range comps {
 			if c.ComponentType == "sheet" && c.BBox != nil {
-				return nil
+				return true, true
 			}
 		}
+		return false, false
+	})
+	if ok {
+		return nil
 	}
 	return fmt.Errorf("写图签后本页找不到图纸边框(sheet 图元的 bbox)—— 图框/明细表很可能被整包回传关掉了。" +
 		"修复:`easyeda sch titleblock --data '{\"Title Block\":{\"value\":1},\"Border\":{\"value\":1}}'`," +
@@ -196,23 +186,18 @@ func tbRequestedKeys(patch map[string]any) []string {
 // 判据换成**画布的最终状态**:用户要的内容在不在图签上。这与「落地即判定」
 // 是同一条原则 —— 平台的 applied 计数是过程量,画布才是结果。
 func tbPatchLanded(cfg *appConfig, window string, patch map[string]any) (bool, []string) {
-	// **回读要重试一次**:写图签会让平台重建图签对象,紧接着的那一读常常还是
-	// 旧值 —— 真机实测,首次写入(值真的变了)复核不过,而幂等重写(平台不重建)
-	// 一路通过。把「读得太早」当成「没写进去」,与 warnIfSheetLost 是同一个坑。
-	var missing []string
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt > 0 {
-			time.Sleep(400 * time.Millisecond)
-		}
+	// 走 settleRead:写图签会让平台重建图签对象,首读常常还是旧值 —— 真机实测,
+	// 首次写入(值真的变了)复核不过,而幂等重写(平台不重建)一路通过,症状正好反着。
+	missing, ok := settleRead(func() ([]string, bool) {
 		res, err := requestAction(cfg, "schematic.titleblock.get", window, map[string]any{})
 		if err != nil {
-			continue
+			return nil, false
 		}
 		full, _ := res.Result["titleBlockData"].(map[string]any)
 		if full == nil {
-			continue
+			return nil, false
 		}
-		missing = nil
+		var miss []string
 		for _, k := range tbRequestedKeys(patch) {
 			want := patch[k]
 			if m, ok := want.(map[string]any); ok {
@@ -220,12 +205,10 @@ func tbPatchLanded(cfg *appConfig, window string, patch map[string]any) (bool, [
 			}
 			cur, _ := full[k].(map[string]any)
 			if cur == nil || fmt.Sprint(cur["value"]) != fmt.Sprint(want) {
-				missing = append(missing, k)
+				miss = append(miss, k)
 			}
 		}
-		if len(missing) == 0 {
-			return true, nil
-		}
-	}
-	return false, missing
+		return miss, len(miss) == 0
+	})
+	return ok, missing
 }

@@ -349,10 +349,10 @@ func collectSchPageFacts(cfg *appConfig, window, docUUID, name string, st *pcbSt
 		}
 	}
 	// 电路说明 = 自由文本总数 − 区名标签(与 sch check 的 missing-note 同一把尺)。
+	// 口径与 `sch check` 的 missing-note **同一个函数**(schCircuitNoteCount),
+	// 不是"照着它再写一遍" —— 上一版正是各写各的,才会明明有四条说明却报 0。
 	if tres, terr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); terr == nil {
-		if n := schTextCount(tres.Result) - labels; n > 0 {
-			f.Notes = n
-		}
+		f.Notes = schCircuitNoteCount(schTextCount(tres.Result), labels)
 	}
 	// includeWires 让导线跟几何**同一次调用、同一次页校验**回来。
 	//
