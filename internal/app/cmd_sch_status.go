@@ -44,8 +44,12 @@ type schPageFacts struct {
 	Wires     int    `json:"wires"`
 	Groups    int    `json:"groups"`
 	Frames    int    `json:"frames"`
-	Notes     int    `json:"notes"` // 分区说明文本(区名标签不算)
-	Err       string `json:"error,omitempty"`
+	// Notes 是**电路说明**的条数,口径与 `sch check` 的 missing-note 规则一致:
+	// 页上自由文本总数减去分区框的区名标签。首版错读成 frame 记账里的 Texts
+	// (那是区名标签),于是真机上明明加了 4 条 note,status 照报「0 页有电路说明」
+	// —— 同一件事两个判据两把尺,又一次。
+	Notes int    `json:"notes"`
+	Err   string `json:"error,omitempty"`
 	// WiresErr 单独记:导线读失败与「真的没有导线」是两件事,合成 0 就会把
 	// 读取故障渲染成「还没连线」——本命令刚因为吞掉这个错误报过一次假缺陷。
 	WiresErr string `json:"wiresError,omitempty"`
@@ -311,7 +315,17 @@ func schStatusNext(verdicts []schStageVerdict, pages []schPageFacts) (next, why 
 			}
 			return "easyeda sch sheet-geometry --json", "S1 未完:" + v.Detail
 		case "S2":
-			return "easyeda sch zone-plan --json  →  easyeda sch zone-draw", "S2 未完:" + v.Detail
+			// 空画布上没有框可画 —— 先落块(block-apply 同时完成 S2 归组 + S3 摆放
+			// + S4 块内布线)。首跑真机时这里直接指 zone-plan,而画布上一个器件都
+			// 没有:下一步必须是**当前状态下真能执行**的那条,否则它只是把流程图
+			// 念了一遍。
+			for _, p := range pages {
+				if p.Reachable && p.Parts > 0 {
+					return "easyeda sch zone-plan --json  →  easyeda sch zone-draw", "S2 未完:" + v.Detail
+				}
+			}
+			return "easyeda blocks ls  →  easyeda sch block-apply <块> --instance <名>",
+				"S2/S3 未开始:画布还是空的,先落块(block-apply 自动归组 + 摆放 + 块内布线)"
 		case "S3":
 			return "easyeda sch block-apply <块> --instance <名>", "S3 未完:" + v.Detail
 		case "S4":
@@ -327,10 +341,17 @@ func schStatusNext(verdicts []schStageVerdict, pages []schPageFacts) (next, why 
 // 组/框来自按 documentUuid 索引的持久状态,与激活页无关。
 func collectSchPageFacts(cfg *appConfig, window, docUUID, name string, st *pcbStageState) schPageFacts {
 	f := schPageFacts{Name: name, DocUUID: docUUID, NamedWell: !schPlaceholderPageName(name)}
+	labels := 0
 	if st != nil {
 		f.Groups = len(st.GroupsForPage(docUUID))
 		if fr := st.SchZoneFrameIdsByPage[docUUID]; fr != nil {
-			f.Frames, f.Notes = len(fr.Rects), len(fr.Texts)
+			f.Frames, labels = len(fr.Rects), len(fr.Texts)
+		}
+	}
+	// 电路说明 = 自由文本总数 − 区名标签(与 sch check 的 missing-note 同一把尺)。
+	if tres, terr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); terr == nil {
+		if n := schTextCount(tres.Result) - labels; n > 0 {
+			f.Notes = n
 		}
 	}
 	// includeWires 让导线跟几何**同一次调用、同一次页校验**回来。
