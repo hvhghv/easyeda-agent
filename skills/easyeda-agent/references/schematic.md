@@ -235,6 +235,20 @@ on the already-connected pins, which `NetKnown=false` after a connector drop can
 detect). **Always run `sch check` right after a batch autoconnect** — its new
 `duplicate-net-marker` rule is the guard that catches those stacked markers.
 
+**平台会随机吞掉一个连接(stuck-at-99%),autoconnect 现在自己救一次。** 实测 2821 次
+connect_pin 里 57 次失败,其中 23 次是 netflag 卡在「请求被丢掉但平台不报错」——
+它是随机的,同一脚重发通常就成。所以失败后**重试一次,但只在连接器明确声明回滚
+之后**(netflag 失败时它会先删掉已建的桩线);`connector did not respond` 这类
+**状态未知**的失败绝不重试 —— 那可能只是我们没等到回应而对方已经建好了,重试会得到
+第二条桩线和第二面旗。被救回来的连接在报告里标 `retried`,**别忽略这个字段**:
+它是平台在变差还是变好的唯一现场证据。
+
+另外 connect_pin 用的是 **35s 专用预算**而非默认 20s:连接器内部最坏路径
+(wire 7s + 重试 0.25s + wire 重试 7s + netflag 7s = 21.25s)本来就超过 20s,
+默认预算会让 daemon 先于连接器放弃 —— 报「connector did not respond」而对方其实
+已经把线和旗建完了(实测 57 次失败里 17 次是这么来的)。**CLI 认为失败、画布上却有
+东西**,是最难查的那种不一致;所以重试判据宁可保守,也要先靠 `sch check` 兜底。
+
 ```bash
 # single pin by designator:pin (number OR name)
 easyeda sch autoconnect --pin U1:41 --kind gnd --net GND
