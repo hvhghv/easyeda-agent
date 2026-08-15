@@ -13,7 +13,7 @@
 
 深在某阶段想回看别阶段的约束/顺序,先扫这张目录定位(💾 = 该阶段过门后 save 检查点):
 
-- **原理图 S0–S6**:S0 设计方案书 · S1 图纸/分页 💾 · S2 模块编组 · S3 按组摆放 💾 · S4 通道布线 💾 · S5 校验门 · S6 调整闭环 💾 · 录制/演示模式
+- **原理图 S0–S6**:S0 设计方案书 · S1 图纸/分页 💾 · S2 模块编组 · S3 按组摆放 💾 · S4 通道布线 💾 · S5 校验门(gate 五关,含 clusters)· S6 调整闭环 💾 · 录制/演示模式
 - **PCB P0–P10**:P0 新板 · P1 导器件 · P2 摆放 · P3 板框 · P4 禁布区(靠前)· P5 丝印对齐(靠前)· P6 可布性门 · **P7 布线**(三档阶梯 + **P7.0 关键网先行** + **自动布线对话框清单** + P7.9 beautify)· P8 叠层+电源+铺铜 · P9 引脚级丝印/极性 · P10 DRC+check 门 💾 · 反模式
 
 ## 核心原则
@@ -95,22 +95,14 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
       "costTier": "standard"
     }
 
-  逐字段说明:
-  - `modules[]` — `name`/**`kind`**/`parts`/`page`/`zone`;S2 模块编组直接读 `page` + `zone`,不重新分区。**标准外设模块可直接引用电路块**:给该 module 记 `block`(如 `"block.ch340c_usb_serial"`),S3 摆放时照抄该块拓扑、只重绑 ports——先 `easyeda blocks ls` 看有没有现成块,能少写一整个模块的选型+接线。
-  - **`modules[].kind`(#167 新增)** — 受控功能域词汇,`flow` 里出现的就是这些值:`POWER` `MCU` `RF` `ANT` `IO` `ANALOG` `SENSOR` `STORAGE` `USB` `DEBUG` `PROTECTION` `POWER_MON` `OTHER`。为什么需要受控词汇:`name` 是自由文本,靠 name 匹配会在大小写和同义词上碎掉,而 P6 的 `flow-order` 维要把「模块质心沿轴的排序」与「spec 声明的顺序」对上。**没写 `kind` 时会拿 `name` 去词表碰一次**(老 spec 的 `name` 恰好常是 MCU/RF/IO),碰不上就报 WARN 且该模块不参与 flow-order。
-  - **`flow` / `flowAxis`(#167 新增)** — `flow` 是**有序**功能域列表,表达「电源 → 数字 → RF → 天线」这种信号流向意图;`flowAxis` = `x` | `y` | `auto`(默认 `auto` = 取板框长边,长边通常就是信号流方向)。**方向不强制**:板上从右到左走 POWER→ANT 与从左到右同样好(打分时正反都算取绝对值大的)。**没写 `flow` 时 `pcb layout-score` 的 flow-order 维会被标 skipped 而不是给满分**——「没测」和「测了满分」必须可区分。`flow` 里重复或不在词表里的阶段是 ERROR;声明了但板上没有对应模块的阶段是 WARN。
-  - `pages[]` — `name`/`sheet`(幅面,默认 `"A4"`)/`modules`;S1 分页直接读,不重新估算页数。
-  - `stackup` — `layers`(层数)/`groundStrategy`(`"plane"` = 单 GND 内电层,或 `"signal-zones-with-pour"` = 分区 pour + 桥地)/`innerLayers`;P8 叠层+电源+铺铜直接读,不重新选地策略。**兼容旧写法** `inner1`/`inner2`(会被归一成 `innerLayers`)。
-  - `assembly` — `profile`(`hand-solder` | `reflow`)/`side`(`top` | `both`);P2 的两个决策落盘处(仍需 `pcb stage set-assembly` 落进 workflow 状态,spec 只是意图正本)。
-  - `rf` — `parts`(RF/天线器件位号列表)/`keepoutLayers`(如 `"all"` 或具体层号数组);P4 禁布区直接读作用范围,不重新判断该不该禁、禁哪些层。
-  - `board` — 板框意图:客户给了尺寸/外形就原样记(如 `{"outline": "50x40mm"}`),**没给就写 `"compact"`(默认)**——紧凑是无信息时的正确目标(省板费+小体积),不要摊大饼;P1 落件与 P3 板框据此执行。**兼容旧写法**:直接写字符串 `"board": "compact"` 也能读。
-  - `interfaces[]` — `name` + **`ref`/`edge`/`facing`/`internal`/`plugWidthMm`(#167/#168 新增)** + 既有的 `orientation`:
-    - **`ref`** — 位号(`J1`/`USB1`…),把板级意图**钉到具体器件**上。没写 `ref` 的接口,#168 的连接器规则只能对它走启发式(报 INFO 而非 WARN),`pcb floorplan` 也不会为它钉边 —— 所以能写就写。
-    - **`edge`** — `left`|`right`|`top`|`bottom`|`any`;`pcb floorplan` 只把**显式声明了 `ref`+`edge`** 的连接器钉到板边(边序是装配体验,工具不猜)。
-    - **`facing`** — `user-facing`(用户插拔的对外口,外壳要开孔,理应占板外沿)| `internal`(只在箱内连线,如备份电池座/板间排针,占外沿就是浪费稀缺资源)| `any`(必须在某条边但哪条都行,如 RF 天线座)。**`"internal": true` 是 `facing:"internal"` 的简写**;两者矛盾(`internal:true` + `facing:"user-facing"`)是 ERROR。
-    - **`plugWidthMm`** — 插头护套包络宽的人工覆盖(块库查找表查不到、或手上有真插头量过时用)。
-    - **为什么这些非写不可**:「这个连接器对内还是对外」是**设计意图不是几何属性** —— 同一个 PH2.0-3P 座接箱内电芯是 internal、接箱外传感器就是 user-facing,铜箔再精确也推不出来。写了 spec → 判定升 WARN(板级决定可信);不写 → 只能靠启发式推定,只报 INFO。规范见 `pcb-design-rules.md` §3.5。
-  - `costTier` — 选型成本档位(如 `"standard"`/`"premium"`),`parts-select.py` 选型时参考。
+  **逐字段说明不在这里** —— 字段有 Go 类型 + 校验命令,散文抄一遍只会和代码漂移:
+  `easyeda spec show <file>` 看工具**实际读到的**归一化结果,`easyeda spec validate` 报哪写错了,
+  决策项的选项/坑/推荐见 [`design-decisions.md`](./design-decisions.md)。这里只强调三条容易漏的:
+  - `modules[].kind` 是**受控词汇**(POWER/MCU/RF/ANT/IO/…),`flow` 里出现的就是这些值;
+    不写就拿 `name` 去词表碰一次,碰不上该模块不参与 P6 的 flow-order 打分(标 skipped,不是满分)。
+  - `interfaces[].facing` 是**设计意图不是几何属性**:同一个 PH2.0-3P 接箱内电芯是 internal、
+    接箱外传感器就是 user-facing,铜箔再精确也推不出来。写了才升 WARN,不写只能启发式推定报 INFO。
+  - `board.outline` 没给尺寸就写 `"compact"` —— 无信息时紧凑是正确目标,不要摊大饼。
 
   **写完必须校验**(#167 起 spec 有 Go 类型 + 校验命令,写错不再静默):
 
@@ -139,16 +131,61 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
 ### S3 — 按组摆放(芯片 + 外围一起)
 - **做什么**:**逐组**放置——先放该组核心芯片,再把它的外围**就近**放在芯片周围(去耦贴电源脚、晶振贴时钟脚…),放完一组再下一组。
-- **块优先(电路块库)**:摆放/接线任何**标准外设模块**前,**先查块库 `easyeda blocks ls`**(离线,无需 daemon/窗口,块库编在二进制里)——现有 **20 块 / 11 类目**(power/rf/usb/usb-serial/comms/storage/sensing/mcu/mcu-support/indicator/button),如 CH340 串口、ESP32 自动下载、buck/LDO/充电、RS-485、GNSS/433M、USB-hub、microSD…;`easyeda blocks search <关键词>`(按**功能**/**芯片**/**端口网**三维轮换搜,一词没中换维度别急着手接)、`blocks ls --category <cat>` 浏览整类、`blocks show <id>` 看完整拓扑。命中就照抄内部网表、只重绑 ports 到主控网络 + 重排位号(引脚用功能名,零改号),按 `schematic_notes` 落线。块的 `parts` 直接给出 `standard-parts.json` 的 role,选型这步都省了。**摆放几何也机械化了**:带 `schematic_layout` 模板的块,`sch block-apply` 按模板的相对偏移+朝向落件(信号流左入右出、去耦贴芯片的几何人审一次终身复用);无模板的块退回网格铺列。两条路**原点都会避开已有器件和 A4 标题栏图签**(不显式传 `--at` 时,按真实 bbox + 标题栏 keep-out 螺旋找最近空位,块落纸面右下也不会压到图签/明细表;显式 `--at` 尊重你的坐标但碰撞会警告)。落完以每次 place 返回的 `primitiveId` 标识本实例,并**回读真实 bbox + pins 作 wiring 前硬门**:读取/解析/几何不完整、涉及本实例的 bbox overlap 或异件引脚重合都会停止,绝不进入 autoconnect、绝不打印假绿;随后只按本次 ID 补偿删除并再次读回,可证明删净为 `failed-rolled-back`,否则明确 `failed-partial` + `PARTIAL STATE`(EasyEDA 各次变异独立 autosave,不是事务)。**块还带 PCB 多维约束 map**,各 P 阶段按 `target` 匹配读:`pcb_layout`(`*-adjacency`→P2 贴脚距离、`ep-*`→P8 EP 热过孔/接地缝合、`rf-*`/`balun-mirror`→P4 keepout+P7 RF 布线)、`placement`→P2 板边/朝向、`signals`→P7.0 差分/阻抗、`silk`→P9 逐脚标注。无命中才手接;手接并端到端验证过的新外设,按 [`standard-blocks-contributing.md`](./standard-blocks-contributing.md) 回馈入库(署名 + `validated` 门禁)。**块没带 `schematic_layout` 模板时,别再肉眼盯板手写 dx/dy**——在真板上把该外设摆漂亮一次,`easyeda sch extract-layout <block-id> --from <该实例的位号>`(或 `--role ROLE=DESIG` 精确指定)反向导出模板 JSON(role→{dx,dy,rotation},锚点=芯片/首个 role,自动吸 5 格),复审后粘进 `internal/blocks/data/<id>.json` 的 `schematic_layout` 段、跑 `go test ./internal/blocks/...` 过校验(#140)。这样「摆好一次→固化模板」是数据管线而非手工反推。
-- **怎么做**:`easyeda sch place` + `sch modify`(设位号);坐标按 S2 的分区。库优先、选型规则见 schematic.md / references。
-- **整组分区摆放优先用 `easyeda sch autolayout`**(模块级放置规划器,`--engine template` 默认):把 S2 的分区写成 `--spec`(每个 module 给 `zone`/`core`/`parts` 与规则),它按真实 bbox 把核心芯片放到分区中心、外围环绕核心、碰撞自动重试,并保留引脚 fanout 通道 + A4 标题栏 keep-out,**确定性产出可过 layout-lint 的坐标**。先 `--dry-run` 看方案,确认后用 `--doc <页>` + `--apply`;`--doc` 与 `spec.page` 同时存在时必须解析到同一 UUID。`--apply` 前必须有真实 sheet bbox;无 sheet 只能停在 dry-run/修图纸。**template v1 是 parts-only,必须在布线前运行**:规划前与首个 move 前各读取一次 fail-closed active-page inventory,只要存在 wire/bus/netflag/netport/netlabel/short_symbol 任一种就硬拒绝;同时要求完整有限 anchor/bbox、显式成功的 pins 读取,且两次快照的器件+sheet 几何完全一致,防止 stale plan。`--apply --all-pages` 同样 fail closed(`--all-pages` 仅 dry-run)。当前没有 force/override,`--rewire` 仅属于 official 引擎。落子后逐 primitiveId 回读目标锚点与完整 baseline,再验 sheet bounds/grid/spacing/overlap/pin coincidence/title-block,只有 `schematic.save` 明确 `saved:true` 才算完成;任一步失败都按规划快照逆序恢复,再次回读原锚点(只有确认值才算 restored)并证明 rollback 保存,不伪装成事务。**`--apply` 成功后自动画功能分区框(#142)**:按 `modules[].zone` 用 zone-draw 同几何画出虚线区域框+区名(电源区/MCU区/USB区…),认领和 frame IDs 都落到该目标 documentUuid，不再写项目级单记录；页面 UUID、ID 数量和保存同样核验。绘框失败不回滚已保存布局,但会补偿删除已创建注释并让命令非零退出,不会伪装完整成功。`--zone-draw=false` 关闭,`sch zone-draw --clear --doc <页>` 移除。**v1 只移动「已放置」的器件**,不创建缺件——所以先 `sch place` 把器件放上页,再用 autolayout 排布。手动 `sch place`/`modify` 仍是逐件微调的兜底。
-- **兜底引擎 `--engine official`**:块/spec 都没覆盖的散乱页,可让**官方 `eda.sch_Document.autoLayout()`**(@beta,3.2.148 起可用)对整页粗排。⚠**它是破坏性的、只该布线前用**:实测三坑——① **只挪器件不挪导线** → 已连线页跑完连线全断(16件→59悬空);② **落点 off-grid** → 下游布线短桩落不到脚;③ **散布让短桩相撞短路**(--replace 也拆不开)。封装已加安全管线:**已连线页默认拒绝**(报 N 条线),`--rewire` 才允许(跑后自动:吸附5格→删断线→按跑前网表重连);**自检用 `sch check`(查断线/悬空)不止 layout-lint**;长操作 ~2min(300s 超时)、需目标页**前台**。**#143 兜底增强**:① `connect_pin` 网格判定容忍浮点残差(吸附后引脚坐标=anchor+旋转偏移会带入 649.9999999 之类 FP 噪声,旧严格判定误拒→现 round 到最近格再判并把桩起点吸到整格,官方 `--rewire` 可连干净);② 官方 `autoLayout` 喂 `designatorDeviceTypeMap`(按位号前缀分 resistor/capacitor/chip… 角色),布局更聚拢。即便如此,散布布局仍可能残留极少数短桩相撞的失败连接(命令会诚实报 floating/失败数,让你 `sch bridge-check` 核)。**优先级铁律:命中块→`block-apply` 模板;有 spec→`--engine template`;都没有才 `--engine official` 兜底,且成品/已连线页一律别用它。**
-  - **official 的 P0 fail-closed 契约**:执行 `autoLayout` 前会再次读取同一页的「part id/位号/坐标/旋转 + sheet + wire/bus/net marker 全量计数」并与首份快照逐项比较，启动变异的同一个 JS action 内还会再次锁定 document/input；`--rewire` 另比较规范化网表，所以即使 wire 数没变、拓扑已换线也会拒绝。bus 无法可靠重建，始终拒绝。后续 snap/delete/rewire/save 全部钉同一 UUID。变异后的 bbox/pin/connectivity 回读或 `sch check` 只要不可用、解析不完整，或发现 overlap、异件 pin 重合、dangling/多网线/marker 等阻断 finding，或 save 未明确 `saved:true`，命令同样非零退出，不能再把 “check unavailable” 当 clean。注意官方 API 没有事务回滚：post-check 失败时页面已经变异，必须先人工修复/撤销，不能继续 S4。
+- **块优先(电路块库)—— 命中块时 S3 和 S4 合并成一条命令。**
+  摆放/接线任何**标准外设模块**前先查块库(离线,不需要 daemon/窗口):
+  `easyeda blocks ls` / `blocks search <关键词>`(按**功能 / 芯片 / 端口网**三维轮换搜,
+  一词没中换维度)/ `blocks show <id>`。命中就 `easyeda sch block-apply <id> --bind PORT=网名`,
+  它**一次做完**:放件 → 用锚件实测引脚求解其余件 → 实测推让(给 marker 腾通道)→
+  **布线前硬门**(真实 bbox/引脚,重叠或引脚重合就回滚,绝不打印假绿)→ autoconnect 连线 →
+  网表对账 → **虚拟组体检**(`clusters`)→ 登记虚拟组。所以命中块的模块**不用再走 S4**,
+  直接进 S5 复验即可。
+  - 块的 `parts` 直接给出 `standard-parts.json` 的 role,**选型这步都省了**;引脚按功能名引用,零改号。
+  - 块的 `schematic_layout` 有两种形态:**关系形态(推荐)**只声明 `flow`/`attach`/`pair`,
+    **一个坐标都不写**,几何由求解器按实测引脚 + 页面碰撞 + 图纸边界算(细节见
+    [`schematic.md`](./schematic.md));**legacy 绝对偏移**仍支持但已废弃 —— 块作者写模板时
+    根本不知道实例会落在页面哪里、图纸多大,手算必踩出界/顶图签。
+  - 块还带 **PCB 多维约束 map**,各 P 阶段按 `target` 匹配读:`pcb_layout` / `placement` /
+    `signals` / `silk`。无命中才手接;手接并验证过的新外设按
+    [`standard-blocks-contributing.md`](./standard-blocks-contributing.md) 回流入库。
+- **怎么做(非块路径)**:`easyeda sch place` + `sch modify`(设位号);坐标按 S2 的分区。
+- **整组分区摆放优先用 `easyeda sch autolayout --engine template`**(默认引擎):把 S2 的分区写成
+  `--spec`,它按真实 bbox 把核心放到分区中心、外围环绕、碰撞重试,保留引脚 fanout 通道 +
+  图签 keep-out,**确定性产出可过 layout-lint 的坐标**。先 `--dry-run`,确认后 `--doc <页> --apply`。
+  三条硬约束:**必须在布线前跑**(v1 是 parts-only,页上有任何 wire/bus/marker 就硬拒绝)、
+  **必须有真实 sheet bbox**、**只移动已放置的器件**(不创建缺件)。`--apply` 成功后自动画分区框
+  (#142,`--zone-draw=false` 关)。失败按规划快照逆序恢复并回读证明,不伪装事务。
+- **兜底引擎 `--engine official`(块和 spec 都没覆盖的散乱页)**:官方 `sch_Document.autoLayout()`
+  @beta。⚠ **破坏性、只在布线前用**——实测三坑:只挪器件不挪导线(已连线页跑完全断)、
+  落点 off-grid、散布让短桩相撞短路。封装已加安全管线:已连线页默认拒绝(`--rewire` 才允许,
+  跑后自动吸格→删断线→按跑前网表重连)、自检用 `sch check` 不止 layout-lint、需目标页**前台**、
+  ~2min。**官方 API 没有事务回滚**:post-check 失败时页面已经变异,必须先人工修复才能进 S4。
+- **优先级铁律**:命中块 → `block-apply`;有 spec → `--engine template`;都没有才 `official`,
+  且**成品/已连线页一律别用它**。
 - **摆完可自评质量**:`easyeda sch layout-score` 给布局可读性打五维分(标签折叠/标签反向/外围贴核心/长链挤压/版面整洁),低分维的归因**自带填好真实位号坐标的 fix 命令,照抄执行即可修**;它是诊断视角不是门(无 `--min-score` 永远 exit 0),门仍是下面的 layout-lint + check。
-- **💾 过门条件**:进入 S4 前**必须先过 `easyeda sch layout-lint --strict`**——本组无覆盖/引脚重合，锚点全部在 5-unit 网格，模块不越认领 zone，组内/组间满足 `--min-gap`，且没有因缺 bbox/pin 几何而跳过的器件；已有 zone claim 时 sheet/zone check 也必须可用。默认非 strict 仅供诊断，不能再用 `0 overlap` 冒充布局已完成。**有 ERROR 先回 S3 调整**(单件 `sch modify`;成排对齐 `sch align --mode centerx/top…`;等距摊开 `sch distribute --axis x/y`,均默认 dry-run、`--apply` 落地并自检 overlap;整簇平移 `sch group-move`;实在挤不下 `sch autoplace-free`)。过了就 `easyeda sch save`(整板放置每 ~10 件存一次,别等全放完)。**有 `sch zones set` 认领的多页/多模块板,进 S4 前还需画出分区框+区名标注**——`sch autolayout --apply` 走的话已自动画(#142),手工 `sch place`/`modify` 路径不会自动触发,须显式补跑 `sch zone-draw`(整纸版式用 `--mode partition`);`sch zones status` 可查认领是否已可视化。**分区框只给模块命名——每个模块还要配 1~3 行电路说明**(`easyeda sch note --text "LDO: 5V→3V3 1A\n输入/输出各 100nF" --x … --y …`:作用+关键参数+设计要点,放模块框下/旁的空白处,字号默认 10 低于区名标签,不压电路,放完 `sch layout-lint` 核对无 overlap;`sch text-list` 枚举、`sch prim-delete` 清理)。这是**默认必做**(用户反馈:成品图没分区没说明=交付可读性差),不是可选装饰;分页(S1)+分区框(S2)+电路说明(S3)三件套齐了才算原理图组织完成。单页/单模块小板可免分页,但区名框+电路说明仍要画。
+- **💾 过门条件**:进入 S4 前跑 **`easyeda sch gate --only layout-lint,clusters --doc <页>`**
+  (此时还没连线,电气三关跑了没意义;`--strict` 留到 S5 交付门,S3 阶段先把**硬伤**清零:
+  重叠、引脚重合、出图纸)。**只看 layout-lint 是不够的** —— 它默认排除全部非 part
+  图元,标签之间、标签压器件、标签探出图纸它**结构上看不见**,那一半在 `clusters`。
+  两关都要求:本组无覆盖/引脚重合、锚点在 5-unit 网格、模块不越认领 zone、满足 `--min-gap`、
+  没有因缺 bbox/pin 几何而跳过的器件;有 zone claim 时 sheet/zone check 必须可用。
+  **默认非 strict 只供诊断,不能用 `0 overlap` 冒充布局已完成。**
+- **有 ERROR 先回 S3 调整**:单件 `sch modify`;成排对齐 `sch align --mode centerx/top…`;
+  等距摊开 `sch distribute --axis x/y`(均默认 dry-run,`--apply` 落地并自检 overlap);
+  整簇平移 `sch group-move`;实在挤不下 `sch autoplace-free`。过了就 `easyeda sch save`
+  (整板放置每 ~10 件存一次,别等全放完)。
+- **分页 + 分区框 + 电路说明,三件套齐了才算原理图组织完成**(默认必做,不是装饰 ——
+  用户反馈:成品图没分区没说明 = 交付可读性差):
+  - 分区框:`sch autolayout --apply` 会自动画(#142);手工 `sch place`/`modify` 路径**不会**,
+    须显式补 `sch zone-draw`(整纸版式 `--mode partition`),`sch zones status` 查是否已可视化;
+  - 电路说明:每个模块 1~3 行(`sch note --text "LDO: 5V→3V3 1A\n输入/输出各 100nF" --x … --y …`),
+    写作用 + 关键参数 + 设计要点,放模块框下/旁的空白,字号默认 10 低于区名;放完跑一次几何门
+    核对无 overlap(`sch text-list` 枚举、`sch prim-delete` 清理)。
+  - 单页/单模块小板可免分页,但区名框 + 电路说明仍要画。
 
 ### S4 — 通道布线(留距离,别压元件)
-- **做什么**:在组**摆放并通过 layout-lint 之后**再布线——信号走元件间的**空通道**,不要让导线压在元件或外围上。
+- **做什么**:在组**摆放并过完 S3 几何门之后**再布线——信号走元件间的**空通道**,不要让导线压在元件或外围上。
+  **命中块的模块跳过本阶段**:`sch block-apply` 已经连完线并对过网表(见 S3),这里只处理块之外的连线
+  (块与块之间的接口网、手工搭的外围)。
 - **怎么做**:布线/flag/去耦规则见 conventions 的 `auto-layout-sop.md`(模块内信号=短正交线，跨模块/跨页或长距离=命名 netport 短桩，flag 仅电源地，绝不穿引脚)。
 - **电源/地/netport stub 用 `easyeda sch autoconnect`**(别再手猜 `connect --direction/--offset`):它按真实 bbox/引脚/已有 flag 几何打分,确定性选 direction+offset 再委托 `connect_pin` 落地,批量 `--spec` 还会自动错开标签。先 `--dry-run` 看计划,满意再落地。
 - **💾 过门后**:`easyeda sch save` 存盘,再进入 S5。
@@ -160,22 +197,31 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
 1. **机械门(一条命令)** `easyeda sch gate --strict --doc <page>`
 
-   gate 把四个检查器按**固定顺序**跑完并出一张报告 —— 顺序、阻塞判据、退出码都写在代码里,
-   不再每次现场决定(此前四个命令各跑各的,agent 每次都要自己拼,拼法不一致就是不稳定):
+   gate 把五个检查器按**固定顺序**跑完并出一张报告 —— 顺序、阻塞判据、退出码都写在代码里,
+   不再每次现场决定(此前各命令各跑各的,agent 每次都要自己拼,拼法不一致就是不稳定):
+
+   > **为什么 layout-lint 之外还要 clusters**:layout-lint 默认排除全部非 part 图元,
+   > 而「标签压标签 / 标签压器件 / 标签探出图纸」恰恰只发生在这些图元上 —— 实测同一张
+   > 画布上有 11 处标签重叠,它照样报 `✓ placement gate passed`。这不是阈值松,是**结构上
+   > 看不见**。两关口径互补:一个判本体,一个判「本体 ∪ 它自己的 marker」。
 
    | # | stage | 阻塞判据 |
    |---|---|---|
-   | 1 | `layout-lint` | `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、**out-of-sheet**(件越出图纸可用区,印不出来)、缺失/畸形几何、以及 zone/sheet check `unavailable` 同样阻断 |
-   | 2 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
+   | 1 | `layout-lint` | **器件本体**的 `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、**out-of-sheet**、缺失/畸形几何、zone/sheet check `unavailable` 同样阻断 |
+   | 2 | `clusters` | **虚拟组体积**(器件 + 只挂在它自己引脚上的 marker/桩线/文字):组间**图元级**重叠、组探出图纸可用区;strict 下组间过近也阻断 |
+   | 3 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
 
-   > `marker-overlap` 一片时**别直接 `sch modify` 挪标识坐标**(会把它挪脱导线端点 → 断网):
+   > `marker-overlap` 一片时**别直接 `sch modify` 挪标识坐标**(会把它挪脱导线端点 → 断网)。
+   > **首选重跑 `sch autoconnect`**:落点现在按「长短两档标准长度」循环排 lane(相邻脚的标签
+   > 自动错开),而且判定含**网名的实际渲染宽度**(平台给 netport 的 bbox 只有裸六边形,
+   > 名字画在外面 —— 这是三把尺曾经集体报 0 的原因)。重跑还不干净,再
    > 跑 `easyeda sch destagger`(#171,dry-run)看计划——它按文字带尺寸量算方向/桩长、
    > 只动能安全重连的短桩。**`--apply` 当前禁用**(真机三次都因「删桩线触发导线自动合并
    > → 串网」留下 PARTIAL STATE),按 dry-run 的计划手工 `sch disconnect` + `sch connect`
    > 逐个改,每改一个跑 `sch check` 复验。
 
-   | 3 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag 是告警,strict 下阻塞 |
-   | 4 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
+   | 4 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag 是告警,strict 下阻塞 |
+   | 5 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
 
    **verdict 三态,`blocked` ≠ `fail`**:
    - `pass` — 全过
