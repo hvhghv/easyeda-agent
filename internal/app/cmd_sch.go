@@ -184,11 +184,13 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 				if hide {
 					payload["showTitleBlock"] = false
 				}
+				var userPatch map[string]any
 				if dataJSON != "" {
 					var data map[string]any
 					if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
 						return fmt.Errorf("invalid --data json: %w", err)
 					}
+					userPatch = data
 					full, needShow, ferr := schTitleBlockMerge(cfg, window, data)
 					if ferr != nil {
 						return ferr
@@ -202,6 +204,22 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 					return fmt.Errorf("pass at least one of --show / --hide / --data")
 				}
 				res, err := dispatchCapture(cfg, "schematic.titleblock.modify", window, payload, stdout)
+				// **假失败复核**:连接器按「本次调用改变了什么」判定成败,于是
+				// 我们主动按住的结构开关(值本来就对)永远算「没应用」,而重复写
+				// 同一个值(幂等重跑/批量重放)会让它判定「一项也没证明写入」并报错
+				// —— 实测四页图签内容**全部写对了**,命令却 ok:false。
+				// 假失败比假成功更难缠:调用方会去重试、回滚,或认定这条路不通。
+				// 判据换成画布的最终状态:用户要的内容在不在图签上。
+				if err != nil && userPatch != nil {
+					if landed, _ := tbPatchLanded(cfg, window, userPatch); landed {
+						fmt.Fprintf(stderr, "note: 平台报写入失败,但回读确认请求的 %d 项内容都已是目标值"+
+							"(幂等重写,或我们按住的结构开关本就正确)—— 以画布为准,按成功处理\n", len(userPatch))
+						// **必须在这里返回**:dispatchCapture 失败时 res 是 nil,
+						// 只把 err 抹掉会让下面读 res.Result 的部分应用检查当场 panic
+						// (真机首跑实见)。图纸自检仍要做 —— 内容写对了不代表图框没被写坏。
+						return warnIfSheetLost(cfg, window, stderr)
+					}
+				}
 				// **写后自检:图纸边框还在不在**。写图签是「读全量→改几项→整包回传」,
 				// 一旦结构开关(Title Block / Border)在回传里被平台按默认值处理,
 				// 图框和明细表会被整个关掉 —— 页面看着还在,sheet 图元却没了,
