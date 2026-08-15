@@ -493,8 +493,12 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 	// in one session when it lived only in docs. Scope to the single page under
 	// check (allPages inflates the part count while text.list is active-page only).
 	if !allPages {
-		if pf := partitionFinding(cfg, window, comps, stderr); pf != nil {
+		for _, pf := range partitionFinding(cfg, window, comps, stderr) {
 			geo = append(geo, *pf)
+		}
+		// 图签是交付件:标题/设计者/板名空着,打印出来就是一张没人认领的图。
+		if tf := titleBlockFinding(cfg, window, stderr); tf != nil {
+			geo = append(geo, *tf)
 		}
 	}
 
@@ -510,7 +514,7 @@ func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overl
 			rep.Summary.TitleblockOverlaps++
 		case "marker-overlap":
 			rep.Summary.MarkerOverlaps++
-		case "missing-partition":
+		case "missing-partition", "missing-note", "missing-titleblock":
 			rep.Summary.MissingPartitions++
 		case "redundant-net-marker":
 			rep.Summary.RedundantNetMarkers++
@@ -636,7 +640,7 @@ const schPartitionMinParts = 6
 // left un-partitioned (exactly the lapse this backstops). Title-block fields are NOT
 // free text (they live on the sheet), so a bare, un-annotated page reads as 0.
 // Best-effort: a text.list failure returns nil (never masks the electrical findings).
-func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr io.Writer) *checkFinding {
+func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr io.Writer) []*checkFinding {
 	parts := 0
 	for _, c := range comps {
 		if c.ComponentType == schLayoutPartType {
@@ -651,21 +655,99 @@ func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr 
 		fmt.Fprintf(stderr, "sch check: partition-check skipped — text.list failed: %v\n", err)
 		return nil
 	}
-	return partitionFindingFor(parts, schTextCount(res.Result))
+	rects, labels := schZoneFrameCounts(cfg, window)
+	return partitionFindingFor(parts, rects, labels, schTextCount(res.Result))
 }
 
-// partitionFindingFor is the pure decision (split out for testing): a page with
-// enough parts to be multi-module but zero free text = un-partitioned → WARN.
-func partitionFindingFor(parts, textCount int) *checkFinding {
-	if parts < schPartitionMinParts || textCount > 0 {
+// schZoneFrameCounts 读**工具自己的绘制记账**:平台不提供矩形枚举接口,画过的区框
+// 只有我们记得(workflow 的 SchZoneFrameIdsByPage)。返回(矩形数, 区名标签数)。
+func schZoneFrameCounts(cfg *appConfig, window string) (rects, labels int) {
+	_, _, docUUID, _, st, _, err := loadSchGroupsContext(cfg, window)
+	if err != nil || st == nil {
+		return 0, 0
+	}
+	if f := st.SchZoneFrameIdsByPage[docUUID]; f != nil {
+		return len(f.Rects), len(f.Texts)
+	}
+	if f := st.SchZoneFrameIds; f != nil && (f.DocumentUUID == "" || f.DocumentUUID == docUUID) {
+		return len(f.Rects), len(f.Texts)
+	}
+	return 0, 0
+}
+
+// titleBlockFinding 判图签有没有填。**这是交付件不是装饰**:图纸标题、设计者、板名
+// 空着或还停在平台默认值(`Board1`),打印出来就是一张没人认领的图。
+// 平台把图签字段放在 sheet 上而不是自由文本里,所以 partitionFinding 那条判据看不见它。
+func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFinding {
+	res, err := requestAction(cfg, "schematic.titleblock.get", window, map[string]any{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: titleblock-check skipped — titleblock.get failed: %v\n", err)
+		return nil
+	}
+	data, _ := res.Result["titleBlockData"].(map[string]any)
+	if data == nil {
+		return nil
+	}
+	valueOf := func(k string) string {
+		m, _ := data[k].(map[string]any)
+		if m == nil {
+			return ""
+		}
+		return strings.TrimSpace(asString(m["value"]))
+	}
+	var missing []string
+	// 必填三项:标题 / 设计者 / 板名。版本、日期平台会自己填,不强求。
+	if valueOf("Name") == "" {
+		missing = append(missing, "Name(图纸标题)")
+	}
+	if valueOf("Drawed") == "" {
+		missing = append(missing, "Drawed(设计者)")
+	}
+	if b := valueOf("@Board Name"); b == "" || b == "Board1" {
+		missing = append(missing, "@Board Name(仍是默认 Board1)")
+	}
+	if len(missing) == 0 {
 		return nil
 	}
 	return &checkFinding{
-		Type:    "missing-partition",
+		Type:    "missing-titleblock",
 		Level:   "warn",
-		Count:   parts,
-		Message: fmt.Sprintf("%d parts on this page but 0 functional zone frames / circuit notes — 铁律#15 要求分区框(sch zone-draw)+ 每模块电路说明(sch note);交付前补上", parts),
+		Count:   len(missing),
+		Message: fmt.Sprintf("图签未填:%s — 交付图必须能认领(`sch titleblock-set`)", strings.Join(missing, "、")),
 	}
+}
+
+// partitionFindingFor is the pure decision (split out for testing).
+//
+// **框和说明是两样东西,必须分开判**:第一版只看「自由文本数 > 0」就闭嘴 —— 于是
+// 画了区框(区名标签也是文本)或者随手写了一行注释,判据就认为交付要求满足了,
+// 而实际上说明可能一条没有、框可能一个没画。交付三件套(分页 / 区框 / 说明)里
+// 有两件在这条判据下是可以蒙混的。
+//
+// 现在:框看**我们自己的绘制记录**(平台不提供矩形枚举接口,只能由工具记账),
+// 说明看「自由文本减去区名标签」。两者各报各的。
+func partitionFindingFor(parts, frameRects, labelTexts, textCount int) []*checkFinding {
+	if parts < schPartitionMinParts {
+		return nil
+	}
+	var out []*checkFinding
+	if frameRects == 0 {
+		out = append(out, &checkFinding{
+			Type:    "missing-partition",
+			Level:   "warn",
+			Count:   parts,
+			Message: fmt.Sprintf("%d 个器件的页没有功能分区框 — 铁律#15:`sch zones set` → `sch zone-draw`(整纸版式 `--mode partition`);交付前必须有", parts),
+		})
+	}
+	if notes := textCount - labelTexts; notes <= 0 {
+		out = append(out, &checkFinding{
+			Type:    "missing-note",
+			Level:   "warn",
+			Count:   parts,
+			Message: fmt.Sprintf("%d 个器件的页没有电路说明(区名标签不算)— 每模块 1~3 行 `sch note`:作用 + 关键参数 + 设计要点;交付前必须有", parts),
+		})
+	}
+	return out
 }
 
 // schTextCount extracts the number of free text primitives from a

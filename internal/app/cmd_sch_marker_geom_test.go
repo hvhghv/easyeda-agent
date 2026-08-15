@@ -198,30 +198,35 @@ func TestSplitConnResults_Partial(t *testing.T) {
 // (parts ≥ schPartitionMinParts) with zero free text (no zone frames / notes) is
 // flagged missing-partition; a framed/noted page or a trivially small one is not.
 func TestPartitionFindingFor(t *testing.T) {
+	// **框和说明分开判**:第一版只看「自由文本 > 0」,于是画了区框(区名也是文本)
+	// 或随手写一行注释,判据就闭嘴了 —— 交付三件套里有两件可以蒙混过去。
 	cases := []struct {
-		name      string
-		parts     int
-		textCount int
-		wantFlag  bool
+		name                        string
+		parts, rects, labels, texts int
+		wantFrame, wantNote         bool
 	}{
-		{"unzoned 12-part board flags", 12, 0, true},
-		{"zoned 12-part board (6 texts) clean", 12, 6, false},
-		{"frames drawn (titles present) clean", 8, 3, false},
-		{"below threshold never flags", schPartitionMinParts - 1, 0, false},
-		{"exactly at threshold flags", schPartitionMinParts, 0, true},
+		{"什么都没有的 12 件页:框和说明都报", 12, 0, 0, 0, true, true},
+		{"画了框但一条说明都没有:只报说明", 12, 3, 3, 3, false, true},
+		{"框 + 说明齐全:干净", 12, 3, 3, 6, false, false},
+		{"只有说明没有框:只报框", 12, 0, 0, 2, true, false},
+		{"低于阈值:一条都不报", schPartitionMinParts - 1, 0, 0, 0, false, false},
+		{"恰好到阈值:照报", schPartitionMinParts, 0, 0, 0, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := partitionFindingFor(tc.parts, tc.textCount)
-			if tc.wantFlag {
-				if f == nil {
-					t.Fatalf("parts=%d text=%d: expected a missing-partition finding, got nil", tc.parts, tc.textCount)
+			got := partitionFindingFor(tc.parts, tc.rects, tc.labels, tc.texts)
+			var frame, note bool
+			for _, f := range got {
+				switch f.Type {
+				case "missing-partition":
+					frame = true
+				case "missing-note":
+					note = true
 				}
-				if f.Type != "missing-partition" || f.Level != "warn" || f.Count != tc.parts {
-					t.Fatalf("unexpected finding: %+v", *f)
-				}
-			} else if f != nil {
-				t.Fatalf("parts=%d text=%d: expected no finding, got %+v", tc.parts, tc.textCount, *f)
+			}
+			if frame != tc.wantFrame || note != tc.wantNote {
+				t.Fatalf("frame=%v note=%v, want frame=%v note=%v (findings=%+v)",
+					frame, note, tc.wantFrame, tc.wantNote, got)
 			}
 		})
 	}
@@ -232,10 +237,10 @@ func TestPartitionFindingFor(t *testing.T) {
 // ground/power markers are not. Real ceshi geometry: folded 11×31, normal 31×11.
 func TestFoldedNetLabelFindings(t *testing.T) {
 	comps := []layoutComp{
-		{ID: "folded", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(940, 440, 951, 471)},   // 11×31 vertical
-		{ID: "normal", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(945, 650, 976, 661)},   // 31×11 horizontal
-		{ID: "gndv", ComponentType: "netflag", Net: "GND", BBox: bb(0, 0, 10, 21)},                // ground is exempt
-		{ID: "nobox", ComponentType: "netport", Net: "EN"},                                        // no bbox → skip
+		{ID: "folded", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(940, 440, 951, 471)}, // 11×31 vertical
+		{ID: "normal", ComponentType: "netport", Net: "LED_CTRL", BBox: bb(945, 650, 976, 661)}, // 31×11 horizontal
+		{ID: "gndv", ComponentType: "netflag", Net: "GND", BBox: bb(0, 0, 10, 21)},              // ground is exempt
+		{ID: "nobox", ComponentType: "netport", Net: "EN"},                                      // no bbox → skip
 	}
 	// 2026-08-12 用户拍板「netport 顺着方向摆布即可」:竖放合法,判据恒零
 	// (拥挤由 marker-overlap 文字带管)。此测试翻转为语义变更的回归钉。

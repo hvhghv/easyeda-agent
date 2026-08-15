@@ -1210,8 +1210,31 @@ func dropSchGroupsForPage(project, docUUID string, stderr io.Writer) {
 		fmt.Fprintf(stderr, "warn: 页已清空,但取不到分组表(%v)—— 可能残留孤儿组,用 `sch group list` 查、`sch group ungroup` 清\n", err)
 		return
 	}
+	// 区框记账同样要作废:平台**不提供矩形枚举接口**,画过的框只有我们自己记得 ——
+	// 清页把框删掉了而记账还在,`sch check` 的 missing-partition 就会以为「画过了」,
+	// 交付判据当场变成假绿(实测:清页重放之后它一声不吭)。
+	frames := 0
+	if st.SchZoneFrameIdsByPage != nil {
+		if f := st.SchZoneFrameIdsByPage[docUUID]; f != nil {
+			frames = len(f.Rects)
+			delete(st.SchZoneFrameIdsByPage, docUUID)
+		}
+	}
+	if f := st.SchZoneFrameIds; f != nil && (f.DocumentUUID == "" || f.DocumentUUID == docUUID) {
+		frames += len(f.Rects)
+		st.SchZoneFrameIds = nil
+	}
 	existing := st.GroupsForPage(docUUID)
+	if len(existing) == 0 && frames == 0 {
+		return
+	}
+	if frames > 0 {
+		fmt.Fprintf(stderr, "同时作废了这一页的 %d 个分区框记账(框已随清页删除)\n", frames)
+	}
 	if len(existing) == 0 {
+		if err := savePcbStageState(st); err != nil {
+			fmt.Fprintf(stderr, "warn: 分区框记账未能落盘(%v)\n", err)
+		}
 		return
 	}
 	if err := saveSchGroups(st, docUUID, nil); err != nil {
