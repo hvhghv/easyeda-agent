@@ -17,8 +17,32 @@ package app
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
+
+// tbPreserve 原样回传一个**没被修改**的明细项,但把数字型字符串还原成数字。
+//
+// **这条是数据损坏修复**:`Title Block` / `Border` 这类结构开关读回来是字符串 `"1"`,
+// 整体回传时平台把它解析成 0 —— 实测一次写图签就把**图框和明细表整个关掉**,
+// sheet 图元的 bbox 塌成全零,`zone-plan`/`layout-lint` 的 sheet-check 当场不可用。
+// 页面看上去还在,判据却瞎了,而且没有任何报错。
+func tbPreserve(v any) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	out := map[string]any{}
+	for k, vv := range m {
+		out[k] = vv
+	}
+	if sv, isStr := out["value"].(string); isStr {
+		if n, err := strconv.ParseFloat(strings.TrimSpace(sv), 64); err == nil && sv != "" {
+			out["value"] = n
+		}
+	}
+	return out
+}
 
 // schTitleBlockMerge 读回当前页的全量明细项,把用户的 patch 合并进去。
 //
@@ -36,7 +60,7 @@ func schTitleBlockMerge(cfg *appConfig, window string, patch map[string]any) (ma
 	}
 	out := make(map[string]any, len(full)+len(patch))
 	for k, v := range full {
-		out[k] = v
+		out[k] = tbPreserve(v)
 	}
 	var unknown []string
 	for k, v := range patch {
