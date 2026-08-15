@@ -13,14 +13,22 @@ package app
 //     workflow state the PCB claims live in (State.SchZonesByPage — separate from
 //     State.Zones because a module legitimately claims different zones on the
 //     sheet vs the board);
-//   - `sch layout-lint` gains a zone-violation rule (WARN): a claimed part whose
-//     bbox center sits outside its zone's sub-rectangle of the SHEET bbox.
+//   - `sch autolayout --engine template` 用它决定模块该**落在纸面哪一格** —— 这是
+//     认领现在唯一无可替代的职责:那一步在**布局之前**跑,件还没放下去,没有任何
+//     活体几何可读,模块往哪去只能靠声明。
+//
+// **它不再负责「哪几件是一个模块」**(2026-08-15):`sch block-apply` 落块时已按功能
+// 子群把件封成虚拟组,那是成员归属的单一事实来源,`sch zone-plan` / `zone-draw` 直接
+// 读组。认领再抄一份成员列表就是第二处副本,而副本**不会跟着更新** —— 件被
+// `group-move` 挪走或删掉,认领纹丝不动。没有虚拟组的页(手工搭的)才回落到认领。
+//
+// 同时废弃的还有 `sch layout-lint` 的 zone-violation 判据:分区框现在从活体模块 bbox
+// 反推,「件在不在自己的框里」成了同义反复,永远不会失败的判据 = 没有判据。
 //
 // Zone names reuse the shared grid vocabulary (docs/concepts.md): columns
 // left/center/right × rows top/bottom (sheet coords are y-UP, so "top" is the
 // larger-y half — zoneRect in cmd_sch_autolayout.go is the single geometry
-// source). The rectangle is resolved from the LIVE sheet bbox at lint time, so
-// claims keep working when the sheet is swapped or moved.
+// source). The rectangle is resolved from the LIVE sheet bbox at placement time.
 
 import (
 	"encoding/json"
@@ -193,19 +201,28 @@ func sheetBBoxOf(comps []layoutComp) *layoutBBox {
 func newSchZonesCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	zones := &cobra.Command{
 		Use:   "zones",
-		Short: "Schematic functional zone claims (S0 modules[].zone → sheet): set / status / clear",
-		Long: `Persist the S0 spec's functional-zone partitioning (modules[].zone) on the
-SCHEMATIC side so placement can be mechanically verified against the plan:
+		Short: "原理图分区认领(S0 modules[].zone → 图纸格位):set / status / clear",
+		Long: `把 S0 方案书的功能分区(modules[].zone)落到原理图这一侧。
 
-  - ` + "`sch layout-lint`" + ` flags zone-violation (WARN): a claimed part whose bbox
-    center sits outside its zone's sub-rectangle of the sheet;
-  - ` + "`sch autolayout --spec`" + ` remains the placement executor for the same zones.
+**它只剩一个不可替代的用途**:在**布局之前**告诉 ` + "`sch autolayout --engine template`" + `
+每个模块该落在纸面的哪一格 —— 那一步跑的时候件还没放下去,没有任何活体几何可读,
+模块往哪去只能靠声明。
+
+**它不再负责「哪几件是一个模块」**:` + "`sch block-apply`" + ` 落块时已按**功能子群**
+把件封成虚拟组(flow 的每一级 + 跟着它的去耦/并列组),` + "`sch zone-plan`" + ` /
+` + "`zone-draw`" + ` 直接读组 —— 那是成员归属的**单一事实来源**。认领再抄一份成员列表
+就是第二处副本,而副本不会跟着更新(件被 ` + "`group-move`" + ` 挪走或删掉,认领纹丝不动)。
+只有**手工搭的页**(没有块、没有虚拟组)才需要用它来告诉工具谁跟谁一组。
+
+` + "`sch layout-lint`" + ` 的 zone-violation 判据**已废弃**:分区框现在从活体模块 bbox
+反推,「件在不在自己的框里」是同义反复 —— 永远不会失败的判据等于没有判据。
+分区画得对不对由 ` + "`sch zone-plan`" + ` 的六项落笔前 validation 判。
 
 Zone names are the shared grid vocabulary (same as autolayout + pcb zones):
 left / center / right × top / bottom (e.g. right-top), or full-height/width
 left / right / top / bottom / center. The canvas is y-UP, and "top" means the
 VISUALLY upper half (larger y — zoneRect owns the mapping). The rectangle is
-resolved from the LIVE sheet bbox at lint time. Claims live by schematic
+resolved from the LIVE sheet bbox at placement time. Claims live by schematic
 document UUID in the project workflow state
 (~/.easyeda-agent/workflow/<project>.json); modules[].page in a spec is resolved
 to its page UUID, while manual --module claims apply to the active/--doc page.
@@ -223,7 +240,7 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 	var modules []string
 	c := &cobra.Command{
 		Use:   "set",
-		Short: "Set page-scoped schematic zone claims from an S0 spec file (--spec) or manually (--module)",
+		Short: "认领模块的落位格位(给布局前的 autolayout 用;成员归属请用虚拟组)",
 		Example: `  easyeda sch zones set --spec s0-esp32mini.json --project ceshi
   easyeda sch zones set --module "POWER=left-top:U3,C5,C6" --module "MCU=center:U1" --project ceshi`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -298,7 +315,9 @@ func newSchZonesSetCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 				}
 				fmt.Fprintf(stderr, "✓ %s → %s%s (%d part(s): %s)\n", name, zc.Zone, page, len(zc.Parts), strings.Join(zc.Parts, ","))
 			}
-			fmt.Fprintf(stderr, "schematic zone claims persisted for %q — %d module(s), %d part(s), page-scoped by document UUID; consumed by `sch layout-lint` (zone-violation WARN)\n",
+			fmt.Fprintf(stderr, "已记下 %q 的分区认领 —— %d 个模块 / %d 件,按页(documentUuid)持久化;"+
+				"消费者只有 `sch autolayout --engine template`(布局前的落位目标格)。"+
+				"分区框与说明读的是**虚拟组**,不读这里;手工搭的页(没有虚拟组)才回落到它\n",
 				project, len(claims), total)
 			return nil
 		},
@@ -312,7 +331,7 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 	var asJSON bool
 	c := &cobra.Command{
 		Use:   "status",
-		Short: "Show the persisted schematic zone claims (and live violations when a window is connected)",
+		Short: "列出已记下的分区认领(活体违规判据已随 zone-violation 一并废弃)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
 			if err != nil {

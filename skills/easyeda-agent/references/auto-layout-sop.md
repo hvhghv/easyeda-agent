@@ -21,6 +21,8 @@ netflag、去耦贴 IC、框和文字按页保存。**
 
 1. `easyeda sch sheet-geometry --json --doc <page>`：必须有真实 sheet bbox。
 2. 按功能拆页并生成 module spec；`easyeda sch zones set --spec <spec>` 持久化
+   （认领现在**只给布局前的 `sch autolayout` 指定落位格位**；分区框/说明的成员归属
+   读的是虚拟组 —— `sch block-apply` 落块时已按功能子群自动归组）
    `modules[].page/zone/parts`。
 3. 放置全部器件并读回真实 bbox/pins。优先 `sch block-apply`；其次在无
    wire/bus/marker 的页面运行 `sch autolayout --engine template --dry-run`，确认后

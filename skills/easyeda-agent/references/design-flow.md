@@ -238,7 +238,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 
    | # | stage | 阻塞判据 |
    |---|---|---|
-   | 1 | `layout-lint` | **器件本体**的 `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、zone-violation、**out-of-sheet**、缺失/畸形几何、zone/sheet check `unavailable` 同样阻断 |
+   | 1 | `layout-lint` | **器件本体**的 `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、**out-of-sheet**、缺失/畸形几何、sheet check `unavailable` 同样阻断 |
    | 2 | `clusters` | **虚拟组体积**(器件 + 只挂在它自己引脚上的 marker/桩线/文字):组间**图元级**重叠、组探出图纸可用区;strict 下组间过近也阻断 |
    | 3 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
 

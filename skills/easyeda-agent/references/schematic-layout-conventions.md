@@ -68,7 +68,10 @@ A3 / 类 A3 图纸划成 **3×3 九宫格**——这是**理想布局**，不是
 1. **分页（S1）**——模块多/页挤就分页，每页一个功能域（电源一页、主控一页、
    接口/外设一页…），跨页用 `net_port` 同名同网连接。判据：单页塞不下
    「模块间 ≥§2 间距 + 说明文字空间」就该分页，别硬挤。
-2. **分区框 + 区名（S2）**——`sch zones set --spec` 认领 → `sch zone-draw` 画虚线
+2. **分区框 + 区名（S2）**——`sch block-apply` 落块时已按**功能子群**自动归组,
+   直接 `sch zone-plan`（六项 validation 全 0 才落笔）→ `sch zone-draw` 画虚线;
+   框 = 成员虚拟组体积的并集(框住内容是构造保证),区名在框内左上、电路说明在框内左下
+   (`sch note --zone <子群>`,超宽自动折行)。手工搭的页才需要 `sch zones set` 认领成员
    框+区名（整纸版式 `--mode partition --font-size 22`）；`autolayout --apply`
    自动画。`sch zones status` 查是否已可视化。
 3. **电路说明（S3，每模块 1~3 行）**——`easyeda sch note` 在模块框下/旁放简短
