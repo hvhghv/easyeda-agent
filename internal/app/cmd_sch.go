@@ -1840,6 +1840,7 @@ the selection). Without --ids it exports the whole active page.`,
 	// S5 校验门:把 layout-lint / check / bridge-check / drc 收成一条固定流水线。
 	// 四个单命令原样保留(专家 + 局部复查),但主干路径走 gate。
 	sch.AddCommand(newSchGateCmd(cfg, &window, stdout, stderr))
+	sch.AddCommand(newSchStatusCmd(cfg, &window, stdout, stderr))
 
 	return sch
 }

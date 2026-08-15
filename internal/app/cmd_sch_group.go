@@ -800,6 +800,11 @@ then re-connect the affected pin(s) (`+"`sch connect`"+`) and retry`,
 func fetchSchWirePolylinesStable(cfg *appConfig, window, docUUID string) ([]schGroupWire, error) {
 	const attempts = 4
 	var prevKey string
+	// havePrev 而不是 `prevKey != ""`:**一页也可以一根线都没有**,那时 key 恒为
+	// 空串,旧写法的守卫永远不成立 —— 连续四次读到同一个空集,却报「快照还在churning」。
+	// 于是「零导线」被渲染成读取故障(sch status 首跑就撞上:三页各报读不到)。
+	// 「没读过」和「读到空」是两件事,必须用独立的标志区分,不能靠值本身。
+	var havePrev bool
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
 			time.Sleep(350 * time.Millisecond)
@@ -814,10 +819,10 @@ func fetchSchWirePolylinesStable(cfg *appConfig, window, docUUID string) ([]schG
 		}
 		sort.Strings(ids)
 		key := strings.Join(ids, ",")
-		if prevKey != "" && key == prevKey {
+		if havePrev && key == prevKey {
 			return cur, nil
 		}
-		prevKey = key
+		prevKey, havePrev = key, true
 	}
 	return nil, fmt.Errorf("wire list is still churning after %d reads (platform snapshot settling after a recent mutation) — wait a moment and rerun", attempts)
 }

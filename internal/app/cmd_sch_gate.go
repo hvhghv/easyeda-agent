@@ -84,6 +84,15 @@ type gateReport struct {
 	Warnings []string    `json:"warnings,omitempty"`
 }
 
+// gate 三个判据阈值的默认值。**提成常量是为了让别的调用方用同一把尺**:
+// `sch status --gate` 复用 collectSchGate 时若各自抄一份字面量,两条路就会在
+// 某次调参后悄悄给出不同判定 —— 同一张画布两个答案是最难查的那种不一致。
+const (
+	gateDefaultMinGap     = 2.54
+	gateDefaultPinEps     = 0.0
+	gateDefaultOverlapEps = 0.5
+)
+
 const (
 	gateStatusPass    = "pass"
 	gateStatusFail    = "fail"
@@ -483,12 +492,46 @@ func gateAdviceFor(st gateStage) []string {
 // runSchGate executes the fixed S5 gate pipeline and renders one report.
 func runSchGate(cfg *appConfig, window string, allPages, strict, asJSON, failFast bool,
 	only, skip string, minGap, pinEps, overlapEps float64, stdout, stderr io.Writer) error {
+	rep, err := collectSchGate(cfg, window, allPages, strict, failFast, only, skip,
+		minGap, pinEps, overlapEps, stderr)
+	if err != nil {
+		return err
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(rep); err != nil {
+			return err
+		}
+	} else {
+		renderGateReport(*rep, stdout)
+	}
+
+	switch rep.Verdict {
+	case "blocked":
+		return fmt.Errorf("sch gate: BLOCKED — 检查器没能跑完,原理图未被完整判定(不是板子的问题):%s",
+			strings.Join(rep.Blockers, "; "))
+	case "fail":
+		return fmt.Errorf("sch gate: FAIL — %s", strings.Join(rep.Blockers, "; "))
+	}
+	return nil
+}
+
+// collectSchGate 跑固定管线并给出评级后的报告,**不渲染、不决定退出码**。
+//
+// 抽出来是为了让 `sch status --gate` 复用同一条管线:status 要的是三态判定本身
+// (pass / fail / **blocked**),而不是打印出来的那段文字。如果它改用「调 runSchGate
+// 看 error 非空」来判,blocked 就会被折成 fail —— 「检查器没跑起来」被当成「板子有病」,
+// 正是 gate 三态存在的理由。判定只有一个来源,渲染是它的下游。
+func collectSchGate(cfg *appConfig, window string, allPages, strict, failFast bool,
+	only, skip string, minGap, pinEps, overlapEps float64, stderr io.Writer) (*gateReport, error) {
 	if strict && allPages {
-		return fmt.Errorf("sch gate: --strict cannot be combined with --all-pages: inactive pages expose shallow geometry (see layout-lint), so gate each page after `easyeda doc switch <page>`")
+		return nil, fmt.Errorf("sch gate: --strict cannot be combined with --all-pages: inactive pages expose shallow geometry (see layout-lint), so gate each page after `easyeda doc switch <page>`")
 	}
 	run, skippedNames, err := resolveGateStages(only, skip)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	rep := gateReport{Stages: make([]gateStage, 0, len(gateStages))}
@@ -536,25 +579,7 @@ func runSchGate(cfg *appConfig, window string, allPages, strict, asJSON, failFas
 	}
 
 	gradeGateReport(&rep)
-
-	if asJSON {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(rep); err != nil {
-			return err
-		}
-	} else {
-		renderGateReport(rep, stdout)
-	}
-
-	switch rep.Verdict {
-	case "blocked":
-		return fmt.Errorf("sch gate: BLOCKED — 检查器没能跑完,原理图未被完整判定(不是板子的问题):%s",
-			strings.Join(rep.Blockers, "; "))
-	case "fail":
-		return fmt.Errorf("sch gate: FAIL — %s", strings.Join(rep.Blockers, "; "))
-	}
-	return nil
+	return &rep, nil
 }
 
 // gradeGateReport derives blockers, warnings, verdict and ok from the stage
@@ -721,8 +746,8 @@ superset of the four single commands' JSON: nothing needs a second run.`,
 	c.Flags().StringVar(&skip, "skip", "", "skip these stages (comma-separated)")
 	// Defaults mirror `sch layout-lint` / `sch check` exactly — gating a page must
 	// never disagree with linting it directly.
-	c.Flags().Float64Var(&minGap, "min-gap", 2.54, "layout-lint stage: min edge-to-edge gap (mm) before a pair is flagged as tight")
-	c.Flags().Float64Var(&pinEps, "pin-eps", 0, "layout-lint stage: max distance (mm) at which two pins of DIFFERENT components count as coincident; 0 = strict equality")
-	c.Flags().Float64Var(&overlapEps, "overlap-eps", 0.5, "check stage: min positive-area extent (mm) for the marker-overlap/titleblock-overlap rules")
+	c.Flags().Float64Var(&minGap, "min-gap", gateDefaultMinGap, "layout-lint stage: min edge-to-edge gap (mm) before a pair is flagged as tight")
+	c.Flags().Float64Var(&pinEps, "pin-eps", gateDefaultPinEps, "layout-lint stage: max distance (mm) at which two pins of DIFFERENT components count as coincident; 0 = strict equality")
+	c.Flags().Float64Var(&overlapEps, "overlap-eps", gateDefaultOverlapEps, "check stage: min positive-area extent (mm) for the marker-overlap/titleblock-overlap rules")
 	return c
 }
