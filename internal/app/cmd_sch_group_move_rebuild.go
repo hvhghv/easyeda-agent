@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 )
@@ -62,12 +63,31 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 	}
 	before := groupRebuildSnapshotOf(live)
 
+	wires, werr := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if werr != nil {
+		return fmt.Errorf("读导线:%w", werr)
+	}
+
+	// 2b. **边界收拢**:每一层都要自己保证不出界(ADR-0003 §6)。group-arrange 走的
+	//     是有边界的排布器,而手工 group-move 过去完全不查 —— 实测 Δ=(40,60) 就把
+	//     整个组推出图纸,layout-lint 报 5 out-of-sheet 而命令一声不吭。
+	//     收拢而不是拒绝:调用方要的是「挪一挪」,把它按到可用区里仍然满足这个意图。
+	if box, ok := groupOccupancy(comps, wires, memberSet); ok {
+		if bounds, ok2 := arrangeBoundsOf(sheetBBoxOf(comps)); ok2 {
+			ndx, ndy := clampDeltaToBounds(box, dx, dy, bounds)
+			if ndx != dx || ndy != dy {
+				fmt.Fprintf(stderr, "note: Δ=(%.0f,%.0f) 会让组出图纸可用区,已收拢到 Δ=(%.0f,%.0f)\n", dx, dy, ndx, ndy)
+				dx, dy = ndx, ndy
+			}
+		}
+	}
+	if dx == 0 && dy == 0 {
+		fmt.Fprintln(stdout, "✓ 组已在可用区内且无需移动(零位移,未改动画布)")
+		return nil
+	}
+
 	// 3. 删净成员整树(旧桩 + 旧旗 + 不触 pin 的残段)。共享树(触到非成员引脚)
 	//    会被 tidyDeepSweepPlan 拒绝,零 mutation 退出 —— 删掉它会切断组外的电路。
-	wires, err := fetchSchWirePolylinesStable(cfg, win, docUUID)
-	if err != nil {
-		return fmt.Errorf("读导线:%w", err)
-	}
 	deleteIDs, err := tidyDeepSweepPlan(memberSet, comps, wires)
 	if err != nil {
 		return err
@@ -346,4 +366,26 @@ func diffStringSets(a, b []string) (onlyA, onlyB []string) {
 	sort.Strings(onlyA)
 	sort.Strings(onlyB)
 	return onlyA, onlyB
+}
+
+// clampDeltaToBounds 把一次平移收拢进可用区:先按请求平移,越界的方向往回推,
+// 结果仍吸附在 5 格上(判定坐标 = 落地坐标)。组比可用区还大时只保证左上角对齐,
+// 那种情况该拆页,不是靠挪。
+func clampDeltaToBounds(box layoutBBox, dx, dy float64, bounds layoutBBox) (float64, float64) {
+	grid := float64(schAnchorGrid)
+	snap := func(v float64) float64 { return math.Round(v/grid) * grid }
+	nx, ny := dx, dy
+	if box.MaxX+nx > bounds.MaxX {
+		nx = bounds.MaxX - box.MaxX
+	}
+	if box.MinX+nx < bounds.MinX {
+		nx = bounds.MinX - box.MinX
+	}
+	if box.MaxY+ny > bounds.MaxY {
+		ny = bounds.MaxY - box.MaxY
+	}
+	if box.MinY+ny < bounds.MinY {
+		ny = bounds.MinY - box.MinY
+	}
+	return snap(nx), snap(ny)
 }

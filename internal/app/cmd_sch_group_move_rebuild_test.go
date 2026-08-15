@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -110,4 +111,43 @@ func TestGroupRebuildConnSpecs_IgnoresNonMembers(t *testing.T) {
 			t.Errorf("不该重连组外器件: %+v", conns)
 		}
 	}
+}
+
+// **每一层都要自己保证不出界**(ADR-0003 §6)。group-arrange 有边界排布器,而手工
+// group-move 过去完全不查 —— 实测 Δ=(40,60) 就把组推出图纸,layout-lint 报
+// 5 out-of-sheet 而命令一声不吭。
+func TestClampDeltaToBounds(t *testing.T) {
+	bounds := layoutBBox{MinX: 0, MinY: 0, MaxX: 1000, MaxY: 800}
+	box := layoutBBox{MinX: 100, MinY: 100, MaxX: 400, MaxY: 300}
+
+	t.Run("界内不动", func(t *testing.T) {
+		dx, dy := clampDeltaToBounds(box, 50, 50, bounds)
+		if dx != 50 || dy != 50 {
+			t.Errorf("不越界就不该改: (%v,%v)", dx, dy)
+		}
+	})
+	t.Run("右越界收回", func(t *testing.T) {
+		dx, _ := clampDeltaToBounds(box, 900, 0, bounds)
+		if box.MaxX+dx > bounds.MaxX {
+			t.Errorf("收拢后仍越界: MaxX=%v > %v", box.MaxX+dx, bounds.MaxX)
+		}
+	})
+	t.Run("上越界收回", func(t *testing.T) {
+		_, dy := clampDeltaToBounds(box, 0, 900, bounds)
+		if box.MaxY+dy > bounds.MaxY {
+			t.Errorf("收拢后仍越界: MaxY=%v > %v", box.MaxY+dy, bounds.MaxY)
+		}
+	})
+	t.Run("负向越界收回", func(t *testing.T) {
+		dx, dy := clampDeltaToBounds(box, -900, -900, bounds)
+		if box.MinX+dx < bounds.MinX || box.MinY+dy < bounds.MinY {
+			t.Errorf("收拢后仍越界: (%v,%v)", box.MinX+dx, box.MinY+dy)
+		}
+	})
+	t.Run("结果吸附在网格上", func(t *testing.T) {
+		dx, dy := clampDeltaToBounds(box, 903, 707, bounds)
+		if math.Mod(dx, float64(schAnchorGrid)) != 0 || math.Mod(dy, float64(schAnchorGrid)) != 0 {
+			t.Errorf("位移必须在 %d 格上: (%v,%v)", schAnchorGrid, dx, dy)
+		}
+	})
 }
