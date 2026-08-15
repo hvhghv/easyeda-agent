@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -85,8 +86,12 @@ type acConnResult struct {
 	Rejected        []acRejected `json:"rejected,omitempty"`
 	WirePrimitiveID string       `json:"wirePrimitiveId,omitempty"`
 	FlagPrimitiveID string       `json:"flagPrimitiveId,omitempty"`
-	DryRun          bool         `json:"dryRun,omitempty"`
-	Error           string       `json:"error,omitempty"`
+	// Retried 记这一脚是重试后才连上的。**必须可见**:它是平台随机卡死的
+	// 唯一现场证据,报告里不体现的话,一条重试救回来的连接看起来和一次就成的
+	// 完全一样,谁也不会知道这条路正在变差(还是变好)。
+	Retried bool   `json:"retried,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+	Error   string `json:"error,omitempty"`
 	// State is the idempotency decision (issue #50): "new" (planned/connected),
 	// "already-connected" (skipped), or "conflict" (blocked, or replaced under
 	// --replace). CurrentNet is the pin's pre-existing net when known.
@@ -502,7 +507,8 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 				"direction": selected.Direction,
 				"offset":    selected.Offset,
 			}
-			cres, cerr := requestAction(cfg, "schematic.power.connect_pin", window, payload)
+			cres, cerr, retried := acConnectPinWithRetry(cfg, window, payload)
+			cr.Retried = retried
 			if cerr != nil {
 				cr.Error = cerr.Error()
 				report.OK = false
@@ -861,4 +867,49 @@ unless you pass --replace, which deletes the old flag+wire and reconnects.`,
 	c.Flags().BoolVar(&replace, "replace", false, "when a pin is already on a DIFFERENT net, delete its old flag+wire and reconnect (without --replace such pins error out; pins already on the target net are always skipped)")
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the report as JSON")
 	return c
+}
+
+// acConnectPinTimeout 是 connect_pin 的**专用**预算,比默认 20s 长。
+//
+// 连接器内部的最坏路径是 wire(7s)+ 重试间隔(0.25s)+ wire 重试(7s)+ netflag(7s)
+// = **21.25s > 默认 20s** —— daemon 会先于连接器放弃,报「connector did not
+// respond」(实测 57 次失败里 17 次是它),而此时连接器往往还在跑、甚至已经把线和旗
+// 建完了。CLI 认为失败、画布上却有东西,是最难查的那种不一致。预算必须**大于**被
+// 调用方的最坏耗时,否则超时报告的是我们自己的不耐烦,不是对方的故障。
+const acConnectPinTimeout = 35 * time.Second
+
+// acConnectPinRetryable 判一次失败能不能安全重试。
+//
+// 判据是**连接器有没有明确说它回滚了**:netflag 创建超时时,连接器会删掉已建的桩线
+// 再抛错(actions.ts 的 rollbackWire),此时画布干净,重试等价于第一次。反过来,
+// 「connector did not respond」这类**状态未知**的失败绝不能盲目重试 —— 那可能只是
+// 我们没等到回应而对方已经建好了,重试会得到第二条桩线和第二面旗。
+//
+// 依赖错误文案是刻意的:连接器是本仓库自己的代码,这句话是双方的契约,改文案就要
+// 一起改这里。
+func acConnectPinRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "rolled back") || strings.Contains(msg, "Rolling back")
+}
+
+// acConnectPinWithRetry 发一次 connect_pin,失败且**可证明干净**时再发一次。
+//
+// 为什么值得重试:实测 57 次失败里 23 次是 netflag 卡在平台的 stuck-at-99%
+// (「请求被丢掉但不报错」),它是**随机**的 —— 同一脚重发一次通常就成。不重试的
+// 代价不是慢,是那一脚根本没连上,要等到几步之后 `sch check` 才暴露成悬空引脚。
+func acConnectPinWithRetry(cfg *appConfig, window string, payload map[string]any) (*actionResult, error, bool) {
+	res, err := requestActionTimed(cfg, "schematic.power.connect_pin", window, payload, acConnectPinTimeout)
+	if err == nil || !acConnectPinRetryable(err) {
+		return res, err, false
+	}
+	res2, err2 := requestActionTimed(cfg, "schematic.power.connect_pin", window, payload, acConnectPinTimeout)
+	if err2 != nil {
+		// 两次都失败:报**第一次**的原因(它才是根因;第二次往往是同一次平台抽风的
+		// 余波),并写明重试过 —— 否则读日志的人会以为只试了一次。
+		return res2, fmt.Errorf("%w(重试一次仍失败)", err), true
+	}
+	return res2, nil, true
 }
