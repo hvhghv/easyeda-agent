@@ -797,9 +797,14 @@ func bapDropRelationalLayout(in []string) []string {
 	return out
 }
 
-// bslMarkerLanePitch 是同侧两条 marker lane 的间距:netport 典型 body 长 38 + 间隙。
-// 与 autoconnect 的 laneStepFor 同量级 —— 布局留的空间和落点要的空间必须对齐。
-const bslMarkerLanePitch = 46.0
+// bslMarkerLanePitch 是同侧两条 marker lane 的间距 —— **直接问 autoconnect 要**,
+// 别再自己写一个「同量级」的常量:落点那边的步长现在含网名(laneStepFor),布局这边
+// 若还按 46 留,两条 lane 之间就差了一整个名字的宽度,marker 照样压在一起。
+// 网名未知时用一个典型长度问价(布局阶段只需要量级,逐个网名的差异由 reach 那一项管)。
+func bslMarkerLanePitchFor(net string) float64 { return laneStepFor("netport", net) }
+
+// bslMarkerLanePitch 是没有具体网名时的默认 lane 间距。
+var bslMarkerLanePitch = bslMarkerLanePitchFor("NET_1")
 
 // ── marker 通道不够就把器件推开(ADR-0003 时间窗)──────────────────────────────
 //

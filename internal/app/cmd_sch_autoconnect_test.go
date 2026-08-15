@@ -866,16 +866,19 @@ func TestApplyLaneStagger_StaysShallowWhenLabelsDoNotCollide(t *testing.T) {
 
 // 撞了才让开:首选带着 costFlagCollision 时,挑同方向里第一个不撞的。
 func TestApplyLaneStagger_StepsOutOnlyWhenItActuallyCollides(t *testing.T) {
+	// 让开的那一档必须真的越过前一支的**整个占地**(body + 网名 + 间隙),
+	// 否则深的那支 body 会落进浅的那支名字带里 —— 这就是「长短循环」的长档。
+	step := laneStepFor("netport", "C7_N5")
 	all := []acCandidate{
 		{Direction: "left", Offset: 18, Score: 1001,
 			Reasons: []acReason{{costFlagCollision, "label collides with an existing flag/port/label"}}},
-		{Direction: "left", Offset: 64, Score: 6},
-		{Direction: "left", Offset: 90, Score: 9},
+		{Direction: "left", Offset: 18 + step - 6, Score: 6}, // 差一点,不够
+		{Direction: "left", Offset: 18 + step, Score: 9},     // 正好一个完整步长
 	}
 	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
 	got := applyLaneStagger(all, lanes, "U3", "C7_N5", "netport")
-	if got.Offset != 64 {
-		t.Errorf("撞了该挑同方向里第一个干净的(64),got %v", got.Offset)
+	if got.Offset != 18+step {
+		t.Errorf("让开必须够一个完整步长(%v),got %v", 18+step, got.Offset)
 	}
 }
 

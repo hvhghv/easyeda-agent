@@ -291,7 +291,31 @@ func flagDirectionOf(family string, rot float64) (string, bool) {
 // 文字位置按实际渲染:水平旗文字在锚点内侧(pin 方向)桩线上方,竖直旗文字在
 // 符号外端水平居中。宽按 6/字符估,高 12。
 func flagTextBand(c layoutComp) *layoutBBox {
-	if c.ComponentType != "netflag" || c.Rotation == nil || c.BBox == nil || !c.AnchorAvailable || c.Net == "" {
+	if c.BBox == nil || !c.AnchorAvailable || c.Net == "" {
+		return nil
+	}
+	// **netport 的网名画在本体之外**(2026-08-15 实测推翻旧注释):平台给的 bbox 恒为
+	// 31×11,`C7_N3` 与 `USB_DTR` 一模一样 —— 名字根本不在里面。于是"标签压标签"对
+	// check / layout-lint / 落点评分器全都是隐形的:用户一眼看见两支标签叠着,工具却
+	// 一路报 0 marker-overlap。实测 MCU_TX 的本体 x=[544,576],而 MCU_RX 的本体
+	// x=[500,530] 正落在 MCU_TX 名字要渲染的那一段上。
+	// 名字沿本体的**背离锚点**方向往外接一条带(与 relayoutPortWidth 同一个宽度口径)。
+	if c.ComponentType == "netport" {
+		l := relayoutPortWidth(c.Net)
+		const h = 11.0
+		b := *c.BBox
+		switch {
+		case b.MaxX <= c.X: // 本体在锚点左侧 → 名字继续往左
+			return &layoutBBox{MinX: b.MinX - l, MinY: b.MinY, MaxX: b.MinX, MaxY: b.MinY + h}
+		case b.MinX >= c.X: // 本体在锚点右侧 → 名字继续往右
+			return &layoutBBox{MinX: b.MaxX, MinY: b.MinY, MaxX: b.MaxX + l, MaxY: b.MinY + h}
+		case b.MaxY <= c.Y: // 竖放:名字接在下端
+			return &layoutBBox{MinX: b.MinX, MinY: b.MinY - l, MaxX: b.MinX + h, MaxY: b.MinY}
+		default:
+			return &layoutBBox{MinX: b.MinX, MinY: b.MaxY, MaxX: b.MinX + h, MaxY: b.MaxY + l}
+		}
+	}
+	if c.ComponentType != "netflag" || c.Rotation == nil {
 		return nil
 	}
 	family := ""

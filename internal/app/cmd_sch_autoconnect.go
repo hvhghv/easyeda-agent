@@ -342,9 +342,28 @@ func predictedMarkerBBox(x, y float64, canonicalKind, direction, net string) lay
 // `sch check` 的 marker-overlap 判的是「符号本体 ∪ 文字带」,评分器过去只预测
 // 符号本体,于是它挑出的"干净"位置在 check 眼里照样重叠 —— 剩余那批
 // 1.00×12.00 / 22.50×12.50 的重叠量,12 就是文字带高度本身。
-// netport 的名字画在本体内,没有额外文字带(与 flagTextBand 同口径)。
+// **netport 的名字画在本体之外**(2026-08-15 实测推翻旧注释):平台给的 netport bbox
+// 恒为 31×11,`C7_N3` 与 `USB_DTR` 一模一样 —— 名字根本不在里面。于是"标签压标签"
+// 对评分器完全隐形:它挑出的"干净"落点,用户一眼就能看见两支标签叠着。
+// 真机实证:U3 引脚 y 间距 10、标签高 11,同一条 lane 上必压 1 —— 修尺子之后同一张
+// 画布从 `0 marker-overlap` 变成 **11 处 29×1**。
 func predictedFlagTextBand(x, y float64, body layoutBBox, canonicalKind, direction, net string) *layoutBBox {
 	if net == "" {
+		return nil
+	}
+	if canonicalKind == "netport" || canonicalKind == "port" {
+		l := relayoutPortWidth(net)
+		const h = 11.0
+		switch direction {
+		case "left": // 本体在锚点左侧 → 名字继续往左
+			return &layoutBBox{MinX: body.MinX - l, MinY: body.MinY, MaxX: body.MinX, MaxY: body.MinY + h}
+		case "right":
+			return &layoutBBox{MinX: body.MaxX, MinY: body.MinY, MaxX: body.MaxX + l, MaxY: body.MinY + h}
+		case "up":
+			return &layoutBBox{MinX: body.MinX, MinY: body.MaxY, MaxX: body.MinX + h, MaxY: body.MaxY + l}
+		case "down":
+			return &layoutBBox{MinX: body.MinX, MinY: body.MinY - l, MaxX: body.MinX + h, MaxY: body.MinY}
+		}
 		return nil
 	}
 	switch canonicalKind {
@@ -867,11 +886,20 @@ func laneKeyOf(designator, direction string) string {
 	return strings.ToUpper(designator) + "|" + direction
 }
 
-// laneStepFor 是同一条 lane 上两个 marker 的最小 offset 差:marker 自身的 body
-// 长度 + 一个可见间隙。小于它,后一个的 body 会压在前一个身上。
+// laneStepFor 是同一条 lane 上两个 marker 的最小 offset 差:marker 的**整个占地**
+// (body + 渲染出来的网名)+ 一个可见间隙。小于它,后一个会压在前一个身上。
+//
+// 名字这一段是 2026-08-15 补的:此前只算 body(netport 46),而 netport 的名字画在
+// body **之外**,于是"长短两档"只错开 42 —— 深的那支 body 正好落进浅的那支名字带里,
+// 真机同一侧连出 11 处 `29×1` 的重叠(29 是名字宽,1 是引脚间距 10 与标签高 11 的差)。
 func laneStepFor(canonicalKind, net string) float64 {
 	p := markerBBoxProfile(canonicalKind, net)
-	return (p.Far - p.Near) + acLaneGap
+	step := (p.Far - p.Near) + acLaneGap
+	switch canonicalKind {
+	case "netport", "port":
+		step += relayoutPortWidth(net)
+	}
+	return step
 }
 
 // acLaneGap 是同侧相邻 marker 之间的可见间隙。
@@ -927,9 +955,17 @@ func applyLaneStagger(all []acCandidate, lanes map[string]float64,
 	if !candidateCollidesWithMarker(best) {
 		return best
 	}
-	// 首选确实撞了:同方向里找第一个不撞、又不破坏正确性判据的。
+	// 首选确实撞了:同方向里找第一个不撞、又不破坏正确性判据的,**并且至少让开一个
+	// 完整步长**(body + 网名 + 间隙)。只要"不撞"是不够的:候选档位是 6 一跳,
+	// 挑出来的往往只比前一支深 42,而 netport 的名字画在 body 外 —— 深的那支 body
+	// 正好落进浅的那支名字带里。这就是用户说的「不要阶梯,长短循环」:标准的两档,
+	// 一档浅一档深,深的那档必须真的越过前一支的整个占地。
+	need := 0.0
+	if used, ok := lanes[laneKeyOf(designator, best.Direction)]; ok {
+		need = used + laneStepFor(canonicalKind, net)
+	}
 	for _, c := range all {
-		if c.Direction != best.Direction || candidateCollidesWithMarker(c) {
+		if c.Direction != best.Direction || c.Offset < need || candidateCollidesWithMarker(c) {
 			continue
 		}
 		// **错开不能以别的破坏为代价**。只挡短路是不够的:第一版只过滤硬拒绝,
