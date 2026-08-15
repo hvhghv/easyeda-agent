@@ -367,7 +367,11 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 	}
 	for _, m := range modules {
 		pb, ok := partOf[m.Name]
-		if !ok || !bboxContains(pb, moduleCoreBBox(m)) {
+		// **按整个 L1 虚拟组判,不是按器件本体**:框的职责是「框住这个模块」,而模块的
+		// 体积包含它自己的 marker/桩线。只判本体时,框可以把地旗、网络标签甩在外面
+		// 却依然报 clean —— 用户截图一眼看出 D1 的 GND 垂在 ESD 框外,而 validation
+		// 五项全 0。判据必须判所见。
+		if !ok || !bboxContains(pb, m.BBox) {
 			v.ModuleOutsideZone++
 		}
 	}
@@ -402,7 +406,15 @@ func strInSlice(ss []string, s string) bool {
 // caps' GND rendered below the frame).
 const schModuleMarkerReach = 60.0
 
-func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp) []partitionModule {
+// modulesFromClaims 把认领折成模块 bbox。
+//
+// clusterOf 是**按导线归属**算出的「器件 + 只挂在它自己引脚上的 marker/桩线」体积
+// (`buildSchClusters`)。有它就用它 —— 框住的必须是整个 L1 虚拟组,而不是器件本体:
+// 用户截图实证 D1 的 GND 旗垂在 ESD 框外面。nil 时退回旧的**距离启发式**折叠
+// (`foldMarkers`):按锚点离模块 bbox 多远来收编,够不着的旗就漏在框外,而且可能
+// 把邻居的旗收进来 —— 这正是「归属靠距离」的老毛病,能拿到导线就别用它。
+func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp,
+	clusterOf map[string]layoutBBox) []partitionModule {
 	byDesig := map[string]layoutComp{}
 	for _, c := range comps {
 		if c.Designator != "" && c.BBox != nil {
@@ -438,26 +450,36 @@ func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp) []par
 		if zc == nil {
 			continue
 		}
-		var u *layoutBBox
+		var u, core *layoutBBox
+		grow := func(dst **layoutBBox, b layoutBBox) {
+			if *dst == nil {
+				c := b
+				*dst = &c
+				return
+			}
+			(*dst).MinX = minF((*dst).MinX, b.MinX)
+			(*dst).MinY = minF((*dst).MinY, b.MinY)
+			(*dst).MaxX = maxF((*dst).MaxX, b.MaxX)
+			(*dst).MaxY = maxF((*dst).MaxY, b.MaxY)
+		}
 		for _, d := range zc.Parts {
-			c, ok := byDesig[strings.ToUpper(d)]
+			key := strings.ToUpper(d)
+			c, ok := byDesig[key]
 			if !ok {
 				continue
 			}
-			if u == nil {
-				b := *c.BBox
-				u = &b
+			grow(&core, *c.BBox) // core = 器件本体(压图签时按它收拢)
+			if cb, has := clusterOf[key]; has {
+				grow(&u, cb) // 画框口径 = 整个 L1 虚拟组(本体 ∪ 它自己的 marker/桩线)
 				continue
 			}
-			u.MinX = minF(u.MinX, c.BBox.MinX)
-			u.MinY = minF(u.MinY, c.BBox.MinY)
-			u.MaxX = maxF(u.MaxX, c.BBox.MaxX)
-			u.MaxY = maxF(u.MaxY, c.BBox.MaxY)
+			grow(&u, *c.BBox)
 		}
 		if u != nil {
-			core := *u
-			foldMarkers(u) // 画框口径:框住成员挂的旗(GND/3V3 不再垂出框外)
-			out = append(out, partitionModule{Name: name, BBox: *u, CoreBBox: core})
+			if clusterOf == nil {
+				foldMarkers(u) // 没有导线归属时的兜底:按距离收编附近的旗
+			}
+			out = append(out, partitionModule{Name: name, BBox: *u, CoreBBox: *core})
 		}
 	}
 	return out
@@ -605,7 +627,18 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 		return partitionPlan{}, nil, fmt.Errorf("no sheet bbox on the active page — `easyeda doc switch` to the schematic page first")
 	}
 	keepout, _ := titleBlockKeepout(sheet)
-	modules := modulesFromClaims(zones, comps)
+	// 框住的是「器件 + 它自己的 marker/桩线」(L1 虚拟组),不是器件本体 ——
+	// 归属走导线,不靠距离。读不到导线就退回旧的距离启发式(会漏远处的旗)。
+	var clusterOf map[string]layoutBBox
+	if wires, werr := fetchSchWirePolylines(cfg, window, docUUID); werr == nil {
+		if cs, _ := buildSchClusters(comps, wires); len(cs) > 0 {
+			clusterOf = map[string]layoutBBox{}
+			for _, c := range cs {
+				clusterOf[strings.ToUpper(c.Designator)] = c.Box
+			}
+		}
+	}
+	modules := modulesFromClaims(zones, comps, clusterOf)
 	if len(modules) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no module bboxes resolved — the claimed parts aren't on this page (place them / `doc switch`)")
 	}

@@ -95,10 +95,10 @@ func TestDetectOffGridAnchors(t *testing.T) {
 
 func TestLayoutStrictGateFailsWarningsAndUnprovenGeometry(t *testing.T) {
 	rep := layoutReport{
-		OK:             true,
-		TightPairs:     []layoutFinding{{Type: "spacing", A: "C1", B: "U1"}},
-		NoBBox:         []string{"R1"},
-		UncheckedPins:  []string{"C1"},
+		OK:            true,
+		TightPairs:    []layoutFinding{{Type: "spacing", A: "C1", B: "U1"}},
+		NoBBox:        []string{"R1"},
+		UncheckedPins: []string{"C1"},
 	}
 	applyLayoutStrictGate(&rep, false)
 	if !rep.OK {

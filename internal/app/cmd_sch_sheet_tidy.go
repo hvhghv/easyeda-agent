@@ -163,7 +163,7 @@ func newSchSheetTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 			if err != nil {
 				return err
 			}
-			modules := modulesFromClaims(zonesMap, comps)
+			modules := modulesFromClaims(zonesMap, comps, nil)
 			foldZoneNotesIntoModules(pinned, win, docUUID, zonesMap, modules)
 			if len(modules) == 0 {
 				return fmt.Errorf("no zone modules resolved(先 `sch zones set` 认领)")
