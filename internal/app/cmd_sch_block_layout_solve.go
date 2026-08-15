@@ -41,6 +41,34 @@ const bslPartGap = bapObstacleGap
 // bslLanePitch 是两条平行跨接导线之间的通道宽度,从连接网格推导(不是估的)。
 const bslLanePitch = 2 * schAnchorGrid
 
+// bslTightHalf 是一个件的半宽 —— **求解器全域唯一的一把尺**。
+//
+// bapRoleHalfExtent 刻意「只高不低」(fallback 网格的件间距靠它兜底),但贴脚要的是
+// 紧密 —— 用 50 会把 0402 去耦推到离芯片 79 远,视觉上完全不像"贴"。分立件的 10 是
+// ceshi 实测值(0402 符号 20×16),不是估的。
+func bslTightHalf(partKey string) float64 {
+	k := strings.ToLower(partKey)
+	for _, pre := range []string{"cap.", "res.", "ind.", "diode.", "led.", "tvs.", "esd.", "bjt.", "mos."} {
+		if strings.HasPrefix(k, pre) {
+			return 10
+		}
+	}
+	return bapRoleHalfExtent(partKey)
+}
+
+// bslPartBox 是件的判定 box(以件中心为原点)。放置前它只有下限,落地后由硬门
+// (verifyBlockLayout / layout-lint 的真实 bbox)兜底。
+//
+// **求解、避让、推让必须共用它**:第一版 seed 用紧凑半宽(10)、box 用保守半宽(50),
+// 于是贴脚的件被判成"撞上锚件"而降级走网格(实测 C8/R5 都中招);推让那一版更狠 ——
+// `bapHalfExtentFn(0, nil)` 恒返 0,间隙里根本没算被推件自己的身宽,于是每次都少推
+// 一个半宽。判定与生成同源是本项目反复吃亏的那条定律,这里把尺收成一把。
+func bslPartBox(partKey string) layoutBBox {
+	h := bslTightHalf(partKey)
+	v := math.Min(h, bapPartMargin)
+	return layoutBBox{MinX: -h, MinY: -v, MaxX: h, MaxY: v}
+}
+
 // bslRelations 是求解器的输入契约。
 //
 // **P5(从 internal_nets + ports.dir + 引脚坐标反推关系)的输出类型也是它** ——
@@ -312,31 +340,15 @@ func bslSolveAround(
 		}
 		return bapPartMargin
 	}
-	// 贴脚用**更紧的**半宽:bapRoleHalfExtent 刻意「只高不低」(fallback 网格的
-	// 件间距靠它兜底),但贴脚要的是紧密 —— 用 50 会把 0402 去耦推到离芯片 79 远,
-	// 视觉上完全不像"贴"。分立件的 10 是 ceshi 实测值(0402 符号 20×16),不是估的。
-	tightHalf := func(role string) float64 {
+	partKey := func(role string) string {
 		if p, ok := blk.Parts[role]; ok {
-			k := strings.ToLower(p.Part)
-			for _, pre := range []string{"cap.", "res.", "ind.", "diode.", "led.", "tvs.", "esd.", "bjt.", "mos."} {
-				if strings.HasPrefix(k, pre) {
-					return 10
-				}
-			}
-			return bapRoleHalfExtent(p.Part)
+			return p.Part
 		}
-		return bapPartMargin
+		return ""
 	}
+	tightHalf := func(role string) float64 { return bslTightHalf(partKey(role)) }
 	// 件的估算 box(以中心为原点);放置前只有下限,落地后由硬门兜底。
-	//
-	// **必须与种子距离用同一把尺**:第一版 seed 用紧凑半宽(10)、box 用保守半宽(50),
-	// 于是贴脚的件被判成"撞上锚件"而降级走网格(实测 C8/R5 都中招)。判定与生成
-	// 同源是本项目反复吃亏的那条定律。
-	boxOf := func(role string) layoutBBox {
-		h := tightHalf(role)
-		v := math.Min(h, bapPartMargin)
-		return layoutBBox{MinX: -h, MinY: -v, MaxX: h, MaxY: v}
-	}
+	boxOf := func(role string) layoutBBox { return bslPartBox(partKey(role)) }
 	free := func(cx, cy float64, b layoutBBox) bool {
 		cand := layoutBBox{MinX: cx + b.MinX, MinY: cy + b.MinY, MaxX: cx + b.MaxX, MaxY: cy + b.MaxY}
 		if usable != nil && !boxInside(cand, *usable) {
@@ -648,7 +660,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 	}
 	fmt.Fprintf(stderr, "relational: 锚 %s 实测 bbox [%.0f,%.0f]-[%.0f,%.0f],%d 个引脚;求解 %d 件\n",
 		anchorDesig, anchorBBox.MinX, anchorBBox.MinY, anchorBBox.MaxX, anchorBBox.MaxY, len(pins), n)
-	notes = append(notes, bslExpandForMarkers(plan, anchorBBox, pins, usable, stderr)...)
+	notes = append(notes, bslExpandForMarkers(plan, rel, anchorBBox, pins, obstacles, usable, stderr)...)
 	return notes
 }
 
@@ -708,11 +720,60 @@ const bslMarkerLanePitch = 46.0
 // 算术很简单,也正是重叠的全部来源:
 //
 //	该侧要挂 N 个 marker → 需要 N × bslMarkerLanePitch 的深度
-//	与该侧最近器件的实际空隙 < 需求 → 差多少就把那个件推开多少
-func bslExpandForMarkers(plan *bapPlan, anchorBBox layoutBBox, pins map[string]acPin,
-	usable *layoutBBox, stderr io.Writer) []string {
+//	通道带里的件与锚件的实际空隙 < 需求 → 差多少就让开多少
+//	**让开之后与更外侧的件变挤 → 那一件跟着让**(连锁)
+//
+// 连锁是第一版缺的另一半:实测「把 D1 推开 146」正好把 D1 按在了 J1 身上 ——
+// 通道是从另一处的重叠里抢来的,不算腾出来。推让必须整条链一起动,而且宁可
+// **整条链一起截短**也不许推一半:半推等于把内侧件按在外侧件身上,制造
+// part×part 重叠(layout-lint 的 ERROR),比 marker 挤在一起更严重。
+func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
+	pins map[string]acPin, walls []layoutBBox, usable *layoutBBox, stderr io.Writer) []string {
 
-	// 1. 数锚件每一侧要挂几个 marker。引脚在锚件中心的哪边就算哪一侧。
+	need := bslMarkerNeedPerSide(plan, anchorBBox, pins)
+
+	var notes []string
+	for _, side := range []string{"left", "right"} {
+		cnt := need[side]
+		if cnt == 0 {
+			continue
+		}
+		want := float64(cnt) * bslMarkerLanePitch
+		// 每一侧都用**当前**坐标重建 unit:左侧推完之后,右侧要看到新位置。
+		units := bslPushUnitsOf(plan, rel)
+		res := bslPushSolve(units, walls, usable, anchorBBox, side, want)
+		if res.Head < 0 {
+			continue // 这一侧没有别的件,marker 有整片空地
+		}
+		var detail []string
+		for i, m := range res.Move {
+			if m == 0 {
+				continue
+			}
+			for _, idx := range units[i].Idx {
+				plan.Placements[idx].X += m // 整个 unit 同一个位移:pair 的等距不动
+			}
+			detail = append(detail, fmt.Sprintf("%s 让 %.0f", units[i].Label, math.Abs(m)))
+		}
+		got := res.Gap + math.Abs(res.Move[res.Head])
+		if len(detail) > 0 {
+			fmt.Fprintf(stderr, "relational: %s 侧 %d 个 marker 需 %.0f,与 %s 只有 %.0f —— %s(通道 → %.0f)\n",
+				side, cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
+		}
+		// 推不满就如实说,并且说清是被谁顶住的 —— 人和 agent 照着这句就知道
+		// 下一步该换更大图纸、拆页,还是先挪走那个外部图元。
+		if res.Capped != "" {
+			notes = append(notes, fmt.Sprintf(
+				"%s 侧要挂 %d 个 marker(需 %.0f),推让后通道只有 %.0f —— 被%s顶住;"+
+					"这一块该换更大图纸或拆页", side, cnt, want, got, res.Capped))
+		}
+	}
+	return notes
+}
+
+// bslMarkerNeedPerSide 数锚件每一侧要挂几个 marker。引脚在锚件中心的哪边就算哪一侧
+// (autoconnect 的同侧 lane 阶梯正是按侧分配的,两边必须同一个口径)。
+func bslMarkerNeedPerSide(plan *bapPlan, anchorBBox layoutBBox, pins map[string]acPin) map[string]int {
 	cx := (anchorBBox.MinX + anchorBBox.MaxX) / 2
 	need := map[string]int{}
 	marked := map[string]bool{}
@@ -743,80 +804,244 @@ func bslExpandForMarkers(plan *bapPlan, anchorBBox layoutBBox, pins map[string]a
 			need["right"]++
 		}
 	}
-
-	// 2. 每一侧:够不够?不够就把该侧最近的件推开。
-	var notes []string
-	for _, side := range []string{"left", "right"} {
-		cnt := need[side]
-		if cnt == 0 {
-			continue
-		}
-		want := float64(cnt) * bslMarkerLanePitch
-		idx, gap := bslNearestOnSide(plan, anchorBBox, side)
-		if idx < 0 {
-			continue // 这一侧没有别的件,marker 有整片空地
-		}
-		if gap >= want {
-			continue
-		}
-		push := want - gap
-		dx := push
-		if side == "left" {
-			dx = -push
-		}
-		target := &plan.Placements[idx]
-		nx := snapAnchor(target.X + dx)
-		// 推出可用区就推不动了 —— 说明这一页真的塞不下,如实说,别硬推。
-		if usable != nil && (nx < usable.MinX || nx > usable.MaxX) {
-			notes = append(notes, fmt.Sprintf(
-				"%s 侧要挂 %d 个 marker(需 %.0f),与 %s 只有 %.0f —— 推开 %s 会出可用区,只能挤着放;"+
-					"这一块该换更大图纸或拆页", side, cnt, want, target.Designator, gap, target.Designator))
-			continue
-		}
-		fmt.Fprintf(stderr, "relational: %s 侧 %d 个 marker 需 %.0f,实际只有 %.0f —— 把 %s 推开 %.0f\n",
-			side, cnt, want, gap, target.Designator, push)
-		target.X = nx
-	}
-	return notes
+	return need
 }
 
-// bslNearestOnSide 找锚件某一侧**真正挡住 marker 通道**的那个件。
+// bslPushUnit 是推让链上的一个刚体。
 //
-// 判据不是「x 最近」而是「落在通道带里」:marker 从锚件某一侧引出,占的是那一侧
-// **与锚件同高**的一条带。第一版只比 x,于是要推 R5(下方的 pair 电阻)和 C8
-// (贴 VCC 脚的去耦)—— 它们根本不在带上,推了既不腾空间又破坏关系语义。
+// 通常一个 unit 就是一个件;**pair 组必须整体移动** —— 等距并列是电路语义
+// (ADR-0003 §3:组内相对位置不是布局的自由度),推让只许平移整组,不许拆散。
+type bslPushUnit struct {
+	Idx   []int      // plan.Placements 下标(pair 组有多个)
+	Box   layoutBBox // 判定 box:全组的并集,绝对坐标,与求解器同一把尺(bslPartBox)
+	Label string     // 日志用位号
+}
+
+// bslPushResult 是一侧推让的求解结果(纯几何,不含 I/O)。
+type bslPushResult struct {
+	Move   []float64 // 与 units 下标对齐的位移(带方向号,0 = 不动)
+	Head   int       // 通道带里离锚件最近的 unit;-1 = 这一侧空着
+	Gap    float64   // Head 推让**前**与锚件的间隙
+	Capped string    // 顶住推让的东西;"" = 需求已满足
+}
+
+// bslPushUnitsOf 把 plan 里**可以被推**的件拼成 unit 列表。
 //
-// attach 件永不推:它的全部意义就是贴着那个引脚(去耦电容离芯片越近越好),
-// 为了给 marker 让路把它推走,是拿电气质量换版面。
-func bslNearestOnSide(plan *bapPlan, anchorBBox layoutBBox, side string) (int, float64) {
-	best, bestGap := -1, math.Inf(1)
-	half := bapHalfExtentFn(0, nil)
+// 三类不进列表:
+//   - 锚件 —— 整个布局以它为基准,它一动关系全废;
+//   - attach 件 —— 贴脚是它的全部意义(去耦离芯片越近越好),为让 marker 把去耦
+//     推走是拿电气质量换版面。它也**不当墙**:它占的是自己那条脚的 lane,不是整侧
+//     通道的墙,当墙会让整条链当场失效(实测 C_VCC 就贴在 VCC 脚外 ~30 处);
+//   - 已经落地的件(PrimitiveID != "")—— 改它的 plan 坐标不会写回画布,是静默空转;
+//     它们已经在 walls 里当障碍。
+func bslPushUnitsOf(plan *bapPlan, rel bslRelations) []bslPushUnit {
+	skip := map[string]bool{}
+	if plan.AnchorRole != "" {
+		skip[plan.AnchorRole] = true
+	}
+	for r := range rel.Attach {
+		skip[r] = true
+	}
+	movable := func(i int) bool {
+		p := plan.Placements[i]
+		return p.PrimitiveID == "" && !skip[p.Role]
+	}
+	idxOf := map[string][]int{}
 	for i := range plan.Placements {
-		p := &plan.Placements[i]
-		if p.Role == plan.AnchorRole || p.Source == "attach" {
-			continue
-		}
-		// 只算与锚件同高的:通道带就是锚件的 y 跨度。
-		if p.Y < anchorBBox.MinY || p.Y > anchorBBox.MaxY {
-			continue
-		}
-		h := half(p.Role)
-		var gap float64
-		switch side {
-		case "left":
-			if p.X >= anchorBBox.MinX {
-				continue
+		idxOf[plan.Placements[i].Role] = append(idxOf[plan.Placements[i].Role], i)
+	}
+	taken := map[int]bool{}
+	var units []bslPushUnit
+	for _, group := range rel.Pair { // pair 组先成 unit,整体移动
+		var u bslPushUnit
+		for _, role := range group {
+			for _, i := range idxOf[role] {
+				if taken[i] || !movable(i) {
+					continue
+				}
+				u.Idx = append(u.Idx, i)
+				taken[i] = true
 			}
-			gap = anchorBBox.MinX - (p.X + h)
-		case "right":
-			if p.X <= anchorBBox.MaxX {
-				continue
-			}
-			gap = (p.X - h) - anchorBBox.MaxX
 		}
-		if gap < bestGap {
-			best, bestGap = i, gap
+		if len(u.Idx) > 0 {
+			units = append(units, bslUnitGeom(plan, u))
 		}
 	}
-	return best, bestGap
+	for i := range plan.Placements {
+		if taken[i] || !movable(i) {
+			continue
+		}
+		taken[i] = true
+		units = append(units, bslUnitGeom(plan, bslPushUnit{Idx: []int{i}}))
+	}
+	return units
+}
+
+// bslUnitGeom 补上 unit 的判定 box(成员并集)与日志标签。
+func bslUnitGeom(plan *bapPlan, u bslPushUnit) bslPushUnit {
+	labels := make([]string, 0, len(u.Idx))
+	for k, i := range u.Idx {
+		p := plan.Placements[i]
+		b := bslPartBox(p.PartKey)
+		abs := layoutBBox{MinX: p.X + b.MinX, MinY: p.Y + b.MinY, MaxX: p.X + b.MaxX, MaxY: p.Y + b.MaxY}
+		if k == 0 {
+			u.Box = abs
+		} else {
+			u.Box = layoutBBox{
+				MinX: math.Min(u.Box.MinX, abs.MinX), MinY: math.Min(u.Box.MinY, abs.MinY),
+				MaxX: math.Max(u.Box.MaxX, abs.MaxX), MaxY: math.Max(u.Box.MaxY, abs.MaxY),
+			}
+		}
+		labels = append(labels, p.Designator)
+	}
+	u.Label = strings.Join(labels, "+")
+	return u
+}
+
+// bslPushSolve 求解一侧的连锁推让 —— 纯几何、无 I/O、同输入同输出。
+//
+// 这是一个一维约束问题(推让只沿 marker 引出的那根轴,另一轴钉死 —— 环形推让会
+// 当场破坏 flow 共线 / pair 等距):
+//
+//	① 通道需求:通道带里的 unit,离锚件不足 want 的,差多少让多少;
+//	② 连锁:内侧 unit 让开 d 之后,外侧 unit 跟着让 d − 自己那段富余
+//	   (富余 = 两者现有间隙 − bslPartGap);
+//	③ 上限:每个 unit 自己能动的极限 Lₖ(可用区边界 / 推不动的外部图元),
+//	   **反推回内侧**(capₖ = min(Lₖ, cap外 + 富余)),于是链上任何一处顶住,
+//	   整条链一起截短 —— 绝不出现「内侧推了、外侧没让」的半推重叠。
+//
+// 因为推让只沿 x、unit 按 x 严格排序,①②是一遍从内到外的松弛,③是一遍从外到内,
+// 没有环、不需要迭代到收敛。
+func bslPushSolve(units []bslPushUnit, walls []layoutBBox, usable *layoutBBox,
+	from layoutBBox, side string, want float64) bslPushResult {
+
+	res := bslPushResult{Move: make([]float64, len(units)), Head: -1, Gap: math.Inf(1)}
+	if len(units) == 0 || want <= 0 {
+		return res
+	}
+	dir := 1.0
+	if side == "left" {
+		dir = -1
+	}
+	cx := func(b layoutBBox) float64 { return (b.MinX + b.MaxX) / 2 }
+	edgeIn := func(b layoutBBox) float64 { // 朝向锚件的那条边
+		if dir > 0 {
+			return b.MinX
+		}
+		return b.MaxX
+	}
+	edgeOut := func(b layoutBBox) float64 { // 背向锚件的那条边
+		if dir > 0 {
+			return b.MaxX
+		}
+		return b.MinX
+	}
+	// gapOf 是 b 位于 a 外侧时的边到边间隙(负数 = 已经压着)。
+	gapOf := func(a, b layoutBBox) float64 { return dir * (edgeIn(b) - edgeOut(a)) }
+	outward := func(a, b layoutBBox) bool { return dir*(cx(b)-cx(a)) > 0 }
+	// 通道带 = 与锚件(或内侧件)同高的一条带。marker 从某侧引出,占的就是这条带;
+	// 不在带上的件推了既不腾空间,又破坏关系语义(第一版要推下方的 pair 电阻)。
+	bandHit := func(a, b layoutBBox) bool { return a.MinY <= b.MaxY && b.MinY <= a.MaxY }
+
+	order := make([]int, len(units)) // 从内到外,确定性 tie-break
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ia, ib := order[a], order[b]
+		ca, cb := dir*cx(units[ia].Box), dir*cx(units[ib].Box)
+		if ca != cb {
+			return ca < cb
+		}
+		return ia < ib
+	})
+
+	// ① + ② 一遍从内到外:每个 unit 的最小让开量(先不看上限)。
+	demand := make([]float64, len(units))
+	for k, i := range order {
+		u := units[i]
+		if !outward(from, u.Box) {
+			continue // 在锚件另一侧,与这条通道无关
+		}
+		m := 0.0
+		if bandHit(from, u.Box) {
+			if g := gapOf(from, u.Box); g < want {
+				m = want - g
+			}
+		}
+		for _, j := range order[:k] {
+			v := units[j]
+			if demand[j] <= 0 || !bandHit(v.Box, u.Box) || !outward(v.Box, u.Box) {
+				continue
+			}
+			slack := math.Max(0, gapOf(v.Box, u.Box)-bslPartGap)
+			if p := demand[j] - slack; p > m {
+				m = p
+			}
+		}
+		demand[i] = m
+	}
+
+	// Head:通道带里离锚件最近的那个件 —— 通道实际腾出多少按它算。
+	for _, i := range order {
+		u := units[i]
+		if !outward(from, u.Box) || !bandHit(from, u.Box) {
+			continue
+		}
+		if g := gapOf(from, u.Box); g < res.Gap {
+			res.Head, res.Gap = i, g
+		}
+	}
+	if res.Head < 0 {
+		return res
+	}
+
+	// ③ 一遍从外到内:上限,并把顶住的原因往内传。
+	limit := make([]float64, len(units))
+	why := make([]string, len(units))
+	for k := len(order) - 1; k >= 0; k-- {
+		i := order[k]
+		u := units[i]
+		lim, who := math.Inf(1), ""
+		if usable != nil {
+			b := usable.MaxX - u.Box.MaxX
+			if dir < 0 {
+				b = u.Box.MinX - usable.MinX
+			}
+			lim, who = b, u.Label+" 到可用区边界"
+		}
+		for _, w := range walls {
+			if !outward(u.Box, w) || !bandHit(u.Box, w) {
+				continue
+			}
+			if g := gapOf(u.Box, w) - bslPartGap; g < lim {
+				lim, who = g, u.Label+" 顶到页面上已有的图元"
+			}
+		}
+		for _, j := range order[k+1:] { // 更外侧的 unit:它推不动,我也就到此为止
+			v := units[j]
+			if !bandHit(u.Box, v.Box) || !outward(u.Box, v.Box) {
+				continue
+			}
+			slack := math.Max(0, gapOf(u.Box, v.Box)-bslPartGap)
+			if l := limit[j] + slack; l < lim {
+				lim, who = l, why[j]
+			}
+		}
+		limit[i], why[i] = math.Max(0, lim), who
+	}
+
+	for i := range units {
+		m := math.Min(demand[i], limit[i])
+		// 落到连接网格,且**下取整** —— 宁可少让 4,也不许因为四舍五入越过刚算出的
+		// 上限(判定坐标 = 落地坐标)。整格位移也让 pair 组成员平移后仍在格上。
+		if m = math.Floor(m/schAnchorGrid) * schAnchorGrid; m <= 0 {
+			continue
+		}
+		res.Move[i] = dir * m
+	}
+	if demand[res.Head] > 0 && limit[res.Head] < demand[res.Head] {
+		res.Capped = why[res.Head]
+	}
+	return res
 }

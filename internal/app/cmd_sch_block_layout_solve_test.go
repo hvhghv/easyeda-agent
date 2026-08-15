@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
@@ -224,5 +225,290 @@ func TestBslRelationsFrom_RejectsLegacy(t *testing.T) {
 	// nil 安全
 	if _, ok := bslRelationsFrom(nil); ok {
 		t.Error("nil 模板不该投影成关系")
+	}
+}
+
+// ── 连锁推让(marker 通道不够就把器件让开)──────────────────────────────────
+//
+// 锚件统一用 [0,100]×[-60,60],左侧推让;件的 box 由 bslPartBox 算:
+// tvs/res/cap 半宽 10、conn 半宽 90。所有期望值都是手算出来的边到边间隙,
+// 不是跑一遍记下来的 —— 判据变了这些数就该跟着变。
+
+func bslPushTestAnchor() layoutBBox {
+	return layoutBBox{MinX: 0, MinY: -60, MaxX: 100, MaxY: 60}
+}
+
+// plan 里放一串件;role 与位号同名,便于断言读起来是位号。
+func bslPushTestPlan(anchorRole string, parts ...bapPlacement) *bapPlan {
+	return &bapPlan{AnchorRole: anchorRole, Placements: parts}
+}
+
+func bslPart(role, key string, x, y float64) bapPlacement {
+	return bapPlacement{Role: role, PartKey: key, Designator: role, X: x, Y: y}
+}
+
+func bslMoveOf(t *testing.T, units []bslPushUnit, res bslPushResult, label string) float64 {
+	t.Helper()
+	for i, u := range units {
+		if u.Label == label {
+			return res.Move[i]
+		}
+	}
+	t.Fatalf("unit %q 不在列表里: %+v", label, units)
+	return 0
+}
+
+// 连锁:推 D1 会把它挤到 J1 身上 —— J1 必须跟着让,让量 = D1 的位移减去两者的富余。
+func TestBslPushSolve_CascadesToTheNextPart(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0), // box [-70,-50]
+		bslPart("J1", "conn.usb_c_16p", -200, 0), // box [-290,-110]
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+
+	// D1 与锚件只有 50,要 100 → 让 50;D1 与 J1 有 40,富余 40−20=20 → J1 让 30。
+	if got := bslMoveOf(t, units, res, "D1"); got != -50 {
+		t.Errorf("D1 该让 50: %v", got)
+	}
+	if got := bslMoveOf(t, units, res, "J1"); got != -30 {
+		t.Errorf("J1 该连锁让 30(50 − 富余 20): %v", got)
+	}
+	if res.Capped != "" {
+		t.Errorf("空地上不该报被顶住: %q", res.Capped)
+	}
+}
+
+// 富余吃得下就不传播:外侧件离得远,链到此为止(推让不做无谓的全局放大)。
+func TestBslPushSolve_SlackAbsorbsTheChain(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0),
+		bslPart("J1", "conn.usb_c_16p", -300, 0), // 与 D1 间隙 140,富余 120 > 50
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+	if got := bslMoveOf(t, units, res, "J1"); got != 0 {
+		t.Errorf("富余够时 J1 不该动: %v", got)
+	}
+}
+
+// 顶住时**整条链一起截短**:绝不出现「内侧推了、外侧没让」的半推重叠。
+func TestBslPushSolve_ClampsWholeChainNeverHalfPushes(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0),
+		bslPart("J1", "conn.usb_c_16p", -200, 0),
+	)
+	usable := &layoutBBox{MinX: -300, MinY: -500, MaxX: 1000, MaxY: 500}
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, usable, bslPushTestAnchor(), "left", 100)
+
+	// J1 左沿 −290,可用区 −300 → 只能让 10;D1 因此只能让 10+富余 20 = 30。
+	dJ := bslMoveOf(t, units, res, "J1")
+	dD := bslMoveOf(t, units, res, "D1")
+	if dJ != -10 || dD != -30 {
+		t.Fatalf("整条链该按最紧的一级截短: D1=%v J1=%v(期望 -30 / -10)", dD, dJ)
+	}
+	if res.Capped == "" {
+		t.Error("推不满必须如实说被谁顶住")
+	}
+	// 落位后两件仍隔着 bslPartGap —— 推让不许自己制造 part×part 重叠。
+	dBox := layoutBBox{MinX: -70 + dD, MaxX: -50 + dD}
+	jBox := layoutBBox{MinX: -290 + dJ, MaxX: -110 + dJ}
+	if gap := dBox.MinX - jBox.MaxX; gap < bslPartGap {
+		t.Errorf("推让把 D1 按到了 J1 身上: 间隙 %v < %v", gap, bslPartGap)
+	}
+	if jBox.MinX < usable.MinX {
+		t.Errorf("J1 被推出可用区: %v < %v", jBox.MinX, usable.MinX)
+	}
+}
+
+// 外部图元(别的块的件)是推不动的墙:链在它面前截短,不许压上去。
+func TestBslPushSolve_ForeignPartIsAWall(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0),
+	)
+	wall := layoutBBox{MinX: -200, MinY: -30, MaxX: -100, MaxY: 30}
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, []layoutBBox{wall}, nil, bslPushTestAnchor(), "left", 100)
+
+	// D1 左沿 −70 到墙右沿 −100 有 30,留 20 → 只能让 10。
+	if got := bslMoveOf(t, units, res, "D1"); got != -10 {
+		t.Errorf("撞墙该只让 10: %v", got)
+	}
+	if res.Capped == "" {
+		t.Error("被外部图元顶住必须如实说")
+	}
+}
+
+// pair 组整体平移:等距是电路语义,推让不许把它拆散。
+func TestBslPushSolve_PairMovesAsOneRigidBody(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("R_A", "res.5k1_0402", -80, 0),
+		bslPart("R_B", "res.5k1_0402", -40, 0),
+	)
+	rel := bslRelations{Pair: [][]string{{"R_A", "R_B"}}}
+	units := bslPushUnitsOf(plan, rel)
+	if len(units) != 1 || len(units[0].Idx) != 2 {
+		t.Fatalf("pair 组该合成一个刚体: %+v", units)
+	}
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+	// 组的 box 是并集 [-90,-30],与锚件间隙 30 → 让 70。
+	if res.Move[0] != -70 {
+		t.Fatalf("pair 组该整体让 70: %v", res.Move[0])
+	}
+	for _, i := range units[0].Idx {
+		plan.Placements[i].X += res.Move[0]
+	}
+	if pitch := plan.Placements[2].X - plan.Placements[1].X; pitch != 40 {
+		t.Errorf("推让后 pair 的等距被破坏: %v(原 40)", pitch)
+	}
+	if math.Mod(plan.Placements[1].X, schAnchorGrid) != 0 {
+		t.Errorf("推让后必须仍在连接网格上: %v", plan.Placements[1].X)
+	}
+}
+
+// attach 件(贴脚去耦)永不推;锚件与已落地的件也不进推让列表。
+func TestBslPushUnitsOf_SkipsAnchorAttachAndPlaced(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("C_VCC", "cap.100nf_0402", -40, 20),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0),
+	)
+	plan.Placements[0].PrimitiveID = "prim-anchor"
+	landed := bslPart("R9", "res.5k1_0402", -120, 0)
+	landed.PrimitiveID = "prim-old"
+	plan.Placements = append(plan.Placements, landed)
+
+	units := bslPushUnitsOf(plan, bslRelations{Attach: map[string]string{"C_VCC": "U.VCC"}})
+	if len(units) != 1 || units[0].Label != "D1" {
+		t.Fatalf("只有 D1 该可推: %+v", units)
+	}
+}
+
+// 通道带外的件不推:marker 占的是与锚件同高的一条带,推带外的件既不腾空间
+// 又破坏关系语义(第一版要推下方的 pair 电阻,就是这个错)。
+func TestBslPushSolve_OnlyPartsInTheLaneBand(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("R5", "res.5k1_0402", -60, -200), // 锚件下方 200,不在带上
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+	if res.Head >= 0 {
+		t.Errorf("带外的件不该被当成挡路的: head=%d", res.Head)
+	}
+	if got := bslMoveOf(t, units, res, "R5"); got != 0 {
+		t.Errorf("带外的件不该被推: %v", got)
+	}
+}
+
+// 同一条带上并排两件都在通道里 —— 只推最近的那件等于没腾出通道,两件都要让。
+func TestBslPushSolve_PushesEveryPartInsideTheChannel(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 30),
+		bslPart("D2", "tvs.sm712_sot23", -60, -30),
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+	if a, b := bslMoveOf(t, units, res, "D1"), bslMoveOf(t, units, res, "D2"); a != -50 || b != -50 {
+		t.Errorf("通道里的两件都该让 50: D1=%v D2=%v", a, b)
+	}
+}
+
+// 右侧同样成立(方向对称,不是只为左侧写的特例)。
+func TestBslPushSolve_RightSideIsSymmetric(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", 160, 0), // box [150,170],与锚件间隙 50
+		bslPart("J1", "conn.usb_c_16p", 300, 0),  // box [210,390],与 D1 间隙 40
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "right", 100)
+	if a, b := bslMoveOf(t, units, res, "D1"), bslMoveOf(t, units, res, "J1"); a != 50 || b != 30 {
+		t.Errorf("右侧该镜像成立: D1=%v J1=%v(期望 +50 / +30)", a, b)
+	}
+}
+
+// 收敛与确定性:同输入同输出,且推完一轮再解一次不该再动(否则真机上会来回抖)。
+func TestBslPushSolve_DeterministicAndConverges(t *testing.T) {
+	build := func() *bapPlan {
+		return bslPushTestPlan("U",
+			bslPart("U", "ic.ch340c", 50, 0),
+			bslPart("D1", "tvs.sm712_sot23", -60, 0),
+			bslPart("J1", "conn.usb_c_16p", -200, 0),
+		)
+	}
+	p1, p2 := build(), build()
+	u1, u2 := bslPushUnitsOf(p1, bslRelations{}), bslPushUnitsOf(p2, bslRelations{})
+	r1 := bslPushSolve(u1, nil, nil, bslPushTestAnchor(), "left", 100)
+	r2 := bslPushSolve(u2, nil, nil, bslPushTestAnchor(), "left", 100)
+	for i := range r1.Move {
+		if r1.Move[i] != r2.Move[i] {
+			t.Fatalf("同输入必须同输出: %v vs %v", r1.Move, r2.Move)
+		}
+	}
+	for i, m := range r1.Move {
+		for _, idx := range u1[i].Idx {
+			p1.Placements[idx].X += m
+		}
+	}
+	again := bslPushSolve(bslPushUnitsOf(p1, bslRelations{}), nil, nil, bslPushTestAnchor(), "left", 100)
+	for _, m := range again.Move {
+		if m != 0 {
+			t.Errorf("推让该一轮收敛,第二轮还在动: %v", again.Move)
+			break
+		}
+	}
+}
+
+// 间隙必须算上被推件自己的身宽 —— 旧版 bapHalfExtentFn(0,nil) 恒返 0,
+// 每次都少推一个半宽(conn 差 90),这是「判定与生成同一把尺」的又一次显形。
+func TestBslPushSolve_GapCountsThePartsOwnWidth(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("J1", "conn.usb_c_16p", -140, 0), // 中心距锚件 140,右沿只有 −50
+	)
+	units := bslPushUnitsOf(plan, bslRelations{})
+	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
+	if res.Gap != 50 {
+		t.Errorf("间隙该按 J1 的右沿算(−50)而不是中心: %v", res.Gap)
+	}
+	if got := bslMoveOf(t, units, res, "J1"); got != -50 {
+		t.Errorf("该让 50: %v", got)
+	}
+}
+
+// 端到端:从 plan.Nets + 实测引脚数出每侧 marker 数,再走连锁推让写回 plan。
+func TestBslExpandForMarkers_CountsMarkersAndPushes(t *testing.T) {
+	plan := bslPushTestPlan("U",
+		bslPart("U", "ic.ch340c", 50, 0),
+		bslPart("D1", "tvs.sm712_sot23", -60, 0),
+	)
+	plan.Placements[0].Designator = "U1"
+	plan.Nets = []bapNet{{Net: "USB_DP", Members: []string{"U1:5", "D1:1"}},
+		{Net: "USB_DM", Members: []string{"U1:6", "D1:2"}}}
+	pins := map[string]acPin{
+		"5": {X: 5, Y: 10, Designator: "U1", PinNumber: "5", PinName: "D+"},
+		"6": {X: 5, Y: -10, Designator: "U1", PinNumber: "6", PinName: "D-"},
+		"9": {X: 95, Y: 0, Designator: "U1", PinNumber: "9", PinName: "NC"}, // 不在网里,不算
+	}
+	var log strings.Builder
+	notes := bslExpandForMarkers(plan, bslRelations{}, bslPushTestAnchor(), pins, nil, nil, &log)
+
+	// 左侧 2 个 marker → 需 92,与 D1 只有 50 → 让 42,落格下取整 40。
+	if plan.Placements[1].X != -100 {
+		t.Errorf("D1 该被推到 −100: %v", plan.Placements[1].X)
+	}
+	if len(notes) != 0 {
+		t.Errorf("空地上推得动就不该有告警: %v", notes)
+	}
+	if !strings.Contains(log.String(), "D1 让 40") {
+		t.Errorf("日志要把算术写清楚: %q", log.String())
 	}
 }
