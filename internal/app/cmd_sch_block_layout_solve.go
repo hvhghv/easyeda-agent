@@ -454,24 +454,29 @@ func bslSolveAround(
 		prevRight := anchorBBox.MaxX
 		prevLeft := anchorBBox.MinX
 		cy := (anchorBBox.MinY + anchorBBox.MaxY) / 2
+		// 间距按**链上相邻的那两件**算,不是一律对着锚件算:J1 挨着的是 D1,
+		// 它们之间要留的是 J1 与 D1 两边标签的伸出,与锚件 U3 无关。
+		rightPrev, leftPrev := anchorRole, anchorRole
 		for i := anchorIdx + 1; i >= 0 && i < len(rel.Flow); i++ {
 			role := rel.Flow[i]
-			gap := bslFlowGap(bslCrossNets(nets, anchorRole, role), bslReach(""), bslReach(""))
+			gap := bslFlowGap(bslCrossNets(nets, rightPrev, role),
+				bslRoleReach(nets, rightPrev), bslRoleReach(nets, role))
 			seedX := prevRight + gap + tightHalf(role)
 			if x, y, ok := fitAlong(role, seedX, cy, 1, 0, gap, 6); ok {
 				out = append(out, bslSolved{Role: role, X: x, Y: y, Source: "flow"})
-				prevRight = x + tightHalf(role)
+				prevRight, rightPrev = x+tightHalf(role), role
 			} else {
 				notes = append(notes, fmt.Sprintf("%s: 信号流右侧放不下 —— 该件走网格", role))
 			}
 		}
 		for i := anchorIdx - 1; i >= 0; i-- {
 			role := rel.Flow[i]
-			gap := bslFlowGap(bslCrossNets(nets, anchorRole, role), bslReach(""), bslReach(""))
+			gap := bslFlowGap(bslCrossNets(nets, leftPrev, role),
+				bslRoleReach(nets, leftPrev), bslRoleReach(nets, role))
 			seedX := prevLeft - gap - tightHalf(role)
 			if x, y, ok := fitAlong(role, seedX, cy, -1, 0, gap, 6); ok {
 				out = append(out, bslSolved{Role: role, X: x, Y: y, Source: "flow"})
-				prevLeft = x - tightHalf(role)
+				prevLeft, leftPrev = x-tightHalf(role), role
 			} else {
 				notes = append(notes, fmt.Sprintf("%s: 信号流左侧放不下 —— 该件走网格", role))
 			}
@@ -514,6 +519,43 @@ func bslSolveAround(
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Role < out[j].Role })
 	return out, notes
+}
+
+// bslRoleReach 是某个角色的 marker 最远能伸出多少 —— 取它沾到的所有网里标签最宽的
+// 那条。**flow 间距必须按两边各自的实测标签算**:此前两处调用都传 bslReach("")
+// (空网名 = 最窄标签),于是 J1 与 D1 之间只留了最小间距,两边的标签在中间撞成一团
+// (`sch clusters` 图元级判据抓到 J1 ↔ D1 重叠 24×11)。网名用与 bslNetOfPins 同一个
+// 代理口径(PORT 名优先,否则引脚名),块模板里本来就没有实例化后的网名。
+func bslRoleReach(nets [][]string, role string) float64 {
+	max := bslReach("")
+	for _, net := range nets {
+		name, has := "", false
+		for _, m := range net {
+			if strings.HasPrefix(m, "PORT:") {
+				if name == "" {
+					name = strings.TrimPrefix(m, "PORT:")
+				}
+				continue
+			}
+			r, pin, ok := splitBlockPinRef(m)
+			if !ok {
+				continue
+			}
+			if r == role {
+				has = true
+				if name == "" {
+					name = pin
+				}
+			}
+		}
+		if !has {
+			continue
+		}
+		if r := bslReach(name); r > max {
+			max = r
+		}
+	}
+	return max
 }
 
 // bslNetOfPins 找同时含 target 引脚与 role 任一脚的那条网的名字(用第一个 PORT:
