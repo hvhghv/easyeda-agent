@@ -180,9 +180,14 @@ func bslReach(net string) float64 {
 //	③ 两侧 marker 的伸出之和 —— 这一项才是把「标签互相糊住」挡在门外的东西。
 //
 // 三项都从数据/实测推导,没有一个是拍脑袋常量。
+//
+// 第三项**必须再加一个视觉间隙**:两件的 marker 是朝着对方伸的,只留
+// `reachRight+reachLeft` 等于让两支标签首尾相接 —— 判据上不算重叠,看上去却是黏在
+// 一起的一条。真机 `sch clusters --strict`:J1↔D1 只剩 14、D1↔U3 只剩 8,都低于
+// 组间该有的 bslPartGap。
 func bslFlowGap(crossNets int, reachRight, reachLeft float64) float64 {
 	lanes := float64(crossNets)*bslLanePitch + 2*bslPartGap
-	return math.Max(bslPartGap, math.Max(lanes, reachRight+reachLeft))
+	return math.Max(bslPartGap, math.Max(lanes, reachRight+reachLeft+bslPartGap))
 }
 
 // bslCrossNets 数 a、b 两个角色之间有几条**不同的**内部网 —— 每条网将来都是一根
@@ -502,8 +507,9 @@ func bslSolveAround(
 		if s, ok := placed[first]; ok {
 			baseX, baseY = s.X, s.Y
 		} else {
-			baseX = anchorBBox.MinX - bslFlowGap(0, bslReach(""), bslReach("")) - tightHalf(first)
-			baseY = anchorBBox.MinY - bslPartGap - bapPartMargin
+			baseX = anchorBBox.MinX - bslFlowGap(0, reachOf(anchorRole), reachOf(first)) - tightHalf(first)
+			// 下方也有锚件自己的 marker 往下伸,别只留一个身位。
+			baseY = anchorBBox.MinY - reachOf(anchorRole) - bslPartGap - bapPartMargin
 			if x, y, ok := fitAlong(first, baseX, baseY, 0, -1, bslPartGap+2*bapPartMargin, 6); ok {
 				out = append(out, bslSolved{Role: first, X: x, Y: y, Rotation: 270, Source: "pair"})
 				baseX, baseY = x, y
@@ -828,14 +834,20 @@ func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 		}
 		want := bslSideDepth(reach[side], cnt)
 		// 每一侧都用**当前**坐标重建 unit:左侧推完之后,右侧要看到新位置。
-		units := bslPushUnitsOf(plan, rel, bslEstimatedBox)
+		units := bslPushUnitsOf(plan, rel, func(i int, p bapPlacement) (layoutBBox, bool) {
+			b, ok := bslEstimatedBox(i, p)
+			if !ok {
+				return b, false
+			}
+			return bslClusterBoxOf(plan, []int{i}, b), true
+		})
 		allWalls := append(walls, bslAttachWalls(plan, rel)...)
 		res := bslPushSolve(units, allWalls, usable, anchorBBox, side, want)
 		if res.Head < 0 {
 			continue // 这一侧没有别的件,marker 有整片空地
 		}
-		// 通道是两边共用的:再加上挡路那一件自己的 marker 伸出 + 视觉间隙,重解一次。
-		want += bslUnitReach(plan, units[res.Head].Idx) + bslPartGap
+		// 邻居自己的 marker 伸出已经算进它的簇包络里了,这里只补视觉间隙。
+		want += bslPartGap
 		res = bslPushSolve(units, allWalls, usable, anchorBBox, side, want)
 		var detail []string
 		for i, m := range res.Move {
@@ -973,7 +985,7 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 		if !ok {
 			return layoutBBox{}, false // 没落地/读不回来的件不推 —— 量不到就不动它
 		}
-		b := markerJudgeBBox(c)
+		b := bslClusterBoxOf(plan, []int{i}, markerJudgeBBox(c))
 		d := shift[i]
 		return layoutBBox{MinX: b.MinX + d, MinY: b.MinY, MaxX: b.MaxX + d, MaxY: b.MaxY}, true
 	}
@@ -991,8 +1003,8 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 		if res.Head < 0 {
 			continue
 		}
-		// 通道是两边共用的:加上挡路那一件自己的 marker 伸出 + 视觉间隙,重解一次。
-		want += bslUnitReach(plan, units[res.Head].Idx) + bslPartGap
+		// 邻居自己的 marker 伸出已经算进它的簇包络里了,这里只补视觉间隙。
+		want += bslPartGap
 		res = bslPushSolve(units, walls, usable, anchor.BBox, side, want)
 		// **从最外侧往里下发**:每一步之前外侧都已经让开了,于是任何一个中间状态
 		// 都不重叠 —— 万一某次 modify 失败,画布停在一个仍然干净的状态上。
@@ -1319,6 +1331,17 @@ func bslEstimatedBox(i int, p bapPlacement) (layoutBBox, bool) {
 	return layoutBBox{MinX: p.X + b.MinX, MinY: p.Y + b.MinY, MaxX: p.X + b.MaxX, MaxY: p.Y + b.MaxY}, true
 }
 
+// bslClusterBoxOf 把件的 box 撑成**簇包络**:本体 + 它自己的 marker 会往两边伸出多远。
+//
+// 推让此前作用在**本体**上,而缺陷在**簇**上:body 之间还很宽松,marker 早已顶在一起。
+// 真机实证 —— 把 D1 往左推 40 去给 U3 腾通道,body 口径下 D1↔J1 还有很大富余、链不
+// 传播,而簇口径下这一推把 J1↔D1 从 14 挤到了 9。判定与生成必须同一把尺:
+// `sch clusters` 用簇判,推让就得用簇算。
+func bslClusterBoxOf(plan *bapPlan, idx []int, body layoutBBox) layoutBBox {
+	r := bslUnitReach(plan, idx)
+	return layoutBBox{MinX: body.MinX - r, MinY: body.MinY, MaxX: body.MaxX + r, MaxY: body.MaxY}
+}
+
 // bslUnitGeom 补上 unit 的判定 box(成员并集)与日志标签。
 func bslUnitGeom(plan *bapPlan, boxes map[int]layoutBBox, u bslPushUnit) bslPushUnit {
 	labels := make([]string, 0, len(u.Idx))
@@ -1359,6 +1382,9 @@ func bslPushSolve(units []bslPushUnit, walls []layoutBBox, usable *layoutBBox,
 	if len(units) == 0 || want <= 0 {
 		return res
 	}
+	// 需求先**向上**取到连接网格:位移落格时是向下取整(不许越过上限),两头都向下
+	// 就会系统性地少让 —— 真机上通道停在 204 而需求是 208,那 4 个单位正是这里丢的。
+	want = math.Ceil(want/schAnchorGrid) * schAnchorGrid
 	dir := 1.0
 	if side == "left" {
 		dir = -1

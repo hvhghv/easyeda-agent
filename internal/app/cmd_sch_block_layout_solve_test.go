@@ -115,8 +115,9 @@ func TestBslFlowGap_ScalesWithDataNotConstant(t *testing.T) {
 		t.Errorf("跨接网多到主导时通道必须变宽: 1条=%v 12条=%v", oneLane, manyLanes)
 	}
 	// 而在通道项不主导时,间距由 marker 伸出决定 —— 两项各自当家的区间都要覆盖。
-	if got, want := oneLane, 2*bslReach("D"); got != want {
-		t.Errorf("少量跨接网时应由 marker 伸出决定: got %v want %v", got, want)
+	// 两支标签朝着对方伸,中间还要留一个视觉间隙 —— 否则首尾相接,看着就是黏成一条。
+	if got, want := oneLane, 2*bslReach("D")+bslPartGap; got != want {
+		t.Errorf("少量跨接网时应由 marker 伸出 + 视觉间隙决定: got %v want %v", got, want)
 	}
 	shortNet := bslFlowGap(1, bslReach("D"), bslReach("D"))
 	longNet := bslFlowGap(1, bslReach("USB_DP_SHIELD"), bslReach("USB_DP_SHIELD"))
