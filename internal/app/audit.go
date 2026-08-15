@@ -39,6 +39,7 @@ func newAuditCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	audit.AddCommand(newAuditTailCmd(stdout, stderr))
 	audit.AddCommand(newAuditExportCmd(stdout, stderr))
+	audit.AddCommand(newAuditCostCmd(stdout, stderr))
 	return audit
 }
 

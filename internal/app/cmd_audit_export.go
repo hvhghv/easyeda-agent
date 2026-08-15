@@ -30,10 +30,14 @@ import (
 type auditRow struct {
 	Ts       time.Time      `json:"ts"`
 	WindowID string         `json:"windowId"`
+	ClientID string         `json:"clientId"`
 	Action   string         `json:"action"`
 	Payload  map[string]any `json:"payload"`
 	OK       bool           `json:"ok"`
 	Result   map[string]any `json:"result"`
+	// DurationMs 是 daemon 侧的往返耗时 —— `audit cost` 用它把「机器在算」和
+	// 「agent 在想」分开:两者的改法完全不同(前者优化调用,后者优化流程)。
+	DurationMs float64 `json:"durationMs"`
 }
 
 func newAuditExportCmd(stdout, stderr io.Writer) *cobra.Command {

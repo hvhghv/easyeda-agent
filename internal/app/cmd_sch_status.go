@@ -525,9 +525,12 @@ func boolMark(b bool) string {
 	return "✗"
 }
 
+// truncPageName 按 **rune** 截断 —— 页名和台账标签都可能是中文,按字节切会把
+// 一个汉字劈成半个,渲染出 `原理�…`(cost ledger 首跑实见)。
 func truncPageName(s string) string {
-	if len(s) > 18 {
-		return s[:17] + "…"
+	r := []rune(s)
+	if len(r) > 18 {
+		return string(r[:17]) + "…"
 	}
 	return s
 }
