@@ -185,19 +185,11 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 		return order[i].c < order[j].c
 	})
 
-	half := opts.Gutter / 2
-	// Lift/validate against the SAME inflated keep-out (titleBlockSafety) so the
-	// planner can never pass its own gate while visibly crossing the real table.
+	// 图签安全带:说明带撞上它可以缩,**内容不许缩**(见 rect 后的收拢)。
 	safe := inflatedTitleKeepout(keepout)
+	// 网格只用来**决定谁跟谁同一组**(哪些模块合成一个分区),不再参与矩形的尺寸 ——
+	// 尺寸一律由成员虚拟组的并集决定(见下面 rect 的注释)。
 	for _, k := range order {
-		cell := layoutBBox{
-			MinX: colBounds[k.c] + half, MinY: rowBounds[k.r] + half,
-			MaxX: colBounds[k.c+1] - half, MaxY: rowBounds[k.r+1] - half,
-		}
-		// Shrink the frame to its modules' union bbox + pad (clamped to the cell):
-		// the cell keeps partitions disjoint, the content hug kills the page-height
-		// frame around a small cluster. Top pad additionally reserves the title band
-		// so the big zone label never sits on a symbol.
 		content := modules[cells[k][0]].BBox
 		for _, i := range cells[k][1:] {
 			b := modules[i].BBox
@@ -214,33 +206,31 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 				content.MaxY = b.MaxY
 			}
 		}
+		// **框 = 成员虚拟组体积的并集 + 边距 + 上标题带 + 下说明带,不做任何裁剪。**
+		//
+		// 此前这里把矩形 clamp 到网格单元(`math.Min(cell.MaxX, …)`),于是模块的
+		// 虚拟组一旦跨过单元边界,框就被切短 —— 地旗、网络标签垂在框外(用户截图实证
+		// D1 的 GND)。「框住自己的内容」必须是**构造保证**而不是检查项:算得出来的东西
+		// 不该留给判据去发现、更不该留给人去看图。
+		//
+		// 去掉 clamp 之后,moduleOutsideZone 结构上恒为 0(它降级成一条后置断言:
+		// 真报出来说明这里的算术错了)。**代价是框之间可能重叠** —— 但那不是画框的
+		// 毛病,是布局的事实:两个模块的虚拟组本身交叠时,不存在既包住又互不重叠的
+		// 一组矩形。那件事由 partitionOverlap 如实报出来,修法是挪件(S3 的组间留通道),
+		// 不是把框切短来掩盖。
 		rect := layoutBBox{
-			MinX: math.Max(cell.MinX, content.MinX-partitionContentPad),
-			MinY: math.Max(cell.MinY, content.MinY-partitionContentPad-opts.NoteBand),
-			MaxX: math.Min(cell.MaxX, content.MaxX+partitionContentPad),
-			MaxY: math.Min(cell.MaxY, content.MaxY+partitionContentPad+opts.TitleBand),
+			MinX: content.MinX - partitionContentPad,
+			MinY: content.MinY - partitionContentPad - opts.NoteBand,
+			MaxX: content.MaxX + partitionContentPad,
+			MaxY: content.MaxY + partitionContentPad + opts.TitleBand,
 		}
-		// Lift the bottom above the title-block keep-out (a bottom-right band) so no
-		// partition covers the 图签/明细表. Never lift past the module content: the
-		// frame's job is to contain its modules — if a module itself intrudes the
-		// safety band, keep it contained and let validation flag the titleBlockHit
-		// (refusing to draw and pointing at the real fix: move the module up).
-		// Clamp on the CORE (parts-only) bottom, not the draw bbox: when a member's
-		// downward flag folds into the draw bbox and dips into the safety band, the
-		// frame must still stop at the band (the flag may stick out slightly) —
-		// better a flag toe over the line than the whole frame over the 图签.
+		// 说明带/标题带是**我们加的预留**,不是内容:它撞上图签就缩,而
+		// 「content ± pad」这一圈是构造保证,一步都不让。于是「框住自己的内容」
+		// 永远成立,而「不压图签」在装得下时也成立;两者真冲突时(模块自己压到图签)
+		// 由 titleBlockHits 如实报出来,修法是把模块挪上去。
 		if safe != nil && boxesOverlap(rect, *safe) {
-			coreMinY := moduleCoreBBox(modules[cells[k][0]]).MinY
-			for _, i := range cells[k][1:] {
-				if b := moduleCoreBBox(modules[i]); b.MinY < coreMinY {
-					coreMinY = b.MinY
-				}
-			}
-			lift := safe.MaxY
-			if lift > coreMinY {
-				lift = coreMinY
-			}
-			if lift > rect.MinY && lift < rect.MaxY {
+			// 让到**内容下沿**为止:边距和说明带都可以被图签吃掉,内容一寸不让。
+			if lift := math.Min(safe.MaxY, content.MinY); lift > rect.MinY {
 				rect.MinY = lift
 			}
 		}
