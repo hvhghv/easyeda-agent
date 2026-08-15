@@ -213,40 +213,56 @@ func bslCrossNets(nets [][]string, a, b string) int {
 	return n
 }
 
-// bslAttachSide 决定贴上去的件放在目标引脚的哪一侧,以及它自己该竖放还是横放。
+// bslAttachSide 决定贴上去的件放在宿主的哪一侧,以及它自己该竖放还是横放。
 //
-// 侧向来自**实测引脚相对宿主 bbox 中心的位置**(outwardDirection),不猜:
-//   - 引脚在左/右列 → 该件**竖放**,沿 x 推出去;竖放件自己的两个 marker 一上一下
-//     (电上地下),而宿主引脚的 marker 朝左/右 —— **方向正交,天然不撞**。
-//     这是「贴脚不撞标签」的机制性理由,不是运气。
-//   - 引脚在上/下沿 → **横放**,沿 y 推出去。
+// **引脚在左/右列时,件放到宿主的上/下侧,不是同侧**(2026-08-15 用户拍板的 A 方案,
+// ADR-0003 §2.5)。旧推导是「引脚在左列 → 该件沿 x 推出去,方向正交天然不撞」——
+// 那只比了「该件自己的 marker」与「宿主该脚的 marker」两支,漏了真正的杀手:
+// **同侧其它引脚的 marker 会横扫过去**。实测 U3 左侧 6 个 marker 要 276 深的通道,
+// 而贴在 V3 脚上的 C7 就坐在通道里,按 L1 组口径是整块重叠(71×85)。
 //
-// orient 显式声明时以它为准(作者的意图优先于推导)。
+// 去耦贴上/下侧不损失电气质量(离脚一样近,PCB 侧照样紧贴),而另外两条路都更贵:
+// 让 marker 换到背面撞「背面引出是红线」(fa8f969),让 marker 绕更深是拿版面赔。
+// 竖放保持不变 —— 竖放件电上地下,与「power 上 / gnd 下」的画法一致。
+//
+// 引脚在上/下沿时**仍然同侧**:那一侧本来就是它的引出方向,没有横扫冲突。
+// orient 显式声明只决定横竖,不再决定侧向(侧向是几何冲突问题,不是作者偏好)。
 func bslAttachSide(pinSide string, orient string) (side string, vertical bool) {
-	switch orient {
-	case "vertical":
-		return pinSide, true
-	case "horizontal":
-		return pinSide, false
-	}
+	vertical = orient != "horizontal"
 	switch pinSide {
 	case "left", "right":
-		return pinSide, true
+		// 上下由调用方按引脚在宿主里的高低选(bslAttachClearSide),这里给默认。
+		return "up", vertical
 	case "up", "down":
-		return pinSide, false
+		return pinSide, orient == "vertical"
 	}
-	return "right", true
+	return "up", vertical
 }
 
-// bslAttachSeed 算 attach 件的**语义理想中心**:从目标引脚沿 side 推出去
-// 「marker 伸出 + 间隙 + 自身半宽」。这只是种子 —— 之后一律再过
-// findSlotNormalized,所以「贴脚」是意图,「不出界/不压人」是保证。
-func bslAttachSeed(pinX, pinY float64, side string, net string, ownHalf float64) (x, y float64) {
-	// **不加 marker 伸出**:attach 表达的是「这两件同网直连」(V4 校验保证了这一点),
-	// 它们之间画一根线,不各挂一个网络标签 —— 去耦电容就该紧贴电源脚,中间留出
-	// marker 的空间反而把它推远(实测第一版隔了 159,视觉上完全不像"贴")。
-	// 需要给 marker 让路的是**信号流上相邻的两件**(bslFlowGap 的第三项),不是这里。
-	_ = net
+// bslAttachClearSide 在「上」和「下」之间挑一个:引脚在宿主上半就往上、下半就往下,
+// 走最短的那条路。宿主 bbox 高度为 0(读不到)时退回 up。
+func bslAttachClearSide(pinY float64, host layoutBBox) string {
+	if host.MaxY <= host.MinY {
+		return "up"
+	}
+	if pinY < (host.MinY+host.MaxY)/2 {
+		return "down"
+	}
+	return "up"
+}
+
+// bslAttachSeed 算 attach 件的**语义理想中心**。
+//
+// 上/下侧要**让开宿主本体**(不是从引脚算):引脚在左右列时,它的 y 还在本体高度范围内,
+// 从引脚算会把件按在芯片身上。以本体的上/下沿为基准往外推「间隙 + 自身半宽」,x 对齐目标
+// 引脚那一列 —— 于是件落在本体正上/正下方、贴着目标脚那一头,读图的人一眼看得出它属于谁。
+//
+// 左/右侧(引脚本来就在上下沿的情形)仍从引脚算。
+//
+// **不加 marker 伸出**:attach 表达的是「这两件同网」,中间留出 marker 的空间反而把它推远
+// (实测第一版隔了 159,视觉上完全不像"贴")。需要给 marker 让路的是信号流上相邻的两件
+// (bslFlowGap 的第三项),不是这里。这只是种子 —— 之后一律再过 findSlotNormalized。
+func bslAttachSeed(pinX, pinY float64, host layoutBBox, side string, ownHalf float64) (x, y float64) {
 	d := bslPartGap + ownHalf
 	switch side {
 	case "left":
@@ -254,9 +270,9 @@ func bslAttachSeed(pinX, pinY float64, side string, net string, ownHalf float64)
 	case "right":
 		return pinX + d, pinY
 	case "down":
-		return pinX, pinY - d
+		return pinX, math.Min(pinY, host.MinY) - d
 	default: // up
-		return pinX, pinY + d
+		return pinX, math.Max(pinY, host.MaxY) + d
 	}
 }
 
@@ -408,8 +424,10 @@ func bslSolveAround(
 			side = "right"
 		}
 		side, vertical := bslAttachSide(side, rel.Orient[role])
-		net := bslNetOfPins(nets, target, role)
-		sx, sy := bslAttachSeed(pin.X, pin.Y, side, net, tightHalf(role))
+		if side == "up" || side == "down" { // 上下二选一:走离引脚最近的那一头
+			side = bslAttachClearSide(pin.Y, anchorBBox)
+		}
+		sx, sy := bslAttachSeed(pin.X, pin.Y, anchorBBox, side, tightHalf(role))
 		// 躲让方向 = 继续远离引脚,这样它始终待在该脚的那一侧(贴脚语义不破)。
 		ax, ay := bslDirVec(side)
 		x, y, ok := fitAlong(role, sx, sy, ax, ay, bslPartGap+2*half(role), 6)
@@ -742,7 +760,7 @@ func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 		want := float64(cnt) * bslMarkerLanePitch
 		// 每一侧都用**当前**坐标重建 unit:左侧推完之后,右侧要看到新位置。
 		units := bslPushUnitsOf(plan, rel, bslEstimatedBox)
-		res := bslPushSolve(units, walls, usable, anchorBBox, side, want)
+		res := bslPushSolve(units, append(walls, bslAttachWalls(plan, rel)...), usable, anchorBBox, side, want)
 		if res.Head < 0 {
 			continue // 这一侧没有别的件,marker 有整片空地
 		}
@@ -845,16 +863,23 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 		}
 	}
 
-	// 墙:页面上不属于本块的一切实测图元。它们推不动,链撞上就截短。
-	mine := map[string]bool{}
+	// 墙:页面上一切**推不动**的实测图元 —— 别的块的件,以及本块的 attach 件。
+	//
+	// attach 件从前既不推**也不当墙**(理由是"它占自己那条脚的 lane")。那条理由错了,
+	// 且已按 ADR-0003 §2.5 改掉:去耦现在贴在宿主上/下侧,不在左右通道带里,当墙零代价 ——
+	// 万一哪个模板还是把它放进了带里,当墙才能挡住链把它压过去。
+	notWall := map[string]bool{} // 锚件(它是基准)+ 会被推的件
 	for _, p := range plan.Placements {
-		if p.PrimitiveID != "" {
-			mine[p.PrimitiveID] = true
+		if p.PrimitiveID == "" {
+			continue
+		}
+		if _, isAttach := rel.Attach[p.Role]; !isAttach {
+			notWall[p.PrimitiveID] = true
 		}
 	}
 	var walls []layoutBBox
 	for _, c := range comps {
-		if c.BBox == nil || c.ComponentType == "sheet" || mine[c.ID] {
+		if c.BBox == nil || c.ComponentType == "sheet" || notWall[c.ID] {
 			continue
 		}
 		walls = append(walls, markerJudgeBBox(c))
@@ -1107,6 +1132,20 @@ func bslPushUnitsOf(plan *bapPlan, rel bslRelations,
 		units = append(units, bslUnitGeom(plan, boxes, bslPushUnit{Idx: []int{i}}))
 	}
 	return units
+}
+
+// bslAttachWalls 是本块 attach 件的估算 box —— 它们推不动(贴脚是全部意义),所以对推让
+// 链来说是墙。落地前它们还没创建,不在页面障碍表里,只能从 plan 的求解结果拿。
+func bslAttachWalls(plan *bapPlan, rel bslRelations) []layoutBBox {
+	var out []layoutBBox
+	for _, p := range plan.Placements {
+		if _, isAttach := rel.Attach[p.Role]; !isAttach || p.PrimitiveID != "" {
+			continue
+		}
+		b := bslPartBox(p.PartKey)
+		out = append(out, layoutBBox{MinX: p.X + b.MinX, MinY: p.Y + b.MinY, MaxX: p.X + b.MaxX, MaxY: p.Y + b.MaxY})
+	}
+	return out
 }
 
 // bslEstimatedBox 是落地**前**的 box 提供者:估算 box + 只认还没创建的件。

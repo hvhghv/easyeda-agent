@@ -152,50 +152,75 @@ func TestBslCrossNets(t *testing.T) {
 	}
 }
 
-// 贴脚侧向:引脚在左右列 → 竖放(与宿主 marker 方向正交,天然不撞);
-// 上下沿 → 横放。orient 显式声明优先。
-func TestBslAttachSide(t *testing.T) {
+// 贴脚侧向(ADR-0003 §2.5 的 A 方案):引脚在**左/右列时件放到宿主的上/下侧** ——
+// 同侧是 marker 通道,把去耦塞进去就是整块重叠;引脚在上/下沿时才同侧。
+func TestBslAttachSide_LeavesTheMarkerChannel(t *testing.T) {
 	for _, c := range []struct {
 		pinSide, orient string
+		wantSide        string
 		wantVertical    bool
 	}{
-		{"left", "", true},
-		{"right", "", true},
-		{"up", "", false},
-		{"down", "", false},
-		{"up", "vertical", true},      // 显式覆盖推导
-		{"left", "horizontal", false}, // 同上
+		{"left", "", "up", true},  // 左列的脚 → 让开左侧通道,走上/下
+		{"right", "", "up", true}, // 右列同理
+		{"up", "", "up", false},   // 上沿的脚本来就朝上,同侧不冲突
+		{"down", "", "down", false},
+		{"up", "vertical", "up", true},      // orient 只管横竖
+		{"left", "horizontal", "up", false}, // 侧向不再由 orient 决定
 	} {
 		side, vertical := bslAttachSide(c.pinSide, c.orient)
-		if vertical != c.wantVertical {
-			t.Errorf("pinSide=%q orient=%q → vertical=%v, want %v", c.pinSide, c.orient, vertical, c.wantVertical)
+		if side != c.wantSide || vertical != c.wantVertical {
+			t.Errorf("pinSide=%q orient=%q → (%q,%v), want (%q,%v)",
+				c.pinSide, c.orient, side, vertical, c.wantSide, c.wantVertical)
 		}
-		if c.orient == "" && side != c.pinSide {
-			t.Errorf("侧向应跟随引脚实测方向: got %q want %q", side, c.pinSide)
-		}
+	}
+	if side, _ := bslAttachSide("left", ""); side == "left" {
+		t.Error("左列的脚绝不能再把去耦放回左侧 —— 那是 marker 通道")
 	}
 }
 
-// 种子点必须把 marker 的伸出让出来 —— 这是「贴脚不撞标签」的算术依据。
-func TestBslAttachSeed_HugsThePin(t *testing.T) {
-	const pinX, pinY, ownHalf float64 = 1000, 500, 10
-	net := "3V3"
-	x, y := bslAttachSeed(pinX, pinY, "right", net, ownHalf)
-	if y != pinY {
-		t.Errorf("右贴时 y 应与引脚齐平: %v", y)
+// 上下二选一:走离引脚最近的那一头。
+func TestBslAttachClearSide_TakesTheShorterWayOut(t *testing.T) {
+	host := layoutBBox{MinX: 654, MinY: 414, MaxX: 726, MaxY: 506}
+	if got := bslAttachClearSide(500, host); got != "up" {
+		t.Errorf("引脚在上半 → up: %q", got)
 	}
-	// attach = 同网直连,中间不挂 marker,所以只留「间隙 + 自身半宽」。
-	want := pinX + bslPartGap + ownHalf
-	if math.Abs(x-want) > 0.001 {
-		t.Errorf("x = %v, want %v(gap+半宽,不含 marker 伸出)", x, want)
+	if got := bslAttachClearSide(420, host); got != "down" {
+		t.Errorf("引脚在下半 → down: %q", got)
 	}
-	if x-pinX > bslReach(net) {
-		t.Errorf("贴脚距离不该大到能塞下一个 marker(%v > %v)", x-pinX, bslReach(net))
+	if got := bslAttachClearSide(420, layoutBBox{}); got != "up" {
+		t.Errorf("读不到宿主高度时退回 up: %q", got)
 	}
-	// 左贴是镜像
-	lx, _ := bslAttachSeed(pinX, pinY, "left", net, ownHalf)
-	if math.Abs((pinX-lx)-(x-pinX)) > 0.001 {
-		t.Errorf("左右贴应对称: left=%v right=%v", lx, x)
+}
+
+// 种子点:上/下侧必须**让开宿主本体**(引脚的 y 还在本体高度里,从引脚算会把件按在芯片上),
+// x 对齐目标引脚那一列,让人一眼看出它属于哪只脚。
+func TestBslAttachSeed_ClearsTheHostBody(t *testing.T) {
+	host := layoutBBox{MinX: 654, MinY: 414, MaxX: 726, MaxY: 506}
+	const pinX, pinY, ownHalf float64 = 654, 468, 10
+
+	x, y := bslAttachSeed(pinX, pinY, host, "up", ownHalf)
+	if x != pinX {
+		t.Errorf("x 应对齐目标引脚那一列: %v", x)
+	}
+	if want := host.MaxY + bslPartGap + ownHalf; y != want {
+		t.Errorf("上贴 y = %v, want %v(本体上沿 + 间隙 + 半宽)", y, want)
+	}
+	if y <= host.MaxY {
+		t.Error("上贴必须整体在本体之上,否则就是压在芯片身上")
+	}
+	_, dy := bslAttachSeed(pinX, pinY, host, "down", ownHalf)
+	if want := host.MinY - bslPartGap - ownHalf; dy != want {
+		t.Errorf("下贴 y = %v, want %v", dy, want)
+	}
+	// 离脚仍然近:比一个 marker 的伸出还短,才叫"贴"。
+	if y-pinY > bslReach("3V3")+host.MaxY-host.MinY {
+		t.Errorf("贴脚距离不该大到读不出归属: %v", y-pinY)
+	}
+	// 左/右侧(引脚在上下沿的情形)仍从引脚算,且左右对称。
+	rx, ry := bslAttachSeed(pinX, pinY, host, "right", ownHalf)
+	lx, _ := bslAttachSeed(pinX, pinY, host, "left", ownHalf)
+	if ry != pinY || math.Abs((pinX-lx)-(rx-pinX)) > 0.001 {
+		t.Errorf("左右贴应与引脚齐平且对称: left=%v right=%v y=%v", lx, rx, ry)
 	}
 }
 
