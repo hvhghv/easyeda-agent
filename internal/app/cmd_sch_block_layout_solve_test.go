@@ -519,22 +519,24 @@ func TestBslExpandForMarkers_CountsMarkersAndPushes(t *testing.T) {
 	plan.Placements[0].Designator = "U1"
 	plan.Nets = []bapNet{{Net: "USB_DP", Members: []string{"U1:5", "D1:1"}},
 		{Net: "USB_DM", Members: []string{"U1:6", "D1:2"}}}
+	// 两只脚 y 只差 10,而 netport 标签 11 高 —— 一条 lane 装不下,要排 2 条。
 	pins := map[string]acPin{
-		"5": {X: 5, Y: 10, Designator: "U1", PinNumber: "5", PinName: "D+"},
-		"6": {X: 5, Y: -10, Designator: "U1", PinNumber: "6", PinName: "D-"},
+		"5": {X: 5, Y: 5, Designator: "U1", PinNumber: "5", PinName: "D+"},
+		"6": {X: 5, Y: -5, Designator: "U1", PinNumber: "6", PinName: "D-"},
 		"9": {X: 95, Y: 0, Designator: "U1", PinNumber: "9", PinName: "NC"}, // 不在网里,不算
 	}
 	var log strings.Builder
 	notes := bslExpandForMarkers(plan, bslRelations{}, bslPushTestAnchor(), pins, nil, nil, &log)
 
-	// 左侧 2 个 marker → 需 92,与 D1 只有 50 → 让 42,落格下取整 40。
-	if plan.Placements[1].X != -100 {
-		t.Errorf("D1 该被推到 −100: %v", plan.Placements[1].X)
+	// 左侧 2 支 marker 排 2 条 lane;通道 = 我这侧的伸出 + 另一条 lane 的步长
+	// + D1 自己的 marker 伸出 + 视觉间隙 = 214,与 D1 只有 50 → 让 160(落格)。
+	if plan.Placements[1].X != -220 {
+		t.Errorf("D1 该被推到 −220: %v", plan.Placements[1].X)
 	}
 	if len(notes) != 0 {
 		t.Errorf("空地上推得动就不该有告警: %v", notes)
 	}
-	if !strings.Contains(log.String(), "D1 让 40") {
+	if !strings.Contains(log.String(), "D1 让 160") {
 		t.Errorf("日志要把算术写清楚: %q", log.String())
 	}
 }
@@ -557,17 +559,17 @@ const bslLiveGeometry = `{"components":[
           {"pinNumber":"6","pinName":"D-","x":654,"y":500},
           {"pinNumber":"7","pinName":"NC","x":726,"y":460}]},
  {"componentType":"part","designator":"D1","primitiveId":"pid-d",
-  "bbox":{"minX":358,"minY":432,"maxX":406,"maxY":488},"pinsAvailable":true,
-  "pins":[{"pinNumber":"1","x":358,"y":460}]},
+  "bbox":{"minX":590,"minY":432,"maxX":638,"maxY":488},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":590,"y":460}]},
  {"componentType":"part","designator":"J1","primitiveId":"pid-j",
-  "bbox":{"minX":280,"minY":420,"maxX":350,"maxY":490},"pinsAvailable":true,
-  "pins":[{"pinNumber":"A1","x":350,"y":455}]},
+  "bbox":{"minX":532,"minY":420,"maxX":580,"maxY":490},"pinsAvailable":true,
+  "pins":[{"pinNumber":"A1","x":580,"y":455}]},
  {"componentType":"part","designator":"C8","primitiveId":"pid-c8",
-  "bbox":{"minX":500,"minY":450,"maxX":520,"maxY":470},"pinsAvailable":true,
-  "pins":[{"pinNumber":"1","x":500,"y":460}]},
+  "bbox":{"minX":700,"minY":560,"maxX":720,"maxY":580},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":700,"y":570}]},
  {"componentType":"part","designator":"X9","primitiveId":"pid-foreign",
-  "bbox":{"minX":100,"minY":430,"maxX":%d,"maxY":480},"pinsAvailable":true,
-  "pins":[{"pinNumber":"1","x":100,"y":455}]}
+  "bbox":{"minX":300,"minY":430,"maxX":%d,"maxY":480},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":300,"y":455}]}
 ]}`
 
 // bslLiveTestGeom 是锚件的实测几何(落地回读那一步的产物);推让这一步只用它 + 自己
@@ -608,20 +610,21 @@ func bslLiveTestPlan() *bapPlan {
 		BlockID: "block.ch340c_usb_serial", Relational: true, AnchorRole: "U",
 		Placements: []bapPlacement{
 			{Role: "U", PartKey: "ic.ch340c", Designator: "U3", PrimitiveID: "pid-u", X: 690, Y: 460},
-			{Role: "D_ESD", PartKey: "tvs.sm712_sot23", Designator: "D1", PrimitiveID: "pid-d", X: 370, Y: 460},
-			{Role: "J_USB", PartKey: "conn.usb_c_16p", Designator: "J1", PrimitiveID: "pid-j", X: 315, Y: 455},
-			{Role: "C_VCC", PartKey: "cap.100nf_0402", Designator: "C8", PrimitiveID: "pid-c8", X: 510, Y: 460},
+			{Role: "D_ESD", PartKey: "tvs.sm712_sot23", Designator: "D1", PrimitiveID: "pid-d", X: 610, Y: 460},
+			{Role: "J_USB", PartKey: "conn.usb_c_16p", Designator: "J1", PrimitiveID: "pid-j", X: 556, Y: 455},
+			{Role: "C_VCC", PartKey: "cap.100nf_0402", Designator: "C8", PrimitiveID: "pid-c8", X: 710, Y: 570},
 		},
 		// 左侧 6 个引脚挂 marker(第 7 脚不在网里 → 不算);右侧因此需求为 0。
 		Nets: []bapNet{{Net: "N", Members: []string{"U3:1", "U3:2", "U3:3", "U3:4", "U3:5", "U3:6"}}},
 	}
 }
 
-// 实测通道 = 654 − 406 = 248,需 276 → D1 让 28(落格 25);D1 与 J1 只有 8(< 20),
-// 富余为 0 → J1 连锁跟着让 25。下发顺序必须**由外向内**,中间态才始终不重叠。
+// 6 支 marker 的标签在 y 上互不相撞 → 只排 1 条 lane(旧阶梯口径会要 6 条)。
+// 通道 = U3 这侧的 marker 伸出 + D1 自己的伸出 + 视觉间隙;实测只有 16 → D1 让 65,
+// 而 D1 与 J1 只有 10(富余 0)→ J1 连锁跟着让 65。下发顺序必须**由外向内**。
 func TestBslExpandLive_PushesByRealBBoxAndCascades(t *testing.T) {
 	var log strings.Builder
-	cfg, daemon, cleanup := bslLiveTestDaemon(t, 200)
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 400)
 	defer cleanup()
 
 	plan := bslLiveTestPlan()
@@ -640,13 +643,13 @@ func TestBslExpandLive_PushesByRealBBoxAndCascades(t *testing.T) {
 		patch, _ := c.Payload["patch"].(map[string]any)
 		got = append(got, fmt.Sprintf("%v@%v", c.Payload["primitiveId"], patch["x"]))
 	}
-	if len(got) != 2 || got[0] != "pid-j@290" || got[1] != "pid-d@345" {
-		t.Errorf("下发顺序应由外向内、坐标按实测算: %v(期望 [pid-j@290 pid-d@345])", got)
+	if len(got) != 2 || got[0] != "pid-j@491" || got[1] != "pid-d@545" {
+		t.Errorf("下发顺序应由外向内、坐标按实测算: %v(期望 [pid-j@491 pid-d@545])", got)
 	}
-	if plan.Placements[1].X != 345 || plan.Placements[2].X != 290 {
+	if plan.Placements[1].X != 545 || plan.Placements[2].X != 491 {
 		t.Errorf("plan 必须跟着更新(manifest 的 AT 要如实): D1=%v J1=%v", plan.Placements[1].X, plan.Placements[2].X)
 	}
-	if plan.Placements[0].X != 690 || plan.Placements[3].X != 510 {
+	if plan.Placements[0].X != 690 || plan.Placements[3].X != 710 {
 		t.Errorf("锚件与 attach 件永远不动: U3=%v C8=%v", plan.Placements[0].X, plan.Placements[3].X)
 	}
 	if !strings.Contains(log.String(), "实测") {
@@ -657,7 +660,7 @@ func TestBslExpandLive_PushesByRealBBoxAndCascades(t *testing.T) {
 // 外部图元把链顶死时:一件都不许动(推一半 = 自己制造 part×part 重叠),并如实说。
 func TestBslExpandLive_WallBlocksTheWholeChain(t *testing.T) {
 	var log strings.Builder
-	cfg, daemon, cleanup := bslLiveTestDaemon(t, 270)
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 522)
 	defer cleanup()
 
 	plan := bslLiveTestPlan()
@@ -673,7 +676,7 @@ func TestBslExpandLive_WallBlocksTheWholeChain(t *testing.T) {
 	if len(notes) != 1 || !strings.Contains(notes[0], "J1") {
 		t.Errorf("必须说清被谁顶住: %v", notes)
 	}
-	if plan.Placements[1].X != 370 {
+	if plan.Placements[1].X != 610 {
 		t.Errorf("顶死时坐标不该变: %v", plan.Placements[1].X)
 	}
 }
@@ -681,19 +684,58 @@ func TestBslExpandLive_WallBlocksTheWholeChain(t *testing.T) {
 // 还原是精确的:坐标是我们自己写进去的,回滚就是把它写回去。
 func TestBslUndoLiveMoves_RestoresExactly(t *testing.T) {
 	var log strings.Builder
-	cfg, daemon, cleanup := bslLiveTestDaemon(t, 200)
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 400)
 	defer cleanup()
 
 	plan := bslLiveTestPlan()
 	moves, _ := bslExpandLive(cfg, "w1", plan, bslLiveTestGeom(), &log)
 	bslUndoLiveMoves(cfg, "w1", plan, moves, &log)
-	if plan.Placements[1].X != 370 || plan.Placements[2].X != 315 {
+	if plan.Placements[1].X != 610 || plan.Placements[2].X != 556 {
 		t.Errorf("还原必须精确回到推让前: D1=%v J1=%v", plan.Placements[1].X, plan.Placements[2].X)
 	}
 	calls := daemon.snapshot()
 	last := calls[len(calls)-1]
 	patch, _ := last.Payload["patch"].(map[string]any)
-	if last.Payload["primitiveId"] != "pid-j" || patch["x"] != float64(315) {
+	if last.Payload["primitiveId"] != "pid-j" || patch["x"] != float64(556) {
 		t.Errorf("还原也该由外向内(最后一步是最外侧的 J1 回到 315): %+v", last.Payload)
+	}
+}
+
+// lane 数 = y 方向上「同时被覆盖最多的那一层」,不是 marker 支数。
+// 这条判据决定通道要留多深:6 支隔得开的 marker 只要 1 条 lane(46),
+// 旧的阶梯口径会要 276 —— 器件本体才 71 宽,簇被撑成本体的 6 倍。
+func TestBslMarkerLanes_PacksByRealCollisionNotByCount(t *testing.T) {
+	span := func(y, h float64) [2]float64 { return [2]float64{y - h/2, y + h/2} }
+
+	// ① 6 支标签(高 11)隔 16 —— 互不相撞,共用最浅那条。
+	var apart [][2]float64
+	for i := 0; i < 6; i++ {
+		apart = append(apart, span(float64(i*16), 11))
+	}
+	if got := bslMarkerLanes(apart); got != 1 {
+		t.Errorf("隔得开的 6 支只要 1 条 lane: %d", got)
+	}
+	// ② 同样 6 支,但标签高 21(GND 旗)—— 相邻必撞,要 2 条。
+	var gnd [][2]float64
+	for i := 0; i < 6; i++ {
+		gnd = append(gnd, span(float64(i*16), 21))
+	}
+	if got := bslMarkerLanes(gnd); got != 2 {
+		t.Errorf("高 21 的旗隔 16 要 2 条 lane: %d", got)
+	}
+	// ③ 全叠在一起 → 有几支就要几条。
+	var stacked [][2]float64
+	for i := 0; i < 4; i++ {
+		stacked = append(stacked, span(0, 11))
+	}
+	if got := bslMarkerLanes(stacked); got != 4 {
+		t.Errorf("全叠在一起要 4 条: %d", got)
+	}
+	// ④ 恰好相接不算重叠(闭区间端点碰端点)。
+	if got := bslMarkerLanes([][2]float64{{0, 10}, {10, 20}}); got != 1 {
+		t.Errorf("端点相接不算撞: %d", got)
+	}
+	if got := bslMarkerLanes(nil); got != 0 {
+		t.Errorf("空侧应为 0 条: %d", got)
 	}
 }

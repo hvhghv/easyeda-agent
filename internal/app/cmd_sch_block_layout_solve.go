@@ -749,21 +749,25 @@ const bslMarkerLanePitch = 46.0
 func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 	pins map[string]acPin, walls []layoutBBox, usable *layoutBBox, stderr io.Writer) []string {
 
-	need := bslMarkerNeedPerSide(plan, anchorBBox, pins)
+	lanes, count, reach := bslMarkerNeedPerSide(plan, anchorBBox, pins)
 
 	var notes []string
 	for _, side := range []string{"left", "right"} {
-		cnt := need[side]
+		cnt := lanes[side]
 		if cnt == 0 {
 			continue
 		}
-		want := float64(cnt) * bslMarkerLanePitch
+		want := bslSideDepth(reach[side], cnt)
 		// 每一侧都用**当前**坐标重建 unit:左侧推完之后,右侧要看到新位置。
 		units := bslPushUnitsOf(plan, rel, bslEstimatedBox)
-		res := bslPushSolve(units, append(walls, bslAttachWalls(plan, rel)...), usable, anchorBBox, side, want)
+		allWalls := append(walls, bslAttachWalls(plan, rel)...)
+		res := bslPushSolve(units, allWalls, usable, anchorBBox, side, want)
 		if res.Head < 0 {
 			continue // 这一侧没有别的件,marker 有整片空地
 		}
+		// 通道是两边共用的:再加上挡路那一件自己的 marker 伸出 + 视觉间隙,重解一次。
+		want += bslUnitReach(plan, units[res.Head].Idx) + bslPartGap
+		res = bslPushSolve(units, allWalls, usable, anchorBBox, side, want)
 		var detail []string
 		for i, m := range res.Move {
 			if m == 0 {
@@ -776,15 +780,15 @@ func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 		}
 		got := res.Gap + math.Abs(res.Move[res.Head])
 		if len(detail) > 0 {
-			fmt.Fprintf(stderr, "relational: %s 侧 %d 个 marker 需 %.0f,与 %s 只有 %.0f —— %s(通道 → %.0f)\n",
-				side, cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
+			fmt.Fprintf(stderr, "relational: %s 侧 %d 支 marker 排 %d 条 lane、需 %.0f,与 %s 只有 %.0f —— %s(通道 → %.0f)\n",
+				side, count[side], cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
 		}
 		// 推不满就如实说,并且说清是被谁顶住的 —— 人和 agent 照着这句就知道
 		// 下一步该换更大图纸、拆页,还是先挪走那个外部图元。
 		if res.Capped != "" {
 			notes = append(notes, fmt.Sprintf(
-				"%s 侧要挂 %d 个 marker(需 %.0f),推让后通道只有 %.0f —— 被%s顶住;"+
-					"这一块该换更大图纸或拆页", side, cnt, want, got, res.Capped))
+				"%s 侧 %d 支 marker 要 %d 条 lane(需 %.0f),推让后通道只有 %.0f —— 被%s顶住;"+
+					"这一块该换更大图纸或拆页", side, count[side], cnt, want, got, res.Capped))
 		}
 	}
 	return notes
@@ -839,8 +843,8 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 	if !isRel {
 		return nil, nil
 	}
-	need := bslMarkerNeedPerSide(plan, anchor.BBox, anchor.Pins)
-	if need["left"] == 0 && need["right"] == 0 {
+	lanes, count, reach := bslMarkerNeedPerSide(plan, anchor.BBox, anchor.Pins)
+	if lanes["left"] == 0 && lanes["right"] == 0 {
 		return nil, nil
 	}
 
@@ -908,16 +912,19 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 	var moves []bslLiveMove
 	var notes []string
 	for _, side := range []string{"left", "right"} {
-		cnt := need[side]
+		cnt := lanes[side]
 		if cnt == 0 {
 			continue
 		}
-		want := float64(cnt) * bslMarkerLanePitch
+		want := bslSideDepth(reach[side], cnt)
 		units := bslPushUnitsOf(plan, rel, liveBox)
 		res := bslPushSolve(units, walls, usable, anchor.BBox, side, want)
 		if res.Head < 0 {
 			continue
 		}
+		// 通道是两边共用的:加上挡路那一件自己的 marker 伸出 + 视觉间隙,重解一次。
+		want += bslUnitReach(plan, units[res.Head].Idx) + bslPartGap
+		res = bslPushSolve(units, walls, usable, anchor.BBox, side, want)
 		// **从最外侧往里下发**:每一步之前外侧都已经让开了,于是任何一个中间状态
 		// 都不重叠 —— 万一某次 modify 失败,画布停在一个仍然干净的状态上。
 		order := make([]int, 0, len(units))
@@ -957,8 +964,8 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 		}
 		if len(detail) > 0 {
 			got := res.Gap + math.Abs(res.Move[res.Head])
-			fmt.Fprintf(stderr, "relational(实测): %s 侧 %d 个 marker 需 %.0f,与 %s 实测只有 %.0f —— %s(通道 → %.0f)\n",
-				side, cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
+			fmt.Fprintf(stderr, "relational(实测): %s 侧 %d 支 marker 排 %d 条 lane、需 %.0f,与 %s 实测只有 %.0f —— %s(通道 → %.0f)\n",
+				side, count[side], cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
 		}
 		if failed != "" {
 			notes = append(notes, failed)
@@ -966,8 +973,8 @@ func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnch
 		}
 		if res.Capped != "" {
 			notes = append(notes, fmt.Sprintf(
-				"%s 侧要挂 %d 个 marker(需 %.0f),实测推让后通道只有 %.0f —— 被%s顶住;这一块该换更大图纸或拆页",
-				side, cnt, want, res.Gap+math.Abs(res.Move[res.Head]), res.Capped))
+				"%s 侧 %d 支 marker 要 %d 条 lane(需 %.0f),实测推让后通道只有 %.0f —— 被%s顶住;这一块该换更大图纸或拆页",
+				side, count[side], cnt, want, res.Gap+math.Abs(res.Move[res.Head]), res.Capped))
 		}
 	}
 	return moves, notes
@@ -1017,15 +1024,54 @@ func bslUndoLiveMoves(cfg *appConfig, window string, plan *bapPlan, moves []bslL
 	}
 }
 
-// bslMarkerNeedPerSide 数锚件每一侧要挂几个 marker。引脚在锚件中心的哪边就算哪一侧
-// (autoconnect 的同侧 lane 阶梯正是按侧分配的,两边必须同一个口径)。
-func bslMarkerNeedPerSide(plan *bapPlan, anchorBBox layoutBBox, pins map[string]acPin) map[string]int {
+// bslMarkerLanes 预测一侧会用掉几条 lane —— **不是「几支 marker 就几条」**。
+//
+// 旧口径是阶梯:同侧每多一支就再深一个 step,6 个脚 = 276 深,而器件本体才 71 宽,
+// 簇被标签撑成本体的 6 倍(`sch clusters` 实测 J1 体积 486×292,D1 整个坐在里面)。
+// autoconnect 现在只在**标签真的相撞**时才往深里挪(applyLaneStagger),所以 lane 数 =
+// y 方向上「同时被覆盖最多的那一层」的重叠数:引脚隔 16、标签高 11 → 共用最浅那条,
+// 1 条 lane 就够;而 GND 旗高 21 > 16,相邻两支就得分两条。
+//
+// 判定与生成必须同一把尺:这里的标签高度来自 predictedMarkerBBox —— 评分器判碰撞用的
+// 就是它。
+func bslMarkerLanes(spans [][2]float64) int {
+	type ev struct {
+		at   float64
+		open bool
+	}
+	evs := make([]ev, 0, 2*len(spans))
+	for _, s := range spans {
+		evs = append(evs, ev{s[0], true}, ev{s[1], false})
+	}
+	sort.Slice(evs, func(i, j int) bool {
+		if evs[i].at != evs[j].at {
+			return evs[i].at < evs[j].at
+		}
+		return !evs[i].open && evs[j].open // 先关后开:恰好相接不算重叠
+	})
+	cur, max := 0, 0
+	for _, e := range evs {
+		if e.open {
+			cur++
+			if cur > max {
+				max = cur
+			}
+		} else {
+			cur--
+		}
+	}
+	return max
+}
+
+// bslMarkerNeedPerSide 算锚件每一侧需要多深的 marker 通道 —— 返回 lane 数与 marker 数。
+// 引脚在锚件中心的哪边就算哪一侧(与 autoconnect 的按侧分配同口径)。
+func bslMarkerNeedPerSide(plan *bapPlan, anchorBBox layoutBBox, pins map[string]acPin) (lanes, count map[string]int, reach map[string]float64) {
 	cx := (anchorBBox.MinX + anchorBBox.MaxX) / 2
-	need := map[string]int{}
-	marked := map[string]bool{}
+	lanes, count, reach = map[string]int{}, map[string]int{}, map[string]float64{}
+	netOf := map[string]string{}
 	for _, n := range plan.Nets {
 		for _, m := range n.Members {
-			marked[strings.ToUpper(m)] = true
+			netOf[strings.ToUpper(m)] = n.Net
 		}
 	}
 	anchorDesig := ""
@@ -1034,23 +1080,70 @@ func bslMarkerNeedPerSide(plan *bapPlan, anchorBBox layoutBBox, pins map[string]
 			anchorDesig = strings.ToUpper(p.Designator)
 		}
 	}
+	spans := map[string][][2]float64{}
 	seen := map[string]bool{}
 	for _, pin := range pins {
 		if seen[pin.PinNumber] {
 			continue // pins 同时按号和名索引,只数一次
 		}
 		seen[pin.PinNumber] = true
-		if anchorDesig != "" && !marked[anchorDesig+":"+strings.ToUpper(pin.PinNumber)] &&
-			!marked[anchorDesig+":"+strings.ToUpper(pin.PinName)] {
-			continue // 这个引脚不挂 marker
+		net, ok := netOf[anchorDesig+":"+strings.ToUpper(pin.PinNumber)]
+		if !ok {
+			if net, ok = netOf[anchorDesig+":"+strings.ToUpper(pin.PinName)]; !ok {
+				if anchorDesig != "" {
+					continue // 这个引脚不挂 marker
+				}
+			}
 		}
+		side := "right"
 		if pin.X < cx {
-			need["left"]++
-		} else {
-			need["right"]++
+			side = "left"
+		}
+		count[side]++
+		// 标签占的 y 区间 —— 与评分器判碰撞用同一把尺。
+		b := predictedMarkerBBox(pin.X, pin.Y, bapFlagKind(net), side, net)
+		spans[side] = append(spans[side], [2]float64{b.MinY, b.MaxY})
+		if r := bslReach(net); r > reach[side] {
+			reach[side] = r
 		}
 	}
-	return need
+	for side, s := range spans {
+		lanes[side] = bslMarkerLanes(s)
+	}
+	return lanes, count, reach
+}
+
+// bslSideDepth 是一侧的 marker 一共要占多深。
+//
+// **第一条 lane 的深度 ≠ lane 间距**:一支 marker 从引脚伸出 = 桩长 + 标签实宽
+// (bslReach,58–90),而 lane 之间只需要错开一个 body(bslMarkerLanePitch=46)。
+// 旧口径拿 lane 数 × 46 当深度,连一支 marker 都装不下 —— 真机上 lane 收窄之后
+// markerOverlaps 反而 2→7,就是这里少算了第一条 lane 的伸出。
+func bslSideDepth(maxReach float64, lanes int) float64 {
+	if lanes <= 0 {
+		return 0
+	}
+	return maxReach + float64(lanes-1)*bslMarkerLanePitch
+}
+
+// bslUnitReach 是这个 unit 自己的 marker 会往外伸多远 —— 通道是**两边**的 marker
+// 共用的,只留自己那一半必然撞上邻居的标签。网名从 plan.Nets 拿(标签越长伸得越远)。
+func bslUnitReach(plan *bapPlan, idx []int) float64 {
+	max := 0.0
+	for _, i := range idx {
+		desig := strings.ToUpper(plan.Placements[i].Designator) + ":"
+		for _, n := range plan.Nets {
+			for _, m := range n.Members {
+				if !strings.HasPrefix(strings.ToUpper(m), desig) {
+					continue
+				}
+				if r := bslReach(n.Net); r > max {
+					max = r
+				}
+			}
+		}
+	}
+	return max
 }
 
 // bslPushUnit 是推让链上的一个刚体。

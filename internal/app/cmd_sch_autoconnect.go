@@ -917,18 +917,19 @@ func applyLaneStagger(all []acCandidate, lanes map[string]float64,
 		return acCandidate{}
 	}
 	best := all[0]
-	used, ok := lanes[laneKeyOf(designator, best.Direction)]
-	if !ok {
-		return best // 这一侧还没人,首选即可
+	// **只在真的会撞时才往深里挪。** 上一版是「同侧每多一个 marker 就再深一个 step」的
+	// 阶梯:6 个脚 = 276 深的通道,而器件本体只有 71 宽 —— 簇被标签撑成本体的 6 倍,
+	// 于是 D1 整个坐进了 J1 的 marker 场里(`sch clusters` 实测 J1 体积 486×292)。
+	// 阶梯本来就是多余的:评分器已经把「撞已放标签 = costFlagCollision」算进总分,
+	// 而 offset 每单位只要 0.1 —— 它自己就会为了不撞而走深,不撞时就该待在最浅那条。
+	// 引脚在 y 上隔 16、标签才 11 高时,两支 marker 共用最浅 lane 根本不相撞,
+	// 阶梯却硬把第二支推到 72。
+	if !candidateCollidesWithMarker(best) {
+		return best
 	}
-	need := used + laneStepFor(canonicalKind, net)
-	if best.Offset >= need {
-		return best // 首选本来就够远
-	}
-	// 在**同方向**里找第一个够远且不比硬拒绝更差的候选。候选已按分数升序,
-	// 所以第一个命中的就是同方向里最省的。
+	// 首选确实撞了:同方向里找第一个不撞、又不破坏正确性判据的。
 	for _, c := range all {
-		if c.Direction != best.Direction || c.Offset < need {
+		if c.Direction != best.Direction || candidateCollidesWithMarker(c) {
 			continue
 		}
 		// **错开不能以别的破坏为代价**。只挡短路是不够的:第一版只过滤硬拒绝,

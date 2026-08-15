@@ -848,23 +848,34 @@ func TestLaneStepFor_ExceedsMarkerBody(t *testing.T) {
 
 // 同一侧第二个 marker 必须错开一个 body 长度 —— 这是相邻脚不互压的唯一办法
 // (改 offset 只动 x,y 范围由引脚决定,不会变)。
-func TestApplyLaneStagger_SecondMarkerOnSameSideStepsOut(t *testing.T) {
+func TestApplyLaneStagger_StaysShallowWhenLabelsDoNotCollide(t *testing.T) {
+	// 同侧已经落过一支 marker,但新的这支在最浅档**并不撞** —— 就该待在最浅档。
+	// 旧口径是阶梯(每多一支再深一个 step),6 个脚就要 276 深的通道,而器件本体
+	// 才 71 宽:簇被标签撑成本体的 6 倍,邻居整个坐进来(`sch clusters` 实测
+	// J1 体积 486×292,D1 115×109 全在里面)。深度只该由**真实碰撞**决定。
 	all := []acCandidate{
 		{Direction: "left", Offset: 18, Score: 1},
-		{Direction: "left", Offset: 24, Score: 2},
-		{Direction: "left", Offset: 60, Score: 5},
 		{Direction: "left", Offset: 90, Score: 9},
 	}
 	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
 	got := applyLaneStagger(all, lanes, "U3", "C7_N5", "netport")
-	need := 18 + laneStepFor("netport", "C7_N5")
-	if got.Offset < need {
-		t.Errorf("同侧第二个必须让开: got offset=%v, 至少要 %v", got.Offset, need)
+	if got.Offset != 18 {
+		t.Errorf("不撞就不该让开,阶梯是白给的深度: got offset=%v", got.Offset)
 	}
-	// 且要挑同方向里**够远之中最省**的那个:C7_N5 的 body 长 38,步长 46,
-	// 所以 60 还不够(18+46=64),90 才是第一个合格的。
-	if got.Offset != 90 {
-		t.Errorf("应挑够远里最省的 90, got %v", got.Offset)
+}
+
+// 撞了才让开:首选带着 costFlagCollision 时,挑同方向里第一个不撞的。
+func TestApplyLaneStagger_StepsOutOnlyWhenItActuallyCollides(t *testing.T) {
+	all := []acCandidate{
+		{Direction: "left", Offset: 18, Score: 1001,
+			Reasons: []acReason{{costFlagCollision, "label collides with an existing flag/port/label"}}},
+		{Direction: "left", Offset: 64, Score: 6},
+		{Direction: "left", Offset: 90, Score: 9},
+	}
+	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
+	got := applyLaneStagger(all, lanes, "U3", "C7_N5", "netport")
+	if got.Offset != 64 {
+		t.Errorf("撞了该挑同方向里第一个干净的(64),got %v", got.Offset)
 	}
 }
 
@@ -880,7 +891,8 @@ func TestApplyLaneStagger_FirstOnSideKeepsBest(t *testing.T) {
 // **错开不能以短路为代价**:够远的候选若被 #64 硬拒绝,必须跳过。
 func TestApplyLaneStagger_NeverPicksAHardReject(t *testing.T) {
 	all := []acCandidate{
-		{Direction: "left", Offset: 18, Score: 1},
+		{Direction: "left", Offset: 18, Score: 1001,
+			Reasons: []acReason{{costFlagCollision, "label collides with an existing flag/port/label"}}},
 		{Direction: "left", Offset: 90, Score: 2e9,
 			Reasons: []acReason{{costHardReject, "stub touches an existing (foreign-net) wire (hard reject)"}}},
 		{Direction: "up", Offset: 18, Score: 3},
@@ -900,7 +912,8 @@ func TestApplyLaneStagger_NeverPicksAHardReject(t *testing.T) {
 // 真机当场多出两条「D1(part) 与 MCU_TX(netport) 重叠 26.00×11.00」。
 func TestApplyLaneStagger_NeverPicksACandidateOverAPart(t *testing.T) {
 	all := []acCandidate{
-		{Direction: "left", Offset: 18, Score: 1},
+		{Direction: "left", Offset: 18, Score: 1001,
+			Reasons: []acReason{{costFlagCollision, "label collides with an existing flag/port/label"}}},
 		{Direction: "left", Offset: 90, Score: 10001,
 			Reasons: []acReason{{costPartOverlap, "label overlaps a part bbox"}}},
 		{Direction: "down", Offset: 18, Score: 3},

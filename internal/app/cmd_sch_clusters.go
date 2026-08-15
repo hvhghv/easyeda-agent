@@ -25,6 +25,11 @@ import (
 )
 
 // schCluster 是一个 L1 虚拟组。
+//
+// Box 是包络(给布局留位用),Parts 是**组成它的每一个图元的实测 box**(判重叠用):
+// 一个件的 marker 是四面星形展开的,包络矩形里大半是空的 —— 拿包络判"组间重叠"会
+// 把「J1 的上方 marker 和 D1 的下方本体各占一半、谁也没压谁」也报成 ERROR。
+// 判据必须落在**真实图元**上,否则它会逼着布局去躲根本不存在的碰撞。
 type schCluster struct {
 	Designator  string     `json:"designator"`
 	PrimitiveID string     `json:"primitiveId,omitempty"`
@@ -33,6 +38,8 @@ type schCluster struct {
 	Box         layoutBBox `json:"box"`     // 体积:本体 ∪ 归属 marker ∪ 归属桩线
 	Markers     int        `json:"markers"` // 归属的 marker 数
 	Wires       int        `json:"wires"`   // 归属的桩线数(跨组的不算)
+	// Members 是组成它的每一个图元的实测 box —— 判组间重叠用它,不用包络。
+	Members []layoutBBox `json:"-"`
 }
 
 // schClusterFinding 是一条判定结果。
@@ -92,8 +99,10 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 	box := map[string]layoutBBox{}
 	markers := map[string]int{}
 	wireCount := map[string]int{}
+	members := map[string][]layoutBBox{}
 	for d, b := range body {
 		box[d] = b
+		members[d] = []layoutBBox{b}
 	}
 	grow := func(d string, b layoutBBox) {
 		cur := box[d]
@@ -101,6 +110,7 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 			MinX: math.Min(cur.MinX, b.MinX), MinY: math.Min(cur.MinY, b.MinY),
 			MaxX: math.Max(cur.MaxX, b.MaxX), MaxY: math.Max(cur.MaxY, b.MaxY),
 		}
+		members[d] = append(members[d], b)
 	}
 	quant := func(x, y float64) [2]int64 {
 		return [2]int64{int64(math.Round(x)), int64(math.Round(y))}
@@ -233,7 +243,7 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 	for _, d := range order {
 		out = append(out, schCluster{
 			Designator: d, PrimitiveID: idOf[d], Device: devOf[d],
-			Body: body[d], Box: box[d], Markers: markers[d], Wires: wireCount[d],
+			Body: body[d], Box: box[d], Markers: markers[d], Wires: wireCount[d], Members: members[d],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -245,21 +255,62 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 	return out, unowned
 }
 
+// membersOf 退化保护:老调用方(或手搓的 fixture)没填 Members 时用包络顶上。
+func membersOf(c schCluster) []layoutBBox {
+	if len(c.Members) > 0 {
+		return c.Members
+	}
+	return []layoutBBox{c.Box}
+}
+
+// boxesIntersect / boxGapAlongAxes 是包络快筛用的两把小尺。
+func boxesIntersect(a, b layoutBBox) bool {
+	return math.Min(a.MaxX, b.MaxX)-math.Max(a.MinX, b.MinX) > 0 &&
+		math.Min(a.MaxY, b.MaxY)-math.Max(a.MinY, b.MinY) > 0
+}
+
+func boxGapAlongAxes(a, b layoutBBox) float64 {
+	ox := math.Min(a.MaxX, b.MaxX) - math.Max(a.MinX, b.MinX)
+	oy := math.Min(a.MaxY, b.MaxY) - math.Max(a.MinY, b.MinY)
+	return math.Max(-ox, -oy)
+}
+
 // judgeSchClusters 出判定:组间重叠(ERROR)、组出图纸(ERROR)、组间过近(WARN)。
 func judgeSchClusters(cs []schCluster, usable *layoutBBox, minGap float64) []schClusterFinding {
 	var out []schClusterFinding
 	for i := 0; i < len(cs); i++ {
 		for j := i + 1; j < len(cs); j++ {
-			a, b := cs[i].Box, cs[j].Box
-			ox := math.Min(a.MaxX, b.MaxX) - math.Max(a.MinX, b.MinX)
-			oy := math.Min(a.MaxY, b.MaxY) - math.Max(a.MinY, b.MinY)
-			if ox > 0 && oy > 0 {
+			// 先用包络快筛(包络不相交,成员一定不相交),再逐图元判 —— 判定必须落在
+			// 真实图元上,包络之间的空白不是碰撞。
+			ox, oy, hit := 0.0, 0.0, false
+			gap := math.Inf(1)
+			ea, eb := cs[i].Box, cs[j].Box
+			if boxGapAlongAxes(ea, eb) < minGap || boxesIntersect(ea, eb) {
+				for _, a := range membersOf(cs[i]) {
+					for _, b := range membersOf(cs[j]) {
+						x := math.Min(a.MaxX, b.MaxX) - math.Max(a.MinX, b.MinX)
+						y := math.Min(a.MaxY, b.MaxY) - math.Max(a.MinY, b.MinY)
+						if x > 0 && y > 0 {
+							if !hit || x*y > ox*oy {
+								ox, oy, hit = x, y, true
+							}
+							continue
+						}
+						if g := math.Max(-x, -y); g < gap {
+							gap = g
+						}
+					}
+				}
+			}
+			if hit {
 				out = append(out, schClusterFinding{Type: "overlap", Level: "ERROR",
 					A: cs[i].Designator, B: cs[j].Designator, OvX: ox, OvY: oy})
 				continue
 			}
-			gap := math.Max(-ox, -oy) // 分离轴上的间隙
 			if minGap > 0 && gap < minGap {
+				if gap == 0 {
+					gap = 0 // 抹掉 −0,别让"贴着"打印成 "-0"
+				}
 				out = append(out, schClusterFinding{Type: "tight", Level: "WARN",
 					A: cs[i].Designator, B: cs[j].Designator, Gap: gap})
 			}
