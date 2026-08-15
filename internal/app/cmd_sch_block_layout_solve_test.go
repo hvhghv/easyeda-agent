@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -265,7 +266,7 @@ func TestBslPushSolve_CascadesToTheNextPart(t *testing.T) {
 		bslPart("D1", "tvs.sm712_sot23", -60, 0), // box [-70,-50]
 		bslPart("J1", "conn.usb_c_16p", -200, 0), // box [-290,-110]
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
 
 	// D1 与锚件只有 50,要 100 → 让 50;D1 与 J1 有 40,富余 40−20=20 → J1 让 30。
@@ -287,7 +288,7 @@ func TestBslPushSolve_SlackAbsorbsTheChain(t *testing.T) {
 		bslPart("D1", "tvs.sm712_sot23", -60, 0),
 		bslPart("J1", "conn.usb_c_16p", -300, 0), // 与 D1 间隙 140,富余 120 > 50
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
 	if got := bslMoveOf(t, units, res, "J1"); got != 0 {
 		t.Errorf("富余够时 J1 不该动: %v", got)
@@ -302,7 +303,7 @@ func TestBslPushSolve_ClampsWholeChainNeverHalfPushes(t *testing.T) {
 		bslPart("J1", "conn.usb_c_16p", -200, 0),
 	)
 	usable := &layoutBBox{MinX: -300, MinY: -500, MaxX: 1000, MaxY: 500}
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, usable, bslPushTestAnchor(), "left", 100)
 
 	// J1 左沿 −290,可用区 −300 → 只能让 10;D1 因此只能让 10+富余 20 = 30。
@@ -332,7 +333,7 @@ func TestBslPushSolve_ForeignPartIsAWall(t *testing.T) {
 		bslPart("D1", "tvs.sm712_sot23", -60, 0),
 	)
 	wall := layoutBBox{MinX: -200, MinY: -30, MaxX: -100, MaxY: 30}
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, []layoutBBox{wall}, nil, bslPushTestAnchor(), "left", 100)
 
 	// D1 左沿 −70 到墙右沿 −100 有 30,留 20 → 只能让 10。
@@ -352,7 +353,7 @@ func TestBslPushSolve_PairMovesAsOneRigidBody(t *testing.T) {
 		bslPart("R_B", "res.5k1_0402", -40, 0),
 	)
 	rel := bslRelations{Pair: [][]string{{"R_A", "R_B"}}}
-	units := bslPushUnitsOf(plan, rel)
+	units := bslPushUnitsOf(plan, rel, bslEstimatedBox)
 	if len(units) != 1 || len(units[0].Idx) != 2 {
 		t.Fatalf("pair 组该合成一个刚体: %+v", units)
 	}
@@ -384,7 +385,7 @@ func TestBslPushUnitsOf_SkipsAnchorAttachAndPlaced(t *testing.T) {
 	landed.PrimitiveID = "prim-old"
 	plan.Placements = append(plan.Placements, landed)
 
-	units := bslPushUnitsOf(plan, bslRelations{Attach: map[string]string{"C_VCC": "U.VCC"}})
+	units := bslPushUnitsOf(plan, bslRelations{Attach: map[string]string{"C_VCC": "U.VCC"}}, bslEstimatedBox)
 	if len(units) != 1 || units[0].Label != "D1" {
 		t.Fatalf("只有 D1 该可推: %+v", units)
 	}
@@ -397,7 +398,7 @@ func TestBslPushSolve_OnlyPartsInTheLaneBand(t *testing.T) {
 		bslPart("U", "ic.ch340c", 50, 0),
 		bslPart("R5", "res.5k1_0402", -60, -200), // 锚件下方 200,不在带上
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
 	if res.Head >= 0 {
 		t.Errorf("带外的件不该被当成挡路的: head=%d", res.Head)
@@ -414,7 +415,7 @@ func TestBslPushSolve_PushesEveryPartInsideTheChannel(t *testing.T) {
 		bslPart("D1", "tvs.sm712_sot23", -60, 30),
 		bslPart("D2", "tvs.sm712_sot23", -60, -30),
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
 	if a, b := bslMoveOf(t, units, res, "D1"), bslMoveOf(t, units, res, "D2"); a != -50 || b != -50 {
 		t.Errorf("通道里的两件都该让 50: D1=%v D2=%v", a, b)
@@ -428,7 +429,7 @@ func TestBslPushSolve_RightSideIsSymmetric(t *testing.T) {
 		bslPart("D1", "tvs.sm712_sot23", 160, 0), // box [150,170],与锚件间隙 50
 		bslPart("J1", "conn.usb_c_16p", 300, 0),  // box [210,390],与 D1 间隙 40
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "right", 100)
 	if a, b := bslMoveOf(t, units, res, "D1"), bslMoveOf(t, units, res, "J1"); a != 50 || b != 30 {
 		t.Errorf("右侧该镜像成立: D1=%v J1=%v(期望 +50 / +30)", a, b)
@@ -445,7 +446,7 @@ func TestBslPushSolve_DeterministicAndConverges(t *testing.T) {
 		)
 	}
 	p1, p2 := build(), build()
-	u1, u2 := bslPushUnitsOf(p1, bslRelations{}), bslPushUnitsOf(p2, bslRelations{})
+	u1, u2 := bslPushUnitsOf(p1, bslRelations{}, bslEstimatedBox), bslPushUnitsOf(p2, bslRelations{}, bslEstimatedBox)
 	r1 := bslPushSolve(u1, nil, nil, bslPushTestAnchor(), "left", 100)
 	r2 := bslPushSolve(u2, nil, nil, bslPushTestAnchor(), "left", 100)
 	for i := range r1.Move {
@@ -458,7 +459,7 @@ func TestBslPushSolve_DeterministicAndConverges(t *testing.T) {
 			p1.Placements[idx].X += m
 		}
 	}
-	again := bslPushSolve(bslPushUnitsOf(p1, bslRelations{}), nil, nil, bslPushTestAnchor(), "left", 100)
+	again := bslPushSolve(bslPushUnitsOf(p1, bslRelations{}, bslEstimatedBox), nil, nil, bslPushTestAnchor(), "left", 100)
 	for _, m := range again.Move {
 		if m != 0 {
 			t.Errorf("推让该一轮收敛,第二轮还在动: %v", again.Move)
@@ -474,7 +475,7 @@ func TestBslPushSolve_GapCountsThePartsOwnWidth(t *testing.T) {
 		bslPart("U", "ic.ch340c", 50, 0),
 		bslPart("J1", "conn.usb_c_16p", -140, 0), // 中心距锚件 140,右沿只有 −50
 	)
-	units := bslPushUnitsOf(plan, bslRelations{})
+	units := bslPushUnitsOf(plan, bslRelations{}, bslEstimatedBox)
 	res := bslPushSolve(units, nil, nil, bslPushTestAnchor(), "left", 100)
 	if res.Gap != 50 {
 		t.Errorf("间隙该按 J1 的右沿算(−50)而不是中心: %v", res.Gap)
@@ -510,5 +511,164 @@ func TestBslExpandForMarkers_CountsMarkersAndPushes(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "D1 让 40") {
 		t.Errorf("日志要把算术写清楚: %q", log.String())
+	}
+}
+
+// ── 实测推让(place 之后 connect_pin 之前,用真实 bbox 再解一次)──────────────
+//
+// 几何照抄真机(ceshi 单块 ch340c)的实测值,包括那条最要命的事实:**锚点不在 bbox
+// 中心** —— D1 锚点 370,bbox 却是 [358,406],右侧伸出 36。估算尺(tvs 半宽 10)
+// 在这里必然算错通道,这正是要用实测再解一次的原因。
+
+const bslLiveGeometry = `{"components":[
+ {"componentType":"sheet","bbox":{"minX":0,"minY":0,"maxX":1170,"maxY":825}},
+ {"componentType":"part","designator":"U3","primitiveId":"pid-u",
+  "bbox":{"minX":654,"minY":414,"maxX":726,"maxY":506},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","pinName":"GND","x":654,"y":420},
+          {"pinNumber":"2","pinName":"TXD","x":654,"y":436},
+          {"pinNumber":"3","pinName":"RXD","x":654,"y":452},
+          {"pinNumber":"4","pinName":"V3","x":654,"y":468},
+          {"pinNumber":"5","pinName":"D+","x":654,"y":484},
+          {"pinNumber":"6","pinName":"D-","x":654,"y":500},
+          {"pinNumber":"7","pinName":"NC","x":726,"y":460}]},
+ {"componentType":"part","designator":"D1","primitiveId":"pid-d",
+  "bbox":{"minX":358,"minY":432,"maxX":406,"maxY":488},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":358,"y":460}]},
+ {"componentType":"part","designator":"J1","primitiveId":"pid-j",
+  "bbox":{"minX":280,"minY":420,"maxX":350,"maxY":490},"pinsAvailable":true,
+  "pins":[{"pinNumber":"A1","x":350,"y":455}]},
+ {"componentType":"part","designator":"C8","primitiveId":"pid-c8",
+  "bbox":{"minX":500,"minY":450,"maxX":520,"maxY":470},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":500,"y":460}]},
+ {"componentType":"part","designator":"X9","primitiveId":"pid-foreign",
+  "bbox":{"minX":100,"minY":430,"maxX":%d,"maxY":480},"pinsAvailable":true,
+  "pins":[{"pinNumber":"1","x":100,"y":455}]}
+]}`
+
+// bslLiveTestGeom 是锚件的实测几何(落地回读那一步的产物);推让这一步只用它 + 自己
+// 读回来的 bbox,**不再读引脚** —— 带引脚的回读会毒化紧随其后的 modify。
+func bslLiveTestGeom() *bslAnchorGeom {
+	pins := map[string]acPin{}
+	for _, p := range []acPin{
+		{PinNumber: "1", PinName: "GND", X: 654, Y: 420, Designator: "U3"},
+		{PinNumber: "2", PinName: "TXD", X: 654, Y: 436, Designator: "U3"},
+		{PinNumber: "3", PinName: "RXD", X: 654, Y: 452, Designator: "U3"},
+		{PinNumber: "4", PinName: "V3", X: 654, Y: 468, Designator: "U3"},
+		{PinNumber: "5", PinName: "D+", X: 654, Y: 484, Designator: "U3"},
+		{PinNumber: "6", PinName: "D-", X: 654, Y: 500, Designator: "U3"},
+		{PinNumber: "7", PinName: "NC", X: 726, Y: 460, Designator: "U3"},
+	} {
+		pins[p.PinNumber] = p
+		pins[p.PinName] = p
+	}
+	return &bslAnchorGeom{BBox: layoutBBox{MinX: 654, MinY: 414, MaxX: 726, MaxY: 506}, Pins: pins}
+}
+
+// bslLiveTestDaemon 回放实测几何;wallMaxX 决定那个「不属于本块」的外部图元有多近。
+func bslLiveTestDaemon(t *testing.T, wallMaxX int) (*appConfig, *blockApplyTestDaemon, func()) {
+	t.Helper()
+	return newBlockApplyTestDaemon(t, func(call blockApplyTestCall) string {
+		if call.Action != "schematic.components.list" {
+			return ""
+		}
+		if call.Payload["includePins"] == true {
+			t.Errorf("实测推让绝不能带 includePins:那次回读会跑 netlist 导出,之后的 modify 会被平台拒")
+		}
+		return `{"ok":true,"result":` + fmt.Sprintf(bslLiveGeometry, wallMaxX) + `}`
+	})
+}
+
+func bslLiveTestPlan() *bapPlan {
+	return &bapPlan{
+		BlockID: "block.ch340c_usb_serial", Relational: true, AnchorRole: "U",
+		Placements: []bapPlacement{
+			{Role: "U", PartKey: "ic.ch340c", Designator: "U3", PrimitiveID: "pid-u", X: 690, Y: 460},
+			{Role: "D_ESD", PartKey: "tvs.sm712_sot23", Designator: "D1", PrimitiveID: "pid-d", X: 370, Y: 460},
+			{Role: "J_USB", PartKey: "conn.usb_c_16p", Designator: "J1", PrimitiveID: "pid-j", X: 315, Y: 455},
+			{Role: "C_VCC", PartKey: "cap.100nf_0402", Designator: "C8", PrimitiveID: "pid-c8", X: 510, Y: 460},
+		},
+		// 左侧 6 个引脚挂 marker(第 7 脚不在网里 → 不算);右侧因此需求为 0。
+		Nets: []bapNet{{Net: "N", Members: []string{"U3:1", "U3:2", "U3:3", "U3:4", "U3:5", "U3:6"}}},
+	}
+}
+
+// 实测通道 = 654 − 406 = 248,需 276 → D1 让 28(落格 25);D1 与 J1 只有 8(< 20),
+// 富余为 0 → J1 连锁跟着让 25。下发顺序必须**由外向内**,中间态才始终不重叠。
+func TestBslExpandLive_PushesByRealBBoxAndCascades(t *testing.T) {
+	var log strings.Builder
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 200)
+	defer cleanup()
+
+	plan := bslLiveTestPlan()
+	moves, notes := bslExpandLive(cfg, "w1", plan, bslLiveTestGeom(), &log)
+	if len(notes) != 0 {
+		t.Fatalf("空地上不该有告警: %v", notes)
+	}
+	if len(moves) != 2 {
+		t.Fatalf("该挪 D1 与 J1 两件: %+v", moves)
+	}
+	var got []string
+	for _, c := range daemon.snapshot() {
+		if c.Action != "schematic.component.modify" {
+			continue
+		}
+		patch, _ := c.Payload["patch"].(map[string]any)
+		got = append(got, fmt.Sprintf("%v@%v", c.Payload["primitiveId"], patch["x"]))
+	}
+	if len(got) != 2 || got[0] != "pid-j@290" || got[1] != "pid-d@345" {
+		t.Errorf("下发顺序应由外向内、坐标按实测算: %v(期望 [pid-j@290 pid-d@345])", got)
+	}
+	if plan.Placements[1].X != 345 || plan.Placements[2].X != 290 {
+		t.Errorf("plan 必须跟着更新(manifest 的 AT 要如实): D1=%v J1=%v", plan.Placements[1].X, plan.Placements[2].X)
+	}
+	if plan.Placements[0].X != 690 || plan.Placements[3].X != 510 {
+		t.Errorf("锚件与 attach 件永远不动: U3=%v C8=%v", plan.Placements[0].X, plan.Placements[3].X)
+	}
+	if !strings.Contains(log.String(), "实测") {
+		t.Errorf("日志要标明这是实测那一遍: %q", log.String())
+	}
+}
+
+// 外部图元把链顶死时:一件都不许动(推一半 = 自己制造 part×part 重叠),并如实说。
+func TestBslExpandLive_WallBlocksTheWholeChain(t *testing.T) {
+	var log strings.Builder
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 270)
+	defer cleanup()
+
+	plan := bslLiveTestPlan()
+	moves, notes := bslExpandLive(cfg, "w1", plan, bslLiveTestGeom(), &log)
+	if len(moves) != 0 {
+		t.Errorf("顶死时不许挪: %+v", moves)
+	}
+	for _, c := range daemon.snapshot() {
+		if c.Action != "schematic.components.list" {
+			t.Errorf("顶死时不该改画布,出现了 %q", c.Action)
+		}
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "J1") {
+		t.Errorf("必须说清被谁顶住: %v", notes)
+	}
+	if plan.Placements[1].X != 370 {
+		t.Errorf("顶死时坐标不该变: %v", plan.Placements[1].X)
+	}
+}
+
+// 还原是精确的:坐标是我们自己写进去的,回滚就是把它写回去。
+func TestBslUndoLiveMoves_RestoresExactly(t *testing.T) {
+	var log strings.Builder
+	cfg, daemon, cleanup := bslLiveTestDaemon(t, 200)
+	defer cleanup()
+
+	plan := bslLiveTestPlan()
+	moves, _ := bslExpandLive(cfg, "w1", plan, bslLiveTestGeom(), &log)
+	bslUndoLiveMoves(cfg, "w1", plan, moves, &log)
+	if plan.Placements[1].X != 370 || plan.Placements[2].X != 315 {
+		t.Errorf("还原必须精确回到推让前: D1=%v J1=%v", plan.Placements[1].X, plan.Placements[2].X)
+	}
+	calls := daemon.snapshot()
+	last := calls[len(calls)-1]
+	patch, _ := last.Payload["patch"].(map[string]any)
+	if last.Payload["primitiveId"] != "pid-j" || patch["x"] != float64(315) {
+		t.Errorf("还原也该由外向内(最后一步是最外侧的 J1 回到 315): %+v", last.Payload)
 	}
 }

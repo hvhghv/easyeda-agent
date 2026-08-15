@@ -137,6 +137,10 @@ func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *
 // 返回值分两组:blocking(重叠/引脚重合 —— wiring 前硬门,触发整单回滚)与
 // advisory(出图纸 —— 与 `sch layout-lint` 的分档一致,只警告不回滚:块比图纸大
 // 是版面决策,不该让 apply 变成不可能)。
+//
+// **这一步带 includePins,而带引脚的回读会顺带跑一次 netlist 导出** —— 导出之后紧接着
+// 发 component.modify 会被平台拒掉(见 bslMoveComponentX)。所以实测推让排在它**前面**,
+// 而它验的是推让之后的最终几何。
 func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]layoutFinding, []layoutFinding, error) {
 	// includePins is load-bearing: PIN COINCIDENCE is the failure this check exists
 	// for. Two parts can sit at a clean bbox distance and still land a pin of one
@@ -646,12 +650,16 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 			}
 		}
 	}
+	// anchorGeom 是锚件的实测 bbox + 引脚,落地后回读那一次取得;锚件此后不动,
+	// 所以放置全部完成后的实测推让直接复用它,不必再要一次带引脚的回读。
+	var anchorGeom *bslAnchorGeom
 	for i := range plan.Placements {
 		// 锚件落地后回读一次,用实测引脚求解其余件 —— 只回读这一次:后续件的尺寸
-		// 用估算(只保证下限),最终由放置后的硬门用真实 bbox 兜底。每件都回读会让
-		// 稠密页上的 SDK 往返变成 O(件数 × 页组件数)。
+		// 用估算(只保证下限),最终由放置后的实测推让 + 硬门用真实 bbox 兜底。
+		// 每件都回读会让稠密页上的 SDK 往返变成 O(件数 × 页组件数)。
 		if plan.Relational && i == 1 {
-			notes := bslResolveLive(cfg, window, &plan, sheetBBox, stderr)
+			geom, notes := bslResolveLive(cfg, window, &plan, sheetBBox, stderr)
+			anchorGeom = geom
 			if len(notes) > 0 {
 				plan.Warnings = append(plan.Warnings, notes...)
 				man.Warnings = plan.Warnings
@@ -729,6 +737,17 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	created = append(created[:0], plan.Placements...)
 	man.Placed = append([]bapPlacement(nil), plan.Placements...)
 
+	// 5b-0. 实测推让(ADR-0003 时间窗)排在硬门**之前**:器件全部落地、marker 一根都
+	// 还没建,此刻挪件只是一次 component.modify;硬门随后验的就是推让之后的最终几何,
+	// 不必再验第二遍。顺序还有一个硬理由:硬门那次回读带 includePins,而带引脚的回读
+	// 会顺带跑 netlist 导出,导出之后的 modify 会被平台拒掉(bslMoveComponentX 有实测)。
+	moves, pushNotes := bslExpandLive(cfg, window, &plan, anchorGeom, stderr)
+	man.Warnings = append(man.Warnings, pushNotes...)
+	if len(moves) > 0 {
+		man.Placed = append([]bapPlacement(nil), plan.Placements...)
+		created = append(created[:0], plan.Placements...)
+	}
+
 	// 5b. real-geometry read-back: the estimated-footprint dodge above is a
 	// heuristic; the rendered bboxes and pin coordinates are the truth. Findings
 	// involving this instance are a hard pre-wiring gate, not a warning.
@@ -741,13 +760,19 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
 			fmt.Errorf("layout verification failed: %w", verifyErr), asJSON, stdout, stderr)
 	}
-	// 出图纸:按**实测 bbox** 判(取代事后拿锚点比 sheet 的老 warning —— 锚点在框内
-	// 而 body 探出框外就漏报)。只警告不回滚,与 layout-lint 的分档一致。
-	for _, f := range offSheet {
-		w := fmt.Sprintf("%s 越出图纸可用区(图框内缩 %.0f 单位),该件照样连线、netlist 也对得上,但印不出来 — 换大图纸/拆页/给块加 schematic_layout 模板;`sch layout-lint --strict` 会把它判为阻塞",
-			f.A, sheetEdgeMinGap)
-		man.Warnings = append(man.Warnings, w)
-		fmt.Fprintf(stderr, "warn: %s\n", w)
+	// 硬门在推让之后报重叠时,先把位移原样还原再验一次:布局本来是干净的,不该因为
+	// 一次版面优化把整单回滚掉(位移是我们自己写进去的,还原是精确的)。
+	if len(findings) > 0 && len(moves) > 0 {
+		fmt.Fprintf(stderr, "layout ✗ 推让后出现 %d 处重叠/引脚重合 —— 还原位移再验一次\n", len(findings))
+		bslUndoLiveMoves(cfg, window, &plan, moves, stderr)
+		man.Placed = append([]bapPlacement(nil), plan.Placements...)
+		created = append(created[:0], plan.Placements...)
+		if f2, off2, err := verifyBlockLayout(cfg, window, plan.Placements); err == nil && len(f2) == 0 {
+			w := "实测推让会造成重叠,已整体还原到落地时的位置(布局照旧,只是没优化)"
+			man.Warnings = append(man.Warnings, w)
+			fmt.Fprintf(stderr, "warn: %s\n", w)
+			findings, offSheet = f2, off2
+		}
 	}
 	if len(findings) > 0 {
 		man.LayoutOverlaps = findings
@@ -769,8 +794,16 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 			fmt.Errorf("layout verification found %d overlap(s) and %d pin coincidence(s)",
 				overlaps, coincidences),
 			asJSON, stdout, stderr)
-	} else {
-		fmt.Fprintf(stderr, "layout ✓ no overlap or pin coincidence involving this instance\n")
+	}
+	fmt.Fprintf(stderr, "layout ✓ no overlap or pin coincidence involving this instance\n")
+
+	// 出图纸:按**实测 bbox** 判(取代事后拿锚点比 sheet 的老 warning —— 锚点在框内
+	// 而 body 探出框外就漏报)。只警告不回滚,与 layout-lint 的分档一致。
+	for _, f := range offSheet {
+		w := fmt.Sprintf("%s 越出图纸可用区(图框内缩 %.0f 单位),该件照样连线、netlist 也对得上,但印不出来 — 换大图纸/拆页/给块加 schematic_layout 模板;`sch layout-lint --strict` 会把它判为阻塞",
+			f.A, sheetEdgeMinGap)
+		man.Warnings = append(man.Warnings, w)
+		fmt.Fprintf(stderr, "warn: %s\n", w)
 	}
 
 	// 6. wire — delegate to autoconnect, which owns the stub geometry + idempotency.

@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 )
@@ -565,32 +566,32 @@ func bslGroupNets(nets [][]string, group []string) []string {
 //
 // 任何一步失败都只降级为「其余件走网格坐标」+ 一条 warning:关系模板是布局优化,
 // 不该因为读不到几何就让整个 apply 失败。
-func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutBBox, stderr io.Writer) []string {
+func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutBBox, stderr io.Writer) (*bslAnchorGeom, []string) {
 	blk, ok, err := blocks.Get(plan.BlockID)
 	if err != nil || !ok {
-		return []string{fmt.Sprintf("关系求解跳过:取不到块 %s(%v)—— 其余件按网格坐标落地", plan.BlockID, err)}
+		return nil, []string{fmt.Sprintf("关系求解跳过:取不到块 %s(%v)—— 其余件按网格坐标落地", plan.BlockID, err)}
 	}
 	layout, lerr := blk.SchematicLayout()
 	if lerr != nil {
-		return []string{"关系求解跳过:模板解析失败 —— 其余件按网格坐标落地"}
+		return nil, []string{"关系求解跳过:模板解析失败 —— 其余件按网格坐标落地"}
 	}
 	rel, isRel := bslRelationsFrom(layout)
 	if !isRel {
-		return nil
+		return nil, nil
 	}
 	anchor := plan.Placements[0]
 	if anchor.PrimitiveID == "" {
-		return []string{"关系求解跳过:锚件没有 primitiveId —— 其余件按网格坐标落地"}
+		return nil, []string{"关系求解跳过:锚件没有 primitiveId —— 其余件按网格坐标落地"}
 	}
 
 	res, rerr := requestAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true, "includePins": true})
 	if rerr != nil {
-		return []string{fmt.Sprintf("关系求解跳过:回读页面几何失败(%v)—— 其余件按网格坐标落地", rerr)}
+		return nil, []string{fmt.Sprintf("关系求解跳过:回读页面几何失败(%v)—— 其余件按网格坐标落地", rerr)}
 	}
 	comps, perr := parseLayoutComps(res.Result)
 	if perr != nil {
-		return []string{"关系求解跳过:几何解析失败 —— 其余件按网格坐标落地"}
+		return nil, []string{"关系求解跳过:几何解析失败 —— 其余件按网格坐标落地"}
 	}
 	scene := buildScene(res.Result)
 
@@ -605,7 +606,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 		}
 	}
 	if !found {
-		return []string{"关系求解跳过:回读里找不到锚件的实测 bbox —— 其余件按网格坐标落地"}
+		return nil, []string{"关系求解跳过:回读里找不到锚件的实测 bbox —— 其余件按网格坐标落地"}
 	}
 	// 锚件的实测引脚:名字与编号都建索引(attach 的目标两种写法都该认)。
 	pins := map[string]acPin{}
@@ -621,7 +622,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 		}
 	}
 	if len(pins) == 0 {
-		return []string{fmt.Sprintf("关系求解跳过:锚件 %s 读不到引脚 —— 其余件按网格坐标落地", anchorDesig)}
+		return nil, []string{fmt.Sprintf("关系求解跳过:锚件 %s 读不到引脚 —— 其余件按网格坐标落地", anchorDesig)}
 	}
 
 	// 障碍表:页面上除本块未落地件之外的一切(含刚落地的锚件)。
@@ -661,7 +662,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 	fmt.Fprintf(stderr, "relational: 锚 %s 实测 bbox [%.0f,%.0f]-[%.0f,%.0f],%d 个引脚;求解 %d 件\n",
 		anchorDesig, anchorBBox.MinX, anchorBBox.MinY, anchorBBox.MaxX, anchorBBox.MaxY, len(pins), n)
 	notes = append(notes, bslExpandForMarkers(plan, rel, anchorBBox, pins, obstacles, usable, stderr)...)
-	return notes
+	return &bslAnchorGeom{BBox: anchorBBox, Pins: pins}, notes
 }
 
 // bslDirVec 把方向名翻成单位向量(y-UP)。
@@ -740,7 +741,7 @@ func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 		}
 		want := float64(cnt) * bslMarkerLanePitch
 		// 每一侧都用**当前**坐标重建 unit:左侧推完之后,右侧要看到新位置。
-		units := bslPushUnitsOf(plan, rel)
+		units := bslPushUnitsOf(plan, rel, bslEstimatedBox)
 		res := bslPushSolve(units, walls, usable, anchorBBox, side, want)
 		if res.Head < 0 {
 			continue // 这一侧没有别的件,marker 有整片空地
@@ -769,6 +770,226 @@ func bslExpandForMarkers(plan *bapPlan, rel bslRelations, anchorBBox layoutBBox,
 		}
 	}
 	return notes
+}
+
+// bslLiveMove 是实测推让实际下发的一次平移(只动 x —— 推让永远只沿关系自己的轴)。
+type bslLiveMove struct {
+	Idx         int
+	PrimitiveID string
+	Designator  string
+	FromX, ToX  float64
+}
+
+// bslAnchorGeom 是锚件的实测几何(bbox + 引脚),在「锚件落地后回读一次」那一步取得。
+//
+// **它是整条链上唯一需要引脚的地方**,而锚件此后再不移动(布局以它为基准),所以后面的
+// 实测推让只需要 bbox —— 这不是省一次读,是**必须**:带引脚的回读会顺带跑一次 netlist
+// 导出,导出之后的 component.modify 会被平台拒掉(见 bslMoveComponentX)。
+type bslAnchorGeom struct {
+	BBox layoutBBox
+	Pins map[string]acPin
+}
+
+// bslExpandLive 用**实测 bbox** 把 marker 通道再解一次 —— ADR-0003 时间窗的正用法。
+//
+// 时机:place 全部件之后、布线前硬门之前。器件已经落地(真实 bbox),marker 一根都还
+// 没建,所以挪一个件只是一次 component.modify(实测 10–23ms),没有桩线可被 EasyEDA
+// 合并成串网。窗口之外挪件已经三次真机失败。
+//
+// 为什么落地前那一遍不够(它仍然有用 —— 它决定件**创建**在哪,少一堆 modify):
+// 估算与真值差得离谱。`tvs.` 估半宽 10,而 D1 实测 bbox 是 [358,406] —— **锚点根本
+// 不在 bbox 中心**,右侧伸出 36;`conn.` 估 90,而 J1 实测只有 35。于是估算版以为
+// 通道 275、实际只有 259。这一遍算出来的通道就是渲染出来的通道。
+//
+// 求解器本体一行不改:bslPushSolve 是纯几何函数,换一批 box 进去就行 —— 这正是
+// 当初把它写成纯函数的理由。
+func bslExpandLive(cfg *appConfig, window string, plan *bapPlan, anchor *bslAnchorGeom,
+	stderr io.Writer) ([]bslLiveMove, []string) {
+
+	if anchor == nil || !plan.Relational || plan.AnchorRole == "" {
+		return nil, nil
+	}
+	blk, ok, err := blocks.Get(plan.BlockID)
+	if err != nil || !ok {
+		return nil, nil
+	}
+	layout, lerr := blk.SchematicLayout()
+	if lerr != nil {
+		return nil, nil
+	}
+	rel, isRel := bslRelationsFrom(layout)
+	if !isRel {
+		return nil, nil
+	}
+	need := bslMarkerNeedPerSide(plan, anchor.BBox, anchor.Pins)
+	if need["left"] == 0 && need["right"] == 0 {
+		return nil, nil
+	}
+
+	// **只读 bbox,绝不带 includePins**:带引脚的回读会跑 netlist 导出,而导出之后
+	// 发出去的 modify 会被平台拒掉(bslMoveComponentX 记了实测)。引脚只有锚件需要,
+	// 那份数据在 anchor 里已经有了。
+	res, rerr := requestAction(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true})
+	if rerr != nil {
+		return nil, []string{fmt.Sprintf("实测推让跳过:回读几何失败(%v)—— 布局保持落地时的样子", rerr)}
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		return nil, []string{"实测推让跳过:几何解析失败 —— 布局保持落地时的样子"}
+	}
+	byID := map[string]layoutComp{}
+	for _, c := range comps {
+		if c.BBox != nil {
+			byID[c.ID] = c
+		}
+	}
+
+	// 墙:页面上不属于本块的一切实测图元。它们推不动,链撞上就截短。
+	mine := map[string]bool{}
+	for _, p := range plan.Placements {
+		if p.PrimitiveID != "" {
+			mine[p.PrimitiveID] = true
+		}
+	}
+	var walls []layoutBBox
+	for _, c := range comps {
+		if c.BBox == nil || c.ComponentType == "sheet" || mine[c.ID] {
+			continue
+		}
+		walls = append(walls, markerJudgeBBox(c))
+	}
+	var usable *layoutBBox
+	if sheet := sheetBBoxOf(comps); sheet != nil {
+		usable = &layoutBBox{
+			MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+			MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+		}
+	}
+
+	// 已下发的位移:实测 bbox 是读那一刻的,挪过之后要按位移平推(件是刚体,x 平移
+	// 多少 bbox 就平移多少),否则右侧那一遍会拿着左侧挪之前的旧几何算。
+	shift := map[int]float64{}
+	liveBox := func(i int, p bapPlacement) (layoutBBox, bool) {
+		c, ok := byID[p.PrimitiveID]
+		if !ok {
+			return layoutBBox{}, false // 没落地/读不回来的件不推 —— 量不到就不动它
+		}
+		b := markerJudgeBBox(c)
+		d := shift[i]
+		return layoutBBox{MinX: b.MinX + d, MinY: b.MinY, MaxX: b.MaxX + d, MaxY: b.MaxY}, true
+	}
+
+	var moves []bslLiveMove
+	var notes []string
+	for _, side := range []string{"left", "right"} {
+		cnt := need[side]
+		if cnt == 0 {
+			continue
+		}
+		want := float64(cnt) * bslMarkerLanePitch
+		units := bslPushUnitsOf(plan, rel, liveBox)
+		res := bslPushSolve(units, walls, usable, anchor.BBox, side, want)
+		if res.Head < 0 {
+			continue
+		}
+		// **从最外侧往里下发**:每一步之前外侧都已经让开了,于是任何一个中间状态
+		// 都不重叠 —— 万一某次 modify 失败,画布停在一个仍然干净的状态上。
+		order := make([]int, 0, len(units))
+		for i, m := range res.Move {
+			if m != 0 {
+				order = append(order, i)
+			}
+		}
+		sort.Slice(order, func(a, b int) bool {
+			ca := (units[order[a]].Box.MinX + units[order[a]].Box.MaxX) / 2
+			cb := (units[order[b]].Box.MinX + units[order[b]].Box.MaxX) / 2
+			if side == "left" {
+				return ca < cb
+			}
+			return ca > cb
+		})
+		var detail []string
+		failed := ""
+		for _, i := range order {
+			m := res.Move[i]
+			for _, idx := range units[i].Idx {
+				p := &plan.Placements[idx]
+				nx := p.X + m
+				if err := bslMoveComponentX(cfg, window, p.PrimitiveID, nx, p.Y, stderr); err != nil {
+					failed = fmt.Sprintf("%s 挪不动(%v)—— 这一侧到此为止", p.Designator, err)
+					break
+				}
+				moves = append(moves, bslLiveMove{Idx: idx, PrimitiveID: p.PrimitiveID,
+					Designator: p.Designator, FromX: p.X, ToX: nx})
+				p.X = nx
+				shift[idx] += m
+			}
+			if failed != "" {
+				break
+			}
+			detail = append(detail, fmt.Sprintf("%s 让 %.0f", units[i].Label, math.Abs(m)))
+		}
+		if len(detail) > 0 {
+			got := res.Gap + math.Abs(res.Move[res.Head])
+			fmt.Fprintf(stderr, "relational(实测): %s 侧 %d 个 marker 需 %.0f,与 %s 实测只有 %.0f —— %s(通道 → %.0f)\n",
+				side, cnt, want, units[res.Head].Label, res.Gap, strings.Join(detail, "、"), got)
+		}
+		if failed != "" {
+			notes = append(notes, failed)
+			break
+		}
+		if res.Capped != "" {
+			notes = append(notes, fmt.Sprintf(
+				"%s 侧要挂 %d 个 marker(需 %.0f),实测推让后通道只有 %.0f —— 被%s顶住;这一块该换更大图纸或拆页",
+				side, cnt, want, res.Gap+math.Abs(res.Move[res.Head]), res.Capped))
+		}
+	}
+	return moves, notes
+}
+
+// bslMoveComponentX 平移一个已落地的件(只动 x/y,不碰属性)。
+//
+// **平台实测坑(2026-08-15,ceshi)**:紧跟在一次**带引脚的**回读之后发 modify,会在
+// 1–7ms 内被平台内部拒掉,errorDetail 是
+//
+//	Cannot destructure property 'cmdKey' of 'i' as it is undefined.
+//
+// 复现是确定的:`components.list --include-bbox --include-pins` → modify,8 轮里 4 轮失败;
+// 换成 `--include-bbox`(不带引脚)→ modify,10 轮全过;完全不读、连发 10 次 modify 也全过。
+// 根因在连接器的引脚分支会调 `sch_ManufactureData.getNetlistFile()` —— **读引脚顺带跑了
+// 一次 netlist 导出**,导出把编辑器的命令上下文搅了。所以正解是**排序**(实测推让排在
+// 带引脚的硬门回读之前),不是重试;这里留一次短重试只是兜底,并且失败信息要把这条线索
+// 带出去,免得下一个人再查一遍。
+func bslMoveComponentX(cfg *appConfig, window, primitiveID string, x, y float64, stderr io.Writer) error {
+	patch := map[string]any{"primitiveId": primitiveID, "patch": map[string]any{"x": x, "y": y}}
+	_, err := requestAction(cfg, "schematic.component.modify", window, patch)
+	if err == nil {
+		return nil
+	}
+	time.Sleep(300 * time.Millisecond)
+	if _, err2 := requestAction(cfg, "schematic.component.modify", window, patch); err2 != nil {
+		return fmt.Errorf("%w(重试一次仍失败;若 errorDetail 是 cmdKey,说明这次 modify 前面跑过带引脚的回读/netlist 导出)", err2)
+	}
+	fmt.Fprintf(stderr, "note: modify 第一次被平台拒(%v),300ms 后重试成功\n", err)
+	return nil
+}
+
+// bslUndoLiveMoves 把实测推让下发过的位移原样还原 —— 坐标是我们自己写进去的,
+// 还原是精确的(不是"大概挪回去"),这也是这一步敢在硬门之后动画布的前提。
+func bslUndoLiveMoves(cfg *appConfig, window string, plan *bapPlan, moves []bslLiveMove, stderr io.Writer) {
+	for i := len(moves) - 1; i >= 0; i-- { // 逆序:先还原最后挪的,中间态照样不重叠
+		m := moves[i]
+		if _, err := requestAction(cfg, "schematic.component.modify", window, map[string]any{
+			"primitiveId": m.PrimitiveID,
+			"patch":       map[string]any{"x": m.FromX, "y": plan.Placements[m.Idx].Y},
+		}); err != nil {
+			fmt.Fprintf(stderr, "warn: %s 的位移还原失败(%v)—— 画布停在 %.0f,跑 `sch layout-lint` 确认\n",
+				m.Designator, err, m.ToX)
+			continue
+		}
+		plan.Placements[m.Idx].X = m.FromX
+	}
 }
 
 // bslMarkerNeedPerSide 数锚件每一侧要挂几个 marker。引脚在锚件中心的哪边就算哪一侧
@@ -832,9 +1053,12 @@ type bslPushResult struct {
 //   - attach 件 —— 贴脚是它的全部意义(去耦离芯片越近越好),为让 marker 把去耦
 //     推走是拿电气质量换版面。它也**不当墙**:它占的是自己那条脚的 lane,不是整侧
 //     通道的墙,当墙会让整条链当场失效(实测 C_VCC 就贴在 VCC 脚外 ~30 处);
-//   - 已经落地的件(PrimitiveID != "")—— 改它的 plan 坐标不会写回画布,是静默空转;
-//     它们已经在 walls 里当障碍。
-func bslPushUnitsOf(plan *bapPlan, rel bslRelations) []bslPushUnit {
+//
+// box 决定「这个件能不能推、判定 box 多大」——两条路径的差别全部收在这一个闭包里:
+// 落地**前**用估算 box 且只认还没创建的件(改 plan 坐标即可);落地**后**用实测 bbox
+// 且只认已创建的件(推它 = 一次 component.modify)。
+func bslPushUnitsOf(plan *bapPlan, rel bslRelations,
+	box func(i int, p bapPlacement) (layoutBBox, bool)) []bslPushUnit {
 	skip := map[string]bool{}
 	if plan.AnchorRole != "" {
 		skip[plan.AnchorRole] = true
@@ -842,9 +1066,17 @@ func bslPushUnitsOf(plan *bapPlan, rel bslRelations) []bslPushUnit {
 	for r := range rel.Attach {
 		skip[r] = true
 	}
+	boxes := map[int]layoutBBox{}
 	movable := func(i int) bool {
 		p := plan.Placements[i]
-		return p.PrimitiveID == "" && !skip[p.Role]
+		if skip[p.Role] {
+			return false
+		}
+		b, ok := box(i, p)
+		if ok {
+			boxes[i] = b
+		}
+		return ok
 	}
 	idxOf := map[string][]int{}
 	for i := range plan.Placements {
@@ -864,7 +1096,7 @@ func bslPushUnitsOf(plan *bapPlan, rel bslRelations) []bslPushUnit {
 			}
 		}
 		if len(u.Idx) > 0 {
-			units = append(units, bslUnitGeom(plan, u))
+			units = append(units, bslUnitGeom(plan, boxes, u))
 		}
 	}
 	for i := range plan.Placements {
@@ -872,18 +1104,25 @@ func bslPushUnitsOf(plan *bapPlan, rel bslRelations) []bslPushUnit {
 			continue
 		}
 		taken[i] = true
-		units = append(units, bslUnitGeom(plan, bslPushUnit{Idx: []int{i}}))
+		units = append(units, bslUnitGeom(plan, boxes, bslPushUnit{Idx: []int{i}}))
 	}
 	return units
 }
 
+// bslEstimatedBox 是落地**前**的 box 提供者:估算 box + 只认还没创建的件。
+func bslEstimatedBox(i int, p bapPlacement) (layoutBBox, bool) {
+	if p.PrimitiveID != "" {
+		return layoutBBox{}, false // 已在画布上,改 plan 坐标是静默空转
+	}
+	b := bslPartBox(p.PartKey)
+	return layoutBBox{MinX: p.X + b.MinX, MinY: p.Y + b.MinY, MaxX: p.X + b.MaxX, MaxY: p.Y + b.MaxY}, true
+}
+
 // bslUnitGeom 补上 unit 的判定 box(成员并集)与日志标签。
-func bslUnitGeom(plan *bapPlan, u bslPushUnit) bslPushUnit {
+func bslUnitGeom(plan *bapPlan, boxes map[int]layoutBBox, u bslPushUnit) bslPushUnit {
 	labels := make([]string, 0, len(u.Idx))
 	for k, i := range u.Idx {
-		p := plan.Placements[i]
-		b := bslPartBox(p.PartKey)
-		abs := layoutBBox{MinX: p.X + b.MinX, MinY: p.Y + b.MinY, MaxX: p.X + b.MaxX, MaxY: p.Y + b.MaxY}
+		abs := boxes[i]
 		if k == 0 {
 			u.Box = abs
 		} else {
@@ -892,7 +1131,7 @@ func bslUnitGeom(plan *bapPlan, u bslPushUnit) bslPushUnit {
 				MaxX: math.Max(u.Box.MaxX, abs.MaxX), MaxY: math.Max(u.Box.MaxY, abs.MaxY),
 			}
 		}
-		labels = append(labels, p.Designator)
+		labels = append(labels, plan.Placements[i].Designator)
 	}
 	u.Label = strings.Join(labels, "+")
 	return u

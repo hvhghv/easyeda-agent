@@ -259,7 +259,11 @@ func runAlignMoves(cfg *appConfig, window string, moves []alignMove, apply, asJS
 
 // fetchAlignParts pulls the live parts (real bboxes) for align/distribute.
 func fetchAlignParts(cfg *appConfig, window string) ([]alPart, error) {
-	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true, "includePins": true})
+	// **不要 includePins**:align/distribute 一个引脚字段都不读,而带引脚的回读会顺带跑
+	// 一次 netlist 导出,导出之后紧接着发的 component.modify 会被平台拒掉
+	// ("Cannot destructure property 'cmdKey' of 'i' as it is undefined",实测 8 轮 4 败)。
+	// 这条链正是 --apply 的链:读几何 → 立刻 modify。详见 bslMoveComponentX。
+	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
 	if err != nil {
 		return nil, err
 	}
