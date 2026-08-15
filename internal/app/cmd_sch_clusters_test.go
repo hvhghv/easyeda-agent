@@ -95,3 +95,34 @@ func TestJudgeSchClusters(t *testing.T) {
 		}
 	}
 }
+
+// 同组豁免的两条边界:紧贴豁免、压叠不豁免。
+func TestJudgeSchClustersWith_SameGroupExemptFromTightOnly(t *testing.T) {
+	// 两个组挨着(间隙 5 < 20)但不重叠。
+	near := []schCluster{
+		{Designator: "U3", Box: layoutBBox{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100},
+			Members: []layoutBBox{{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100}}},
+		{Designator: "C8", Box: layoutBBox{MinX: 105, MinY: 0, MaxX: 125, MaxY: 40},
+			Members: []layoutBBox{{MinX: 105, MinY: 0, MaxX: 125, MaxY: 40}}},
+	}
+	same := func(a, b string) bool { return true }
+
+	if got := judgeSchClustersWith(near, nil, 20, nil); len(got) != 1 || got[0].Type != "tight" {
+		t.Fatalf("不知道分组时该照报 tight,得到 %+v", got)
+	}
+	if got := judgeSchClustersWith(near, nil, 20, same); len(got) != 0 {
+		t.Errorf("同组紧贴是设计要求(去耦贴电源脚),不该报:%+v", got)
+	}
+
+	// 压叠:同组也必须报 —— 那是真几何缺陷,不是"贴得紧"。
+	over := []schCluster{
+		{Designator: "U3", Box: layoutBBox{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100},
+			Members: []layoutBBox{{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100}}},
+		{Designator: "C8", Box: layoutBBox{MinX: 50, MinY: 50, MaxX: 150, MaxY: 150},
+			Members: []layoutBBox{{MinX: 50, MinY: 50, MaxX: 150, MaxY: 150}}},
+	}
+	got := judgeSchClustersWith(over, nil, 20, same)
+	if len(got) != 1 || got[0].Type != "overlap" || got[0].Level != "ERROR" {
+		t.Errorf("同组压叠必须仍报 ERROR,得到 %+v", got)
+	}
+}

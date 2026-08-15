@@ -326,7 +326,11 @@ func gateClustersStage(cfg *appConfig, window string, strict bool, geom *schGeom
 	if strict {
 		minGap = bslPartGap // 非 strict 只判硬伤;组间"贴着但不压"留给 strict
 	}
-	findings := judgeSchClusters(clusters, usable, minGap)
+	var same schSameGroupFn
+	if _, _, docUUID, _, gst, _, gerr := loadSchGroupsContext(cfg, window); gerr == nil {
+		same = schSameGroupFromState(gst, docUUID)
+	}
+	findings := judgeSchClustersWith(clusters, usable, minGap, same)
 	st.Detail = schClusterReport{Clusters: clusters, Findings: findings, Sheet: usable}
 	var overlaps, offSheet, tight int
 	for _, f := range findings {

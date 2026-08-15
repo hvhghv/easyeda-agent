@@ -289,7 +289,23 @@ func boxGapAlongAxes(a, b layoutBBox) float64 {
 }
 
 // judgeSchClusters 出判定:组间重叠(ERROR)、组出图纸(ERROR)、组间过近(WARN)。
-func judgeSchClusters(cs []schCluster, usable *layoutBBox, minGap float64) []schClusterFinding {
+// schSameGroupFn 判两个位号是不是同一个**功能子群**(L2 虚拟组)的成员。
+// nil = 不知道分组,一律当成不同组(保持旧行为)。
+type schSameGroupFn func(a, b string) bool
+
+// judgeSchClusters 判 L1 组之间的重叠与过近。
+//
+// **tight 对同组成员豁免**(2026-08-16 E2E #2):`sch block-apply` 落块时按功能
+// 子群归组,而「去耦紧贴电源脚」「上下拉紧贴 strapping 脚」正是设计要求 ——
+// 实测 P3 报的 6 处过近里有 5 处是块内的 attach 件(D1↔U3、U3↔C8、Q1↔R5…),
+// 那不是缺陷,是电路该有的样子;真正该报的只有跨块那一处(Q2↔R3)。
+//
+// 求解器那边是同一笔账的另一半:它件间只按本体判、marker 之间靠 lane 排布错开
+// (见 bslPartBox 的注释),所以组体积贴在一起本就在预期内。判据要是照旧把它们
+// 全报出来,6 条里 5 条是噪音 —— 而噪音会让人把整条规则关掉。
+//
+// **重叠(ERROR)不豁免**:同组也不许压在一起,那是真几何缺陷。
+func judgeSchClustersWith(cs []schCluster, usable *layoutBBox, minGap float64, sameGroup schSameGroupFn) []schClusterFinding {
 	var out []schClusterFinding
 	for i := 0; i < len(cs); i++ {
 		for j := i + 1; j < len(cs); j++ {
@@ -321,6 +337,9 @@ func judgeSchClusters(cs []schCluster, usable *layoutBBox, minGap float64) []sch
 				continue
 			}
 			if minGap > 0 && gap < minGap {
+				if sameGroup != nil && sameGroup(cs[i].Designator, cs[j].Designator) {
+					continue // 同一功能子群内紧贴是设计要求,不是缺陷
+				}
 				if gap == 0 {
 					gap = 0 // 抹掉 −0,别让"贴着"打印成 "-0"
 				}
@@ -379,7 +398,12 @@ func runSchClusters(cfg *appConfig, window string, minGap float64, asJSON, stric
 			MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
 		}
 	}
-	findings := judgeSchClusters(clusters, usable, minGap)
+	// 带上功能子群信息:块内「去耦贴电源脚」这类紧贴是设计要求,不该报 tight。
+	var same schSameGroupFn
+	if _, _, docUUID, _, st, _, gerr := loadSchGroupsContext(cfg, window); gerr == nil {
+		same = schSameGroupFromState(st, docUUID)
+	}
+	findings := judgeSchClustersWith(clusters, usable, minGap, same)
 	report := schClusterReport{Clusters: clusters, Findings: findings, Sheet: usable, Unowned: unowned}
 
 	if asJSON {
@@ -523,4 +547,35 @@ func bapReportClusters(cfg *appConfig, window string, man *bapManifest, stderr i
 	}
 	fmt.Fprintf(stderr, "clusters: %d 个组、%d 处硬伤 —— 详情与门禁跑 `easyeda sch clusters --strict`\n",
 		len(clusters), len(findings))
+}
+
+// judgeSchClusters 是不带分组信息的旧签名(纯几何,同组不豁免)。
+func judgeSchClusters(cs []schCluster, usable *layoutBBox, minGap float64) []schClusterFinding {
+	return judgeSchClustersWith(cs, usable, minGap, nil)
+}
+
+// schSameGroupFromState 从持久虚拟组表折出「同组」谓词。读不到组表时返回 nil,
+// 判据退回纯几何 —— **不知道分组时宁可多报**,漏报一个跨块紧贴比多报一条噪音贵。
+func schSameGroupFromState(st *pcbStageState, docUUID string) schSameGroupFn {
+	if st == nil {
+		return nil
+	}
+	groups := st.GroupsForPage(docUUID)
+	if len(groups) == 0 {
+		return nil
+	}
+	of := map[string]string{}
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		for _, m := range g.Members {
+			of[strings.ToUpper(m)] = g.ID
+		}
+	}
+	return func(a, b string) bool {
+		ga, oka := of[strings.ToUpper(a)]
+		gb, okb := of[strings.ToUpper(b)]
+		return oka && okb && ga == gb
+	}
 }
