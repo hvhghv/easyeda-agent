@@ -166,9 +166,11 @@ skills/easyeda-agent/scripts/audit-baseline.py 2026-08      # 只看某月/某�
 
 # 成本画像 —— **每跑完一场端到端都要记一笔**(用户要求,用以改善)。
 # 三个耗时指标分开:墙钟 / daemon 侧(机器真在算)/ 两者之差(agent 思考+编译)——
-# 改法完全不同。「上下文探测」单独计一栏:首测 esp32Mini 原理图 E2E,5466 次调用里
-# 3527 次(65%)是 document.current / pages.list / documents.list,零信息,纯进程启动
-# 开销。token 不在审计日志里(那是 agent 侧的账),用 --tokens 自报,不给就记「未记录」。
+# 改法完全不同。动作榜**按耗时排**:首版按次数排,把「探测占 65% 调用」顶到榜首,
+# 而它只花 22 秒(机器时间 1.4%);真正吃掉 86% 的是 components.list(41%)/
+# connect_pin(34%)/ document.open(11%,单次 4.24s)。次数的价值在别处 —— 它是
+# 「跑了多少条 CLI 命令」的代理(每条固定 2~3 发探测)。
+# token 不在审计日志里(那是 agent 侧的账),用 --tokens 自报,不给就记「未记录」。
 easyeda audit cost --day 2026-08-15 --since 14:12 --until 15:50 --label "…" --tokens N --record
 easyeda audit cost --ledger                                 # 跨批次对比台账
 ```

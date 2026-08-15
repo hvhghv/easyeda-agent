@@ -3,11 +3,15 @@ package app
 // cmd_audit_cost.go — `easyeda audit cost`:一次设计跑了多久、花了多少次调用、
 // 其中多少是白花的。用户立项(2026-08-16):「耗时和 token 以后都要记录,用以改善」。
 //
-// 为什么值得单独做一条命令:首次统计 esp32Mini 的原理图 E2E 就翻出一个谁都没注意
-// 的事实 —— 5466 次调用里 **3527 次(65%)是上下文探测**(document.current /
-// schematic.pages.list / pcb.documents.list),它们不改变任何东西,只是每个 CLI 进程
-// 启动时都要重新 resolve 一遍窗口和工程。这种浪费在单条命令的视角下完全不可见,
-// 只有把一整场跑聚合起来才会显形。
+// 为什么值得单独做一条命令:一整场跑的形状,在单条命令的视角下完全看不见。
+//
+// **报告首版按次数排序,当场把作者引到了错误的靶子上** —— 它把「探测占 65% 的调用」
+// 顶到榜首,读起来像一笔巨大的浪费;按耗时一算,那 3527 次只花 22 秒(机器时间的
+// 1.4%),优化掉毫无意义。真正吃掉 86% 机器时间的是 components.list(41%)、
+// connect_pin(34%)、document.open(11%,单次 4.24s 最贵),它们在次数榜上并不显眼。
+// 所以动作榜**按耗时排**,探测那一行的次数占比旁边永远站着时间占比:次数多 ≠ 贵。
+// 次数真正的诊断价值是别的 —— 它反映**跑了多少条 CLI 命令**(每条固定 2~3 发探测,
+// 实测 `doc ls` 3 发、`sch clusters` 2 发),而命令条数 = agent 的决策轮数。
 //
 // 三个指标是分开的,因为**改法不同**:
 //   - 墙钟          —— 用户实际等了多久;
@@ -31,9 +35,9 @@ import (
 	"github.com/zhoushoujianwork/easyeda-agent/internal/protocol"
 )
 
-// auditProbeActions 是**零信息上下文探测** —— CLI 每次启动 resolve 窗口/工程时打的
-// 那几发。它们既不读设计数据也不改画布,却能占掉总调用量的大半;单独计一栏,
-// 是为了让「真正的工作」和「进程启动开销」不再混在一个总数里。
+// auditProbeActions 是上下文探测 —— CLI 每次启动 resolve 窗口/工程时打的那几发。
+// 它们既不读设计数据也不改画布。单独计一栏**不是因为它贵**(实测只占机器时间的
+// 1.4%),而是因为它是「跑了多少条 CLI 命令」的可靠代理:每条命令固定 2~3 发。
 var auditProbeActions = map[string]bool{
 	"document.current":         true,
 	"document.list":            true,
@@ -70,6 +74,8 @@ type auditCostReport struct {
 	// Probes / ProbeShare 是上下文探测的次数与占比(见 auditProbeActions)。
 	Probes     int     `json:"probes"`
 	ProbeShare float64 `json:"probeShare"`
+	// ProbeSeconds 是探测的**耗时** —— 与次数占比并列显示。次数多≠贵。
+	ProbeSeconds float64 `json:"probeSeconds"`
 	// Mutations 是写动作次数 —— 「产出」的粗略度量,用来跟成本对比。
 	Mutations int `json:"mutations"`
 
@@ -137,13 +143,27 @@ func summarizeAuditCost(rows []auditRow, mutating map[string]bool) auditCostRepo
 	for name, a := range byAction {
 		stats = append(stats, auditActionStat{Action: name, Calls: a.calls, Failures: a.fails, Seconds: a.ms / 1000})
 	}
+	// **按耗时排,不按次数** —— 首版按次数排,把我自己引到了错误的靶子上:
+	// 探测占 65% 的次数却只占 1.4% 的时间(22 秒),而真正吃掉 86% 机器时间的
+	// components.list / connect_pin / document.open 在次数榜上排在后面。
+	// 要优化的是「时间去哪了」,次数只是它的一个弱代理。
 	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Seconds != stats[j].Seconds {
+			return stats[i].Seconds > stats[j].Seconds
+		}
 		if stats[i].Calls != stats[j].Calls {
 			return stats[i].Calls > stats[j].Calls
 		}
 		return stats[i].Action < stats[j].Action
 	})
 	rep.Top = stats[:minInt(len(stats), 12)]
+	// ProbeSeconds 让「次数占比」旁边永远站着「时间占比」,免得再有人(比如我)
+	// 拿次数当浪费的证据。
+	for _, s := range stats {
+		if auditProbeActions[s.Action] {
+			rep.ProbeSeconds += s.Seconds
+		}
+	}
 
 	fails := make([]auditActionStat, 0, len(stats))
 	for _, s := range stats {
@@ -247,22 +267,27 @@ func renderCostReport(rep auditCostReport, stdout io.Writer) {
 	fmt.Fprintf(stdout, "  └ 其余          %.1f 分钟(%.0f%%)—— agent 思考/编译/人工介入\n\n",
 		rep.ThinkMinutes, pct(rep.ThinkMinutes, rep.WallMinutes))
 	fmt.Fprintf(stdout, "  调用            %d 次,失败 %d(%.1f%%)\n", rep.Calls, rep.Failures, rep.FailRate*100)
-	fmt.Fprintf(stdout, "  ├ 上下文探测     %d 次(%.0f%%)—— 零信息,每个 CLI 进程启动都要重来\n",
-		rep.Probes, rep.ProbeShare*100)
+	fmt.Fprintf(stdout, "  ├ 上下文探测     %d 次(%.0f%%)但只花 %.0fs(机器时间的 %.1f%%)—— 次数多≠贵,\n",
+		rep.Probes, rep.ProbeShare*100, rep.ProbeSeconds, pct(rep.ProbeSeconds/60, rep.DaemonMinutes))
+	fmt.Fprintf(stdout, "  │                它真正的诊断价值是反映**跑了多少条 CLI 命令**(每条固定 2~3 发)\n")
 	fmt.Fprintf(stdout, "  └ 写动作        %d 次 —— 产出\n", rep.Mutations)
 	if rep.Tokens > 0 {
 		fmt.Fprintf(stdout, "  token           %d(自报)\n", rep.Tokens)
 	} else {
 		fmt.Fprintf(stdout, "  token           未记录 —— 审计日志里没有,用 --tokens N 自报\n")
 	}
-	fmt.Fprintf(stdout, "\n  动作 top:\n")
+	fmt.Fprintf(stdout, "\n  动作 top(**按耗时**排 —— 时间去哪了才是靶子,次数只是弱代理):\n")
 	for _, s := range rep.Top {
 		mark := ""
 		if auditProbeActions[s.Action] {
 			mark = "  ← 探测"
 		}
-		fmt.Fprintf(stdout, "    %-34s %5d 次  失败 %3d  累计 %7.1fs%s\n",
-			s.Action, s.Calls, s.Failures, s.Seconds, mark)
+		per := 0.0
+		if s.Calls > 0 {
+			per = s.Seconds / float64(s.Calls)
+		}
+		fmt.Fprintf(stdout, "    %-34s %7.1fs(%4.1f%%)  %5d 次  均 %.2fs  失败 %3d%s\n",
+			s.Action, s.Seconds, pct(s.Seconds/60, rep.DaemonMinutes), s.Calls, per, s.Failures, mark)
 	}
 	if len(rep.TopFails) > 0 {
 		fmt.Fprintf(stdout, "\n  失败 top(失败率高 = 那条路可能根本没在工作):\n")
