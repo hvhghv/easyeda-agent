@@ -87,7 +87,7 @@ func TestPlanFreePlace_DodgesFixedObstacle(t *testing.T) {
 	opts.AvoidTitleBlock = false // isolate the fixed-part logic
 	parts := []alPart{
 		fpPart("BIG", "big", 40, 40, 900, 700), // fixed, fills most of usable
-		fpPart("R1", "r1", 0, 0, 40, 40),        // must find the sliver that's left
+		fpPart("R1", "r1", 0, 0, 40, 40),       // must find the sliver that's left
 	}
 	move := map[string]bool{"r1": true}
 	rep := planFreePlace(parts, move, sheet, opts)

@@ -206,4 +206,3 @@ func objSuffix(leaf map[string]any, key string) string {
 	}
 	return ""
 }
-

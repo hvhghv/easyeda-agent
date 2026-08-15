@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 // partitionModule is one functional module: a name + the union bbox of its parts.
@@ -735,16 +734,6 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	frames, verr := validateZoneDrawResult(v, len(plan.Partitions))
 	if verr != nil {
 		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames, verr)
-	}
-	// 把**画出来的**分区几何一并记下:zone-violation 要判所见,不是判九宫格。
-	if frames != nil {
-		frames.ModuleRects = map[string]workflow.SchZoneRect{}
-		for _, p := range plan.Partitions {
-			for _, m := range p.Modules {
-				frames.ModuleRects[m] = workflow.SchZoneRect{
-					MinX: p.BBox.MinX, MinY: p.BBox.MinY, MaxX: p.BBox.MaxX, MaxY: p.BBox.MaxY}
-			}
-		}
 	}
 	setRecordedZoneFrames(st, docUUID, "partition", frames)
 	if err := savePcbStageState(st); err != nil {

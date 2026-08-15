@@ -358,21 +358,6 @@ type SchZoneFrames struct {
 	Rects        []string `json:"rects,omitempty"`
 	Texts        []string `json:"texts,omitempty"`
 	At           string   `json:"at,omitempty"`
-	// ModuleRects 是**画出来的**分区几何(模块名 → 矩形),partition 模式才有。
-	//
-	// 判据必须判「所见」:固定九宫格模式下框的几何 = zoneRect(claim),两者天然同源;
-	// 而 partition 模式的框是从活体模块 bbox 反推的,与九宫格无关 —— 此时 zone-violation
-	// 若还拿九宫格判,就会对着一张画得好好的图报违规(实测:单模块页铺满整纸,
-	// 认领成 center,画的是 partition 框,lint 报 2 处 zone-violation)。
-	ModuleRects map[string]SchZoneRect `json:"moduleRects,omitempty"`
-}
-
-// SchZoneRect 是一个分区矩形(原理图单位,y-UP)。
-type SchZoneRect struct {
-	MinX float64 `json:"minX"`
-	MinY float64 `json:"minY"`
-	MaxX float64 `json:"maxX"`
-	MaxY float64 `json:"maxY"`
 }
 
 // ZoneClaim is one functional zone's part claim (issue #126): the S0 spec's

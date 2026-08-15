@@ -54,9 +54,9 @@ func TestAnalyzeSnapshotFrame_BlankVsContent(t *testing.T) {
 
 func TestSanitizeStage(t *testing.T) {
 	cases := map[string]string{
-		"P7 routing":     "P7-routing",
-		"  P0 布局/板框 ": "P0",  // non-ASCII stripped, edges trimmed
-		"///":            "stage", // nothing usable → fallback
+		"P7 routing":      "P7-routing",
+		"  P0 布局/板框 ":     "P0",    // non-ASCII stripped, edges trimmed
+		"///":             "stage", // nothing usable → fallback
 		"P8_power-planes": "P8_power-planes",
 	}
 	for in, want := range cases {

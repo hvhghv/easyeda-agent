@@ -131,9 +131,10 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
   1. `easyeda sch zones set --spec <s0-spec.json>` 把分区**持久化**进项目状态 ——
      此后 `sch layout-lint` 自动多一条 zone-violation(件落在自己分区外),
      `sch zones status` 随时查认领与活体违规;
-  2. `easyeda sch zone-draw` 把认领画成虚线框 + 区名(默认 `--mode zones` 固定九宫格);
-     要「整张纸按模块自然空隙切分、给图签留缺口」的行业版式,先 `sch zone-plan --json`
-     出方案(纯计算,五项 validation 必须全 0)再 `zone-draw --mode partition`。
+  2. `easyeda sch zone-plan --json` 先出方案(纯计算、不落笔,六项 validation 必须全 0),
+     再 `easyeda sch zone-draw` 落笔。**分区框一律数据驱动** —— 从活体模块 bbox 反推,
+     按模块之间的自然空隙切分整纸、给右下角图签留缺口。固定九宫格模式已废弃
+     (框的几何与电路实际位置无关:单模块页铺满整纸时框套不住电路、框里大半是空的)。
   3. 认领与框都**按页(documentUuid)持久化**,多页工程逐页 `--doc <页>` 画,
      绝不把 MCU 页的认领套到 Power 页。
 - **过门条件**:每个组有明确的目标矩形(已认领),组间预留通道(分区不重叠);
@@ -193,6 +194,8 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
     `missing-partition`(没画分区框)/ `missing-note`(没有电路说明,区名标签不算)/
     `missing-titleblock`(图签的标题、设计者、板名空着或还是默认 `Board1`),
     在 **`sch gate --strict`** 下阻塞 —— 也就是交付门过不了。
+    版式:**区名在框的左上角,电路说明在框的左下角**(`sch note --zone <模块>` 自动落点,
+    别手填坐标);说明只写**需要注意的**(关键参数、易错点),一到两行,不要复述电路。
     框的有无读**工具自己的绘制记账**(平台不提供矩形枚举接口);`sch clear` 会同时作废
     该页的记账,免得清了页而判据还以为画过。
 

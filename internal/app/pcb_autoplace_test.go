@@ -153,8 +153,8 @@ func TestOrientSatellite(t *testing.T) {
 	cap := mkComp("c", "C1", 0, 0, 40, 20, []apPad{p("2", "3V3", 15, 0), p("1", "GND", -15, 0)})
 
 	cases := []struct {
-		edge    apEdge
-		wantRot float64
+		edge               apEdge
+		wantRot            float64
 		wantEffW, wantEffH float64
 	}{
 		{edgeLeft, 0, 40, 20},    // faces +x → pad already there
@@ -266,10 +266,10 @@ func floorplan2DBoard() []apComp {
 	// Column A at x≈0, column B at x≈100 (X-projections overlap → 1D would spread),
 	// but each column has two vertically stacked chips (Y-projections disjoint).
 	return []apComp{
-		mk8("u1", "U1", 0, 0),      // col A, lower
-		mk8("u2", "U2", 0, 600),    // col A, upper (stacked over U1)
-		mk8("u3", "U3", 100, 0),    // col B, lower
-		mk8("u4", "U4", 100, 600),  // col B, upper
+		mk8("u1", "U1", 0, 0),     // col A, lower
+		mk8("u2", "U2", 0, 600),   // col A, upper (stacked over U1)
+		mk8("u3", "U3", 100, 0),   // col B, lower
+		mk8("u4", "U4", 100, 600), // col B, upper
 	}
 }
 

@@ -179,9 +179,6 @@ type layoutReport struct {
 	AnchorGridRaw   float64         `json:"anchorGridRaw"`
 	AnchorGridUnit  string          `json:"anchorGridUnit,omitempty"`
 	GridViolations  []layoutFinding `json:"gridViolations,omitempty"`
-	// ZoneViolations are claimed parts sitting outside their `sch zones` claim.
-	// They are advisory in default mode and fail the report under --strict.
-	ZoneViolations  []layoutFinding `json:"zoneViolations,omitempty"`
 	ZoneCheckStatus string          `json:"zoneCheckStatus"`
 	// OutOfSheet 是 bbox 越出图纸可用区(边框内缩 sheetEdgeMinGap)的器件。
 	// 此前**没有任何判据抓这个**:出图的件照样连线、照样 netlist 对账通过,
@@ -328,7 +325,6 @@ func applyLayoutStrictGate(rep *layoutReport, strict bool) {
 	}
 	if len(rep.TightPairs) > 0 ||
 		len(rep.GridViolations) > 0 ||
-		len(rep.ZoneViolations) > 0 ||
 		len(rep.OutOfSheet) > 0 ||
 		rep.SheetCheckStatus == "unavailable" ||
 		len(rep.NoBBox) > 0 ||
@@ -373,9 +369,9 @@ func layoutReportInMM(rep layoutReport) layoutReport {
 	rep.MeasurementUnit = "mm"
 	rep.CoordinateUnit = "0.01inch"
 	rep.AnchorGridUnit = "0.01inch"
-	rep.Summary = fmt.Sprintf("strict=%t: %d components (%d with bbox): %d overlap, %d tight (<%.2fmm), %d pin-coincidence, %d off-grid, %d zone-violation, %d out-of-sheet, %d unchecked-bbox, %d unchecked-pins, %d unproven-pins, %d invalid-geometry; zoneCheck=%s sheetCheck=%s",
+	rep.Summary = fmt.Sprintf("strict=%t: %d components (%d with bbox): %d overlap, %d tight (<%.2fmm), %d pin-coincidence, %d off-grid, %d out-of-sheet, %d unchecked-bbox, %d unchecked-pins, %d unproven-pins, %d invalid-geometry; zoneCheck=%s sheetCheck=%s",
 		rep.Strict, rep.Total, rep.WithBBox, len(rep.Overlaps), len(rep.TightPairs), rep.MinGap,
-		len(rep.PinCoincidences), len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet),
+		len(rep.PinCoincidences), len(rep.GridViolations), len(rep.OutOfSheet),
 		len(rep.NoBBox), len(rep.UncheckedPins), len(rep.UnprovenPins),
 		len(rep.InvalidGeometry), rep.ZoneCheckStatus, rep.SheetCheckStatus)
 	return rep
@@ -569,9 +565,9 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 	if !rep.OK {
 		// 每一个能让 OK=false 的判据都必须出现在这句里 —— 少一个就会出现
 		// 「所有计数都是 0 却非零退出」的不可归因失败(记忆:真机验的是报告读起来对不对)。
-		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s",
+		return fmt.Errorf("layout-lint: %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d out-of-sheet, %d unchecked bbox(s), %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s",
 			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet), len(rep.NoBBox),
+			len(rep.GridViolations), len(rep.OutOfSheet), len(rep.NoBBox),
 			len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
 			rep.ZoneCheckStatus, rep.SheetCheckStatus)
 	}
@@ -649,13 +645,13 @@ func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, al
 		rep.ZoneCheckError = zerr.Error()
 	case len(zones) == 0:
 		rep.ZoneCheckStatus = "not-configured"
-	case sheet == nil:
-		rep.ZoneCheckStatus = "unavailable"
-		rep.ZoneCheckError = "schematic zone claims are configured but the active page has no readable sheet bbox"
 	default:
+		// **zone-violation 判据已废弃**(2026-08-15,随固定九宫格一起):分区框现在
+		// 一律从活体模块 bbox 反推,「件在不在自己的框里」于是成了同义反复 ——
+		// 框正是按这些件画出来的,判据永远不会失败。永远不会失败的判据 = 没有判据。
+		// 分区画得对不对由 `sch zone-plan` 的六项 validation 在**落笔前**判(出界/
+		// 互相重叠/压图签/模块跑到区外/标签碰撞/压页边距),那才是有内容的判据。
 		rep.ZoneCheckStatus = "checked"
-		rep.ZoneViolations = findSchZoneViolations(zones, *sheet, realParts,
-			loadDrawnZoneRects(readCfg, readWindow, docUUID))
 	}
 	// 出图纸判据(issue #180 Fix C):与 zone 同档诚实披露 —— 读不到图纸 bbox 就
 	// 说 unavailable,绝不因为"没检查"而显得干净。allPages 下逐页图纸无法对应,
@@ -867,10 +863,6 @@ func renderLayoutReport(rep layoutReport, w io.Writer) {
 		fmt.Fprintf(w, "  %s  off-grid  %s at %.2f,%.2f (anchor must land on %.0f-unit grid)\n",
 			softSeverity, f.A, f.X, f.Y, rep.AnchorGridRaw)
 	}
-	for _, f := range rep.ZoneViolations {
-		fmt.Fprintf(w, "  %s  zone-violation  %s at %.0f,%.0f outside its claimed zone %s — S0 拍板的分区没有落实(`sch zones status` 看认领)\n",
-			softSeverity, f.A, f.X, f.Y, f.B)
-	}
 	for _, f := range rep.OutOfSheet {
 		fmt.Fprintf(w, "  %s  out-of-sheet  %s at %.0f,%.0f 越出图纸可用区(图框内缩 %.0f 单位)%s — 该件照样连线、netlist 也对得上,但印不出来\n",
 			softSeverity, f.A, f.X, f.Y, sheetEdgeMinGap, layoutOverExtent(f, unit))
@@ -912,13 +904,13 @@ func renderLayoutReport(rep layoutReport, w io.Writer) {
 		skipCaveat = fmt.Sprintf("; %d component(s) NOT checked (skipped ≠ confirmed clear)", len(rep.NoBBox))
 	}
 	if rep.OK {
-		fmt.Fprintf(w, "✓ placement gate passed; %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, zone-check=%s sheet-check=%s%s\n",
-			len(rep.TightPairs), len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet),
+		fmt.Fprintf(w, "✓ placement gate passed; %d tight pair(s), %d off-grid anchor(s), %d out-of-sheet, zone-check=%s sheet-check=%s%s\n",
+			len(rep.TightPairs), len(rep.GridViolations), len(rep.OutOfSheet),
 			rep.ZoneCheckStatus, rep.SheetCheckStatus, skipCaveat)
 	} else {
-		fmt.Fprintf(w, "✗ %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d zone violation(s), %d out-of-sheet, %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s%s\n",
+		fmt.Fprintf(w, "✗ %d overlap(s), %d pin-coincidence(s), %d tight pair(s), %d off-grid anchor(s), %d out-of-sheet, %d unchecked pin-set(s), %d unproven pin-set(s), %d invalid geometry value(s), zone-check=%s sheet-check=%s%s\n",
 			len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-			len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet), len(rep.UncheckedPins),
+			len(rep.GridViolations), len(rep.OutOfSheet), len(rep.UncheckedPins),
 			len(rep.UnprovenPins), len(rep.InvalidGeometry), rep.ZoneCheckStatus, rep.SheetCheckStatus, skipCaveat)
 	}
 }

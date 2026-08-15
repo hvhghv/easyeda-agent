@@ -124,7 +124,7 @@ func TestResolveEnrichScriptNotFoundListsProbedPaths(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, want := range []string{
-		filepath.Join(root, "easyeda-agent", "scripts", "bom-enrich.py"), // env rung
+		filepath.Join(root, "easyeda-agent", "scripts", "bom-enrich.py"),                      // env rung
 		filepath.Join(home, ".claude", "skills", "easyeda-agent", "scripts", "bom-enrich.py"), // installed rung
 		filepath.Join(home, ".codex", "skills", "easyeda-agent", "scripts", "bom-enrich.py"),
 		"$PATH/bom-enrich.py",

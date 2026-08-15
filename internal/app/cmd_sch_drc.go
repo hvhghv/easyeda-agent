@@ -16,10 +16,10 @@ import (
 
 // drcViolation mirrors one normalized violation from the connector.
 type drcViolation struct {
-	Level        string   `json:"level"`
-	Type         string   `json:"type,omitempty"`
-	Rule         string   `json:"rule,omitempty"`
-	Message      string   `json:"message,omitempty"`
+	Level        string          `json:"level"`
+	Type         string          `json:"type,omitempty"`
+	Rule         string          `json:"rule,omitempty"`
+	Message      string          `json:"message,omitempty"`
 	PrimitiveIDs []string        `json:"primitiveIds,omitempty"`
 	Designators  []string        `json:"designators,omitempty"`
 	X            *float64        `json:"x,omitempty"`

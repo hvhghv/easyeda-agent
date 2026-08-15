@@ -20,10 +20,10 @@ func TestCpHolesFromFillsBBox(t *testing.T) {
 		}
 	}
 	fills := []any{
-		mkFill(12, -23.5, -33.5, 103.5, 93.5),        // ceshi bl M3 hole
-		mkFill(12, 1566.5, -33.5, 1693.5, 93.5),      // ceshi br M3 hole
-		mkFill(1, 0, 0, 500, 500),                    // TOP-layer copper fill — not a hole
-		map[string]any{"layer": float64(12)},         // layer-12 fill without bbox/points → skipped
+		mkFill(12, -23.5, -33.5, 103.5, 93.5),             // ceshi bl M3 hole
+		mkFill(12, 1566.5, -33.5, 1693.5, 93.5),           // ceshi br M3 hole
+		mkFill(1, 0, 0, 500, 500),                         // TOP-layer copper fill — not a hole
+		map[string]any{"layer": float64(12)},              // layer-12 fill without bbox/points → skipped
 		map[string]any{"layer": float64(12), "bbox": nil}, // null bbox (getPrimitivesBBox failed)
 	}
 	holes := cpHolesFromFills(fills)

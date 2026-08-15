@@ -181,7 +181,7 @@ func findFloatingTrackIslands(tracks []pcbTrack, vias []pcbViaP, pads []pcbPadP,
 		out = append(out, pcbCheckFinding{
 			Type: "floating-track-island", Level: "WARN", Net: net,
 			Layer: tracks[idxs[0]].Layer, Primitives: ids,
-			At: &pcbXY{round2(sx / float64(len(idxs))), round2(sy / float64(len(idxs)))},
+			At:      &pcbXY{round2(sx / float64(len(idxs))), round2(sy / float64(len(idxs)))},
 			Message: fmt.Sprintf("island of %d connected track(s) anchors to NO pad — an entire floating copper group (dangling-end can't see it: members anchor each other); wire it to a pad or delete it (`pcb track-delete --ids …`)", len(idxs)),
 		})
 	}

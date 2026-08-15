@@ -6,9 +6,9 @@ import "testing"
 
 func TestFindSilkOverPad(t *testing.T) {
 	pads := []pcbPadP{
-		{Designator: "R1", Number: "1", Net: "N1", Layer: 1, X: 0, Y: 0},      // top pad under top silk
-		{Designator: "R2", Number: "1", Net: "N2", Layer: 2, X: 0, Y: 0},      // bottom pad — top silk can't hit it
-		{Designator: "R3", Number: "1", Net: "N3", Layer: 1, X: 500, Y: 500},  // far away
+		{Designator: "R1", Number: "1", Net: "N1", Layer: 1, X: 0, Y: 0},     // top pad under top silk
+		{Designator: "R2", Number: "1", Net: "N2", Layer: 2, X: 0, Y: 0},     // bottom pad — top silk can't hit it
+		{Designator: "R3", Number: "1", Net: "N3", Layer: 1, X: 500, Y: 500}, // far away
 	}
 	silk := []pcbSilkText{
 		{ID: "s1", Kind: "attribute", Key: "Designator", Text: "R1", Layer: 3, X: 5, Y: 5},
@@ -80,9 +80,9 @@ func TestFindViaInPad(t *testing.T) {
 		{Designator: "U1", Number: "2", Net: "3V3", Layer: 1, X: 100, Y: 0},
 	}
 	vias := []pcbViaP{
-		{ID: "v1", Net: "GND", X: 2, Y: 2, Hole: 12, Dia: 24},   // ON the GND pad → flagged
-		{ID: "v2", Net: "GND", X: 40, Y: 0, Hole: 12, Dia: 24},  // offset dog-bone → OK
-		{ID: "v3", Net: "3V3", X: 0, Y: 0, Hole: 12, Dia: 24},   // cross-net on pad — clearance rule's case, not ours
+		{ID: "v1", Net: "GND", X: 2, Y: 2, Hole: 12, Dia: 24},  // ON the GND pad → flagged
+		{ID: "v2", Net: "GND", X: 40, Y: 0, Hole: 12, Dia: 24}, // offset dog-bone → OK
+		{ID: "v3", Net: "3V3", X: 0, Y: 0, Hole: 12, Dia: 24},  // cross-net on pad — clearance rule's case, not ours
 	}
 	out := findViaInPad(vias, pads)
 	if len(out) != 1 {

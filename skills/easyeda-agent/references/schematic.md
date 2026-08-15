@@ -464,9 +464,13 @@ frame down by one height and pushes it past the sheet/title-block edge.
 
 Before drawing a partition, require all five `zone-plan` validation counters
 (`sheetOverflow`, `partitionOverlap`, `titleBlockHits`, `moduleOutsideZone`,
-`labelCollisions`) to be zero. `zones` mode draws the fixed zone rectangles used
-by `layout-lint`; `partition` mode derives whole-sheet partitions from live module
-bboxes and defaults to 22pt titles. Both modes share one page-scoped frame record, so changing mode replaces
+`labelCollisions`) to be zero. Frames are **always data-driven**: whole-sheet partitions derived from live module
+bboxes, 22pt titles by default. The old fixed nine-grid mode (`--mode zones`) is
+**retired** — its rectangles had nothing to do with where the parts actually are,
+so on a single-module page spanning the sheet the frame missed the circuit entirely.
+With frames derived from the parts, `layout-lint`'s old `zone-violation` rule became
+a tautology (the frame is drawn *around* those parts), so it is retired too; what
+judges a partition now is `sch zone-plan`'s six pre-draw validations. Both modes share one page-scoped frame record, so changing mode replaces
 that page's prior annotations without touching another page. Redraw/clear is
 fail-closed: exact rectangle/text IDs are re-read after delete, survivors retain
 their recovery record, draw counts must match 1:1, and partial creation is

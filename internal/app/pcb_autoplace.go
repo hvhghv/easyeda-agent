@@ -198,8 +198,8 @@ type apMove struct {
 	Designator string  `json:"designator"`
 	NewX       float64 `json:"newX"`
 	NewY       float64 `json:"newY"`
-	NewRot     float64 `json:"newRot"`           // target rotation (deg); == current when SetRot is false
-	SetRot     bool    `json:"setRot"`           // whether to apply NewRot (only re-oriented 2-pin satellites)
+	NewRot     float64 `json:"newRot"` // target rotation (deg); == current when SetRot is false
+	SetRot     bool    `json:"setRot"` // whether to apply NewRot (only re-oriented 2-pin satellites)
 	Main       string  `json:"main"`
 	Edge       string  `json:"edge"`
 	TargetNet  string  `json:"targetNet"`

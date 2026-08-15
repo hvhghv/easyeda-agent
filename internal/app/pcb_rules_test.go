@@ -37,9 +37,9 @@ func ceshiRuleResult() map[string]any {
 							"tables": map[string]any{
 								"1": map[string]any{
 									"content": []any{
-										[]any{0.10199878},                     // Track↔Track (4mil)
-										[]any{0.15200122, 0.15200122},         // SMD Pad↔Track (6mil), ↔Pad
-										[]any{0.254, 0.254, 0.254},            // Copper/Plane Zone
+										[]any{0.10199878},                       // Track↔Track (4mil)
+										[]any{0.15200122, 0.15200122},           // SMD Pad↔Track (6mil), ↔Pad
+										[]any{0.254, 0.254, 0.254},              // Copper/Plane Zone
 										[]any{0.29972, 0.29972, 0.254, 0.29972}, // Board Outline ↔ … ↔ CopperZone=0.254 (10mil)
 									},
 								},

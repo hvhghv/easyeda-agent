@@ -48,17 +48,17 @@ import (
 
 // syncDesignatorsResult 是一次回填的结果。
 type syncDesignatorsResult struct {
-	PCBTotal      int      `json:"pcbTotal"`
-	Placeholder   int      `json:"placeholderDesignators"`
-	Matched       int      `json:"matched"`
-	Repaired      int      `json:"repaired"`
-	Unmatched     []string `json:"unmatched,omitempty"`
+	PCBTotal       int      `json:"pcbTotal"`
+	Placeholder    int      `json:"placeholderDesignators"`
+	Matched        int      `json:"matched"`
+	Repaired       int      `json:"repaired"`
+	Unmatched      []string `json:"unmatched,omitempty"`
 	SchUnannotated []string `json:"schematicUnannotated,omitempty"`
-	Failed        []string `json:"failed,omitempty"`
-	SchematicSeen int      `json:"schematicComponents"`
-	DryRun        bool     `json:"dryRun,omitempty"`
-	Saved         bool     `json:"saved,omitempty"`
-	Summary       string   `json:"summary"`
+	Failed         []string `json:"failed,omitempty"`
+	SchematicSeen  int      `json:"schematicComponents"`
+	DryRun         bool     `json:"dryRun,omitempty"`
+	Saved          bool     `json:"saved,omitempty"`
+	Summary        string   `json:"summary"`
 }
 
 // isPlaceholderDesignator 判断位号是不是平台的未分配占位符。

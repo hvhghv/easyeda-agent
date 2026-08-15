@@ -90,11 +90,11 @@ func TestExportFiltersWindowAndTime(t *testing.T) {
 
 func TestLooksLikePrimitiveID(t *testing.T) {
 	cases := map[string]bool{
-		"be7fdb3c8c24fe36": true,  // 16-hex with letters
-		"gge4":             true,  // unique id
-		"1234567890123456": false, // digits only — could be a number
-		"GND":              false,
-		"schematic.save":   false,
+		"be7fdb3c8c24fe36":                 true,  // 16-hex with letters
+		"gge4":                             true,  // unique id
+		"1234567890123456":                 false, // digits only — could be a number
+		"GND":                              false,
+		"schematic.save":                   false,
 		"0819f05c4eef4c71ace90d822a990e87": false, // 32-hex library uuid ≠ primitive id
 	}
 	for s, want := range cases {

@@ -206,16 +206,16 @@ func identifyDiffPairs(liveNets []string) []rcDiffPair {
 
 type rcPairResult struct {
 	rcDiffPair
-	Status     string    `json:"status"` // routed | already-routed | partial | unroutable
-	Segments   int       `json:"segments"`
-	LenPMil    float64   `json:"lenPMil"`
-	LenNMil    float64   `json:"lenNMil"`
-	SkewMil    float64   `json:"skewMil"`
-	WithinSkew bool      `json:"withinSkew"`
-	Diags      []string  `json:"diags,omitempty"`
-	Segs       []rtSeg   `json:"-"`
-	Vias       []rtVia   `json:"-"`
-	Notes      []string  `json:"notes,omitempty"`
+	Status     string   `json:"status"` // routed | already-routed | partial | unroutable
+	Segments   int      `json:"segments"`
+	LenPMil    float64  `json:"lenPMil"`
+	LenNMil    float64  `json:"lenNMil"`
+	SkewMil    float64  `json:"skewMil"`
+	WithinSkew bool     `json:"withinSkew"`
+	Diags      []string `json:"diags,omitempty"`
+	Segs       []rtSeg  `json:"-"`
+	Vias       []rtVia  `json:"-"`
+	Notes      []string `json:"notes,omitempty"`
 }
 
 func rtSegLen(s rtSeg) float64 { return math.Hypot(s.X2-s.X1, s.Y2-s.Y1) }
@@ -295,7 +295,7 @@ func splitCSVList(items []string) []string {
 func newPcbRouteCriticalCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var (
 		skipPower, skipDiff, noLock, dryRun bool
-		forceReason, forceUnsafeReason     string
+		forceReason, forceUnsafeReason      string
 	)
 	c := &cobra.Command{
 		Use:   "route-critical",
@@ -381,8 +381,8 @@ and identifies without mutating.`,
 				opt := defaultRtOptions()
 				opt.signalWidth = rules.clampWidth(rules.trackWidthMil)
 				opt.netClassWidths = netClassWidthTable(rules)
-				opt.corner = "45"       // chamfered corners — diff-pair hygiene
-				opt.multilayer = false  // pairs stay on their pads' layer (vias hurt the pair)
+				opt.corner = "45"      // chamfered corners — diff-pair hygiene
+				opt.multilayer = false // pairs stay on their pads' layer (vias hurt the pair)
 				opt.skipPower = true
 				opt.avoid = true
 				opt.clearance = rules.clearanceMil

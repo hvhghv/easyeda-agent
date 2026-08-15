@@ -1550,7 +1550,6 @@ and runs these placement checks in Go:
   • pin-coincidence  — two pins of DIFFERENT parts land on the same point → ERROR
   • spacing          — bbox gap is below --min-gap (default 2.54mm)       → WARN
   • off-grid         — part anchor is not on the 5-unit connection grid   → WARN
-  • zone-violation   — claimed part is outside its functional zone         → WARN
 
 Pin coincidence is an implicit short: any wire/stub through the shared point ties
 the two nets together, yet the bboxes may never touch (a small 2-pin part tucked

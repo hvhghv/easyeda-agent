@@ -154,13 +154,13 @@ func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allP
 	}
 	st.Detail = rep
 	st.Errors = len(rep.Overlaps) + len(rep.PinCoincidences)
-	st.Warnings = len(rep.TightPairs) + len(rep.GridViolations) + len(rep.ZoneViolations) + len(rep.OutOfSheet)
+	st.Warnings = len(rep.TightPairs) + len(rep.GridViolations) + len(rep.OutOfSheet)
 	// The summary MUST mention the geometry-provenance counts, not just the
 	// pairwise ones: under --strict those are what usually fails, and a summary
 	// reading "0 overlap, 0 pin-coincidence…" beside a FAIL is unreadable.
-	st.Summary = fmt.Sprintf("%d overlap, %d pin-coincidence, %d tight, %d off-grid, %d zone-violation, %d out-of-sheet, %d no-bbox, %d unchecked-pin, %d unproven-pin, %d invalid-geometry (zone-check=%s sheet-check=%s)",
+	st.Summary = fmt.Sprintf("%d overlap, %d pin-coincidence, %d tight, %d off-grid, %d out-of-sheet, %d no-bbox, %d unchecked-pin, %d unproven-pin, %d invalid-geometry (zone-check=%s sheet-check=%s)",
 		len(rep.Overlaps), len(rep.PinCoincidences), len(rep.TightPairs),
-		len(rep.GridViolations), len(rep.ZoneViolations), len(rep.OutOfSheet), len(rep.NoBBox),
+		len(rep.GridViolations), len(rep.OutOfSheet), len(rep.NoBBox),
 		len(rep.UncheckedPins), len(rep.UnprovenPins), len(rep.InvalidGeometry),
 		rep.ZoneCheckStatus, rep.SheetCheckStatus)
 
@@ -174,7 +174,6 @@ func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allP
 	if strict {
 		add(len(rep.TightPairs), "tight-spacing (--strict)")
 		add(len(rep.GridViolations), "off-grid anchor (--strict)")
-		add(len(rep.ZoneViolations), "zone-violation (--strict)")
 		add(len(rep.OutOfSheet), "out-of-sheet (--strict;件越出图纸可用区,印不出来)")
 		add(len(rep.NoBBox), "component without bbox (--strict)")
 		add(len(rep.UncheckedPins), "unchecked pin geometry (--strict)")

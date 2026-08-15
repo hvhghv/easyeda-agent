@@ -119,9 +119,8 @@ func legalizeConstrainedMoves(snap *boardSnapshot, moves []apMove) ([]apMove, []
 			}
 			dropped[des] = true
 			res.Dropped++
-			diags = append(diags, apDiag{Designator: des, Reason:
-				"legalize:dropped: planned move introduces a blocking issue (overlap/short/off-board) and no legal spot within " +
-					fmt.Sprintf("%.0fmil — part left at its previous position", legalizeSpiralMaxRad)})
+			diags = append(diags, apDiag{Designator: des, Reason: "legalize:dropped: planned move introduces a blocking issue (overlap/short/off-board) and no legal spot within " +
+				fmt.Sprintf("%.0fmil — part left at its previous position", legalizeSpiralMaxRad)})
 			// 血缘级联：跟随者的落点是按这个伙伴的位移算的 —— 伙伴不去了，
 			// 跟随者停在半路只会离它的端口更远（真板实锤：J2 的 move 被弃，
 			// TVS/ESD 跟着幽灵位移搬走，protection 从贴身变 800+mil）。

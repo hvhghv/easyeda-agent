@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -157,47 +156,6 @@ func writeZoneDrawEpilogue(b *strings.Builder) {
   const cleanup = await cleanupCreated();
   return {ok:false, error: err instanceof Error ? err.message : String(err), rects, texts, ...cleanup};
 }`)
-}
-
-// buildZoneDrawJS renders the one-shot exec_js script: create every fixed-grid
-// frame + label, return their ids, and self-clean on partial failure.
-func buildZoneDrawJS(zones map[string]*schZoneClaim, sheet layoutBBox, tb *layoutBBox, color string, fontSize float64) string {
-	var names []string
-	for n := range zones {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	opts := defaultSchZoneOpts()
-	var b strings.Builder
-	writeZoneDrawPrelude(&b)
-	for _, name := range names {
-		zc := zones[name]
-		if zc == nil || !pcbZoneNames[zc.Zone] {
-			continue
-		}
-		frame, ok := schZoneFrameRect(zc.Zone, sheet, tb, opts)
-		if !ok {
-			continue
-		}
-		label, _ := json.Marshal(fmt.Sprintf("%s (%s)", name, zc.Zone))
-		colorJS, _ := json.Marshal(color)
-		if !writeZoneRectangleCreateJS(&b, frame, colorJS) {
-			continue
-		}
-		fmt.Fprintf(&b, "  if (!rc) throw new Error(%q);\n", "rectangle create returned undefined for "+name)
-		fmt.Fprintf(&b, "  const rid = rc.getState_PrimitiveId(); if (!rid) { await eda.sch_PrimitiveRectangle.delete(rc); throw new Error(%q); } rects.push(rid);\n",
-			"rectangle id missing for "+name)
-		// The label is anchored bottom-left and grows upward, so its top edge is
-		// (y + fontSize): park it a pad below the frame's top line instead of
-		// exactly on it (#163 — labels used to sit on the frame/sheet border).
-		fmt.Fprintf(&b, "  const tx = await eda.sch_PrimitiveText.create(%g, %g, %s, 0, %s, null, %g);\n",
-			frame.MinX+opts.LabelPad, frame.MaxY-fontSize-opts.LabelPad, label, colorJS, fontSize)
-		fmt.Fprintf(&b, "  if (!tx) throw new Error(%q);\n", "text create returned undefined for "+name)
-		fmt.Fprintf(&b, "  const tid = tx.getState_PrimitiveId(); if (!tid) { await eda.sch_PrimitiveText.delete(tx); throw new Error(%q); } texts.push(tid); }\n",
-			"text id missing for "+name)
-	}
-	writeZoneDrawEpilogue(&b)
-	return b.String()
 }
 
 // buildZoneClearJS deletes only recorded ids and verifies them against the live
@@ -433,108 +391,6 @@ func compensateZoneDraw(
 	return cause
 }
 
-func drawableZoneClaimCount(zones map[string]*schZoneClaim) int {
-	n := 0
-	for _, zc := range zones {
-		if zc != nil && pcbZoneNames[zc.Zone] {
-			n++
-		}
-	}
-	return n
-}
-
-func runFixedZoneDraw(
-	cfg *appConfig,
-	window string,
-	fontSize float64,
-	color string,
-	clear bool,
-	stdout, stderr io.Writer,
-) error {
-	pinnedCfg, win, docUUID, err := pinZonePage(cfg, window)
-	if err != nil {
-		return err
-	}
-	project, err := resolveStageProject(pinnedCfg, win)
-	if err != nil {
-		return err
-	}
-	st, err := loadPcbStageState(project)
-	if err != nil {
-		return err
-	}
-	exec := func(phase, code string) (map[string]any, error) {
-		return execAutolayoutZoneJS(pinnedCfg, win, docUUID, phase, code)
-	}
-	if clear {
-		hadPrevious, err := clearPriorZoneFrames(st, docUUID, exec, stderr)
-		if err != nil {
-			return err
-		}
-		if !hadPrevious {
-			fmt.Fprintln(stdout, "no zone frames recorded for this page — nothing to clear")
-			return nil
-		}
-		if err := saveZoneDocument(pinnedCfg, win, docUUID, "save cleared zone frames"); err != nil {
-			return err
-		}
-		if err := savePcbStageState(st); err != nil {
-			return fmt.Errorf("persist cleared zone-frame state: %w", err)
-		}
-		fmt.Fprintln(stdout, "zone frames cleared and schematic saved for this page")
-		return nil
-	}
-
-	zones := st.SchZonesForPage(docUUID)
-	if len(zones) == 0 {
-		return fmt.Errorf("no schematic zone claims for %q on page %s — run `sch zones set --spec <s0-spec.json>` first", project, docUUID)
-	}
-	res, err := requestAutolayoutAction(pinnedCfg, "schematic.components.list", win,
-		map[string]any{"includeBBox": true}, docUUID, "read zone-draw sheet")
-	if err != nil {
-		return err
-	}
-	comps, perr := parseLayoutComps(res.Result)
-	if perr != nil {
-		return perr
-	}
-	sheet := sheetBBoxOf(comps)
-	if sheet == nil {
-		return fmt.Errorf("no sheet bbox on the active page — place a drawing sheet first")
-	}
-	if fontSize <= 0 {
-		fontSize = defaultFixedZoneFontSize
-	}
-	// Same keep-out source the partition planner and `sch check` use, so the
-	// frames we draw cannot trip our own titleblock-overlap rule (#163).
-	titleBlock, provisional := titleBlockKeepout(sheet)
-	if provisional {
-		fmt.Fprintln(stderr, "⚠ title-block keep-out could not be derived for this sheet — frames are NOT checked against it")
-	}
-	if _, err := clearPriorZoneFrames(st, docUUID, exec, stderr); err != nil {
-		return err
-	}
-	v, err := exec("draw fixed zone frames", buildZoneDrawJS(zones, *sheet, titleBlock, color, fontSize))
-	if err != nil {
-		return err
-	}
-	frames, verr := validateZoneDrawResult(v, drawableZoneClaimCount(zones))
-	if verr != nil {
-		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "zones", exec, frames, verr)
-	}
-	setRecordedZoneFrames(st, docUUID, "zones", frames)
-	if err := savePcbStageState(st); err != nil {
-		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "zones", exec, frames,
-			fmt.Errorf("persist zone-frame ids: %w", err))
-	}
-	if err := saveZoneDocument(pinnedCfg, win, docUUID, "save fixed zone frames"); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "drew %d zone frame(s) + %d label(s) for %d claim(s) on page %s; schematic saved\n",
-		len(frames.Rects), len(frames.Texts), len(zones), docUUID)
-	return nil
-}
-
 // newSchZoneDrawCmd builds `sch zone-draw`.
 func newSchZoneDrawCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var color string
@@ -561,23 +417,24 @@ Use the global --doc <page> selector for multi-page projects.`,
 			// Partition mode (issue #149): whole-sheet data-driven functional partitions
 			// via the planner + per-page frame persistence, instead of the fixed
 			// zones-grid rectangles below.
-			if mode == "partition" {
-				if fontSize <= 0 {
-					fontSize = defaultPartitionZoneFontSize
-				}
-				return runPartitionDraw(cfg, *window,
-					partitionOptsFrom(margin, gutter, titleBand, 3, 2), fontSize, color, clear, stdout, stderr)
+			// 固定九宫格模式已废弃(用户拍板 2026-08-15):框的几何一律由**活体模块
+			// bbox** 反推。九宫格的框与电路的实际位置无关 —— 单模块页铺满整纸时,
+			// 框套不住电路、框里大半是空的,而且它还让 zone-violation 对着一张画得好
+			// 好的图报违规。分区是**版面**,版面就该跟着电路走。
+			if mode != "" && mode != "partition" {
+				return fmt.Errorf("--mode %q 已废弃:分区框一律数据驱动(从活体模块 bbox 反推);去掉 --mode 即可", mode)
 			}
-			if mode != "" && mode != "zones" {
-				return fmt.Errorf("unknown --mode %q (zones|partition)", mode)
+			if fontSize <= 0 {
+				fontSize = defaultPartitionZoneFontSize
 			}
-			return runFixedZoneDraw(cfg, *window, fontSize, color, clear, stdout, stderr)
+			return runPartitionDraw(cfg, *window,
+				partitionOptsFrom(margin, gutter, titleBand, 3, 2), fontSize, color, clear, stdout, stderr)
 		},
 	}
 	c.Flags().StringVar(&color, "color", "#AA00AA", "frame + label color")
 	c.Flags().BoolVar(&clear, "clear", false, "remove the frames drawn by the last zone-draw on this page")
-	c.Flags().StringVar(&mode, "mode", "zones", "zones = fixed-grid claim rectangles; partition = data-driven whole-sheet functional partitions (issue #149)")
-	c.Flags().Float64Var(&fontSize, "font-size", 0, "label/title font size (default: 14 for zones, 22 for partition)")
+	c.Flags().StringVar(&mode, "mode", "", "已废弃:分区框一律数据驱动;传 zones 会报错")
+	c.Flags().Float64Var(&fontSize, "font-size", 0, "分区标题字号(默认 22)")
 	// Defaults come from defaultPartitionOpts so the flag layer can never drift
 	// from the planner's own defaults (margin 20 lingered here after the planner
 	// moved to 28 — live 2026-08-11).

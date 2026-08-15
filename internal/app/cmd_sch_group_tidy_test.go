@@ -201,8 +201,8 @@ func tidyCapIn(desig, powerNet string) tidyMemberIn {
 
 func TestPlanPowerUpdownCentered(t *testing.T) {
 	members := []tidyMemberIn{tidyCapIn("C1", "3V3"), tidyCapIn("C2", "3V3"), tidyCapIn("C3", "5V")}
-	anchor := tidyAnchor{X: 400, Y: 300} // 无 IC:bbox 中心锚,横排居中
-	plans, err := planPowerUpdown(members, anchor, 0)  // spacing 0 → 默认 50
+	anchor := tidyAnchor{X: 400, Y: 300}              // 无 IC:bbox 中心锚,横排居中
+	plans, err := planPowerUpdown(members, anchor, 0) // spacing 0 → 默认 50
 	if err != nil {
 		t.Fatalf("planPowerUpdown: %v", err)
 	}
@@ -583,9 +583,9 @@ func TestTidyDesignatorLess(t *testing.T) {
 		a, b string
 		want bool
 	}{
-		{"C2", "C10", true},  // 数字自然序,非字典序
+		{"C2", "C10", true}, // 数字自然序,非字典序
 		{"C10", "C2", false},
-		{"C1", "R1", true},   // 前缀字典序
+		{"C1", "R1", true}, // 前缀字典序
 		{"C1", "C1", false},
 	}
 	for _, tc := range cases {
@@ -925,9 +925,9 @@ func TestTidyDeepSweepPlan(t *testing.T) {
 		{ID: "fFar", ComponentType: "netflag", Net: "3V3", X: 800, Y: 300, AnchorAvailable: true}, // unrelated
 	}
 	wires := []schGroupWire{
-		{ID: "wStub", Points: []float64{270, 455, 270, 505}},   // C3:1 stub (tree A)
-		{ID: "wFrag", Points: []float64{270, 443, 270, 448}},   // dangling remnant grazing C3 bbox, no pin (tree B)
-		{ID: "wElse", Points: []float64{800, 300, 840, 300}},   // unrelated tree
+		{ID: "wStub", Points: []float64{270, 455, 270, 505}}, // C3:1 stub (tree A)
+		{ID: "wFrag", Points: []float64{270, 443, 270, 448}}, // dangling remnant grazing C3 bbox, no pin (tree B)
+		{ID: "wElse", Points: []float64{800, 300, 840, 300}}, // unrelated tree
 	}
 	ids, err := tidyDeepSweepPlan(map[string]bool{"C3": true}, comps, wires)
 	if err != nil {

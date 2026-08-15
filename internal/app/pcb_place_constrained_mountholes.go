@@ -234,7 +234,7 @@ func runPcbMountHoles(cfg *appConfig, window string, dia, inset, clearance float
 
 	out := map[string]any{
 		"ok": failed == 0, "dryRun": dryRun,
-		"board":              map[string]any{"x0": board.x0, "y0": board.y0, "x1": board.x1, "y1": board.y1},
+		"board":    map[string]any{"x0": board.x0, "y0": board.y0, "x1": board.x1, "y1": board.y1},
 		"diaMil":   dia,
 		"insetMil": inset,
 		"clearanceRadiusMil": func() float64 {
@@ -243,9 +243,9 @@ func runPcbMountHoles(cfg *appConfig, window string, dia, inset, clearance float
 			}
 			return mhClearanceRadius(dia)
 		}(),
-		"holes":              plan,
-		"placed":             len(placed),
-		"placedHoles":        placed,
+		"holes":       plan,
+		"placed":      len(placed),
+		"placedHoles": placed,
 	}
 	if !dryRun && len(placed) > 0 {
 		out["note"] = "孔已放(MULTI 层挖槽,同 `pcb slot`)——`pcb place-constrained` 把它们当 Tier-1 障碍避让;" +

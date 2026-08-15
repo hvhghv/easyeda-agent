@@ -633,33 +633,12 @@ func drawAutolayoutZones(cfg *appConfig, window, targetUUID string, claims map[s
 	// Persist the partition so `sch zones status` and layout-lint see the same claims.
 	st.SetSchZonesForPage(targetUUID, claims)
 	st.SchZones = nil
-	exec := func(phase, code string) (map[string]any, error) {
-		return execAutolayoutZoneJS(cfg, window, targetUUID, phase, code)
+	// 分区框一律**数据驱动**(固定九宫格已废弃):框从活体模块 bbox 反推,
+	// 所以要在落子之后画 —— 此刻件已经在目标位置,框才套得住电路。
+	if err := runPartitionDraw(cfg, window, defaultPartitionOpts(),
+		defaultPartitionZoneFontSize, "#AA00AA", false, io.Discard, io.Discard); err != nil {
+		return fmt.Errorf("draw partition frames: %w", err)
 	}
-	// Clear only this page's previously recorded frames, and keep their state if
-	// the SDK cannot prove every id is gone.
-	if _, err := clearPriorZoneFrames(st, targetUUID, exec, io.Discard); err != nil {
-		return err
-	}
-	titleBlock, _ := titleBlockKeepout(sheet)
-	v, err := exec("draw zone frames", buildZoneDrawJS(claims, *sheet, titleBlock, "#AA00AA", defaultFixedZoneFontSize))
-	if err != nil {
-		return err
-	}
-	frames, verr := validateZoneDrawResult(v, drawableZoneClaimCount(claims))
-	if verr != nil {
-		return compensateZoneDraw(cfg, window, targetUUID, st, "zones", exec, frames, verr)
-	}
-	setRecordedZoneFrames(st, targetUUID, "zones", frames)
-	if err := savePcbStageState(st); err != nil {
-		return compensateZoneDraw(cfg, window, targetUUID, st, "zones", exec, frames,
-			fmt.Errorf("save zone state: %w", err))
-	}
-	if err := saveAutolayoutDocument(cfg, window, targetUUID, "save zone frames"); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "autolayout: drew %d functional zone frame(s) + %d label(s) — `sch zone-draw --clear` removes them\n",
-		len(frames.Rects), len(frames.Texts))
 	return nil
 }
 

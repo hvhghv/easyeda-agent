@@ -81,9 +81,9 @@ type checkFinding struct {
 	SuggestKeepId    string            `json:"suggestKeepId,omitempty"`    // duplicate-net-marker: id to keep
 	SuggestDeleteIds []string          `json:"suggestDeleteIds,omitempty"` // duplicate-net-marker: ids to prim-delete
 	BBox             *layoutBBox       `json:"bbox,omitempty"`             // primary primitive bbox (titleblock/marker overlap)
-	Keepout          *layoutBBox       `json:"keepout,omitempty"`         // titleblock-overlap: the keep-out rect
-	Other            *checkOverlapSide `json:"other,omitempty"`           // marker-overlap: the B side
-	OverlapX         float64           `json:"overlapX,omitempty"`        // overlap extent (marker/titleblock)
+	Keepout          *layoutBBox       `json:"keepout,omitempty"`          // titleblock-overlap: the keep-out rect
+	Other            *checkOverlapSide `json:"other,omitempty"`            // marker-overlap: the B side
+	OverlapX         float64           `json:"overlapX,omitempty"`         // overlap extent (marker/titleblock)
 	OverlapY         float64           `json:"overlapY,omitempty"`
 }
 

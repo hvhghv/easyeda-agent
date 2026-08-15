@@ -16,7 +16,7 @@ func TestPcbZoneRectGrid(t *testing.T) {
 		{"left", cpRect{0, 0, 100, 200}},
 		{"right", cpRect{200, 0, 300, 200}},
 		{"center", cpRect{100, 0, 200, 200}},
-		{"top", cpRect{0, 100, 300, 200}},       // top = MAX-Y half (PCB canvas convention)
+		{"top", cpRect{0, 100, 300, 200}}, // top = MAX-Y half (PCB canvas convention)
 		{"bottom", cpRect{0, 0, 300, 100}},
 		{"right-top", cpRect{200, 100, 300, 200}},
 		{"left-bottom", cpRect{0, 0, 100, 100}},

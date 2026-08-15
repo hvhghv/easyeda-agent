@@ -97,7 +97,6 @@ func TestLayoutStrictGateFailsWarningsAndUnprovenGeometry(t *testing.T) {
 	rep := layoutReport{
 		OK:             true,
 		TightPairs:     []layoutFinding{{Type: "spacing", A: "C1", B: "U1"}},
-		ZoneViolations: []layoutFinding{{Type: "zone-violation", A: "U1", B: "center"}},
 		NoBBox:         []string{"R1"},
 		UncheckedPins:  []string{"C1"},
 	}
@@ -218,12 +217,12 @@ func TestLayoutSummaryIncludesStrictFailures(t *testing.T) {
 		WithBBox:        2,
 		MinGap:          10,
 		GridViolations:  []layoutFinding{{Type: "off-grid", A: "U1"}},
-		ZoneViolations:  []layoutFinding{{Type: "zone-violation", A: "U1"}},
 		UncheckedPins:   []string{"U2"},
 		ZoneCheckStatus: "unavailable",
 	}
 	got := layoutReportInMM(rep).Summary
-	for _, want := range []string{"strict=true", "1 off-grid", "1 zone-violation", "1 unchecked-pins", "zoneCheck=unavailable"} {
+	// zone-violation 已随固定九宫格一并废弃(分区框数据驱动后该判据是同义反复)。
+	for _, want := range []string{"strict=true", "1 off-grid", "1 unchecked-pins", "zoneCheck=unavailable"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q missing %q", got, want)
 		}

@@ -23,11 +23,11 @@ import (
 )
 
 type ppNet struct {
-	Net   string      `json:"net"`
-	Layer int         `json:"layer"`
-	Pads  [][2]float64 `json:"-"`
-	Vias  int         `json:"viasPlaced"`
-	Poured bool       `json:"poured"`
+	Net    string       `json:"net"`
+	Layer  int          `json:"layer"`
+	Pads   [][2]float64 `json:"-"`
+	Vias   int          `json:"viasPlaced"`
+	Poured bool         `json:"poured"`
 }
 
 // runPowerPlanes orchestrates the 4-layer power-plane build. gndLayer/powerLayer are

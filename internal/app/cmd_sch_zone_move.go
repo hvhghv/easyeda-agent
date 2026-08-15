@@ -795,15 +795,10 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	// 铁则2 settle:group.move + 文本重建是重 mutation,重画内部要重新读几何;
 	// (id+bbox) 指纹连续两次一致才放行。超预算降级不画 —— 宁可没框,不画错框。
 	if serr := waitZoneMoveGeometrySettled(pinned, win, docUUID); serr != nil {
-		fmt.Fprintf(stdout, "⚠ move 后几何未稳定(%v)— 框未重画,稍后手动 `sch zone-draw`(--mode 按原样)重画\n", serr)
+		fmt.Fprintf(stdout, "⚠ move 后几何未稳定(%v)— 框未重画,稍后手动 `sch zone-draw`重画\n", serr)
 		return nil
 	}
-	if prev.Mode == "zones" {
-		if err := runFixedZoneDraw(cfg, window, 0, schZoneMoveFrameColor, false, stdout, stderr); err != nil {
-			return fmt.Errorf("移动已完成并保存,但框重画失败:%w — 手动 `sch zone-draw` 重画", err)
-		}
-		return nil
-	}
+	// 旧账里可能还记着 mode="zones"(固定九宫格已废弃)——一律按数据驱动重画。
 	if err := runPartitionDraw(cfg, window, defaultPartitionOpts(), defaultPartitionZoneFontSize, schZoneMoveFrameColor, false, stdout, stderr); err != nil {
 		return fmt.Errorf("移动已完成并保存,但框重画失败:%w — 先 `sch zone-plan` 看六项哪项不为 0,再 `sch zone-draw --mode partition`", err)
 	}

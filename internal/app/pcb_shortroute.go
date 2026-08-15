@@ -67,15 +67,15 @@ type rtOptions struct {
 	// widthFor consults it (signal / power-branch / power-trunk / high-current / gnd)
 	// instead of the two-bucket signalWidth/powerWidth split.
 	netClassWidths map[string]float64
-	skipPower      bool // skip power+ground nets (isGlobalNet) — they belong in a pour, not thin tracks
-	corner      string  // corner style: "90" (L), "45" (chamfer), "round" (chord fillet)
-	roundRadius float64 // max fillet radius for corner=="round" (mil)
-	avoid       bool    // obstacle-aware L-orientation selection (#23)
-	clearance   float64 // safe-spacing clearance (mil) — a track must stay this far from other-net pads
-	multilayer  bool    // route the hops a single-layer L can't clear (too long / cross-layer) with a via detour on the alternate copper layer instead of deferring to the maze tier
-	stub        float64 // via setback from each pad on a multilayer hop (mil) — keeps vias OFF pads
-	viaDia      float64 // multilayer-hop via outer diameter (mil)
-	viaHole     float64 // multilayer-hop via hole/drill diameter (mil)
+	skipPower      bool    // skip power+ground nets (isGlobalNet) — they belong in a pour, not thin tracks
+	corner         string  // corner style: "90" (L), "45" (chamfer), "round" (chord fillet)
+	roundRadius    float64 // max fillet radius for corner=="round" (mil)
+	avoid          bool    // obstacle-aware L-orientation selection (#23)
+	clearance      float64 // safe-spacing clearance (mil) — a track must stay this far from other-net pads
+	multilayer     bool    // route the hops a single-layer L can't clear (too long / cross-layer) with a via detour on the alternate copper layer instead of deferring to the maze tier
+	stub           float64 // via setback from each pad on a multilayer hop (mil) — keeps vias OFF pads
+	viaDia         float64 // multilayer-hop via outer diameter (mil)
+	viaHole        float64 // multilayer-hop via hole/drill diameter (mil)
 
 	// Pre-existing board copper the plan must stay clear of (routing on a board
 	// that already carries tracks/vias — without these the planner only avoids
@@ -151,8 +151,8 @@ func planShortRoutes(comps []apComp, alreadyRouted map[string]bool, opt rtOption
 
 	var segs []rtSeg
 	var vias []rtVia
-	obstacleSegs := append([]rtSeg(nil), opt.existing...)     // pre-existing + planned copper
-	obVias := append([]obVia(nil), opt.existingVias...)       // pre-existing + planned vias
+	obstacleSegs := append([]rtSeg(nil), opt.existing...) // pre-existing + planned copper
+	obVias := append([]obVia(nil), opt.existingVias...)   // pre-existing + planned vias
 	var diags []rtNetDiag
 	clr := opt.clearance + nominalPadHalf
 	for _, net := range nets {
@@ -463,14 +463,14 @@ func lShapeRound(net string, a, b rtPad, w, maxR float64, hFirst bool) []rtSeg {
 	}
 	var cx, cy, t1x, t1y, t2x, t2y, ox, oy float64
 	if hFirst {
-		cx, cy = b.x, a.y          // the sharp corner we are rounding
-		t1x, t1y = cx-sx*r, cy     // tangent on the horizontal (incoming) leg
-		t2x, t2y = cx, cy+sy*r     // tangent on the vertical (outgoing) leg
-		ox, oy = cx-sx*r, cy+sy*r  // arc center (equidistant r from both tangents)
+		cx, cy = b.x, a.y         // the sharp corner we are rounding
+		t1x, t1y = cx-sx*r, cy    // tangent on the horizontal (incoming) leg
+		t2x, t2y = cx, cy+sy*r    // tangent on the vertical (outgoing) leg
+		ox, oy = cx-sx*r, cy+sy*r // arc center (equidistant r from both tangents)
 	} else {
-		cx, cy = a.x, b.y          // vertical-first corner
-		t1x, t1y = cx, cy-sy*r     // tangent on the vertical (incoming) leg
-		t2x, t2y = cx+sx*r, cy     // tangent on the horizontal (outgoing) leg
+		cx, cy = a.x, b.y      // vertical-first corner
+		t1x, t1y = cx, cy-sy*r // tangent on the vertical (incoming) leg
+		t2x, t2y = cx+sx*r, cy // tangent on the horizontal (outgoing) leg
 		ox, oy = cx+sx*r, cy-sy*r
 	}
 
