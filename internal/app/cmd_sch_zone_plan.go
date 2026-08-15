@@ -22,11 +22,12 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 // partitionModule is one functional module: a name + the union bbox of its parts.
 type partitionModule struct {
-	Name string     `json:"name"`
+	Name string `json:"name"`
 	// BBox 是画框口径(器件 ∪ 近旁 marker——旗要被框住,live 2026-08-12:GND 全
 	// 垂出框外);CoreBBox 是校验口径(仅器件):moduleOutsideZone / titleBlockHits
 	// / labelCollisions 用它——旗贴图签安全带或与区名带擦边是注释级余量问题,
@@ -734,6 +735,16 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	frames, verr := validateZoneDrawResult(v, len(plan.Partitions))
 	if verr != nil {
 		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames, verr)
+	}
+	// 把**画出来的**分区几何一并记下:zone-violation 要判所见,不是判九宫格。
+	if frames != nil {
+		frames.ModuleRects = map[string]workflow.SchZoneRect{}
+		for _, p := range plan.Partitions {
+			for _, m := range p.Modules {
+				frames.ModuleRects[m] = workflow.SchZoneRect{
+					MinX: p.BBox.MinX, MinY: p.BBox.MinY, MaxX: p.BBox.MaxX, MaxY: p.BBox.MaxY}
+			}
+		}
 	}
 	setRecordedZoneFrames(st, docUUID, "partition", frames)
 	if err := savePcbStageState(st); err != nil {

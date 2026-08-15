@@ -105,7 +105,13 @@ func parseSchZoneModuleFlags(items []string) (map[string]*schZoneClaim, error) {
 // zone's sub-rectangle of the sheet. Pure (unit-testable). Claimed-but-absent
 // designators are skipped — a part on another page simply isn't in comps, and
 // presence is the netlist/tier layers' concern, not geometry's.
-func findSchZoneViolations(zones map[string]*schZoneClaim, sheet layoutBBox, comps []layoutComp) []layoutFinding {
+// findSchZoneViolations 判「认领的件有没有落在自己的分区里」。
+//
+// drawn 是**画出来的**分区几何(partition 模式才有,模块名 → 矩形)。有它就用它:
+// 判据必须判所见 —— partition 的框是从活体模块 bbox 反推的,拿固定九宫格去判,
+// 会对着一张画得好好的图报违规。没有(固定九宫格模式)才退回 zoneRect(claim)。
+func findSchZoneViolations(zones map[string]*schZoneClaim, sheet layoutBBox, comps []layoutComp,
+	drawn map[string]workflow.SchZoneRect) []layoutFinding {
 	byDesig := map[string]layoutComp{}
 	for _, c := range comps {
 		if c.Designator != "" && c.BBox != nil {
@@ -120,10 +126,16 @@ func findSchZoneViolations(zones map[string]*schZoneClaim, sheet layoutBBox, com
 	var out []layoutFinding
 	for _, name := range names {
 		zc := zones[name]
-		if zc == nil || !pcbZoneNames[zc.Zone] {
+		if zc == nil {
+			continue
+		}
+		if _, drawnHere := drawn[name]; !drawnHere && !pcbZoneNames[zc.Zone] {
 			continue
 		}
 		rect := zoneRect(zc.Zone, sheet)
+		if r, ok := drawn[name]; ok {
+			rect = layoutBBox{MinX: r.MinX, MinY: r.MinY, MaxX: r.MaxX, MaxY: r.MaxY}
+		}
 		for _, d := range zc.Parts {
 			c, present := byDesig[d]
 			if !present {
@@ -219,6 +231,27 @@ func loadSchZoneClaimsForPage(cfg *appConfig, window, docUUID string) (map[strin
 		return nil, project, fmt.Errorf("select page-scoped schematic zones: pinned document UUID is empty")
 	}
 	return st.SchZonesForPage(docUUID), project, nil
+}
+
+// loadDrawnZoneRects 读**画出来的**分区几何(partition 模式的 zone-draw 记的账)。
+// 拿不到就返回 nil —— 判据退回固定九宫格,与旧行为一致。
+func loadDrawnZoneRects(cfg *appConfig, window, docUUID string) map[string]workflow.SchZoneRect {
+	project, err := resolveStageProject(cfg, window)
+	if err != nil {
+		return nil
+	}
+	st, err := loadPcbStageState(project)
+	if err != nil || st == nil {
+		return nil
+	}
+	if f := st.SchZoneFrameIdsByPage[docUUID]; f != nil && len(f.ModuleRects) > 0 {
+		return f.ModuleRects
+	}
+	if f := st.SchZoneFrameIds; f != nil && len(f.ModuleRects) > 0 &&
+		(f.DocumentUUID == "" || f.DocumentUUID == docUUID) {
+		return f.ModuleRects
+	}
+	return nil
 }
 
 // sheetBBoxOf pulls the sheet primitive's bbox out of a components.list parse
@@ -402,7 +435,8 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 				if comps, perr := parseLayoutComps(res.Result); perr == nil {
 					if sheet := sheetBBoxOf(comps); sheet != nil {
 						parts, _ := filterLayoutComps(comps, false)
-						v := findSchZoneViolations(zones, *sheet, parts)
+						v := findSchZoneViolations(zones, *sheet, parts,
+							loadDrawnZoneRects(pinnedCfg, win, docUUID))
 						if len(v) == 0 {
 							fmt.Fprintln(stdout, "  ✓ live check: all claimed parts (on the active page) inside their zones")
 						} else {

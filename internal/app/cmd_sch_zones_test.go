@@ -2,6 +2,8 @@ package app
 
 import (
 	"testing"
+
+	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
 func schZoneComps() []layoutComp {
@@ -25,7 +27,7 @@ func TestFindSchZoneViolations(t *testing.T) {
 		"MCU":   {Zone: "center", Parts: []string{"U1"}},
 		"POWER": {Zone: "left-top", Parts: []string{"U3", "C5", "J1", "C99"}},
 	}
-	v := findSchZoneViolations(zones, sheet, schZoneComps())
+	v := findSchZoneViolations(zones, sheet, schZoneComps(), nil)
 	if len(v) != 1 {
 		t.Fatalf("violations = %+v, want exactly C5", v)
 	}
@@ -41,11 +43,11 @@ func TestFindSchZoneViolationsYUp(t *testing.T) {
 	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 900, MaxY: 600}
 	comps := schZoneComps()
 	top := map[string]*schZoneClaim{"P": {Zone: "left-top", Parts: []string{"U3"}}}
-	if v := findSchZoneViolations(top, sheet, comps); len(v) != 0 {
+	if v := findSchZoneViolations(top, sheet, comps, nil); len(v) != 0 {
 		t.Errorf("U3 at y=500 should satisfy left-top on a y-up sheet, got %+v", v)
 	}
 	bottom := map[string]*schZoneClaim{"P": {Zone: "left-bottom", Parts: []string{"U3"}}}
-	if v := findSchZoneViolations(bottom, sheet, comps); len(v) != 1 {
+	if v := findSchZoneViolations(bottom, sheet, comps, nil); len(v) != 1 {
 		t.Errorf("U3 at y=500 should violate left-bottom, got %+v", v)
 	}
 }
@@ -121,5 +123,23 @@ func TestGroupSchZoneClaimsByPage(t *testing.T) {
 	}
 	if got["page-power"]["POWER"] == nil || got["page-peripheral"]["PERIPHERAL"] == nil {
 		t.Fatalf("page selectors did not resolve: %v", got)
+	}
+}
+
+// **判所见**:partition 模式的框是从活体模块 bbox 反推的,与固定九宫格无关 ——
+// 有画出来的几何就按它判,否则一张画得好好的图会被九宫格判成违规(真机实测:
+// 单模块页铺满整纸、认领 center、画的是 partition 框,lint 报 2 处 zone-violation)。
+func TestFindSchZoneViolations_PrefersTheDrawnRect(t *testing.T) {
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	zones := map[string]*schZoneClaim{"M": {Zone: "center", Parts: []string{"U1"}}}
+	comps := []layoutComp{{Designator: "U1", ComponentType: "part",
+		BBox: &layoutBBox{MinX: 100, MinY: 100, MaxX: 140, MaxY: 140}}} // 远在左下,九宫格 center 之外
+
+	if got := findSchZoneViolations(zones, sheet, comps, nil); len(got) != 1 {
+		t.Fatalf("没有画出来的几何时应退回九宫格判据: %+v", got)
+	}
+	drawn := map[string]workflow.SchZoneRect{"M": {MinX: 50, MinY: 50, MaxX: 400, MaxY: 400}}
+	if got := findSchZoneViolations(zones, sheet, comps, drawn); len(got) != 0 {
+		t.Fatalf("件在**画出来的**分区里就不该报违规: %+v", got)
 	}
 }

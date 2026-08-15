@@ -654,7 +654,8 @@ func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, al
 		rep.ZoneCheckError = "schematic zone claims are configured but the active page has no readable sheet bbox"
 	default:
 		rep.ZoneCheckStatus = "checked"
-		rep.ZoneViolations = findSchZoneViolations(zones, *sheet, realParts)
+		rep.ZoneViolations = findSchZoneViolations(zones, *sheet, realParts,
+			loadDrawnZoneRects(readCfg, readWindow, docUUID))
 	}
 	// 出图纸判据(issue #180 Fix C):与 zone 同档诚实披露 —— 读不到图纸 bbox 就
 	// 说 unavailable,绝不因为"没检查"而显得干净。allPages 下逐页图纸无法对应,
