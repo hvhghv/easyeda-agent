@@ -456,16 +456,16 @@ func markerLabel(c layoutComp) string {
 // counts and passed/total. Best-effort: a components.list failure is logged to
 // stderr and leaves the report untouched.
 func mergeMarkerGeomFindings(cfg *appConfig, window string, allPages bool, overlapEps float64, rep *checkReport, stderr io.Writer) {
+	mergeMarkerGeomFindingsWith(cfg, window, allPages, overlapEps, rep, stderr, nil)
+}
+
+// mergeMarkerGeomFindingsWith 是带**预读快照**的版本(geom=nil 时行为不变)。
+func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, overlapEps float64, rep *checkReport, stderr io.Writer, geom *schGeomSnapshot) {
 	payload := map[string]any{"includeBBox": true}
 	if allPages {
 		payload["allPages"] = true
 	}
-	res, err := requestAction(cfg, "schematic.components.list", window, payload)
-	if err != nil {
-		fmt.Fprintf(stderr, "sch check: marker-geometry skipped — components.list failed: %v\n", err)
-		return
-	}
-	comps, perr := parseLayoutComps(res.Result)
+	comps, perr := geom.compsOr(cfg, window, payload)
 	if perr != nil {
 		fmt.Fprintf(stderr, "sch check: marker-geometry skipped — %v\n", perr)
 		return

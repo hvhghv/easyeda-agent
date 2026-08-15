@@ -153,9 +153,9 @@ func resolveGateStages(only, skip string) (run []string, skipped []string, err e
 
 // gateLayoutStage runs layout-lint and grades it. Overlaps and pin-coincidences
 // are blocking (a real geometric defect); tight spacing is advisory.
-func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allPages, strict bool) gateStage {
+func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allPages, strict bool, geom *schGeomSnapshot) gateStage {
 	st := gateStage{Name: "layout-lint"}
-	rep, err := collectLayoutLint(cfg, window, minGap, pinEps, allPages, false, strict)
+	rep, err := collectLayoutLintWith(cfg, window, minGap, pinEps, allPages, false, strict, geom)
 	if err != nil {
 		st.Status, st.Error = gateStatusError, err.Error()
 		st.Summary = "layout-lint 没能跑起来"
@@ -215,7 +215,7 @@ func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allP
 
 // gateCheckStage runs the reconstructed design check. fatal/error findings block;
 // warn/info are advisory unless --strict.
-func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overlapEps float64, stderr io.Writer) gateStage {
+func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overlapEps float64, stderr io.Writer, geom *schGeomSnapshot) gateStage {
 	st := gateStage{Name: "check"}
 	payload := map[string]any{}
 	if allPages {
@@ -233,7 +233,7 @@ func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overla
 		st.Summary = "sch check 返回了无法解析的结构"
 		return st
 	}
-	mergeMarkerGeomFindings(cfg, window, allPages, overlapEps, &rep, stderr)
+	mergeMarkerGeomFindingsWith(cfg, window, allPages, overlapEps, &rep, stderr, geom)
 	st.Detail = rep
 	for _, f := range rep.Findings {
 		switch strings.ToLower(f.Level) {
@@ -305,19 +305,12 @@ func formatTypeTally(tally map[string]int) string {
 // 标签压器件 / 标签探出图纸」恰恰只发生在这些图元上 —— 同一张画布上有 11 处标签
 // 重叠时它照样报 `✓ placement gate passed`。判据结构上看不见的东西,只能由另一个
 // 判据补上;补了还不进门,等于没补。
-func gateClustersStage(cfg *appConfig, window string, strict bool) gateStage {
+func gateClustersStage(cfg *appConfig, window string, strict bool, geom *schGeomSnapshot) gateStage {
 	st := gateStage{Name: "clusters"}
-	res, err := requestAction(cfg, "schematic.components.list", window,
-		map[string]any{"includeBBox": true, "includePins": true})
-	if err != nil {
-		st.Status, st.Error = gateStatusError, err.Error()
-		st.Summary = "sch clusters 没能读到几何"
-		return st
-	}
-	comps, perr := parseLayoutComps(res.Result)
+	comps, perr := geom.compsOr(cfg, window, map[string]any{"includeBBox": true, "includePins": true})
 	if perr != nil {
 		st.Status, st.Error = gateStatusError, perr.Error()
-		st.Summary = "sch clusters 拿到了无法解析的几何"
+		st.Summary = "sch clusters 没能读到几何"
 		return st
 	}
 	wires, _ := fetchSchWirePolylines(cfg, window, "") // 读不到线只降级归属,不阻断
@@ -534,6 +527,18 @@ func collectSchGate(cfg *appConfig, window string, allPages, strict, failFast bo
 		return nil, err
 	}
 
+	// **一次 gate 只读一次几何**。三关(layout-lint / clusters / check 的 marker 规则)
+	// 判的是同一张画布的同一时刻,却各读各的 —— 实测一次 `gate --strict` 打 3 发
+	// components.list,其中两发 payload 完全相同。6 个器件的页上这是 0.93s,可
+	// includePins 的代价随引脚数涨(81 脚模组单次 18s),同一页就是 54s;整场 E2E 里
+	// components.list 吃掉 41% 的 daemon 时间。
+	//
+	// 快照**显式传递**而不是在 dispatch 层做隐式缓存:试过后者,它既打破了靠「每次
+	// 注入不同响应」工作的 fake-dispatcher 测试,又因为 debug.exec_js 被标记为写动作
+	// 而在关与关之间全被清空 —— 一点没省。作用域限定在这里,失效问题根本不存在:
+	// gate 全程只读,读完就用完。
+	geom := gatePreloadGeometry(cfg, window, allPages)
+
 	rep := gateReport{Stages: make([]gateStage, 0, len(gateStages))}
 	byName := map[string]gateStage{}
 	hardStopped := false
@@ -545,11 +550,11 @@ func collectSchGate(cfg *appConfig, window string, allPages, strict, failFast bo
 		var st gateStage
 		switch name {
 		case "layout-lint":
-			st = gateLayoutStage(cfg, window, minGap, pinEps, allPages, strict)
+			st = gateLayoutStage(cfg, window, minGap, pinEps, allPages, strict, geom)
 		case "clusters":
-			st = gateClustersStage(cfg, window, strict)
+			st = gateClustersStage(cfg, window, strict, geom)
 		case "check":
-			st = gateCheckStage(cfg, window, allPages, strict, overlapEps, stderr)
+			st = gateCheckStage(cfg, window, allPages, strict, overlapEps, stderr, geom)
 		case "bridge-check":
 			st = gateBridgeStage(cfg, window, allPages, strict)
 		case "drc":

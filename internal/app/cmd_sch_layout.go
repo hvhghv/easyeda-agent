@@ -579,6 +579,13 @@ func runLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPag
 // layout-lint as one stage of an aggregate report (the flag-validation and the
 // exit-code contract stay in runLayoutLint — a stage decides its own verdict).
 func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, allPages, includeNonParts, strict bool) (layoutReport, error) {
+	return collectLayoutLintWith(cfg, window, minGap, pinEps, allPages, includeNonParts, strict, nil)
+}
+
+// collectLayoutLintWith 是 collectLayoutLint 带**预读快照**的版本。geom 为 nil
+// (单命令路径)时行为与原来逐字相同;`sch gate` 传进来一份共享快照,省掉重复的
+// components.list —— 它占整场 E2E 的 41% daemon 时间(见 sch_geom_snapshot.go)。
+func collectLayoutLintWith(cfg *appConfig, window string, minGap, pinEps float64, allPages, includeNonParts, strict bool, geom *schGeomSnapshot) (layoutReport, error) {
 	var zero layoutReport
 	readCfg, readWindow, docUUID := cfg, window, ""
 	if !allPages {
@@ -592,21 +599,26 @@ func collectLayoutLint(cfg *appConfig, window string, minGap, pinEps float64, al
 	if allPages {
 		payload["allPages"] = true
 	}
-	var res *actionResult
-	var err error
-	if allPages {
-		res, err = requestAction(readCfg, "schematic.components.list", readWindow, payload)
+	var comps []layoutComp
+	if geom.covers(payload) {
+		comps = geom.comps
 	} else {
-		res, err = requestAutolayoutAction(readCfg, "schematic.components.list", readWindow,
-			payload, docUUID, "read layout-lint geometry")
-	}
-	if err != nil {
-		return zero, err
-	}
-
-	comps, perr := parseLayoutComps(res.Result)
-	if perr != nil {
-		return zero, perr
+		var res *actionResult
+		var err error
+		if allPages {
+			res, err = requestAction(readCfg, "schematic.components.list", readWindow, payload)
+		} else {
+			res, err = requestAutolayoutAction(readCfg, "schematic.components.list", readWindow,
+				payload, docUUID, "read layout-lint geometry")
+		}
+		if err != nil {
+			return zero, err
+		}
+		var perr error
+		comps, perr = parseLayoutComps(res.Result)
+		if perr != nil {
+			return zero, perr
+		}
 	}
 	realParts, _ := filterLayoutComps(comps, false)
 	parts, skipped := filterLayoutComps(comps, includeNonParts)
