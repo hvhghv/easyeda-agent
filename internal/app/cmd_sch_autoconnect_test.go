@@ -914,3 +914,59 @@ func TestApplyLaneStagger_NeverPicksACandidateOverAPart(t *testing.T) {
 		t.Errorf("同侧无干净出路时应换方向: got %s@%v", got.Direction, got.Offset)
 	}
 }
+
+// **背面引出是红线**:左侧引脚的 marker 从右边引出,桩线要穿过/绕过器件本体,
+// 读图的人追不到线。代价必须比任何软破坏(压器件 10000)都贵 —— 实测 C7_N3 接
+// U3 左侧的 V3 脚,marker 却落到了右边,就是因为朝向只值 -20 而撞标签值 +1000。
+func TestScoreCandidate_OppositeSideIsCostlierThanAnySoftDamage(t *testing.T) {
+	owner := layoutBBox{MinX: 0, MinY: 0, MaxX: 100, MaxY: 100}
+	pin := acPin{X: -2, Y: 50, Designator: "U3", PinNumber: "4", OwnerBBox: &owner} // 左侧引脚
+	if got := outwardDirection(pin); got != "left" {
+		t.Fatalf("fixture 不成立:左侧引脚的朝外方向应是 left, got %q", got)
+	}
+	rules := defaultAutoconnectRules()
+	// 左侧(朝外)全被已有 marker 占死,右侧(背面)干净 —— 旧权重下会选右侧
+	var flags []layoutBBox
+	for x := -300.0; x <= -10; x += 5 {
+		flags = append(flags, layoutBBox{MinX: x - 3, MinY: 30, MaxX: x + 3, MaxY: 70})
+	}
+	got := planConnection(pin, "netport", "C7_N3", acScene{Flags: flags, Parts: []layoutBBox{owner}}, rules)
+	if len(got) == 0 {
+		t.Fatal("没有候选")
+	}
+	if got[0].Direction == "right" {
+		t.Errorf("宁可挤也不能从背面引出: 选了 %s@%v", got[0].Direction, got[0].Offset)
+	}
+	// 代价排序:背面 > 压器件
+	if costOppositeSide <= costPartOverlap {
+		t.Errorf("背面引出(%v)必须比压器件(%v)更贵", costOppositeSide, costPartOverlap)
+	}
+}
+
+func TestOppositeDirection(t *testing.T) {
+	for in, want := range map[string]string{"left": "right", "right": "left", "up": "down", "down": "up", "": ""} {
+		if got := oppositeDirection(in); got != want {
+			t.Errorf("oppositeDirection(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// **lane 错开不能凌驾于正确性之上**。真机:U3:V3 左侧撞标签(1583),lane 因为
+// 「左侧已被占」去找没被占用的方向,把 marker 甩到了背面(50597)—— 分数高了 32 倍,
+// 而排序本身是对的,是 lane 在排序之外强行改选。
+func TestApplyLaneStagger_NeverFlipsToTheOppositeSide(t *testing.T) {
+	all := []acCandidate{
+		{Direction: "left", Offset: 30, Score: 1583,
+			Reasons: []acReason{{costFlagCollision, "label collides with an existing flag/port/label"}}},
+		{Direction: "right", Offset: 78, Score: 50597,
+			Reasons: []acReason{{costOppositeSide, "引出方向与引脚朝外方向相反 —— 桩线要穿过/绕过器件本体"}}},
+	}
+	lanes := map[string]float64{laneKeyOf("U3", "left"): 18}
+	got := applyLaneStagger(all, lanes, "U3", "C7_N3", "netport")
+	if candidateGoesOppositeSide(got) {
+		t.Fatalf("宁可挤在正面,也不能为了错开翻到背面: %+v", got)
+	}
+	if got.Direction != "left" {
+		t.Errorf("应退回正面的最优: got %s@%v", got.Direction, got.Offset)
+	}
+}

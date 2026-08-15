@@ -165,12 +165,16 @@ const (
 	// costFlagCollision (a folded label DOES beat overlapping a part or another
 	// label). Ground/power markers are near-square and stay exempt.
 	costFoldedPort    = 150
-	costFanoutChannel = 100  // too close to a preserved pin-fanout channel
-	costOffsetPerUnit = 0.1  // +offset * 0.1 — prefer shorter stubs
-	bonusOutwardSide  = -20  // direction matches the pin's outward side
-	bonusKindDefault  = -10  // direction matches the kind default (GND down / power up / port outward)
-	acCoordEps        = 0.01 // coordinate-equality tolerance
-	acOverlapEps      = 1e-6 // positive-length threshold for interval/area overlap
+	costFanoutChannel = 100 // too close to a preserved pin-fanout channel
+	costOffsetPerUnit = 0.1 // +offset * 0.1 — prefer shorter stubs
+	bonusOutwardSide  = -20 // direction matches the pin's outward side
+	// costOppositeSide:从引脚**背面**引出。比压器件(10000)还贵 —— 压盖是可见、可
+	// 后修的,方向反了则整根线的走向都是错的。不做硬拒绝是为了留最后一条活路:
+	// 真的四面楚歌时,一根难看的线仍好过一次失败的连接。
+	costOppositeSide = 50000
+	bonusKindDefault = -10  // direction matches the kind default (GND down / power up / port outward)
+	acCoordEps       = 0.01 // coordinate-equality tolerance
+	acOverlapEps     = 1e-6 // positive-length threshold for interval/area overlap
 )
 
 // acMarkerBBoxProfile is the measured rendered-body envelope of one marker
@@ -221,6 +225,21 @@ func markerBBoxProfile(canonicalKind, net string) acMarkerBBoxProfile {
 	default: // power and any future netflag family: conservative power envelope
 		return acMarkerBBoxProfile{Near: 4.5, Far: 10.5, Cross: 5.5}
 	}
+}
+
+// oppositeDirection 返回一个方向的正对面;传入空或未知方向时返回空。
+func oppositeDirection(dir string) string {
+	switch dir {
+	case "left":
+		return "right"
+	case "right":
+		return "left"
+	case "up":
+		return "down"
+	case "down":
+		return "up"
+	}
+	return ""
 }
 
 // endpointFor computes where connect_pin will land the stub end for a given
@@ -622,8 +641,19 @@ func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, target
 	reasons = append(reasons, acReason{round2(offset * costOffsetPerUnit), "offset cost"})
 
 	// -20 direction matches the pin's outward side.
-	if outwardDirection(pin) == dir {
+	out := outwardDirection(pin)
+	if out == dir {
 		reasons = append(reasons, acReason{bonusOutwardSide, "matches pin outward side"})
+	}
+	// **背面引出是红线**。左侧引脚的 marker 从右边引出,桩线就要穿过或绕过器件本体
+	// —— 读图的人根本追不到那根线,而 DRC 不管这个。
+	//
+	// 朝向过去只是 -20 的奖励,而撞一次标签是 +1000:评分器于是毫不犹豫地为了躲
+	// 一次重叠把 marker 甩到引脚背面(实测 C7_N3 接 U3 左侧的 V3 脚,marker 却落在
+	// 右边)。代价必须比任何一种软破坏都贵 —— 挤一点可以后修,方向反了整张图就读错了。
+	// 避碰撞的正解是**挪器件**,不是把 marker 甩到反面。
+	if opp := oppositeDirection(out); opp != "" && dir == opp {
+		reasons = append(reasons, acReason{costOppositeSide, "引出方向与引脚朝外方向相反 —— 桩线要穿过/绕过器件本体"})
 	}
 	// -10 direction matches the kind default.
 	if kindDefaultDirection(canonicalKind) == dir {
@@ -844,6 +874,25 @@ func candidateHitsPartOrText(c acCandidate) bool {
 	return false
 }
 
+// candidateGoesOppositeSide reports whether this候选 引出方向与引脚朝外方向相反。
+func candidateGoesOppositeSide(c acCandidate) bool {
+	for _, r := range c.Reasons {
+		if r.Cost == costOppositeSide {
+			return true
+		}
+	}
+	return false
+}
+
+// laneUnacceptable 汇总「为了错开也绝不能选」的候选:短路、压器件/说明、背面引出。
+// **这三条必须一起判**。真机教训:第一版只挡短路,推远时压到了 D1;补上压器件之后,
+// 「换一个没被占用的方向」那一步又把 C7_N3 甩到了 U3 背面(score 50597 竟然胜过
+// 左侧的 1583 —— 不是排序错了,是 lane 在排序之外强行改选)。
+// 错开是**优化**,它不能凌驾于任何一条正确性判据之上。
+func laneUnacceptable(c acCandidate) bool {
+	return candidateHardRejected(c) || candidateHitsPartOrText(c) || candidateGoesOppositeSide(c)
+}
+
 // applyLaneStagger 在候选里挑一个**尊重同侧 lane** 的:如果这一侧已经落过 marker,
 // 新的必须比它远出一个 body 长度。找不到就退回原来的最优 —— 让位给 #64 那些硬
 // 约束,宁可挤一点也不能短路。
@@ -872,14 +921,14 @@ func applyLaneStagger(all []acCandidate, lanes map[string]float64,
 		// 于是把 marker 推远时推到了邻近器件身上 —— 真机当场多出两条
 		// 「D1(part) 与 MCU_TX(netport) 重叠 26.00×11.00」。压器件和压标签一样
 		// 是视觉破坏,换一种破坏不算解决。
-		if candidateHardRejected(c) || candidateHitsPartOrText(c) {
+		if laneUnacceptable(c) {
 			continue
 		}
 		return c
 	}
 	// 同方向没有出路时,换个没被占用的方向往往比硬挤强。
 	for _, c := range all {
-		if candidateHardRejected(c) || candidateHitsPartOrText(c) {
+		if laneUnacceptable(c) {
 			continue
 		}
 		if _, taken := lanes[laneKeyOf(designator, c.Direction)]; !taken {
