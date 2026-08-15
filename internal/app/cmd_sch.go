@@ -1841,6 +1841,7 @@ the selection). Without --ids it exports the whole active page.`,
 	// 四个单命令原样保留(专家 + 局部复查),但主干路径走 gate。
 	sch.AddCommand(newSchGateCmd(cfg, &window, stdout, stderr))
 	sch.AddCommand(newSchStatusCmd(cfg, &window, stdout, stderr))
+	sch.AddCommand(newSchNetsCmd(cfg, &window, stdout, stderr))
 
 	return sch
 }
