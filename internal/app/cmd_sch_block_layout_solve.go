@@ -648,6 +648,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 	}
 	fmt.Fprintf(stderr, "relational: 锚 %s 实测 bbox [%.0f,%.0f]-[%.0f,%.0f],%d 个引脚;求解 %d 件\n",
 		anchorDesig, anchorBBox.MinX, anchorBBox.MinY, anchorBBox.MaxX, anchorBBox.MaxY, len(pins), n)
+	notes = append(notes, bslExpandForMarkers(plan, anchorBBox, pins, usable, stderr)...)
 	return notes
 }
 
@@ -688,4 +689,134 @@ func bapDropRelationalLayout(in []string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// bslMarkerLanePitch 是同侧两条 marker lane 的间距:netport 典型 body 长 38 + 间隙。
+// 与 autoconnect 的 laneStepFor 同量级 —— 布局留的空间和落点要的空间必须对齐。
+const bslMarkerLanePitch = 46.0
+
+// ── marker 通道不够就把器件推开(ADR-0003 时间窗)──────────────────────────────
+//
+// **这一步发生在 place 之后、connect_pin 之前**:器件已落地(有实测引脚),marker 一根
+// 都还没建 —— 挪一个件只是一次 component.modify,零风险。窗口之外挪件要面对
+// 「删桩线→相邻共线导线合并→串网」。
+//
+// 为什么必须是**反馈**而不是前馈:上一版把所有 flow 间距按最坏情况预留(前馈),
+// 块从 631 撑到 1000+,J1 直接放不下降级到网格,markerOverlaps 反而 5→10。
+// 现在改成先落地、**实测哪一侧真的挤**、只推那一侧 —— 不会全局放大。
+//
+// 算术很简单,也正是重叠的全部来源:
+//
+//	该侧要挂 N 个 marker → 需要 N × bslMarkerLanePitch 的深度
+//	与该侧最近器件的实际空隙 < 需求 → 差多少就把那个件推开多少
+func bslExpandForMarkers(plan *bapPlan, anchorBBox layoutBBox, pins map[string]acPin,
+	usable *layoutBBox, stderr io.Writer) []string {
+
+	// 1. 数锚件每一侧要挂几个 marker。引脚在锚件中心的哪边就算哪一侧。
+	cx := (anchorBBox.MinX + anchorBBox.MaxX) / 2
+	need := map[string]int{}
+	marked := map[string]bool{}
+	for _, n := range plan.Nets {
+		for _, m := range n.Members {
+			marked[strings.ToUpper(m)] = true
+		}
+	}
+	anchorDesig := ""
+	for _, p := range plan.Placements {
+		if p.Role == plan.AnchorRole {
+			anchorDesig = strings.ToUpper(p.Designator)
+		}
+	}
+	seen := map[string]bool{}
+	for _, pin := range pins {
+		if seen[pin.PinNumber] {
+			continue // pins 同时按号和名索引,只数一次
+		}
+		seen[pin.PinNumber] = true
+		if anchorDesig != "" && !marked[anchorDesig+":"+strings.ToUpper(pin.PinNumber)] &&
+			!marked[anchorDesig+":"+strings.ToUpper(pin.PinName)] {
+			continue // 这个引脚不挂 marker
+		}
+		if pin.X < cx {
+			need["left"]++
+		} else {
+			need["right"]++
+		}
+	}
+
+	// 2. 每一侧:够不够?不够就把该侧最近的件推开。
+	var notes []string
+	for _, side := range []string{"left", "right"} {
+		cnt := need[side]
+		if cnt == 0 {
+			continue
+		}
+		want := float64(cnt) * bslMarkerLanePitch
+		idx, gap := bslNearestOnSide(plan, anchorBBox, side)
+		if idx < 0 {
+			continue // 这一侧没有别的件,marker 有整片空地
+		}
+		if gap >= want {
+			continue
+		}
+		push := want - gap
+		dx := push
+		if side == "left" {
+			dx = -push
+		}
+		target := &plan.Placements[idx]
+		nx := snapAnchor(target.X + dx)
+		// 推出可用区就推不动了 —— 说明这一页真的塞不下,如实说,别硬推。
+		if usable != nil && (nx < usable.MinX || nx > usable.MaxX) {
+			notes = append(notes, fmt.Sprintf(
+				"%s 侧要挂 %d 个 marker(需 %.0f),与 %s 只有 %.0f —— 推开 %s 会出可用区,只能挤着放;"+
+					"这一块该换更大图纸或拆页", side, cnt, want, target.Designator, gap, target.Designator))
+			continue
+		}
+		fmt.Fprintf(stderr, "relational: %s 侧 %d 个 marker 需 %.0f,实际只有 %.0f —— 把 %s 推开 %.0f\n",
+			side, cnt, want, gap, target.Designator, push)
+		target.X = nx
+	}
+	return notes
+}
+
+// bslNearestOnSide 找锚件某一侧**真正挡住 marker 通道**的那个件。
+//
+// 判据不是「x 最近」而是「落在通道带里」:marker 从锚件某一侧引出,占的是那一侧
+// **与锚件同高**的一条带。第一版只比 x,于是要推 R5(下方的 pair 电阻)和 C8
+// (贴 VCC 脚的去耦)—— 它们根本不在带上,推了既不腾空间又破坏关系语义。
+//
+// attach 件永不推:它的全部意义就是贴着那个引脚(去耦电容离芯片越近越好),
+// 为了给 marker 让路把它推走,是拿电气质量换版面。
+func bslNearestOnSide(plan *bapPlan, anchorBBox layoutBBox, side string) (int, float64) {
+	best, bestGap := -1, math.Inf(1)
+	half := bapHalfExtentFn(0, nil)
+	for i := range plan.Placements {
+		p := &plan.Placements[i]
+		if p.Role == plan.AnchorRole || p.Source == "attach" {
+			continue
+		}
+		// 只算与锚件同高的:通道带就是锚件的 y 跨度。
+		if p.Y < anchorBBox.MinY || p.Y > anchorBBox.MaxY {
+			continue
+		}
+		h := half(p.Role)
+		var gap float64
+		switch side {
+		case "left":
+			if p.X >= anchorBBox.MinX {
+				continue
+			}
+			gap = anchorBBox.MinX - (p.X + h)
+		case "right":
+			if p.X <= anchorBBox.MaxX {
+				continue
+			}
+			gap = (p.X - h) - anchorBBox.MaxX
+		}
+		if gap < bestGap {
+			best, bestGap = i, gap
+		}
+	}
+	return best, bestGap
 }
