@@ -1546,6 +1546,10 @@ combine it with neither --all-pages (inactive-page data is shallow) nor
 		sch.AddCommand(c)
 	}
 
+	// ── clusters ──────────────────────────────────────────────────────────
+	// L1 虚拟组判据(器件 + 它自己的 marker/桩线),核心在 cmd_sch_clusters.go。
+	sch.AddCommand(newSchClustersCmd(cfg, &window, stdout, stderr))
+
 	// ── sheet-geometry ────────────────────────────────────────────────────
 	// Normalized sheet bounds + title-block keep-out (issue #26). The single
 	// source placement/routing planners (autoconnect/autolayout) consume, so A4
