@@ -878,7 +878,14 @@ func renderLayoutReport(rep layoutReport, w io.Writer) {
 		fmt.Fprintf(w, "  %s  sheet-check unavailable: %s\n", softSeverity, rep.SheetCheckError)
 	}
 	if rep.SkippedNonParts > 0 {
-		fmt.Fprintf(w, "  note: %d non-part primitive(s) excluded (sheet/title-frame, netflag/netport/…); pass --include-non-parts to include\n", rep.SkippedNonParts)
+		// **这条不能只是 note**:排除掉的正是 netflag/netport,而「标签压标签 / 标签压
+		// 器件」恰恰只发生在它们身上。此前这里一路打印 `✓ placement gate passed`,
+		// 而同一张画布上有 11 处标签重叠 —— 用户一眼看见,工具全绿。判据看不见的东西,
+		// 必须在判据自己的输出里说清楚它没看,并指出谁看得见。
+		fmt.Fprintf(w, "  %s  未判定 %d 个非 part 图元(图框 / netflag / netport / 文字)——\n"+
+			"        本命令只判器件本体,**标签之间、标签压器件的重叠不在其中**;\n"+
+			"        跑 `easyeda sch clusters --strict` 才看得到(--include-non-parts 是粗筛,\n"+
+			"        它会把旗和它自己的桩线也算成一处重叠)\n", softSeverity, rep.SkippedNonParts)
 	}
 	if len(rep.NoBBox) > 0 {
 		fmt.Fprintf(w, "  %s  no-bbox  %d component(s) NOT CHECKED (no bbox — likely non-active-page shallow data under --all-pages; `doc switch` to that page to lint it): %v\n",

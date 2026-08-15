@@ -591,6 +591,41 @@ func bslRoleReachFrom(plan *bapPlan) map[string]float64 {
 	return out
 }
 
+// bslRoleNameHalf 是某个角色的 marker 名字横向占地的一半 —— 名字以桩线为中心左右
+// 各半,所以判两件挨不挨得住,要各让出半个名字宽。宽度口径与 acPortTotalLen 的
+// 名字部分一致(6×字数 + 8),同一把尺。
+func bslRoleNameHalf(nets [][]string, role string) float64 {
+	max := 0.0
+	for _, net := range nets {
+		name, has := "", false
+		for _, m := range net {
+			if strings.HasPrefix(m, "PORT:") {
+				if name == "" {
+					name = strings.TrimPrefix(m, "PORT:")
+				}
+				continue
+			}
+			r, pin, ok := splitBlockPinRef(m)
+			if !ok {
+				continue
+			}
+			if r == role {
+				has = true
+				if name == "" {
+					name = pin
+				}
+			}
+		}
+		if !has {
+			continue
+		}
+		if w := (6*float64(len(name)) + 8) / 2; w > max {
+			max = w
+		}
+	}
+	return max
+}
+
 // bslNetOfPins 找同时含 target 引脚与 role 任一脚的那条网的名字(用第一个 PORT:
 // 名,没有就用目标引脚名当代理)—— 只为算 marker 标签宽度,不参与电气。
 func bslNetOfPins(nets [][]string, target, role string) string {
