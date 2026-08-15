@@ -102,17 +102,22 @@ func TestScoreCandidate_TitleBlockClearNotRejected(t *testing.T) {
 	}
 }
 
-// netport 的 body **跟着网名变长** —— 与 relayoutPortWidth 同一把尺。写死 31
-// (旧行为)会把任何长于 3 字符的网名少算,评分器于是算出「刚好不撞」而渲染出来
-// 擦在一起:实测 C7_N3 真实跨度 38,比预测多 7 个单位。
+// netport 的**本体**是平台实测的六边形(恒 31,与网名无关),名字画在本体外面 ——
+// 所以跟着网名变长的是 predictedMarkerBBox(本体 ∪ 文字带),不是 body。
+// 实测佐证:同一页里 `C7_N3` 与 `USB_DTR` 的平台 bbox 一模一样,都是 31×11。
 func TestPredictedMarkerBBox_NetPortWidthTracksNetName(t *testing.T) {
 	short := predictedMarkerBody(100, 200, "net_port_bi", "right", "N1")
 	long := predictedMarkerBody(100, 200, "net_port_bi", "right", "C7_N3")
-	if !(long.MaxX > short.MaxX) {
-		t.Errorf("长网名的 netport 必须更宽: short=%v long=%v", short.MaxX, long.MaxX)
+	if short != long {
+		t.Errorf("本体是六边形,不该跟网名变: short=%v long=%v", short, long)
 	}
-	if got, want := long.MaxX-100, 9.5+relayoutPortWidth("C7_N3"); got != want {
-		t.Errorf("netport 伸出 = %v, want %v(与 relayoutPortWidth 同尺)", got, want)
+	sb := predictedMarkerBBox(100, 200, "net_port_bi", "right", "N1")
+	lb := predictedMarkerBBox(100, 200, "net_port_bi", "right", "C7_N3")
+	if !(lb.MaxX > sb.MaxX) {
+		t.Errorf("总占地必须跟着网名变长: short=%v long=%v", sb.MaxX, lb.MaxX)
+	}
+	if got, want := lb.MaxX-100, 9.5+acPortTotalLen("C7_N3"); got != want {
+		t.Errorf("netport 总伸出 = %v, want %v(六边形 + 名字)", got, want)
 	}
 	// ground/power 是固定符号,不该跟网名走
 	g1 := predictedMarkerBody(100, 200, "ground", "right", "GND")
@@ -156,9 +161,14 @@ func TestPredictedMarkerBBox_IncludesTextBandLikeSchCheck(t *testing.T) {
 			}
 		}
 	}
-	// netport 的名字画在本体内,没有额外文字带(与 flagTextBand 同口径)
-	if predictedFlagTextBand(x, y, layoutBBox{}, "net_port_bi", "right", "C7_N3") != nil {
-		t.Error("netport 不该有额外文字带")
+	// netport 的名字画在**本体外**,必须有文字带 —— 长度 = 总占地 − 六边形。
+	pb := predictedMarkerBody(x, y, "net_port_bi", "right", "C7_N3")
+	nb := predictedFlagTextBand(x, y, pb, "net_port_bi", "right", "C7_N3")
+	if nb == nil {
+		t.Fatal("netport 的名字画在本体外,必须有文字带")
+	}
+	if got, want := nb.MaxX-nb.MinX, acPortTotalLen("C7_N3")-acPortBodyLen; got != want {
+		t.Errorf("netport 文字带长 %v, want %v", got, want)
 	}
 }
 

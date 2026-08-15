@@ -233,8 +233,10 @@ func TestAutoconnect_BatchRegistersPredictedMarkerBBox(t *testing.T) {
 	if first.Direction != "right" || first.Offset != 18 {
 		t.Fatalf("first port should take right@18, got %s@%.0f", first.Direction, first.Offset)
 	}
-	if second.Direction != "right" || second.Offset != 54 {
-		t.Fatalf("second port should clear the first measured body at right@54, got %s@%.0f", second.Direction, second.Offset)
+	// 让开的那一档要越过前一支的**整个占地**(六边形 + 名字 + 间隙),不是只越过六边形。
+	if want := 18 + laneStepFor("net_port_bi", "N1"); second.Direction != "right" || second.Offset < want {
+		t.Fatalf("second port should clear the first marker's full footprint (≥%.0f), got %s@%.0f",
+			want, second.Direction, second.Offset)
 	}
 	a := predictedMarkerBBox(first.EndPoint.X, first.EndPoint.Y, "net_port_bi", first.Direction, "N1")
 	b := predictedMarkerBBox(second.EndPoint.X, second.EndPoint.Y, "net_port_bi", second.Direction, "N1")

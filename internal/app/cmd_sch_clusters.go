@@ -40,6 +40,8 @@ type schCluster struct {
 	Wires       int        `json:"wires"`   // 归属的桩线数(跨组的不算)
 	// Members 是组成它的每一个图元的实测 box —— 判组间重叠用它,不用包络。
 	Members []layoutBBox `json:"-"`
+	// Detail 是每个成员的可读描述(类型/网名/bbox),--members 时打印给人核对。
+	Detail []string `json:"members,omitempty"`
 }
 
 // schClusterFinding 是一条判定结果。
@@ -111,6 +113,13 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 			MaxX: math.Max(cur.MaxX, b.MaxX), MaxY: math.Max(cur.MaxY, b.MaxY),
 		}
 		members[d] = append(members[d], b)
+	}
+	detail := map[string][]string{}
+	note := func(d, kind, net string, b layoutBBox) {
+		detail[d] = append(detail[d], fmt.Sprintf("%-8s %-8s x=[%.0f,%.0f] y=[%.0f,%.0f]", kind, net, b.MinX, b.MaxX, b.MinY, b.MaxY))
+	}
+	for d, b := range body {
+		note(d, "part", d, b)
 	}
 	quant := func(x, y float64) [2]int64 {
 		return [2]int64{int64(math.Round(x)), int64(math.Round(y))}
@@ -194,6 +203,7 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 		}
 		for o := range touch[r] {
 			grow(o, wireBox[wi])
+			note(o, "wire", "", wireBox[wi])
 			wireCount[o]++
 		}
 	}
@@ -235,7 +245,9 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 			}
 			owner = o
 		}
-		grow(owner, markerJudgeBBox(c))
+		jb := markerJudgeBBox(c)
+		grow(owner, jb)
+		note(owner, c.ComponentType, c.Net, jb)
 		markers[owner]++
 	}
 
@@ -243,7 +255,8 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 	for _, d := range order {
 		out = append(out, schCluster{
 			Designator: d, PrimitiveID: idOf[d], Device: devOf[d],
-			Body: body[d], Box: box[d], Markers: markers[d], Wires: wireCount[d], Members: members[d],
+			Body: body[d], Box: box[d], Markers: markers[d], Wires: wireCount[d],
+			Members: members[d], Detail: detail[d],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -342,7 +355,7 @@ func judgeSchClusters(cs []schCluster, usable *layoutBBox, minGap float64) []sch
 }
 
 // runSchClusters 读实测几何 → 建组 → 判定 → 打印。只读,不改画布。
-func runSchClusters(cfg *appConfig, window string, minGap float64, asJSON, strict bool,
+func runSchClusters(cfg *appConfig, window string, minGap float64, asJSON, strict, showMembers bool,
 	stdout, stderr io.Writer) error {
 
 	res, err := requestAction(cfg, "schematic.components.list", window,
@@ -383,6 +396,11 @@ func runSchClusters(cfg *appConfig, window string, minGap float64, asJSON, stric
 				c.Designator, c.Box.MinX, c.Box.MaxX, c.Box.MinY, c.Box.MaxY,
 				c.Box.MaxX-c.Box.MinX, c.Box.MaxY-c.Box.MinY,
 				c.Body.MaxX-c.Body.MinX, c.Body.MaxY-c.Body.MinY, c.Markers, c.Wires)
+			if showMembers {
+				for _, m := range c.Detail {
+					fmt.Fprintf(stdout, "         %s\n", m)
+				}
+			}
 		}
 		if unowned > 0 {
 			fmt.Fprintf(stdout, "  note: %d 支 marker 既不沾任何导线、离谁都远,未计入任何组\n", unowned)
@@ -424,7 +442,7 @@ func runSchClusters(cfg *appConfig, window string, minGap float64, asJSON, stric
 // newSchClustersCmd 注册 `sch clusters`。
 func newSchClustersCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var minGap float64
-	var asJSON, strict bool
+	var asJSON, strict, showMembers bool
 	c := &cobra.Command{
 		Use:   "clusters",
 		Short: "列出 L1 虚拟组(器件 + 它自己的 marker/桩线)并判组间重叠 / 出图纸",
@@ -448,12 +466,13 @@ func newSchClustersCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
   easyeda sch clusters --strict
   easyeda sch clusters --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSchClusters(cfg, *window, minGap, asJSON, strict, stdout, stderr)
+			return runSchClusters(cfg, *window, minGap, asJSON, strict, showMembers, stdout, stderr)
 		},
 	}
 	c.Flags().Float64Var(&minGap, "min-gap", 20, "组与组之间的最小间隙(原理图单位;默认 bslPartGap=20)")
 	c.Flags().BoolVar(&asJSON, "json", false, "以 JSON 输出")
 	c.Flags().BoolVar(&strict, "strict", false, "过近(WARN)也算失败")
+	c.Flags().BoolVar(&showMembers, "members", false, "逐条列出每个组的成员图元(类型/网名/bbox)")
 	return c
 }
 

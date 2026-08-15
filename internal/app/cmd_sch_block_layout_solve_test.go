@@ -109,10 +109,11 @@ func TestBslAnchorRole_DeterministicTieBreak(t *testing.T) {
 func TestBslFlowGap_ScalesWithDataNotConstant(t *testing.T) {
 	// 三项取 max,所以要在 marker 伸出**不主导**的量级上验通道项:
 	// reach 下限是 schStubLen+31=61,两侧 122;要让通道项当家需 >8 条跨接网。
+	// reach 现在是「桩长 + 六边形 + 名字」,通道项要更多跨接网才当家。
 	oneLane := bslFlowGap(1, bslReach("D"), bslReach("D"))
-	manyLanes := bslFlowGap(12, bslReach("D"), bslReach("D"))
+	manyLanes := bslFlowGap(40, bslReach("D"), bslReach("D"))
 	if !(manyLanes > oneLane) {
-		t.Errorf("跨接网多到主导时通道必须变宽: 1条=%v 12条=%v", oneLane, manyLanes)
+		t.Errorf("跨接网多到主导时通道必须变宽: 1条=%v 40条=%v", oneLane, manyLanes)
 	}
 	// 而在通道项不主导时,间距由 marker 伸出决定 —— 两项各自当家的区间都要覆盖。
 	// 两支标签朝着对方伸,中间还要留一个视觉间隙 —— 否则首尾相接,看着就是黏成一条。
@@ -133,7 +134,7 @@ func TestBslFlowGap_ScalesWithDataNotConstant(t *testing.T) {
 // reach 必须 = 桩长 + 标签实测宽度,且与 relayout 消费同一个桩长常量。
 func TestBslReach_SharesStubLengthWithRelayout(t *testing.T) {
 	net := "GND"
-	if got, want := bslReach(net), schStubLen+relayoutPortWidth(net); got != want {
+	if got, want := bslReach(net), schStubLen+acPortTotalLen(net); got != want {
 		t.Errorf("reach = %v, want %v", got, want)
 	}
 	if schStubLen != 30 {
@@ -531,14 +532,14 @@ func TestBslExpandForMarkers_CountsMarkersAndPushes(t *testing.T) {
 
 	// 左侧 2 支 marker 排 2 条 lane;通道 = 我这侧的伸出 + 另一条 lane 的步长
 	// + D1 自己的 marker 伸出 + 视觉间隙 = 214,与 D1 只有 50 → 让 160(落格)。
-	// lane 间距与 autoconnect 的 laneStepFor 同一个数(netport 实宽 + 间隙)。
-	if plan.Placements[1].X != -220 {
-		t.Errorf("D1 该被推到 −220: %v", plan.Placements[1].X)
+	// lane 间距与 autoconnect 的 laneStepFor 同一个数(六边形 + 名字 + 间隙)。
+	if plan.Placements[1].X != -320 {
+		t.Errorf("D1 该被推到 −320: %v", plan.Placements[1].X)
 	}
 	if len(notes) != 0 {
 		t.Errorf("空地上推得动就不该有告警: %v", notes)
 	}
-	if !strings.Contains(log.String(), "D1 让 160") {
+	if !strings.Contains(log.String(), "D1 让 260") {
 		t.Errorf("日志要把算术写清楚: %q", log.String())
 	}
 }
@@ -645,10 +646,10 @@ func TestBslExpandLive_PushesByRealBBoxAndCascades(t *testing.T) {
 		patch, _ := c.Payload["patch"].(map[string]any)
 		got = append(got, fmt.Sprintf("%v@%v", c.Payload["primitiveId"], patch["x"]))
 	}
-	if len(got) != 2 || got[0] != "pid-j@491" || got[1] != "pid-d@545" {
-		t.Errorf("下发顺序应由外向内、坐标按实测算: %v(期望 [pid-j@491 pid-d@545])", got)
+	if len(got) != 2 || got[0] != "pid-j@481" || got[1] != "pid-d@535" {
+		t.Errorf("下发顺序应由外向内、坐标按实测算: %v(期望 [pid-j@481 pid-d@535])", got)
 	}
-	if plan.Placements[1].X != 545 || plan.Placements[2].X != 491 {
+	if plan.Placements[1].X != 535 || plan.Placements[2].X != 481 {
 		t.Errorf("plan 必须跟着更新(manifest 的 AT 要如实): D1=%v J1=%v", plan.Placements[1].X, plan.Placements[2].X)
 	}
 	if plan.Placements[0].X != 690 || plan.Placements[3].X != 710 {

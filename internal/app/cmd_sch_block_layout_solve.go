@@ -170,7 +170,7 @@ func bslAnchorBetter(blk blocks.Block, a, b string, attachedTo, pinCount map[str
 // bslReach 是一个引脚上挂了 marker 之后,从引脚往外伸出多远 —— 桩长 + 标签实测
 // 宽度。件间距必须给它留够,否则两件靠得下、标签却糊在一起。
 func bslReach(net string) float64 {
-	return schStubLen + relayoutPortWidth(net)
+	return schStubLen + acPortTotalLen(net) // 六边形 + 名字,与评分器/check 同一把尺
 }
 
 // bslFlowGap 算信号流上相邻两件之间该留多宽。三项取最大:

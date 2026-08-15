@@ -301,12 +301,10 @@ func flagTextBand(c layoutComp) *layoutBBox {
 	// x=[500,530] 正落在 MCU_TX 名字要渲染的那一段上。
 	// 名字沿本体的**背离锚点**方向往外接一条带(与 relayoutPortWidth 同一个宽度口径)。
 	if c.ComponentType == "netport" {
-		// 只补**超出六边形的那一段**:relayoutPortWidth 是「六边形 ∪ 名字」的总宽
-		// (下限 31 = 裸六边形),而实测 bbox 就是那 31。差值才是名字真正多出来的。
-		l := relayoutPortWidth(c.Net) - (c.BBox.MaxX - c.BBox.MinX)
-		if w := c.BBox.MaxY - c.BBox.MinY; w > c.BBox.MaxX-c.BBox.MinX {
-			l = relayoutPortWidth(c.Net) - w // 竖放:长边在 y 上
-		}
+		// 只补**超出六边形的那一段**:acPortTotalLen 是「六边形 + 名字」的总长,
+		// 实测 bbox 的长边就是那个六边形。差值才是名字真正多出来的占地。
+		long := math.Max(c.BBox.MaxX-c.BBox.MinX, c.BBox.MaxY-c.BBox.MinY)
+		l := acPortTotalLen(c.Net) - long
 		if l <= 0 {
 			return nil // 名字短到画得进六边形,没有额外占地
 		}

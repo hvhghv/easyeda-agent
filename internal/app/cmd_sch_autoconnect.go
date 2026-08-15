@@ -219,12 +219,27 @@ func isNetPortKind(canonicalKind string) bool {
 func markerBBoxProfile(canonicalKind, net string) acMarkerBBoxProfile {
 	switch canonicalKind {
 	case "net_port_in", "net_port_out", "net_port_bi", "netport":
-		return acMarkerBBoxProfile{Near: 9.5, Far: 9.5 + relayoutPortWidth(net), Cross: 5.5}
+		return acMarkerBBoxProfile{Near: 9.5, Far: 9.5 + acPortBodyLen, Cross: 5.5}
 	case "ground", "analog_ground", "protective_ground", "protect_ground", "gnd", "agnd", "pgnd":
 		return acMarkerBBoxProfile{Near: 9.5, Far: 19.5, Cross: 10.5}
 	default: // power and any future netflag family: conservative power envelope
 		return acMarkerBBoxProfile{Near: 4.5, Far: 10.5, Cross: 5.5}
 	}
+}
+
+// acPortBodyLen 是 netport 六边形本体的实测长度 —— 平台给的 bbox 恒为 31×11,
+// 与网名无关(`C7_N3` 与 `USB_DTR` 一模一样),名字画在本体**外面**。
+const acPortBodyLen = 31.0
+
+// acPortTotalLen 是一支 netport 的**总占地**:六边形 + 渲染出来的名字。
+//
+// 这是全项目唯一的 netport 长度口径,三把尺(check 的 flagTextBand、评分器的
+// markerBBoxProfile、布局的 bslReach)必须都问它要。此前各用各的:
+// `relayoutPortWidth = max(31, 6×字数+8)` 本是**名字宽**的近似,却被当成总宽复用 ——
+// 5 个字的 C7_N4 算出来 38,减掉六边形只剩 7,于是名字有 ~30 宽是判据看不见的,
+// 用户一眼就能指出两处压着的标签,而 `sch check` 报 0。
+func acPortTotalLen(net string) float64 {
+	return acPortBodyLen + 6*float64(len(net)) + 8
 }
 
 // oppositeDirection 返回一个方向的正对面;传入空或未知方向时返回空。
@@ -342,12 +357,27 @@ func predictedMarkerBBox(x, y float64, canonicalKind, direction, net string) lay
 // `sch check` 的 marker-overlap 判的是「符号本体 ∪ 文字带」,评分器过去只预测
 // 符号本体,于是它挑出的"干净"位置在 check 眼里照样重叠 —— 剩余那批
 // 1.00×12.00 / 22.50×12.50 的重叠量,12 就是文字带高度本身。
-// netport **不在这里**加文字带:它的名字已经算在 markerBBoxProfile 的 Far 里
-// (`Far = 9.5 + relayoutPortWidth(net)`)—— 评分器这一侧本来就是对的。
-// 瞎的是 check 那一侧:平台给的实测 bbox 恒为 31×11(裸六边形),名字不在里面,
-// 所以 flagTextBand 要把超出六边形的那一段补回来。别在这里再补一遍,会翻倍。
+// netport 的名字画在**六边形之外**,所以它和电源/地旗一样要有一条文字带:
+// 本体(markerBBoxProfile)只到平台实测的 31,名字接在本体的背离锚点那一端。
+// 与 check 侧的 flagTextBand 严格对称 —— 判定与生成同一把尺。
 func predictedFlagTextBand(x, y float64, body layoutBBox, canonicalKind, direction, net string) *layoutBBox {
 	if net == "" {
+		return nil
+	}
+	switch canonicalKind {
+	case "net_port_in", "net_port_out", "net_port_bi", "netport":
+		l := acPortTotalLen(net) - acPortBodyLen
+		const h = 11.0
+		switch direction {
+		case "left":
+			return &layoutBBox{MinX: body.MinX - l, MinY: body.MinY, MaxX: body.MinX, MaxY: body.MinY + h}
+		case "right":
+			return &layoutBBox{MinX: body.MaxX, MinY: body.MinY, MaxX: body.MaxX + l, MaxY: body.MinY + h}
+		case "up":
+			return &layoutBBox{MinX: body.MinX, MinY: body.MaxY, MaxX: body.MinX + h, MaxY: body.MaxY + l}
+		case "down":
+			return &layoutBBox{MinX: body.MinX, MinY: body.MinY - l, MaxX: body.MinX + h, MaxY: body.MinY}
+		}
 		return nil
 	}
 	switch canonicalKind {
@@ -899,7 +929,12 @@ func laneKeyOf(designator, direction string) string {
 // 所以这里不再另加名字 —— 加了就是翻倍,标准档位会一路铺到 228。
 func laneStepFor(canonicalKind, net string) float64 {
 	p := markerBBoxProfile(canonicalKind, net)
-	return (p.Far - p.Near) + acLaneGap
+	step := (p.Far - p.Near) + acLaneGap
+	switch canonicalKind {
+	case "net_port_in", "net_port_out", "net_port_bi", "netport":
+		step = acPortTotalLen(net) + acLaneGap // 本体只到六边形,名字要另算进步长
+	}
+	return step
 }
 
 // acLaneGap 是同侧相邻 marker 之间的可见间隙。
