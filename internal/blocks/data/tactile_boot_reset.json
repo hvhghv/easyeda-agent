@@ -48,6 +48,16 @@
       "default_net": "GND"
     }
   },
+  "schematic_layout": {
+    "note": "关系形态(issue #180):两颗同型号轻触键等距并列(pair),BOOT 在前、RESET 在后,与面板按键顺序一致;坐标由求解器算。本块没有芯片锚件,anchor 显式取 SW_BOOT(否则按引脚数推导时两件全等、结果不稳定)。补此模板前无 schematic_layout,block-apply 回退等距网格。",
+    "anchor": "SW_BOOT",
+    "pair": [
+      [
+        "SW_BOOT",
+        "SW_RST"
+      ]
+    ]
+  },
   "schematic_notes": [
     "本块只含两个开关,不含上拉/滤波电容 —— IO0 上拉、EN 上拉+RC 复位电容都在 block.esp32s3_wroom1_module(避免重复)。三块合起来 = 完整最小系统的按键+复位。",
     "BOOT 键接 IO0、RESET 键接 EN,别接反:按 IO0 键在上电瞬间拉低才进下载;按 EN 键任何时候拉低都复位。",

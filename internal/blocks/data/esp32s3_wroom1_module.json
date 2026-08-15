@@ -87,6 +87,17 @@
       "default_net": "MCU_RX"
     }
   },
+  "schematic_layout": {
+    "note": "关系形态(issue #180):只声明意图,坐标由布局求解器算 —— 吃锚件 U(模组)的实测引脚坐标、页面碰撞表、图纸边界。C_VDD/C_BULK 贴 3V3 脚(高频紧贴、大容量顺势排在外侧),R_EN+C_EN 贴 EN 脚构成上电复位 RC,R_IO0 贴 IO0 脚。**不要在这里手算 dx/dy** —— WROOM-1 符号很大,补此模板前本块无 schematic_layout,block-apply 回退等距网格,实测 R_EN 与 U 本体重叠 6×9 直接被落地前硬门拒绝(2026-08-15 esp32Mini E2E)。",
+    "anchor": "U",
+    "attach": {
+      "C_VDD": "U.3V3",
+      "C_BULK": "U.3V3",
+      "R_EN": "U.EN",
+      "C_EN": "U.EN",
+      "R_IO0": "U.IO0"
+    }
+  },
   "schematic_notes": [
     "真实符号脚名(已核实):3V3(2)/EN(3)/IO0(27)/TXD0(37)/RXD0(36)/GND(1,40)/EPAD(41,热焊盘)。未用 GPIO(IO1~IO48)合法悬空,sch check 出 WARN 属正常。",
     "EN 上电复位 RC:R_EN(10k 上拉)+ C_EN(1uF 对地),保证 3V3 稳定后再释放复位。这是模组稳定启动的关键,别省 C_EN(验证:EN 网正确成 3 脚 U.EN+R_EN+C_EN)。",

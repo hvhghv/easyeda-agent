@@ -202,6 +202,15 @@ and Size / Width / Height / "Page Size" are not title-block items. Run
 					return fmt.Errorf("pass at least one of --show / --hide / --data")
 				}
 				res, err := dispatchCapture(cfg, "schematic.titleblock.modify", window, payload, stdout)
+				// **写后自检:图纸边框还在不在**。写图签是「读全量→改几项→整包回传」,
+				// 一旦结构开关(Title Block / Border)在回传里被平台按默认值处理,
+				// 图框和明细表会被整个关掉 —— 页面看着还在,sheet 图元却没了,
+				// 于是 layout-lint 的 sheet-check 变 unavailable、越界判据集体失明,
+				// 而这条命令本身可能还报的是别的错(2026-08-15 esp32Mini E2E:四页
+				// 图纸被静默弄丢,直到 `sch gate --strict` 才暴露)。损坏必须当场说。
+				if sheetErr := warnIfSheetLost(cfg, window, stderr); sheetErr != nil && err == nil {
+					return sheetErr
+				}
 				if err != nil {
 					return err
 				}
@@ -1087,8 +1096,38 @@ pull fresh ids before any follow-up mutation on it.`,
 						return err
 					}
 				}
+				// 裸图元模式**也要过电气自检**。语义不变(只搬你点名的 id),但
+				// 「搬走器件、把它的桩线留在原地」在画布上就是**静默断网**,而命令
+				// 照样报成功 —— 2026-08-15 esp32Mini E2E 连踩四次:每次只传器件 id,
+				// 器件走了、marker 留下,`sch check` 才在几步之后报出悬空引脚。
+				// 移动已经发生,所以这里不是拦截而是**如实报告**(#151 部分应用约定):
+				// 网表变了就非零退出并点名哪条网丢了谁,让调用方立刻补连或改用 --group。
+				before, _, berr := readLiveNets(cfg, window)
+				if berr != nil {
+					fmt.Fprintf(stderr, "warning: 移动前读不到网表(%v)—— 本次无法做电气自检\n", berr)
+				}
 				payload := map[string]any{"primitiveIds": ids, "dx": dx, "dy": dy}
-				return dispatch(cfg, "schematic.group.move", window, payload, stdout, stderr)
+				if err := dispatch(cfg, "schematic.group.move", window, payload, stdout, stderr); err != nil {
+					return err
+				}
+				if berr != nil {
+					return nil
+				}
+				after, _, aerr := readLiveNets(cfg, window)
+				if aerr != nil {
+					fmt.Fprintf(stderr, "warning: 移动后读不到网表(%v)—— 电气自检未完成,请自行跑 `sch check`\n", aerr)
+					return nil
+				}
+				if diff := groupRebuildNetDiff(groupRebuildSnapshotOf(before), groupRebuildSnapshotOf(after)); len(diff) > 0 {
+					fmt.Fprintf(stderr, "✗ 电气自检:平移改变了网表(--ids 只搬点名的图元,器件的桩线/旗不会自动跟随)\n")
+					for _, d := range diff {
+						fmt.Fprintf(stderr, "  %s\n", d)
+					}
+					return fmt.Errorf("group-move --ids 造成 %d 处网表变化 —— 用 `sch autoconnect` 补回受影响的引脚,"+
+						"或改用 `sch group-move --group <id>`(它会自动带上桩线+旗并一遍性重连)", len(diff))
+				}
+				fmt.Fprintln(stdout, "✓ 电气自检:网表逐引脚不变")
+				return nil
 			},
 		}
 		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveIds (components and/or wires) to move together — CSV: id1,id2 (mutually exclusive with --group)")

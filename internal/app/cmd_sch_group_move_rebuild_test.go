@@ -150,4 +150,58 @@ func TestClampDeltaToBounds(t *testing.T) {
 			t.Errorf("位移必须在 %d 格上: (%v,%v)", schAnchorGrid, dx, dy)
 		}
 	})
+
+	// 组**当前就已越界**是常态(marker 探出图纸上沿)。此时旧实现会把「往下挪 30」
+	// 算成「往上挪 40」—— 方向反了,比不动还糟(2026-08-15 esp32Mini E2E 实测)。
+	t.Run("已越界时收拢不许反号", func(t *testing.T) {
+		over := layoutBBox{MinX: 100, MinY: 150, MaxX: 400, MaxY: 850} // MaxY 已超 bounds
+		_, dy := clampDeltaToBounds(over, 0, -30, bounds)
+		if dy > 0 {
+			t.Errorf("请求往下(-30),收拢结果不许为正: %v", dy)
+		}
+		if dy < -30 {
+			t.Errorf("收拢只许减小位移量: %v", dy)
+		}
+	})
+}
+
+// 图签只占右下角一个矩形,不是整条底边 —— 组落在它左边时,页面下部照常可用。
+// 把下界整条抬到图签上沿会凭空少一条地,而 MCU 这类高组正需要它。
+func TestClampDeltaAvoidingKeepout(t *testing.T) {
+	bounds := layoutBBox{MinX: 0, MinY: 0, MaxX: 1000, MaxY: 800}
+	keepout := &layoutBBox{MinX: 500, MinY: 0, MaxX: 1000, MaxY: 200}
+
+	t.Run("图签左侧可以下探", func(t *testing.T) {
+		box := layoutBBox{MinX: 20, MinY: 250, MaxX: 400, MaxY: 700}
+		_, dy := clampDeltaAvoidingKeepout(box, 0, -200, bounds, keepout)
+		if dy != -200 {
+			t.Errorf("组在图签左边,下探不该被拦: %v", dy)
+		}
+	})
+	t.Run("压到图签上收回其上沿", func(t *testing.T) {
+		box := layoutBBox{MinX: 600, MinY: 250, MaxX: 900, MaxY: 700}
+		_, dy := clampDeltaAvoidingKeepout(box, 0, -200, bounds, keepout)
+		if box.MinY+dy < keepout.MaxY {
+			t.Errorf("组与图签同列,不该落进 keepout: MinY=%v < %v", box.MinY+dy, keepout.MaxY)
+		}
+		if dy > 0 {
+			t.Errorf("仍不许反号: %v", dy)
+		}
+	})
+	t.Run("本来就压着图签时允许往好的方向挪", func(t *testing.T) {
+		// marker 伸进图签区是常态。要求"一步到位挪干净"做不到,于是每次 y 移动
+		// 都被收成 0 —— 连"挪一点点变好"都做不了。判据是**别变糟**,不是**必须干净**。
+		box := layoutBBox{MinX: 600, MinY: -22, MaxX: 900, MaxY: 660}
+		_, dy := clampDeltaAvoidingKeepout(box, 0, 40, bounds, keepout)
+		if dy != 40 {
+			t.Errorf("上移减少了对图签的侵入,不该被拦: %v", dy)
+		}
+	})
+	t.Run("没有图签几何时退化成纯边界收拢", func(t *testing.T) {
+		box := layoutBBox{MinX: 600, MinY: 250, MaxX: 900, MaxY: 700}
+		_, dy := clampDeltaAvoidingKeepout(box, 0, -200, bounds, nil)
+		if dy != -200 {
+			t.Errorf("无 keepout 时应原样通过: %v", dy)
+		}
+	})
 }

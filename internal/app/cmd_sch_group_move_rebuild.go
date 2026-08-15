@@ -73,8 +73,21 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 	//     整个组推出图纸,layout-lint 报 5 out-of-sheet 而命令一声不吭。
 	//     收拢而不是拒绝:调用方要的是「挪一挪」,把它按到可用区里仍然满足这个意图。
 	if box, ok := groupOccupancy(comps, wires, memberSet); ok {
-		if bounds, ok2 := arrangeBoundsOf(sheetBBoxOf(comps)); ok2 {
-			ndx, ndy := clampDeltaToBounds(box, dx, dy, bounds)
+		if sheet := sheetBBoxOf(comps); sheet != nil {
+			// 收拢用**整页可用区**,图签 keepout 单独按相交判(见 clampDeltaAvoidingKeepout)。
+			// arrangeBoundsOf 会把下界整条抬到图签上沿 —— 那对多组铺排是可接受的简化,
+			// 对「挪一挪」不是:图签只占右下角,页面**左**下那片(x < 图签左沿)本来能用,
+			// 抬掉等于凭空少一条 198 高的地(2026-08-15 esp32Mini E2E:MCU 组 421 高、
+			// 上面还挂着去耦,只有把它落到左下才装得下)。
+			bounds := layoutBBox{
+				MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+				MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+			}
+			ko, provisional := titleBlockKeepout(sheet)
+			if provisional {
+				ko = nil // 猜出来的图签框不拿来收拢(与 arrangeBoundsOf 同口径)
+			}
+			ndx, ndy := clampDeltaAvoidingKeepout(box, dx, dy, bounds, ko)
 			if ndx != dx || ndy != dy {
 				fmt.Fprintf(stderr, "note: Δ=(%.0f,%.0f) 会让组出图纸可用区,已收拢到 Δ=(%.0f,%.0f)\n", dx, dy, ndx, ndy)
 				dx, dy = ndx, ndy
@@ -387,5 +400,63 @@ func clampDeltaToBounds(box layoutBBox, dx, dy float64, bounds layoutBBox) (floa
 	if box.MinY+ny < bounds.MinY {
 		ny = bounds.MinY - box.MinY
 	}
-	return snap(nx), snap(ny)
+	// **收拢只许减小位移,绝不许反号**:组当前就已越界时(marker 探出上沿是常态),
+	// 上面两条会把「往下挪 30」算成「往上挪 40」—— 调用方要的是往下,工具却把它
+	// 推得更糟(2026-08-15 esp32Mini E2E 实测 Δ=(20,-30) → 收拢成 (20,+40))。
+	// 收拢的语义是「你要的方向走不了那么远」,不是「换个方向走」。走不了就 0。
+	return snap(clampNoFlip(dx, nx)), snap(clampNoFlip(dy, ny))
+}
+
+// clampNoFlip 保证收拢后的位移与请求同号且不更大;反号或超量一律退回 0。
+func clampNoFlip(want, got float64) float64 {
+	if want == 0 {
+		return 0
+	}
+	if want > 0 {
+		if got < 0 {
+			return 0
+		}
+		return math.Min(got, want)
+	}
+	if got > 0 {
+		return 0
+	}
+	return math.Max(got, want)
+}
+
+// clampDeltaAvoidingKeepout 在 clampDeltaToBounds 之上再避开图签 keepout —— 但只在
+// 移动**后**真的与它相交时才管。图签是右下角一个矩形,不是整条底边:组落在它左边
+// (或上边)时,页面下部那片地照常可用。keepout 为 nil 时退化成纯边界收拢。
+func clampDeltaAvoidingKeepout(box layoutBBox, dx, dy float64, bounds layoutBBox, keepout *layoutBBox) (float64, float64) {
+	nx, ny := clampDeltaToBounds(box, dx, dy, bounds)
+	if keepout == nil {
+		return nx, ny
+	}
+	moved := layoutBBox{MinX: box.MinX + nx, MinY: box.MinY + ny, MaxX: box.MaxX + nx, MaxY: box.MaxY + ny}
+	after := boxIntersectArea(moved, *keepout)
+	if after == 0 {
+		return nx, ny // 移动后不压图签
+	}
+	// **只在把事情弄得更糟时才拦**。组常常移动前就已经压着图签(marker 伸进去是
+	// 常态),此时"必须一步到位挪干净"是个做不到的要求 —— 旧实现于是把每一次 y
+	// 移动都收成 0,连"往好的方向挪一点"都做不了(2026-08-15 esp32Mini E2E:LDO 组
+	// 的 +5V 标签伸到 y=-22,想整组上移 40 被拒,页面卡在 out-of-sheet 上)。
+	if after <= boxIntersectArea(box, *keepout) {
+		return nx, ny
+	}
+	// 变糟了:优先把 y 收回到图签上沿之上。
+	if lift := keepout.MaxY - box.MinY; lift <= 0 {
+		return nx, clampNoFlip(dy, lift)
+	}
+	return nx, 0
+}
+
+// boxIntersectArea 是两个矩形的相交面积(不相交为 0)。
+func boxIntersectArea(a, b layoutBBox) float64 {
+	w := math.Min(a.MaxX, b.MaxX) - math.Max(a.MinX, b.MinX)
+	h := math.Min(a.MaxY, b.MaxY) - math.Max(a.MinY, b.MinY)
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	return w * h
 }

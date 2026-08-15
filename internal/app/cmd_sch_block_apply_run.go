@@ -23,6 +23,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
@@ -148,8 +149,10 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]
 	// invisible to an overlap-only scan. Real case: the grid fallback put CH334F's
 	// U3:20 (VDD33) and the crystal's X2:4 (GND) both at (470,510), so the GND stub
 	// bonded straight onto VDD33 while this check happily printed "✓ no overlap".
-	res, err := requestAction(cfg, "schematic.components.list", window,
-		map[string]any{"includeBBox": true, "includePins": true})
+	// 预算要显式给足:includePins 的代价随页面引脚数涨(一颗 81 脚模组实测 18s),
+	// 默认 20s 会随机超时 —— 而这一步超时等于**硬门没跑成**,比慢更糟。
+	res, err := requestActionTimed(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true, "includePins": true}, 90*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read components with real bbox/pin geometry: %w", err)
 	}

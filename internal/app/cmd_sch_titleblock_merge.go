@@ -17,6 +17,7 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -44,6 +45,40 @@ func tbPreserve(v any) any {
 	return out
 }
 
+// tbStructuralKeys 是**画布结构**开关 —— 它们不是文字栏位,而是「图框画不画」
+// 「明细表画不画」。写坏了不是显示问题,是判据失明(sheet 图元没了,越界/分区
+// 一概判不了),所以整包回传时单独按住。
+var tbStructuralKeys = []string{"Title Block", "Border"}
+
+// tbKeepStructural 把结构开关按住:值取原值(数字化),并显式给**真布尔**的
+// showTitle/showValue —— 读回来是 null,原样带回去平台按默认处理,默认就是关。
+func tbKeepStructural(full, out map[string]any) {
+	for _, k := range tbStructuralKeys {
+		v, ok := full[k].(map[string]any)
+		if !ok {
+			continue
+		}
+		kept, _ := tbPreserve(v).(map[string]any)
+		if kept == nil {
+			continue
+		}
+		if _, has := kept["value"]; !has {
+			continue
+		}
+		kept["showTitle"] = tbBoolOr(v["showTitle"], false)
+		kept["showValue"] = tbBoolOr(v["showValue"], true)
+		out[k] = kept
+	}
+}
+
+// tbBoolOr 把读回来的 null / 非布尔折成一个确定的布尔。
+func tbBoolOr(v any, fallback bool) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return fallback
+}
+
 // schTitleBlockMerge 读回当前页的全量明细项,把用户的 patch 合并进去。
 //
 // patch 接受两种写法:`{"Name":{"value":"X"}}`(与读回来的形状一致)与
@@ -62,6 +97,13 @@ func schTitleBlockMerge(cfg *appConfig, window string, patch map[string]any) (ma
 	for k, v := range full {
 		out[k] = tbPreserve(v)
 	}
+	// 结构开关(图框 / 明细表本身)在整包回传里**必须原值原样活下来**。
+	// 实测一次写图签把 `Title Block` 与 `Border` 双双变成 "0",图框和明细表被
+	// 整个关掉:sheet 图元消失 → `sheet-geometry` 读回 bbox=null → `layout-lint`
+	// 的 sheet-check 变 unavailable → `sch gate --strict` 四页全挂,而写图签的
+	// 那条命令只报了一句无关的「nothing was applied」(2026-08-15 esp32Mini E2E)。
+	// 页面看上去还在,判据却瞎了 —— 这是数据损坏,不是显示问题。
+	tbKeepStructural(full, out)
 	var unknown []string
 	for k, v := range patch {
 		if _, ok := full[k]; !ok {
@@ -82,4 +124,29 @@ func schTitleBlockMerge(cfg *appConfig, window string, patch map[string]any) (ma
 	// 只在**当前没显示**时才带 showTitleBlock:图签已经显示还传一次,连接器的
 	// 前后对比会把「本来就是 true」判成「没应用」,于是写成功了却报失败(实测)。
 	return out, !shown, nil
+}
+
+// warnIfSheetLost 在写图签后回读一次图纸几何:sheet 图元没了就当场报错。
+//
+// 判据不是「命令返回了什么」而是「画布还剩什么」—— 平台会在返回 true 的同时
+// 把图框关掉,只有回读能发现。返回非 nil 表示画布已损坏,调用方应当作失败。
+func warnIfSheetLost(cfg *appConfig, window string, stderr io.Writer) error {
+	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: 写图签后读不回页面几何(%v)—— 无法自检图框是否还在\n", err)
+		return nil
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		fmt.Fprintf(stderr, "warning: 写图签后页面几何解析失败(%v)—— 无法自检图框是否还在\n", perr)
+		return nil
+	}
+	for _, c := range comps {
+		if c.ComponentType == "sheet" && c.BBox != nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("写图签后本页找不到图纸边框(sheet 图元的 bbox)—— 图框/明细表很可能被整包回传关掉了。" +
+		"修复:`easyeda sch titleblock --data '{\"Title Block\":{\"value\":1},\"Border\":{\"value\":1}}'`," +
+		"再用 `easyeda sch sheet-geometry` 确认 bbox 回来了")
 }

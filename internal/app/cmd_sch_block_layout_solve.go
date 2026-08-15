@@ -42,6 +42,16 @@ const bslPartGap = bapObstacleGap
 // bslLanePitch 是两条平行跨接导线之间的通道宽度,从连接网格推导(不是估的)。
 const bslLanePitch = 2 * schAnchorGrid
 
+// bslMarkerVReach 是 marker 在**纵向**能伸出多远:桩长 + 一行标签的高度。
+//
+// 与横向的 reach 不对称,是因为标签是横排文字:朝左右引出时伸出的是**标签宽**
+// (网名越长越远,可达 100+),朝上下引出时伸出的只有**标签高**。判图纸边界时拿
+// 横向 reach 去卡纵向,会把页面上下缘大片合法位置误判成越界(实测把两颗轻触键的
+// 并列位卡死,pair 只好整组降级走网格)。
+// 取值 = 桩长 + netflag 符号高 + 一行文字:实测一颗 0805 去耦的组框高 164、本体
+// 只有 21,单侧伸出 ≈71,所以 70 是量出来的不是拍的。
+const bslMarkerVReach = schStubLen + 4*schAnchorGrid
+
 // bslTightHalf 是一个件的半宽 —— **求解器全域唯一的一把尺**。
 //
 // bapRoleHalfExtent 刻意「只高不低」(fallback 网格的件间距靠它兜底),但贴脚要的是
@@ -256,6 +266,21 @@ func bslAttachClearSide(pinY float64, host layoutBBox) string {
 	return "up"
 }
 
+// bslOppositeSide 给出对侧方向名(attach 的上/下二选一放不下时回退用)。
+func bslOppositeSide(side string) string {
+	switch side {
+	case "up":
+		return "down"
+	case "down":
+		return "up"
+	case "left":
+		return "right"
+	case "right":
+		return "left"
+	}
+	return side
+}
+
 // bslAttachSeed 算 attach 件的**语义理想中心**。
 //
 // 上/下侧要**让开宿主本体**(不是从引脚算):引脚在左右列时,它的 y 还在本体高度范围内,
@@ -378,10 +403,25 @@ func bslSolveAround(
 	tightHalf := func(role string) float64 { return bslTightHalf(partKey(role)) }
 	// 件的估算 box(以中心为原点);放置前只有下限,落地后由硬门兜底。
 	boxOf := func(role string) layoutBBox { return bslPartBox(partKey(role)) }
-	free := func(cx, cy float64, b layoutBBox) bool {
+	// free 判一个候选位:**图纸边界按「件 ∪ 它自己的 marker 伸出」算,件间碰撞按本体算**。
+	//
+	// 两个口径不同是有意的,也是这里唯一正确的做法:
+	//   - 边界:marker 跟着件走,件在界内、标签印在纸外等于没印。判定必须与 clusters 门
+	//     (本体 ∪ marker 口径)是**同一把尺**,否则求解器认为合法的落点当场被门判死 ——
+	//     实测 C_BULK 本体 780 在界内、它的 +3V3 标签伸到 852,而图纸上界 813,块每次
+	//     落地都带一条 out-of-sheet(2026-08-15 esp32Mini E2E)。
+	//   - 件间:marker 之间的相互避让由 bslExpandForMarkers 的 lane 排布负责,在这里
+	//     再叠一层 reach 会让每个件互相推开两倍标签宽,布局散得不像人画的。
+	free := func(cx, cy float64, b layoutBBox, reach float64) bool {
 		cand := layoutBBox{MinX: cx + b.MinX, MinY: cy + b.MinY, MaxX: cx + b.MaxX, MaxY: cy + b.MaxY}
-		if usable != nil && !boxInside(cand, *usable) {
-			return false
+		if usable != nil {
+			withMarkers := layoutBBox{
+				MinX: cand.MinX - reach, MinY: cand.MinY - bslMarkerVReach,
+				MaxX: cand.MaxX + reach, MaxY: cand.MaxY + bslMarkerVReach,
+			}
+			if !boxInside(withMarkers, *usable) {
+				return false
+			}
 		}
 		for _, o := range live {
 			if boxesGapOverlap(cand, o, bslPartGap) {
@@ -399,10 +439,11 @@ func bslSolveAround(
 	// attach 永远在目标引脚的那一侧。躲不开就返回 false 交给调用方降级,不硬塞。
 	fitAlong := func(role string, seedX, seedY float64, dx, dy, step float64, tries int) (float64, float64, bool) {
 		b := boxOf(role)
+		reach := reachOf(role)
 		for i := 0; i <= tries; i++ {
 			cx := snapAnchor(seedX + float64(i)*dx*step)
 			cy := snapAnchor(seedY + float64(i)*dy*step)
-			if free(cx, cy, b) {
+			if free(cx, cy, b, reach) {
 				live = append(live, layoutBBox{MinX: cx + b.MinX, MinY: cy + b.MinY, MaxX: cx + b.MaxX, MaxY: cy + b.MaxY})
 				return cx, cy, true
 			}
@@ -436,15 +477,58 @@ func bslSolveAround(
 			side = "right"
 		}
 		side, vertical := bslAttachSide(side, rel.Orient[role])
-		if side == "up" || side == "down" { // 上下二选一:走离引脚最近的那一头
-			side = bslAttachClearSide(pin.Y, anchorBBox)
+		// 上/下是**二选一的启发式**(走离引脚最近的那一头),不是电气语义 —— 所以首选
+		// 那头被占/顶出图纸时要回退到对侧,而不是直接降级走网格。降级不是中性的:
+		// 网格坐标由 planner 预先算好、**不避让刚落地的锚件**,大件必然重叠 → 落地前
+		// 硬门整块回滚(2026-08-15 esp32Mini E2E:WROOM-1 模组 72×420 竖条落在页面上部,
+		// 5 个 attach 因上方只剩 165 全部降级,R_EN 与模组重叠 6×9,块三次都进不去)。
+		// 左/右侧不做对侧回退:那一侧是引脚自己的引出方向,翻到对面要横穿芯片本体。
+		sides := []string{side}
+		if side == "up" || side == "down" {
+			near := bslAttachClearSide(pin.Y, anchorBBox)
+			sides = []string{near, bslOppositeSide(near)}
 		}
-		sx, sy := bslAttachSeed(pin.X, pin.Y, anchorBBox, side, tightHalf(role))
-		// 躲让方向 = 继续远离引脚,这样它始终待在该脚的那一侧(贴脚语义不破)。
-		ax, ay := bslDirVec(side)
-		x, y, ok := fitAlong(role, sx, sy, ax, ay, bslPartGap+2*half(role), 6)
-		if !ok {
-			notes = append(notes, fmt.Sprintf("%s: 贴 %s 的位置放不下(被占或出图纸)—— 该件走网格", role, target))
+		var x, y float64
+		fitted := false
+		hostCX := (anchorBBox.MinX + anchorBBox.MaxX) / 2
+		for _, sd := range sides {
+			sx, sy := bslAttachSeed(pin.X, pin.Y, anchorBBox, sd, tightHalf(role))
+			step := bslPartGap + 2*half(role)
+			reach := reachOf(role)
+			// 躲让方向 = 先继续远离引脚(始终待在该脚那一侧,贴脚语义不破),再**沿宿主
+			// 边缘水平铺开**。上/下侧只会纵向摞时,同侧的第二、三件很快顶出图纸 ——
+			// 模组类竖长条(WROOM-1 72×420)上方只剩 165,一件就把那条列吃满,后面的全
+			// 降级走网格并撞上锚件。沿上沿一字排开既没离开"贴着这个脚"的语义,又不吃
+			// 纵向余量。水平先朝宿主中心走(件留在本体正上/正下方),再试反向。
+			ax, ay := bslDirVec(sd)
+			dirs := [][2]float64{{ax, ay}}
+			if sd == "up" || sd == "down" {
+				hx := 1.0
+				if pin.X > hostCX {
+					hx = -1
+				}
+				dirs = append(dirs, [2]float64{hx, 0}, [2]float64{-hx, 0})
+			}
+			for _, d := range dirs {
+				// **躲让步长要容得下两件各自的 marker**,否则第二件贴着第一件落,
+				// 两个组框当场相接(clusters 判 tight:C4↔C6 间隙 0)。纵向让开
+				// 标签高度、横向让开标签宽度 —— 与判定同一把尺。
+				st := step + 2*bslMarkerVReach
+				if d[1] == 0 {
+					st = step + 2*reach
+				}
+				if fx, fy, ok := fitAlong(role, sx, sy, d[0], d[1], st, 6); ok {
+					x, y, fitted = fx, fy, true
+					break
+				}
+			}
+			if fitted {
+				break
+			}
+		}
+		if !fitted {
+			notes = append(notes, fmt.Sprintf("%s: 贴 %s 的位置放不下(%s 侧都被占或出图纸)—— 该件走网格",
+				role, target, strings.Join(sides, "/")))
 			continue
 		}
 		rot := 0.0
@@ -504,9 +588,19 @@ func bslSolveAround(
 		}
 		var baseX, baseY float64
 		first := group[0]
-		if s, ok := placed[first]; ok {
-			baseX, baseY = s.X, s.Y
-		} else {
+		firstSolved, firstPlaced := placed[first]
+		switch {
+		case first == anchorRole:
+			// 首件**就是锚件**时它已经落地了,基准直接取实测 bbox 的中心。
+			// 走下面的 else 会拿锚件去锚件左边找空位 —— 那个位置永远与它自己相撞,
+			// free() 必然拒,于是整组降级走网格:两颗轻触键按网格 125 间距排,而它们
+			// 各自的网标要 ~190,marker 当场压在一起(2026-08-15 esp32Mini E2E,
+			// block.tactile_boot_reset 的 SW_BOOT/SW_RST 重叠 25×11)。
+			baseX = (anchorBBox.MinX + anchorBBox.MaxX) / 2
+			baseY = (anchorBBox.MinY + anchorBBox.MaxY) / 2
+		case firstPlaced:
+			baseX, baseY = firstSolved.X, firstSolved.Y
+		default:
 			baseX = anchorBBox.MinX - bslFlowGap(0, reachOf(anchorRole), reachOf(first)) - tightHalf(first)
 			// 下方也有锚件自己的 marker 往下伸,别只留一个身位。
 			baseY = anchorBBox.MinY - reachOf(anchorRole) - bslPartGap - bapPartMargin
@@ -712,8 +806,12 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 		return nil, []string{"关系求解跳过:锚件没有 primitiveId —— 其余件按网格坐标落地"}
 	}
 
-	res, rerr := requestAction(cfg, "schematic.components.list", window,
-		map[string]any{"includeBBox": true, "includePins": true})
+	// 引脚回读天生慢:`includePins` 要给每个引脚定当前网,一颗 81 脚模组的页面实测
+	// **18 秒**,踩在默认 20s 预算的边界上随机超时 —— 一超时就"求解跳过、全走网格",
+	// 网格坐标又不避让锚件,整块落地前硬门失败(2026-08-15 esp32Mini E2E 连踩三次)。
+	// 这类重回读要自己的预算,不能吃默认值。
+	res, rerr := requestActionTimed(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true, "includePins": true}, 90*time.Second)
 	if rerr != nil {
 		return nil, []string{fmt.Sprintf("关系求解跳过:回读页面几何失败(%v)—— 其余件按网格坐标落地", rerr)}
 	}

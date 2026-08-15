@@ -742,3 +742,43 @@ func TestBslMarkerLanes_PacksByRealCollisionNotByCount(t *testing.T) {
 		t.Errorf("空侧应为 0 条: %d", got)
 	}
 }
+
+// pair 组的首件**就是锚件**时,基准必须取锚件的实测位置。旧实现走 else 分支拿锚件
+// 去锚件左边找空位 —— 那个位置永远与它自己相撞,于是整组降级走网格,两颗同型号器件
+// 按网格间距排、各自的网标当场压在一起(esp32Mini E2E 实测 SW_BOOT/SW_RST 重叠 25×11)。
+func TestBslSolveAround_PairFirstIsAnchor(t *testing.T) {
+	blk := blocks.Block{
+		ID: "block.test_pair",
+		Parts: map[string]blocks.Part{
+			"SW_BOOT": {Part: "sw.tact_smd"},
+			"SW_RST":  {Part: "sw.tact_smd"},
+		},
+	}
+	rel := bslRelations{Anchor: "SW_BOOT", Pair: [][]string{{"SW_BOOT", "SW_RST"}}}
+	nets := [][]string{{"SW_BOOT.1", "PORT:IO0"}, {"SW_RST.1", "PORT:EN"}}
+	anchorBBox := layoutBBox{MinX: 380, MinY: 295, MaxX: 420, MaxY: 305}
+	usable := &layoutBBox{MinX: 12, MinY: 12, MaxX: 1158, MaxY: 813}
+
+	solved, notes := bslSolveAround(blk, rel, nets, nil, "SW_BOOT",
+		map[string]acPin{"1": {X: 380, Y: 300}, "2": {X: 420, Y: 300}},
+		anchorBBox, nil, usable)
+
+	var rst *bslSolved
+	for i := range solved {
+		if solved[i].Role == "SW_RST" {
+			rst = &solved[i]
+		}
+		if solved[i].Role == "SW_BOOT" {
+			t.Errorf("锚件已落地,不该被再求解一次: %+v", solved[i])
+		}
+	}
+	if rst == nil {
+		t.Fatalf("SW_RST 应由 pair 求解出位置,而不是降级走网格;notes=%v", notes)
+	}
+	if rst.Source != "pair" {
+		t.Errorf("SW_RST 该来自 pair 关系: %+v", *rst)
+	}
+	if rst.X <= anchorBBox.MaxX {
+		t.Errorf("并列件该排在锚件右侧: x=%v vs 锚右沿 %v", rst.X, anchorBBox.MaxX)
+	}
+}
