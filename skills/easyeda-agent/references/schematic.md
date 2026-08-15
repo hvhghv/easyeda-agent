@@ -391,6 +391,22 @@ rechecked before `schematic.save`; only explicit `saved:true` is success.
 Any failure restores captured anchors in reverse order, reads them back (only
 confirmed coordinates count as restored), and saves the rollback.
 
+**Why the official engine is dangerous — three measured traps** (this is why the
+wrapper refuses wired pages by default):
+
+1. **It moves symbols but not wires** — running it on a wired page severs every
+   connection (measured: 16 parts → 59 floating pins).
+2. **It lands anchors off-grid** — downstream stubs then miss the pin.
+3. **Its scatter makes short stubs collide into shorts** — `--replace` cannot
+   pull them apart afterward.
+
+`--rewire` is the only way to run it on a wired page: it snapshots the netlist
+first, then after the layout it snaps anchors to the 5-unit grid, deletes the
+severed wires, and reconnects from that snapshot. Self-check with `sch check`
+(dangling/floating), not `layout-lint` alone. The op needs the target page in the
+**foreground** and takes ~2 min (300 s timeout). **The official API has no
+transactional rollback** — if the post-check fails the page is already mutated.
+
 **Engine priority (iron rule):** block hit → `sch block-apply` template; else a
 `--spec` → `--engine template` (default); only when neither exists → `--engine
 official` fallback. The official engine graduated `@alpha→@beta` on 3.2.148 and
@@ -441,6 +457,10 @@ easyeda sch zone-draw --mode partition --font-size 22 --doc P2_POWER
 easyeda sch zone-plan --json --doc P3_PERIPHERAL
 easyeda sch zone-draw --mode partition --font-size 22 --doc P3_PERIPHERAL
 ```
+
+Rectangles are anchored at **`(MinX, MaxY)`** on the y-UP canvas and extend
+downward by their height — treating `MinY` as the top-left y shifts the whole
+frame down by one height and pushes it past the sheet/title-block edge.
 
 Before drawing a partition, require all five `zone-plan` validation counters
 (`sheetOverflow`, `partitionOverlap`, `titleBlockHits`, `moduleOutsideZone`,

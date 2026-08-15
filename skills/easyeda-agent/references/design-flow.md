@@ -122,12 +122,22 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 - **💾 过门条件**:页集合与模块计划一致(该改名的已改、该补的已补、多余空页已删);每个目标页都有可读图纸(A4 默认)和明确职责;每页模块预计能落在可用区内,标题栏 keep-out 明确 → `easyeda sch save`。若用户要求逐步确认,保存/继续前停住。
 
 ### S2 — 模块编组
-- **做什么**:在每页内,把「芯片 + 其外围电路」定义为一个**组**,并规划各组在页面上的**分区位置**(谁在左、谁在右、信号流向)。
-- **怎么做**:分区/信号流向规则查 conventions 的 `schematic-layout-conventions.md`。此阶段只规划坐标分区,先不落子。布局 spec 里的 `sheet` 默认写 `"A4"`;zone 必须落在 S1 读到的 sheet 可用区内。**组的 page/zone 归属读 S0 方案书 spec 的 `modules[].page` / `modules[].zone`——这里只是把已定的分区落成具体矩形,不重新分配**。
-- **分区落成可校验的认领(新)**:`easyeda sch zones set --spec <s0-spec.json>`(或 `--module NAME=ZONE:D1,D2`)把 modules[].zone 持久化进项目 workflow 状态——此后 **`sch layout-lint` 自动多一条 zone-violation WARN**(被认领的件 bbox 中心落在其分区矩形之外 = S0 拍板的分区没落实),`sch zones status` 随时看认领+活体违规。词汇同 autolayout/pcb zones(left/center/right × top/bottom;画布 y-UP,top=大 y=视觉上半区)。原理图和 PCB 的认领各自独立(同一模块在图纸和板上的分区可以不同)。
-- **分区框可视化(新)**:`easyeda sch zone-draw` 把认领画成**虚线框+区名标签**(行业规范「先看区、再看线」;注释图元,非电气对象;真机验证过 `eda.sch_PrimitiveRectangle/Text` 全 CRUD)。框的几何与 zone-violation 用同一 `zoneRect`——**所见即所校验**。矩形 API 在 y-UP 画布以 `(MinX, MaxY)` 为左上锚点、按高度向 `-y` 延伸;固定九宫格与 partition 模式共用同一生成逻辑,禁止把 `MinY` 当左上 y（会整框下移一个高度并越过图纸/图签下边界）。固定九宫格标题默认 14pt，可用 `--font-size` 调整。`sch zones` 认领与所有绘框模式现在都按 **documentUuid 分页持久化**；多页 spec 的 `modules[].page` 会解析到各页，逐页用 `--doc <页>` 绘制，绝不把 MCU 页认领套到 Power/Peripheral 页。重跑先**验证删除**旧框：任何 rectangle/text survivor 都硬失败并保留恢复 ID；创建返回的框/文字 ID 数量必须一一匹配，部分失败在同一脚本内补偿删除。画/清完成均显式 `schematic.save(saved:true)`，不能用“内存里看见了”冒充持久化。
-- **数据驱动整纸分区(#149)**:上面 `zone-draw`(默认 `--mode zones`)是**固定九宫格**;要「按整张纸合理切分功能区、给右下角图签留缺口」的行业版式,用 `easyeda sch zone-plan`(纯计算,`--json` 出方案+validation,不落笔)+ `easyeda sch zone-draw --mode partition --font-size 22`(画大字号分区框)。planner 从**活体几何**求解:usable sheet(减 margin)按**模块 bbox 之间的自然空隙**切列/行分割线(不是固定分数——高模块跨过中心分割线会跑出分区,故按边缘间隙且间隙≥gutter),每个分区**抬到标题栏 keep-out 之上**、顶部留 title band 放大字号区名。模块 bbox = 认领的各件 live bbox 并集(读当前页的 `sch zones` 认领)。validation 五项(sheetOverflow / partitionOverlap / titleBlockHits / moduleOutsideZone / labelCollisions)必须全 0；有违规时拒绝落笔。适合多页工程逐页分区。
-- **过门条件**:每个组有明确的目标矩形区域(已 `sch zones set` 认领),组间预留了通道(不重叠的分区);若模块太多,已经拆到下一页而不是挤压本页。
+- **做什么**:在每页内,把「芯片 + 其外围电路」定义为一个**组**,并规划各组在页面上的**分区位置**
+  (谁在左、谁在右、信号流向)。此阶段只规划分区,**先不落子**。
+- **归属读 S0,不重新分配**:组的 page/zone 来自方案书 spec 的 `modules[].page` / `modules[].zone`,
+  这里只是把已定的分区落成具体矩形。分区/信号流向规则见 conventions 的
+  `schematic-layout-conventions.md`;zone 必须落在 S1 读到的 sheet 可用区内。
+- **认领 + 画框**(动作细节见 [`schematic.md`](./schematic.md) 的 *Functional frames + text labels*):
+  1. `easyeda sch zones set --spec <s0-spec.json>` 把分区**持久化**进项目状态 ——
+     此后 `sch layout-lint` 自动多一条 zone-violation(件落在自己分区外),
+     `sch zones status` 随时查认领与活体违规;
+  2. `easyeda sch zone-draw` 把认领画成虚线框 + 区名(默认 `--mode zones` 固定九宫格);
+     要「整张纸按模块自然空隙切分、给图签留缺口」的行业版式,先 `sch zone-plan --json`
+     出方案(纯计算,五项 validation 必须全 0)再 `zone-draw --mode partition`。
+  3. 认领与框都**按页(documentUuid)持久化**,多页工程逐页 `--doc <页>` 画,
+     绝不把 MCU 页的认领套到 Power 页。
+- **过门条件**:每个组有明确的目标矩形(已认领),组间预留通道(分区不重叠);
+  模块太多就拆到下一页,而不是挤压本页。
 
 ### S3 — 按组摆放(芯片 + 外围一起)
 - **做什么**:**逐组**放置——先放该组核心芯片,再把它的外围**就近**放在芯片周围(去耦贴电源脚、晶振贴时钟脚…),放完一组再下一组。
@@ -154,11 +164,9 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
   三条硬约束:**必须在布线前跑**(v1 是 parts-only,页上有任何 wire/bus/marker 就硬拒绝)、
   **必须有真实 sheet bbox**、**只移动已放置的器件**(不创建缺件)。`--apply` 成功后自动画分区框
   (#142,`--zone-draw=false` 关)。失败按规划快照逆序恢复并回读证明,不伪装事务。
-- **兜底引擎 `--engine official`(块和 spec 都没覆盖的散乱页)**:官方 `sch_Document.autoLayout()`
-  @beta。⚠ **破坏性、只在布线前用**——实测三坑:只挪器件不挪导线(已连线页跑完全断)、
-  落点 off-grid、散布让短桩相撞短路。封装已加安全管线:已连线页默认拒绝(`--rewire` 才允许,
-  跑后自动吸格→删断线→按跑前网表重连)、自检用 `sch check` 不止 layout-lint、需目标页**前台**、
-  ~2min。**官方 API 没有事务回滚**:post-check 失败时页面已经变异,必须先人工修复才能进 S4。
+- **兜底引擎 `--engine official`(块和 spec 都没覆盖的散乱页)**:官方
+  `sch_Document.autoLayout()` @beta。⚠ **破坏性、只在布线前用、需目标页前台、~2min、
+  没有事务回滚**。三个实测坑与 `--rewire` 安全管线见 [`schematic.md`](./schematic.md)。
 - **优先级铁律**:命中块 → `block-apply`;有 spec → `--engine template`;都没有才 `official`,
   且**成品/已连线页一律别用它**。
 - **摆完可自评质量**:`easyeda sch layout-score` 给布局可读性打五维分(标签折叠/标签反向/外围贴核心/长链挤压/版面整洁),低分维的归因**自带填好真实位号坐标的 fix 命令,照抄执行即可修**;它是诊断视角不是门(无 `--min-score` 永远 exit 0),门仍是下面的 layout-lint + check。
