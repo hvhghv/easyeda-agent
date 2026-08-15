@@ -925,12 +925,44 @@ Page-lazy-load law: only the active page's texts are returned — pass --page (o
 
 	// ── wire ──────────────────────────────────────────────────────────────
 	// schematic.wire.create
+	//
+	// ⚠ 这是**逃生口**,不是一等布线手段。正路是 autoconnect(电源/地/netport 短桩)
+	// 和 block-apply(整块落地)——它们按真实 bbox/引脚/已有 flag 几何打分选方向和
+	// 桩长,天然避开下面说的合并陷阱。本命令存在的理由只有两个:
+	//   1. group-move 刚体平移半途失败时的残局修复(那条错误文案就写着 "finish
+	//      manually with `sch wire`")——导线没有 modify-in-place,只能删了重建,
+	//      重建炸在中间就得手工补;
+	//   2. zone relayout 的串联链共线串接(cmd_sch_zone_relayout.go)内部走同一个
+	//      action 落 pin-to-pin 直线。
+	// 审计数据(2026-08):本命令 40 次调用 / 17.5% 失败率,而 connect_pin 是 17389
+	// 次 / 2.9%——长尾失败率是主路径的 6 倍,典型「用得少所以坏了没人知道」。#170
+	// 就是外部用户把它当一等手段画多网信号线,被 EasyEDA 自动合并成一条多段线,
+	// 18 个引脚全并进 GND,而 `sch check` 全绿。故不加几何护栏(残局修复恰恰需要它
+	// 无阻碍工作),改为在 help 里说清定位 + 落线后提示走 bridge-check 对账。
 	{
 		var pointsJSON, net, styleJSON string
 		c := &cobra.Command{
 			Use:   "wire",
-			Short: "Create a schematic wire polyline",
-			Args:  cobra.NoArgs,
+			Short: "Create a schematic wire polyline — ESCAPE HATCH; 常规布线走 `sch autoconnect` / `sch block-apply`",
+			Long: `手工画一条导线折线。**这是逃生口,不是常规布线手段。**
+
+常规布线请走:
+  • ` + "`easyeda sch autoconnect`" + ` — 电源/地/netport 短桩(按真实几何打分选方向+桩长)
+  • ` + "`easyeda sch block-apply`" + ` — 整块落地(自带 netlist 对账门)
+
+本命令主要用于 ` + "`sch group-move`" + ` 刚体平移半途失败后的残局修复
+(导线无 modify-in-place,只能删除+重建;重建中断就要手工补齐剩余段)。
+
+⚠ **EasyEDA 会自动合并共线相接的导线** —— 这是手工画线最容易静默毁掉电路的坑:
+  • 同 x 的两条竖线只要 y 区间**相接或被元件本体填满**(即使中间隔着元件),
+    就会被合并成一条多段线;竖线**穿过非目标引脚**同样算电气接触 → 合并;
+  • 合并后多个网络并成一个,而 ` + "`sch check`" + ` **不报网络归属错误**(只报
+    wire-crossing / dangling),肉眼和常规检查都看不出来。
+
+所以手工画多网信号线时:每个网分配**独立的竖线通道 x**(互不重叠,避开已有
+netflag 桩线占用的 x),把所有引脚点当作**点障碍**绕行,画完必须跑
+` + "`easyeda sch bridge-check`" + ` + ` + "`easyeda sch read`" + ` 逐网对账。`,
+			Args: cobra.NoArgs,
 			Example: `  easyeda sch wire --points '[[100,200],[100,300]]'        # nested pairs
   easyeda sch wire --points '[100,200,100,300]'            # flat (also accepted)
   easyeda sch wire --points '[[100,200],[100,300]]' --net VCC`,
@@ -953,7 +985,14 @@ Page-lazy-load law: only the active page's texts are returned — pass --page (o
 					}
 					payload["style"] = style
 				}
-				return dispatch(cfg, "schematic.wire.create", window, payload, stdout, stderr)
+				if err := dispatch(cfg, "schematic.wire.create", window, payload, stdout, stderr); err != nil {
+					return err
+				}
+				// 手画线是合并短路的主要来源(#170):落线成功不等于网络正确,而
+				// `sch check` 抓不到网络归属错误。提示走能抓到的那两个判据。
+				fmt.Fprintln(stderr, "提示: 手工画线可能被 EasyEDA 与共线导线自动合并成多网短路(sch check 不报)。"+
+					"跑 `easyeda sch bridge-check` + `easyeda sch read` 逐网对账确认。")
+				return nil
 			},
 		}
 		c.Flags().StringVar(&pointsJSON, "points", "", `JSON coordinate list, nested '[[x,y],...]' or flat '[x1,y1,x2,y2,...]' (connector normalizes; required)`)

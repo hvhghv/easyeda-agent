@@ -34,7 +34,7 @@ EasyEDA tooling.
 5. **PCB mutation(rip-up/route/delete/via/track)后先 `easyeda doc reload` 再读/判/DRC** — 否则 list/DRC 读 stale;同网 Connection Error 暴增多是 pour 连通性 stale(先 `pour-rebuild`),不是真断。daemon 会在 stale 风险读操作时返回 `staleRisk` 警告(CLI 打到 stderr,机械兜底),但别等警告——mutation 后主动 reload。→ pcb.md
 6. **判对错只看 `list/check/drc/layout-lint/layout-score`,不看截图** — 截图会 stale/blank;data 有内容但截图空 = 窗口没渲染(切前台),不是设计错。(`layout-score` 是**诊断视角不是门**——门只有 `layout-lint --gate` 一个;且它的 `skipped` 维是「没测」不是「满分」。)`pcb drc/check` 这类重画布计算**需 PCB 在前台**,超时=切前台**单发一次、绝不循环重试**(重发被 `ACTION_BUSY` 拒)。**录制/演示模式例外**:截图变交付物 → design-flow 录制/演示模式。
 7. **每过一个阶段门显式 `save`(sch/PCB)** — place/wire/modify 只改内存,autosave 只兜底;整板每 ~10 件 save 一次。→ design-flow S 段 💾
-8. **手工连任何已知外围前先查块库 `easyeda blocks`**(离线,无需 daemon/窗口)— 20 块/11 类目,照抄验证过的块只重绑端口。**查不到 → 起草 `block-gap` issue;块用出问题(脚名不符/拓扑错/停产)→ 起草 `block-bug` issue 带证据 —— 都必须经用户确认后才 `gh issue create`,绝不自动上报**。→ ② 块地图速查 · standard-blocks-contributing.md §七
+8. **手工连任何已知外围前先查块库 `easyeda blocks`**(离线,无需 daemon/窗口)— `blocks ls` 看全量,照抄验证过的块只重绑端口。**查不到 → 起草 `block-gap` issue;块用出问题(脚名不符/拓扑错/停产)→ 起草 `block-bug` issue 带证据 —— 都必须经用户确认后才 `gh issue create`,绝不自动上报**。→ ② 块地图速查 · standard-blocks-contributing.md §七
 9. **netflag 必须经真 wire 连、离 pin 非零距** — 重叠坐标 EasyEDA 不认作连接;禁零长 wire;多脚同名 pin 要全连(如多 GND、AMS1117 双 VOUT)。→ schematic.md
 10. **RF/天线 keepout 覆盖每一层** — top+bottom no-copper + 内层 no-inner-electrical;top-only 会被底层 pour 灌到失谐。→ pcb.md
 11. **丝印每个标记落在器件本体/courtyard 之外、装配后不被遮** — 端子塑料罩/卡座壳/按键帽会盖住 footprint 内的丝印 = 等于没标。→ design-flow P9
@@ -103,7 +103,7 @@ EasyEDA tooling.
 | P9 | `silk` | 逐脚标注(`pins`/`label`/`note`) |
 
 **搜索策略**:`blocks search` 命中 id/desc/category/port/part——按**功能**(rs485/buck/gnss)、**芯片**(ch340/cc1101)、
-**端口网**(5V/USB_DP)三维轮换搜;一词没中换维度别急着手接;或 `blocks ls --category <power|usb|usb-serial|rf|comms|storage|sensing|mcu|mcu-support|indicator|button>` 浏览整类(11 类,`blocks ls` 看全 20 块)。
+**端口网**(5V/USB_DP)三维轮换搜;一词没中换维度别急着手接;或 `blocks ls --category <power|usb|usb-serial|rf|comms|storage|sensing|mcu|mcu-support|indicator|button|audio|display>` 浏览整类(类目以 `blocks ls` 实际输出为准,别信这里的枚举过期与否)。
 
 ## ③ 顺序硬约束(反了必返工)
 
