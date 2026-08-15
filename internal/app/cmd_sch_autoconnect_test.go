@@ -35,7 +35,7 @@ func TestPlanConnection_GroundPrefersDownShortest(t *testing.T) {
 	// A pin below its owner center → outward = down; kind gnd default = down.
 	// Both bonuses stack on 'down', and the shortest offset wins ties.
 	pin := acPin{X: 100, Y: 140, OwnerBBox: bb(80, 150, 120, 190)}
-	all := planConnection(pin, "ground", "GND", clearScene(), rulesFor())
+	all := planConnection(pin, "ground", "GND", clearScene(), rulesFor(), 0)
 	sel := all[0]
 	if sel.Direction != "down" {
 		t.Fatalf("expected down (outward + kind default), got %s", sel.Direction)
@@ -244,7 +244,7 @@ func TestScoreCandidate_MarkerHeightTriggersStaggerAt10Pitch(t *testing.T) {
 func TestPlanConnection_StaggersAwayFromRegisteredMarker(t *testing.T) {
 	scene := acScene{Flags: []layoutBBox{predictedMarkerBBox(82, 200, "ground", "left", "GND")}}
 	pin2 := acPin{X: 100, Y: 210}
-	sel := planConnection(pin2, "ground", "N2", scene, rulesFor())[0]
+	sel := planConnection(pin2, "ground", "N2", scene, rulesFor(), 0)[0]
 	for _, r := range sel.Reasons {
 		if r.Cost == costFlagCollision {
 			t.Errorf("selected candidate should stagger away from the registered marker, got collision: %+v", sel)
@@ -305,7 +305,7 @@ func TestScoreCandidate_UnnamedWireIsForeign(t *testing.T) {
 func TestPlanConnection_AvoidsForeignWireDirection(t *testing.T) {
 	pin := acPin{X: 100, Y: 100}
 	scene := acScene{Wires: []wireSegment{{X0: 50, Y0: 70, X1: 200, Y1: 70, Net: "+5V"}}}
-	all := planConnection(pin, "ground", "GND", scene, rulesFor())
+	all := planConnection(pin, "ground", "GND", scene, rulesFor(), 0)
 	if candidateHardRejected(all[0]) {
 		t.Fatalf("planner picked a hard-rejected candidate: %+v", all[0])
 	}
@@ -337,7 +337,7 @@ func TestPlanConnection_AvoidsOverlappingDirection(t *testing.T) {
 	// A wall of parts blocks 'down'; 'up' is clear. Planner must not pick down.
 	pin := acPin{X: 100, Y: 100}
 	scene := acScene{Parts: []layoutBBox{bb(80, 0, 120, 90).deref()}}
-	all := planConnection(pin, "ground", "GND", scene, rulesFor())
+	all := planConnection(pin, "ground", "GND", scene, rulesFor(), 0)
 	if all[0].Direction == "down" {
 		t.Fatalf("planner chose blocked direction down; scene=%+v score=%.2f", scene, all[0].Score)
 	}
@@ -345,8 +345,8 @@ func TestPlanConnection_AvoidsOverlappingDirection(t *testing.T) {
 
 func TestPlanConnection_Deterministic(t *testing.T) {
 	pin := acPin{X: 100, Y: 100, OwnerBBox: bb(80, 80, 120, 95)}
-	a := planConnection(pin, "power", "+5V", clearScene(), rulesFor())
-	b := planConnection(pin, "power", "+5V", clearScene(), rulesFor())
+	a := planConnection(pin, "power", "+5V", clearScene(), rulesFor(), 0)
+	b := planConnection(pin, "power", "+5V", clearScene(), rulesFor(), 0)
 	if len(a) != len(b) {
 		t.Fatalf("candidate count differs: %d vs %d", len(a), len(b))
 	}
@@ -363,7 +363,7 @@ func TestPlanConnection_TieBreakStable(t *testing.T) {
 	// the lexical tie-break must order down<left<right<up. Confirm offsets too:
 	// shortest first within a direction.
 	pin := acPin{X: 0, Y: 0}
-	all := planConnection(pin, "ground", "GND", clearScene(), rulesFor())
+	all := planConnection(pin, "ground", "GND", clearScene(), rulesFor(), 0)
 	if all[0].Direction != "down" || all[0].Offset != 18 {
 		t.Fatalf("expected down@18 first, got %s@%.0f", all[0].Direction, all[0].Offset)
 	}
@@ -809,8 +809,8 @@ func TestScoreCandidate_TextNoteIsAnObstacle(t *testing.T) {
 	// 所以把说明铺在 pin 下方,盖住 down 档位的 ground body。
 	note := layoutBBox{MinX: -100, MinY: -120, MaxX: 100, MaxY: -10}
 
-	clean := planConnection(pin, "gnd", "GND", acScene{}, rules)
-	withNote := planConnection(pin, "gnd", "GND", acScene{Texts: []layoutBBox{note}}, rules)
+	clean := planConnection(pin, "gnd", "GND", acScene{}, rules, 0)
+	withNote := planConnection(pin, "gnd", "GND", acScene{Texts: []layoutBBox{note}}, rules, 0)
 	if len(clean) == 0 || len(withNote) == 0 {
 		t.Fatal("没有候选")
 	}
@@ -930,7 +930,7 @@ func TestScoreCandidate_OppositeSideIsCostlierThanAnySoftDamage(t *testing.T) {
 	for x := -300.0; x <= -10; x += 5 {
 		flags = append(flags, layoutBBox{MinX: x - 3, MinY: 30, MaxX: x + 3, MaxY: 70})
 	}
-	got := planConnection(pin, "netport", "C7_N3", acScene{Flags: flags, Parts: []layoutBBox{owner}}, rules)
+	got := planConnection(pin, "netport", "C7_N3", acScene{Flags: flags, Parts: []layoutBBox{owner}}, rules, 0)
 	if len(got) == 0 {
 		t.Fatal("没有候选")
 	}
@@ -968,5 +968,56 @@ func TestApplyLaneStagger_NeverFlipsToTheOppositeSide(t *testing.T) {
 	}
 	if got.Direction != "left" {
 		t.Errorf("应退回正面的最优: got %s@%v", got.Direction, got.Offset)
+	}
+}
+
+// **上界必须跟着 lane 需求走,不能是拍出来的固定倍数**。真机:布局把 D1 推开 146
+// 后,U3 左侧腾出 276 的通道,而第 6 个 marker 需要 offset 248 —— 旧上界
+// 3×OffsetMax=240 < 248,空间给了却够不着,推开器件那一步白做。
+func TestExtendedOffsets_UpperBoundFollowsLaneDemand(t *testing.T) {
+	rules := defaultAutoconnectRules()
+	base := extendedOffsets(rules, 0)
+	if len(base) == 0 {
+		t.Fatal("无 lane 压力时也该有扩展档位")
+	}
+	if got := base[len(base)-1]; got > 3*rules.OffsetMax+1 {
+		t.Errorf("无 lane 压力时上界仍是 3×OffsetMax: got %v", got)
+	}
+	// lane 要求排到 248
+	far := extendedOffsets(rules, 248)
+	if len(far) == 0 {
+		t.Fatal("有 lane 压力时必须有候选")
+	}
+	last := far[len(far)-1]
+	if last < 248 {
+		t.Errorf("上界没跟上 lane 需求: 最远只到 %v,需要 ≥248", last)
+	}
+	// 且必须真的枚举出 ≥248 的档位
+	found := false
+	for _, o := range far {
+		if o >= 248 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("没有枚举出够远的档位: %v", far)
+	}
+}
+
+// 同侧 lane 占到常规范围之外时,即使当前有干净候选也要铺远档 ——
+// 否则 applyLaneStagger 手里根本没有够远的可选。
+func TestPlanConnection_ExtendsWhenLaneFloorExceedsRegularRange(t *testing.T) {
+	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
+	rules := defaultAutoconnectRules()
+	got := planConnection(pin, "netport", "C7_N5", acScene{}, rules, 248)
+	maxOff := 0.0
+	for _, c := range got {
+		if c.Offset > maxOff {
+			maxOff = c.Offset
+		}
+	}
+	if maxOff < 248 {
+		t.Errorf("lane 要求 248 时,候选最远只到 %v", maxOff)
 	}
 }

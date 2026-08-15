@@ -353,7 +353,7 @@ func TestPlanConnection_DenseArea_ExtendsBeyondOffsetMax(t *testing.T) {
 		{MinX: 5, MinY: -15, MaxX: 100, MaxY: 15},      // 右(只堵到 100)
 	}
 	scene := acScene{Flags: flags}
-	got := planConnection(pin, "gnd", "GND", scene, rules)
+	got := planConnection(pin, "gnd", "GND", scene, rules, 0)
 	if len(got) == 0 {
 		t.Fatal("没有候选")
 	}
@@ -372,7 +372,7 @@ func TestPlanConnection_DenseArea_ExtendsBeyondOffsetMax(t *testing.T) {
 func TestPlanConnection_NotDense_StaysWithinOffsetMax(t *testing.T) {
 	pin := acPin{X: 0, Y: 0, Designator: "U1", PinNumber: "1"}
 	rules := defaultAutoconnectRules()
-	got := planConnection(pin, "gnd", "GND", acScene{}, rules)
+	got := planConnection(pin, "gnd", "GND", acScene{}, rules, 0)
 	if len(got) == 0 {
 		t.Fatal("没有候选")
 	}
@@ -394,7 +394,7 @@ func TestPlanConnection_ExtendedOffsetsStillHardRejected(t *testing.T) {
 	}
 	// 一条横跨的异网线,任何向右的桩线都会碰到它
 	wires := []wireSegment{{X0: 5, Y0: -50, X1: 5, Y1: 50, Net: "OTHER"}}
-	got := planConnection(pin, "gnd", "GND", acScene{Flags: flags, Wires: wires}, rules)
+	got := planConnection(pin, "gnd", "GND", acScene{Flags: flags, Wires: wires}, rules, 0)
 	for _, c := range got {
 		if c.Direction == "right" && !candidateHardRejected(c) {
 			t.Fatalf("向右的桩线穿过异网线却没被硬拒绝: off=%v", c.Offset)

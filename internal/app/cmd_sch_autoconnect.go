@@ -699,7 +699,9 @@ var acDirections = []string{"up", "down", "left", "right"}
 // and returns them sorted best-first. Deterministic tie-break: score asc, then
 // direction lexical (down<left<right<up), then offset asc — so the same scene +
 // spec always yields the same selection (acceptance: "deterministic result").
-func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, rules autoconnectRules) []acCandidate {
+// laneFloor 是同侧 lane 要求的最小 offset(0 = 这一侧还没人)。它决定候选枚举要
+// 铺到多远 —— 布局腾出的空间只有被枚举到才用得上。
+func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, rules autoconnectRules, laneFloor float64) []acCandidate {
 	score := func(offsets []float64) []acCandidate {
 		out := make([]acCandidate, 0, len(acDirections)*len(offsets))
 		for _, dir := range acDirections {
@@ -715,8 +717,10 @@ func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, r
 	// 拉长继续找:人工画法本来就是这样(skill conventions:同侧密集旗用阶梯 offset
 	// 错列 20/50/80)。扩展档位照样过全部判据(穿件/触异网线/折叠端口都还在),
 	// 所以「更远」不等于「更差」,只有真正干净的位置才会赢。
-	if noCleanCandidate(all) {
-		all = append(all, score(extendedOffsets(rules))...)
+	// 两种情况要铺更远的候选:常规档位里一个干净的都没有,**或者**同侧 lane 已经
+	// 占到了常规范围之外(那时不铺,applyLaneStagger 手里根本没有够远的可选)。
+	if noCleanCandidate(all) || laneFloor > rules.OffsetMax {
+		all = append(all, score(extendedOffsets(rules, laneFloor))...)
 	}
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Score != all[j].Score {
@@ -760,16 +764,26 @@ func candidateCollidesWithMarker(c acCandidate) bool {
 	return false
 }
 
-// extendedOffsets are the longer stubs tried only when the regular range has no
-// collision-free slot at all. 上界取 3×OffsetMax:再长的桩线本身就成了视觉噪声,
-// 那时「重叠」反而是更小的代价,交给 layout-lint / sch check 去报。
-func extendedOffsets(rules autoconnectRules) []float64 {
+// extendedOffsets are the longer stubs tried when the regular range has no
+// collision-free slot, **或者同侧 lane 要求排到更远的地方**。
+//
+// 上界过去是拍出来的 3×OffsetMax(=240)。真机暴露了它的问题:布局把 D1 推开 146
+// 之后,U3 左侧腾出 276 的通道,而第 6 个 marker 需要 offset 248 —— 248 > 240,
+// **空间给了,落点算法却够不着**。上界必须跟着 lane 的实际需求走,不能是固定倍数:
+// 腾出多少就要能排到多少,否则推开器件那一步白做。
+//
+// 仍保留 3×OffsetMax 作为下限:没有 lane 压力时,再长的桩线本身就是视觉噪声。
+func extendedOffsets(rules autoconnectRules, laneFloor float64) []float64 {
 	step := rules.OffsetStep
 	if step <= 0 {
 		step = 6
 	}
+	upper := 3 * rules.OffsetMax
+	if laneFloor+step > upper {
+		upper = laneFloor + step
+	}
 	var out []float64
-	for o := rules.OffsetMax + step; o <= 3*rules.OffsetMax+acOverlapEps; o += step {
+	for o := rules.OffsetMax + step; o <= upper+acOverlapEps; o += step {
 		out = append(out, round2(o))
 	}
 	return out

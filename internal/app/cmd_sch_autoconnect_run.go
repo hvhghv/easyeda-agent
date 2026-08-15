@@ -465,7 +465,19 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 			}
 		}
 
-		all := planConnection(pin, canonicalKind, c.Net, scene, rules)
+		// 这一侧已经排到哪儿了,决定候选要铺多远:布局推开器件腾出的空间,只有被
+		// 枚举到才用得上(真机:腾了 276,而上界卡在 240,第 6 个 marker 排不进去)。
+		laneFloor := 0.0
+		for _, dir := range acDirections {
+			used, ok := lanes[laneKeyOf(pin.Designator, dir)]
+			if !ok {
+				continue
+			}
+			if need := used + laneStepFor(canonicalKind, c.Net); need > laneFloor {
+				laneFloor = need
+			}
+		}
+		all := planConnection(pin, canonicalKind, c.Net, scene, rules, laneFloor)
 		selected := applyLaneStagger(all, lanes, pin.Designator, c.Net, canonicalKind)
 		cr.Selected = &selected
 		cr.Rejected = summarizeRejected(all, selected)
