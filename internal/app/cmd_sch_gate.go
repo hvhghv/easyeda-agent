@@ -36,6 +36,7 @@ type gateStageSpec struct {
 
 var gateStages = []gateStageSpec{
 	{Name: "layout-lint", Why: "几何真值,一次 components.list,解释后面的连锁误报"},
+	{Name: "clusters", Why: "虚拟组体积(器件+它自己的 marker/桩线)—— layout-lint **结构上看不见**的那一半"},
 	{Name: "check", Why: "重建式逐条设计检查 + Go 侧几何 marker 规则"},
 	{Name: "bridge-check", Why: "wire-tree 粒度的合并短路 / 孤儿桩"},
 	{Name: "drc", Why: "官方 SDK DRC,最慢且需前台,放最后"},
@@ -290,6 +291,73 @@ func formatTypeTally(tally map[string]int) string {
 
 // gateBridgeStage runs bridge-check. A BRIDGE is a real short and blocks; an
 // orphan stub/flag is advisory (it is cosmetic until it is wired).
+// gateClustersStage 判 L1 虚拟组(器件 + 只挂在它自己引脚上的 marker/桩线/文字)。
+//
+// **为什么它必须在门里**:`layout-lint` 默认排除全部非 part 图元,而「标签压标签 /
+// 标签压器件 / 标签探出图纸」恰恰只发生在这些图元上 —— 同一张画布上有 11 处标签
+// 重叠时它照样报 `✓ placement gate passed`。判据结构上看不见的东西,只能由另一个
+// 判据补上;补了还不进门,等于没补。
+func gateClustersStage(cfg *appConfig, window string, strict bool) gateStage {
+	st := gateStage{Name: "clusters"}
+	res, err := requestAction(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true, "includePins": true})
+	if err != nil {
+		st.Status, st.Error = gateStatusError, err.Error()
+		st.Summary = "sch clusters 没能读到几何"
+		return st
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		st.Status, st.Error = gateStatusError, perr.Error()
+		st.Summary = "sch clusters 拿到了无法解析的几何"
+		return st
+	}
+	wires, _ := fetchSchWirePolylines(cfg, window, "") // 读不到线只降级归属,不阻断
+	clusters, _ := buildSchClusters(comps, wires)
+	var usable *layoutBBox
+	if sheet := sheetBBoxOf(comps); sheet != nil {
+		usable = &layoutBBox{
+			MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+			MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+		}
+	}
+	minGap := 0.0
+	if strict {
+		minGap = bslPartGap // 非 strict 只判硬伤;组间"贴着但不压"留给 strict
+	}
+	findings := judgeSchClusters(clusters, usable, minGap)
+	st.Detail = schClusterReport{Clusters: clusters, Findings: findings, Sheet: usable}
+	var overlaps, offSheet, tight int
+	for _, f := range findings {
+		switch f.Type {
+		case "overlap":
+			overlaps++
+		case "out-of-sheet":
+			offSheet++
+		case "tight":
+			tight++
+		}
+	}
+	st.Errors, st.Warnings = overlaps+offSheet, tight
+	st.Summary = fmt.Sprintf("%d 个虚拟组:%d 重叠 / %d 出图纸 / %d 过近",
+		len(clusters), overlaps, offSheet, tight)
+	if overlaps > 0 {
+		st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d 处组间图元重叠", overlaps))
+	}
+	if offSheet > 0 {
+		st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d 个组探出图纸可用区", offSheet))
+	}
+	if strict && tight > 0 {
+		st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d 处组间过近 (--strict)", tight))
+	}
+	if len(st.BlockingReasons) > 0 {
+		st.Status = gateStatusFail
+	} else {
+		st.Status = gateStatusPass
+	}
+	return st
+}
+
 func gateBridgeStage(cfg *appConfig, window string, allPages, strict bool) gateStage {
 	st := gateStage{Name: "bridge-check"}
 	payload := map[string]any{}
@@ -436,6 +504,8 @@ func runSchGate(cfg *appConfig, window string, allPages, strict, asJSON, failFas
 		switch name {
 		case "layout-lint":
 			st = gateLayoutStage(cfg, window, minGap, pinEps, allPages, strict)
+		case "clusters":
+			st = gateClustersStage(cfg, window, strict)
 		case "check":
 			st = gateCheckStage(cfg, window, allPages, strict, overlapEps, stderr)
 		case "bridge-check":

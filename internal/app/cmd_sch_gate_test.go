@@ -14,7 +14,7 @@ func TestResolveGateStagesDefaultsToTheFullFixedPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{"layout-lint", "check", "bridge-check", "drc"}
+	want := []string{"layout-lint", "clusters", "check", "bridge-check", "drc"}
 	if strings.Join(run, ",") != strings.Join(want, ",") {
 		t.Fatalf("pipeline order changed: got %v want %v", run, want)
 	}
@@ -33,7 +33,7 @@ func TestResolveGateStagesOnlyKeepsPipelineOrderNotArgumentOrder(t *testing.T) {
 	if strings.Join(run, ",") != "layout-lint,drc" {
 		t.Fatalf("got %v, want pipeline order [layout-lint drc]", run)
 	}
-	if strings.Join(skipped, ",") != "check,bridge-check" {
+	if strings.Join(skipped, ",") != "clusters,check,bridge-check" {
 		t.Fatalf("excluded stages wrong: %v", skipped)
 	}
 }
@@ -43,7 +43,7 @@ func TestResolveGateStagesSkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Join(run, ",") != "layout-lint,check,bridge-check" {
+	if strings.Join(run, ",") != "layout-lint,clusters,check,bridge-check" {
 		t.Fatalf("got %v", run)
 	}
 	if strings.Join(skipped, ",") != "drc" {
@@ -65,7 +65,7 @@ func TestResolveGateStagesRejectsOnlyPlusSkipAndEmptySelection(t *testing.T) {
 	if _, _, err := resolveGateStages("check", "drc"); err == nil {
 		t.Fatal("--only with --skip must be rejected")
 	}
-	if _, _, err := resolveGateStages("", "layout-lint,check,bridge-check,drc"); err == nil {
+	if _, _, err := resolveGateStages("", "layout-lint,clusters,check,bridge-check,drc"); err == nil {
 		t.Fatal("skipping every stage must be an error, not an empty pass")
 	}
 }
