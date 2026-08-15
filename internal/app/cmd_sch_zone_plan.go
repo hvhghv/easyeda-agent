@@ -113,6 +113,9 @@ type partitionPlan struct {
 	Keepout    *layoutBBox         `json:"keepout,omitempty"`
 	Partitions []partitionRect     `json:"partitions"`
 	Validation partitionValidation `json:"validation"`
+	// Capacity 回答「这一页是不是根本装不下」——与「摆得不好」是两种病,
+	// 修法完全不同(换纸/拆页 vs 挪一挪)。见 sch_zone_capacity.go。
+	Capacity schZoneCapacity `json:"capacity"`
 }
 
 type partitionOpts struct {
@@ -138,6 +141,7 @@ func defaultPartitionOpts() partitionOpts {
 // lifted above the title-block keep-out and given a top title band. Deterministic.
 func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionModule, opts partitionOpts) partitionPlan {
 	plan := partitionPlan{Sheet: sheet, Keepout: keepout}
+	plan.Capacity = diagnoseZoneCapacity(sheet, keepout, modules, opts)
 	usable := layoutBBox{
 		MinX: sheet.MinX + opts.Margin, MinY: sheet.MinY + opts.Margin,
 		MaxX: sheet.MaxX - opts.Margin, MaxY: sheet.MaxY - opts.Margin,
@@ -712,9 +716,17 @@ func renderPartitionPlan(plan partitionPlan, w io.Writer) {
 		v.SheetOverflow, v.PartitionOverlap, v.TitleBlockHits, v.ModuleOutsideZone, v.LabelCollisions)
 	if v.clean() {
 		fmt.Fprintln(w, "✓ plan is clean")
-	} else {
-		fmt.Fprintln(w, "✗ plan has violations — adjust margins/gutter or the zone claims")
+		return
 	}
+	// **先分清「装不下」和「摆得不好」**。原来只有一句「adjust margins/gutter or
+	// the zone claims」——对一颗 421 高的模组来说那是条做不到的建议,人照着试、
+	// 试不动,然后把整条判据当噪音跳过。判据的价值不在报错,在报出能执行的下一步。
+	if adv := capacityAdvice(plan.Capacity); adv != "" {
+		fmt.Fprintf(w, "✗ %s\n", adv)
+		return
+	}
+	fmt.Fprintln(w, "✗ plan has violations — 容量是够的,是摆放/间距问题:收紧 --gutter、"+
+		"用 `sch group-move` 挪开互相顶住的组,或把模块拆到下一页")
 }
 
 // runPartitionDraw draws (or clears) the partition frames, persisted per-page.
