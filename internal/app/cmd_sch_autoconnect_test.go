@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -383,14 +384,39 @@ func TestPlanConnection_TieBreakStable(t *testing.T) {
 	}
 }
 
-func TestCandidateOffsets_InclusiveRange(t *testing.T) {
-	got := candidateOffsets(autoconnectRules{OffsetMin: 18, OffsetMax: 80, OffsetStep: 6})
+func TestCandidateOffsets_FineRangePlusStandardLanes(t *testing.T) {
+	rules := autoconnectRules{OffsetMin: 18, OffsetMax: 80, OffsetStep: 6}
+	got := candidateOffsets(rules, "netport", "N1")
 	if got[0] != 18 {
 		t.Errorf("first offset want 18, got %.0f", got[0])
 	}
-	last := got[len(got)-1]
-	if last > 80 || last < 74 {
-		t.Errorf("last offset should approach 80, got %.0f", last)
+	// 细档还在(躲零碎障碍靠它):18..80 这一段每 6 一跳。
+	has := func(v float64) bool {
+		for _, o := range got {
+			if math.Abs(o-v) < 0.01 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, o := range []float64{18, 24, 72, 78} { // 18+10×6=78 是 ≤OffsetMax 的最后一档
+		if !has(o) {
+			t.Errorf("细档 %v 应该还在: %v", o, got)
+		}
+	}
+	// **长短循环的标准档位必须常驻**:让开一支 marker 要越过它的整个占地(~85),
+	// 这一档超出 OffsetMax,细档里根本没有 —— 真机 11 处 29×1 就是这么来的。
+	step := laneStepFor("netport", "N1")
+	for k := 1; k <= 3; k++ {
+		if !has(18 + float64(k)*step) {
+			t.Errorf("标准第 %d 档(%v)缺失: %v", k, 18+float64(k)*step, got)
+		}
+	}
+	// 升序且不重复(评分器的 tie-break 依赖确定性顺序)。
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Fatalf("档位必须严格升序去重: %v", got)
+		}
 	}
 }
 

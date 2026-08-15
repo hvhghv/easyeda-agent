@@ -531,14 +531,14 @@ func TestBslExpandForMarkers_CountsMarkersAndPushes(t *testing.T) {
 
 	// 左侧 2 支 marker 排 2 条 lane;通道 = 我这侧的伸出 + 另一条 lane 的步长
 	// + D1 自己的 marker 伸出 + 视觉间隙 = 214,与 D1 只有 50 → 让 160(落格)。
-	// lane 步长现在含网名(与 autoconnect 的 laneStepFor 同一个数),通道更深。
-	if plan.Placements[1].X != -260 {
-		t.Errorf("D1 该被推到 −260: %v", plan.Placements[1].X)
+	// lane 间距与 autoconnect 的 laneStepFor 同一个数(netport 实宽 + 间隙)。
+	if plan.Placements[1].X != -220 {
+		t.Errorf("D1 该被推到 −220: %v", plan.Placements[1].X)
 	}
 	if len(notes) != 0 {
 		t.Errorf("空地上推得动就不该有告警: %v", notes)
 	}
-	if !strings.Contains(log.String(), "D1 让 200") {
+	if !strings.Contains(log.String(), "D1 让 160") {
 		t.Errorf("日志要把算术写清楚: %q", log.String())
 	}
 }

@@ -342,28 +342,12 @@ func predictedMarkerBBox(x, y float64, canonicalKind, direction, net string) lay
 // `sch check` 的 marker-overlap 判的是「符号本体 ∪ 文字带」,评分器过去只预测
 // 符号本体,于是它挑出的"干净"位置在 check 眼里照样重叠 —— 剩余那批
 // 1.00×12.00 / 22.50×12.50 的重叠量,12 就是文字带高度本身。
-// **netport 的名字画在本体之外**(2026-08-15 实测推翻旧注释):平台给的 netport bbox
-// 恒为 31×11,`C7_N3` 与 `USB_DTR` 一模一样 —— 名字根本不在里面。于是"标签压标签"
-// 对评分器完全隐形:它挑出的"干净"落点,用户一眼就能看见两支标签叠着。
-// 真机实证:U3 引脚 y 间距 10、标签高 11,同一条 lane 上必压 1 —— 修尺子之后同一张
-// 画布从 `0 marker-overlap` 变成 **11 处 29×1**。
+// netport **不在这里**加文字带:它的名字已经算在 markerBBoxProfile 的 Far 里
+// (`Far = 9.5 + relayoutPortWidth(net)`)—— 评分器这一侧本来就是对的。
+// 瞎的是 check 那一侧:平台给的实测 bbox 恒为 31×11(裸六边形),名字不在里面,
+// 所以 flagTextBand 要把超出六边形的那一段补回来。别在这里再补一遍,会翻倍。
 func predictedFlagTextBand(x, y float64, body layoutBBox, canonicalKind, direction, net string) *layoutBBox {
 	if net == "" {
-		return nil
-	}
-	if canonicalKind == "netport" || canonicalKind == "port" {
-		l := relayoutPortWidth(net)
-		const h = 11.0
-		switch direction {
-		case "left": // 本体在锚点左侧 → 名字继续往左
-			return &layoutBBox{MinX: body.MinX - l, MinY: body.MinY, MaxX: body.MinX, MaxY: body.MinY + h}
-		case "right":
-			return &layoutBBox{MinX: body.MaxX, MinY: body.MinY, MaxX: body.MaxX + l, MaxY: body.MinY + h}
-		case "up":
-			return &layoutBBox{MinX: body.MinX, MinY: body.MaxY, MaxX: body.MinX + h, MaxY: body.MaxY + l}
-		case "down":
-			return &layoutBBox{MinX: body.MinX, MinY: body.MinY - l, MaxX: body.MinX + h, MaxY: body.MinY}
-		}
 		return nil
 	}
 	switch canonicalKind {
@@ -693,8 +677,18 @@ func scoreCandidate(pin acPin, dir string, offset float64, canonicalKind, target
 }
 
 // candidateOffsets enumerates offsets from OffsetMin to OffsetMax stepping by
-// OffsetStep (inclusive of OffsetMax). Deterministic, ascending.
-func candidateOffsets(rules autoconnectRules) []float64 {
+// OffsetStep (inclusive of OffsetMax), **加上「长短循环」的标准档位**。
+//
+// 细档(6 一跳)是给评分器躲零碎障碍用的:躲一根线、错开一个引脚。但同侧第二支
+// marker 要让开的不是"一点点",是前一支的**整个占地**(body + 网名 + 间隙 =
+// laneStepFor,netport 上 ~85)——而它超出了 OffsetMax(80),细档里根本没有这一档。
+// 真机后果:第二支只能在细档里挑个"不够深"的(60),body 正好落进前一支的名字带,
+// 同一侧连出 11 处 29×1 的重叠,而且怎么调细档都跳不出去。
+//
+// 所以标准档位必须常驻:浅档 = OffsetMin,之后每档一个完整 laneStepFor。这就是用户
+// 要的「不要阶梯,长短循环」——一档浅一档深,两档都是标准长度,相邻脚交替用。
+// 三档封顶(再深就该换方向或挪件了,extendedOffsets 仍是最后的兜底)。
+func candidateOffsets(rules autoconnectRules, canonicalKind, net string) []float64 {
 	min, max, step := rules.OffsetMin, rules.OffsetMax, rules.OffsetStep
 	if step <= 0 {
 		step = 6
@@ -706,10 +700,22 @@ func candidateOffsets(rules autoconnectRules) []float64 {
 	for o := min; o <= max+acOverlapEps; o += step {
 		out = append(out, round2(o))
 	}
+	if lane := laneStepFor(canonicalKind, net); lane > 0 {
+		for k := 1; k <= 3; k++ {
+			out = append(out, round2(min+float64(k)*lane))
+		}
+	}
 	if len(out) == 0 {
 		out = []float64{min}
 	}
-	return out
+	sort.Float64s(out)
+	dedup := out[:0]
+	for i, o := range out {
+		if i == 0 || o-dedup[len(dedup)-1] > acOverlapEps {
+			dedup = append(dedup, o)
+		}
+	}
+	return dedup
 }
 
 var acDirections = []string{"up", "down", "left", "right"}
@@ -730,7 +736,7 @@ func planConnection(pin acPin, canonicalKind, targetNet string, scene acScene, r
 		}
 		return out
 	}
-	all := score(candidateOffsets(rules))
+	all := score(candidateOffsets(rules, canonicalKind, targetNet))
 	// **密集区兜底**:如果常规档位里**每一个**候选都与已有 marker 相撞,那不是
 	// 「挑一个最不差的」的场合 —— 挑出来的就是一处真实的标签重叠。此时把桩线
 	// 拉长继续找:人工画法本来就是这样(skill conventions:同侧密集旗用阶梯 offset
@@ -889,17 +895,11 @@ func laneKeyOf(designator, direction string) string {
 // laneStepFor 是同一条 lane 上两个 marker 的最小 offset 差:marker 的**整个占地**
 // (body + 渲染出来的网名)+ 一个可见间隙。小于它,后一个会压在前一个身上。
 //
-// 名字这一段是 2026-08-15 补的:此前只算 body(netport 46),而 netport 的名字画在
-// body **之外**,于是"长短两档"只错开 42 —— 深的那支 body 正好落进浅的那支名字带里,
-// 真机同一侧连出 11 处 `29×1` 的重叠(29 是名字宽,1 是引脚间距 10 与标签高 11 的差)。
+// netport 的 profile 里 `Far-Near` 已经是「六边形 + 名字」的实宽(relayoutPortWidth),
+// 所以这里不再另加名字 —— 加了就是翻倍,标准档位会一路铺到 228。
 func laneStepFor(canonicalKind, net string) float64 {
 	p := markerBBoxProfile(canonicalKind, net)
-	step := (p.Far - p.Near) + acLaneGap
-	switch canonicalKind {
-	case "netport", "port":
-		step += relayoutPortWidth(net)
-	}
-	return step
+	return (p.Far - p.Near) + acLaneGap
 }
 
 // acLaneGap 是同侧相邻 marker 之间的可见间隙。
