@@ -340,6 +340,7 @@ func bslSolveAround(
 	blk blocks.Block,
 	rel bslRelations,
 	nets [][]string,
+	roleReach map[string]float64, // 角色 → marker 伸出上限(用实例真网名算;nil 退回模板代理名)
 	anchorRole string,
 	anchorPins map[string]acPin, // "PIN名/编号" → 实测引脚(锚件的)
 	anchorBBox layoutBBox,
@@ -356,6 +357,12 @@ func bslSolveAround(
 			return math.Max(bapRoleHalfExtent(p.Part), bapPartMargin)
 		}
 		return bapPartMargin
+	}
+	reachOf := func(role string) float64 {
+		if r, ok := roleReach[role]; ok && r > 0 {
+			return r
+		}
+		return bslRoleReach(nets, role) // 模板代理名兜底(纯函数测试走这条)
 	}
 	partKey := func(role string) string {
 		if p, ok := blk.Parts[role]; ok {
@@ -459,8 +466,7 @@ func bslSolveAround(
 		rightPrev, leftPrev := anchorRole, anchorRole
 		for i := anchorIdx + 1; i >= 0 && i < len(rel.Flow); i++ {
 			role := rel.Flow[i]
-			gap := bslFlowGap(bslCrossNets(nets, rightPrev, role),
-				bslRoleReach(nets, rightPrev), bslRoleReach(nets, role))
+			gap := bslFlowGap(bslCrossNets(nets, rightPrev, role), reachOf(rightPrev), reachOf(role))
 			seedX := prevRight + gap + tightHalf(role)
 			if x, y, ok := fitAlong(role, seedX, cy, 1, 0, gap, 6); ok {
 				out = append(out, bslSolved{Role: role, X: x, Y: y, Source: "flow"})
@@ -471,8 +477,7 @@ func bslSolveAround(
 		}
 		for i := anchorIdx - 1; i >= 0; i-- {
 			role := rel.Flow[i]
-			gap := bslFlowGap(bslCrossNets(nets, leftPrev, role),
-				bslRoleReach(nets, leftPrev), bslRoleReach(nets, role))
+			gap := bslFlowGap(bslCrossNets(nets, leftPrev, role), reachOf(leftPrev), reachOf(role))
 			seedX := prevLeft - gap - tightHalf(role)
 			if x, y, ok := fitAlong(role, seedX, cy, -1, 0, gap, 6); ok {
 				out = append(out, bslSolved{Role: role, X: x, Y: y, Source: "flow"})
@@ -556,6 +561,28 @@ func bslRoleReach(nets [][]string, role string) float64 {
 		}
 	}
 	return max
+}
+
+// bslRoleReachFrom 用**实例化后的真网名**算每个角色的 marker 伸出上限。
+//
+// 模板阶段只有 "DP1" 这样的引脚名当代理,而落地后的真名是 "C7_N4" —— 标签宽度差的
+// 那几个单位,正好是 `sch clusters` 抓到的 J1↔D1 3×11。plan.Nets 里两样都有,
+// 到了这一步就没有理由再用代理名。
+func bslRoleReachFrom(plan *bapPlan) map[string]float64 {
+	out := map[string]float64{}
+	for _, n := range plan.Nets {
+		r := bslReach(n.Net)
+		for _, ref := range n.Roles {
+			role, _, ok := splitBlockPinRef(ref)
+			if !ok {
+				continue
+			}
+			if r > out[role] {
+				out[role] = r
+			}
+		}
+	}
+	return out
 }
 
 // bslNetOfPins 找同时含 target 引脚与 role 任一脚的那条网的名字(用第一个 PORT:
@@ -701,7 +728,7 @@ func bslResolveLive(cfg *appConfig, window string, plan *bapPlan, sheet *layoutB
 		}
 	}
 
-	solved, notes := bslSolveAround(blk, rel, bslBlockNets(blk), plan.AnchorRole,
+	solved, notes := bslSolveAround(blk, rel, bslBlockNets(blk), bslRoleReachFrom(plan), plan.AnchorRole,
 		pins, anchorBBox, obstacles, usable)
 
 	byRole := map[string]bslSolved{}

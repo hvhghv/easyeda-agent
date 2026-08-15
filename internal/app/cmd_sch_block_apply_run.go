@@ -866,6 +866,14 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		}
 	}
 
+	// 8b. 虚拟组体检 —— 连完线才有 marker 和桩线,这一刻才量得出「组的体积」。
+	//
+	// **必须在这里报,不能只靠用户另跑一次。** `layout-lint` 默认排除全部非 part 图元,
+	// 于是 marker 互相压、去耦被标签罩住、簇探出图纸的页,它照样报 0 overlap —— 一路
+	// 假绿到交付。判定不失败整单(器件与连线都已落地,版面问题是可后修的),但必须
+	// 出现在 stderr 和 manifest 里,并指出用哪条命令 gate。
+	bapReportClusters(cfg, window, &man, stderr)
+
 	// 9. 归组 —— ADR-0003 的第一步产物必须是**一个刚体**,不是一堆散件。
 	// 次序在这里而不是更早:组的 bbox 必须已经包含连线和 marker(放件→连线→
 	// 挂 marker→封组),上层(zone tidy / zone-plan)拿到的刚体尺寸才是真实占地,

@@ -456,3 +456,52 @@ func newSchClustersCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 	c.Flags().BoolVar(&strict, "strict", false, "过近(WARN)也算失败")
 	return c
 }
+
+// bapReportClusters 在 block-apply 收尾处做一次虚拟组体检(L1 口径:器件 + 它自己的
+// marker/桩线)。**只报不拦**:器件与连线此刻都已落地,版面问题是可后修的,把它变成
+// 整单失败反而会诱导重跑一遍(而 apply 不幂等)。但它必须出现 —— 这一类问题
+// `layout-lint` 默认根本看不见(非 part 图元全被排除),不报就是假绿。
+func bapReportClusters(cfg *appConfig, window string, man *bapManifest, stderr io.Writer) {
+	res, err := requestAction(cfg, "schematic.components.list", window,
+		map[string]any{"includeBBox": true, "includePins": true})
+	if err != nil {
+		fmt.Fprintf(stderr, "warn: 虚拟组体检读不到几何(%v)—— 请手动跑 `easyeda sch clusters`\n", err)
+		return
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		fmt.Fprintf(stderr, "warn: 虚拟组体检解析失败(%v)—— 请手动跑 `easyeda sch clusters`\n", perr)
+		return
+	}
+	wires, _ := fetchSchWirePolylines(cfg, window, "") // 读不到就只按 marker 归属算
+	clusters, _ := buildSchClusters(comps, wires)
+	var usable *layoutBBox
+	if sheet := sheetBBoxOf(comps); sheet != nil {
+		usable = &layoutBBox{
+			MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+			MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+		}
+	}
+	// minGap 0:这一步只报硬伤(重叠 / 出图纸),过近留给 `sch clusters --strict`。
+	findings := judgeSchClusters(clusters, usable, 0)
+	if len(findings) == 0 {
+		fmt.Fprintf(stderr, "clusters ✓ %d 个虚拟组:0 重叠 / 0 出图纸(器件 + 它自己的 marker/桩线)\n", len(clusters))
+		return
+	}
+	for _, f := range findings {
+		var w string
+		switch f.Type {
+		case "overlap":
+			w = fmt.Sprintf("虚拟组 %s ↔ %s 的图元重叠 %.0f×%.0f —— 两组各自的 marker/桩线压在一起了",
+				f.A, f.B, f.OvX, f.OvY)
+		case "out-of-sheet":
+			w = fmt.Sprintf("虚拟组 %s 探出图纸可用区(%s)—— 器件本体可能还在框内,但它的 marker 印不出来", f.A, f.Note)
+		default:
+			continue
+		}
+		man.Warnings = append(man.Warnings, w)
+		fmt.Fprintf(stderr, "clusters ✗ %s\n", w)
+	}
+	fmt.Fprintf(stderr, "clusters: %d 个组、%d 处硬伤 —— 详情与门禁跑 `easyeda sch clusters --strict`\n",
+		len(clusters), len(findings))
+}
