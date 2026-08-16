@@ -13,30 +13,18 @@ package app
 //
 // 所以这里把两件事分开:
 //   - 摆得不好 —— 挪一挪/收紧间距就能解决,原提示有效;
-//   - **装不下** —— 换更大的图纸(或把模块拆到下一页)才有解,并且要**算给你看**
-//     差多少、该换到多大。
+//   - **装不下** —— 区内收敛(phase A)或把模块拆到下一页才有解。
+//
+// **域界固定 A4(用户裁定 2026-08-16):不做纸张阶梯、不建议换纸。**首版曾内置
+// A3→A0 的标准纸阶梯并在装不下时推荐换纸 —— 与「算法只支持 A4 的功能区布局」
+// 相抵触,已删。装不下的两条出路都在算法域之内:①收敛(标签方向/竖排,
+// `sch zone-arrange`)②拆页(`sch page-new`)。
 //
 // 判据是保守的:只有当「最紧凑的可行摆法」都放不下时才报装不下 —— 即不考虑
 // 模块之间怎么排,只问单个模块自己的框能不能塞进可用区。这样绝不会把「摆得不好」
-// 误判成「装不下」(那会让人白换一张大纸)。
+// 误判成「装不下」(那会让人白白去拆页)。
 
 import "fmt"
-
-// schSheetTemplate 是一档标准图纸的可用尺寸(schematic units,横放)。
-// 数值取自平台 a-series-landscape 模板族:A4 实测 1170×825,其余按 √2 递推
-// 并圆整到 5 的格点 —— 建议换纸时只需要量级正确,不需要毫米级精确。
-type schSheetTemplate struct {
-	Name string
-	W, H float64
-}
-
-var schSheetLadder = []schSheetTemplate{
-	{"A4", 1170, 825},
-	{"A3", 1655, 1170},
-	{"A2", 2340, 1655},
-	{"A1", 3310, 2340},
-	{"A0", 4680, 3310},
-}
 
 // schZoneCapacity 是一页的容量诊断。
 type schZoneCapacity struct {
@@ -48,7 +36,6 @@ type schZoneCapacity struct {
 	HaveW    float64 `json:"haveW"`
 	HaveH    float64 `json:"haveH"`
 	Blocking string  `json:"blockingModule,omitempty"`
-	Suggest  string  `json:"suggestedSheet,omitempty"`
 }
 
 // fitsAroundCorner 判一个 w×h 的矩形能不能放进「可用区 usable 减去角落障碍
@@ -119,25 +106,8 @@ func diagnoseZoneCapacity(sheet layoutBBox, keepout *layoutBBox, modules []parti
 	cap.Fits = fitsAroundCorner(cap.NeedW, cap.NeedH, usable, inflatedTitleKeepout(keepout))
 	if cap.Fits {
 		cap.Blocking = "" // 上面那轮循环记的是"超出整幅"的粗判,这里推翻它
-	} else {
-		cap.Suggest = suggestSheetFor(cap.NeedW, cap.NeedH, keepout, opts)
 	}
 	return cap
-}
-
-// suggestSheetFor 在标准纸阶梯上找第一张装得下的。找不到就说实话 —— 建议拆页,
-// 而不是推荐一张连它自己都装不下的纸。
-func suggestSheetFor(needW, needH float64, keepout *layoutBBox, opts partitionOpts) string {
-	koH := 0.0
-	if keepout != nil {
-		koH = (keepout.MaxY - keepout.MinY) + titleBlockSafety
-	}
-	for _, t := range schSheetLadder {
-		if needW <= t.W-2*opts.Margin && needH <= t.H-2*opts.Margin-koH {
-			return t.Name
-		}
-	}
-	return ""
 }
 
 // capacityAdvice 把诊断折成一句**可执行**的话。
@@ -177,14 +147,9 @@ func capacityAdvice(cap schZoneCapacity) string {
 		"`sch connect --pin X:n --kind … --net … --direction left|right`(**方向要用 `sch connect`;" +
 		"`autoconnect` 自己打分选方向,不接受 --direction**);③件本身超出主芯片 y 跨度时还要挪件" +
 		"(`sch group-move`)。真机实测:改 4 个标签方向,一页总高 576→537"
-	// **必须标明换纸是人工动作**:2026-08-16 实测,平台没有任何改图纸尺寸的 API ——
-	// dmt_Schematic 的 17 个方法里没有,运行时扫全部 eda.* 命名空间对
-	// sheet|paper|size|format 零命中,getSchematicPageInfo 不返回尺寸字段,
-	// sheet 图元也只有通用的 setState_X/Y/Rotation(bbox 是渲染结果不是可写属性)。
-	// 不写清楚的话,这条建议看起来像 CLI 能做的事,而 agent 会去找那条不存在的命令。
-	if cap.Suggest != "" {
-		return base + fmt.Sprintf(";重排后仍放不下再考虑 ①手工把图纸改成 %s"+
-			"(**平台无 API,只能人工**)或 ②拆到单独一页(`sch page-new`)。调 margin/gutter 无解。", cap.Suggest)
-	}
-	return base + ";重排后仍放不下就必须拆到多页(`sch page-new`)——标准图纸里没有装得下的。调 margin/gutter 无解。"
+	// **A4-only(用户裁定):不建议换纸。**曾经这里会推荐 A3/A2 —— 与算法域界
+	// 相抵触,且平台根本没有改图纸尺寸的 API(2026-08-16 实测:dmt_Schematic 17 个
+	// 方法里没有,运行时扫全部 eda.* 对 sheet|paper|size|format 零命中)。
+	// 装不下的两条出路都在算法域之内:收敛或拆页。
+	return base + ";重排后仍放不下就拆到单独一页(`sch page-new`)—— 算法域固定 A4,不建议换纸。调 margin/gutter 无解。"
 }

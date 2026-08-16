@@ -115,8 +115,11 @@ type partitionPlan struct {
 	Partitions []partitionRect     `json:"partitions"`
 	Validation partitionValidation `json:"validation"`
 	// Capacity 回答「这一页是不是根本装不下」——与「摆得不好」是两种病,
-	// 修法完全不同(换纸/拆页 vs 挪一挪)。见 sch_zone_capacity.go。
+	// 修法完全不同(收敛/拆页 vs 挪一挪)。见 sch_zone_capacity.go。
 	Capacity schZoneCapacity `json:"capacity"`
+	// LabelScopeDegraded:导线读取失败,模块 bbox 退回了距离启发式 —— 标签入框
+	// 是硬约束(用户裁定),降级必须可见,漏掉的旗恰恰是判据看不见的那种。
+	LabelScopeDegraded bool `json:"labelScopeDegraded,omitempty"`
 }
 
 type partitionOpts struct {
@@ -628,6 +631,8 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	keepout, _ := titleBlockKeepout(sheet)
 	// 框住的是「器件 + 它自己的 marker/桩线」(L1 虚拟组),不是器件本体 ——
 	// 归属走导线,不靠距离。读不到导线就退回旧的距离启发式(会漏远处的旗)。
+	// **标签入框是硬约束(用户裁定 2026-08-16)**:降级路径必须在输出里可见
+	// (labelScopeDegraded),不许静默 —— 距离启发式漏掉的旗恰恰是判据看不见的那种。
 	var clusterOf map[string]layoutBBox
 	if wires, werr := fetchSchWirePolylines(cfg, window, docUUID); werr == nil {
 		if cs, _ := buildSchClusters(comps, wires); len(cs) > 0 {
@@ -637,6 +642,7 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 			}
 		}
 	}
+	degraded := clusterOf == nil
 	modules := modulesFromClaims(zones, comps, clusterOf)
 	if len(modules) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no module bboxes resolved — the claimed parts aren't on this page (place them / `doc switch`)")
@@ -646,7 +652,9 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	// 图签/区名带的硬校验)。text 无 bbox API,按内容行数×字号估算;读取失败仅
 	// 降级警告(说明不该阻断画框)。
 	foldZoneNotesIntoModules(cfg, window, docUUID, zones, modules)
-	return planPartitions(*sheet, keepout, modules, opts), zones, nil
+	plan := planPartitions(*sheet, keepout, modules, opts)
+	plan.LabelScopeDegraded = degraded
+	return plan, zones, nil
 }
 
 // schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左上(y-UP 向下排行),

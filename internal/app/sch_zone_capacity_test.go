@@ -33,13 +33,16 @@ func TestDiagnoseZoneCapacity_WroomOnA4DoesNotFit(t *testing.T) {
 	if cap.Blocking != "U2" {
 		t.Errorf("该点名是谁装不下,得到 %q", cap.Blocking)
 	}
-	if cap.Suggest != "A3" {
-		t.Errorf("该建议换 A3,得到 %q", cap.Suggest)
-	}
 	adv := capacityAdvice(cap)
-	for _, want := range []string{"当前摆法", "U2", "A3", "先试重排", "调 margin/gutter 无解"} {
+	for _, want := range []string{"当前摆法", "U2", "先试重排", "拆到单独一页", "调 margin/gutter 无解"} {
 		if !strings.Contains(adv, want) {
 			t.Errorf("建议里缺 %q:%s", want, adv)
+		}
+	}
+	// A4-only(用户裁定):永不建议换纸 —— 哪怕真装不下,出路也是收敛或拆页。
+	for _, banned := range []string{"A3", "A2", "换纸建议"} {
+		if strings.Contains(adv, banned+"(") || strings.Contains(adv, "改成 "+banned) {
+			t.Errorf("A4-only 域界下不该建议换 %s:%s", banned, adv)
 		}
 	}
 }
@@ -61,16 +64,17 @@ func TestDiagnoseZoneCapacity_SmallModulesFit(t *testing.T) {
 	}
 }
 
-func TestDiagnoseZoneCapacity_NoSheetFitsAtAll(t *testing.T) {
-	// 比 A0 还大:必须说实话(拆页),而不是推荐一张装不下它的纸。
+func TestDiagnoseZoneCapacity_HugeModuleAdvisesSplit(t *testing.T) {
+	// 巨型模块:A4-only 域界下唯一出路是收敛或拆页 —— 永不推荐纸张。
 	sheet, ko := a4()
 	mods := []partitionModule{{Name: "HUGE", BBox: layoutBBox{MinX: 0, MinY: 0, MaxX: 6000, MaxY: 6000}}}
 	cap := diagnoseZoneCapacity(sheet, ko, mods, defaultPartitionOpts())
-	if cap.Fits || cap.Suggest != "" {
-		t.Fatalf("超出全部标准纸时不该推荐纸张,得到 suggest=%q", cap.Suggest)
+	if cap.Fits {
+		t.Fatal("6000×6000 该判装不下")
 	}
-	if !strings.Contains(capacityAdvice(cap), "拆到多页") {
-		t.Errorf("该建议拆页:%s", capacityAdvice(cap))
+	adv := capacityAdvice(cap)
+	if !strings.Contains(adv, "拆到单独一页") || !strings.Contains(adv, "A4") {
+		t.Errorf("该建议拆页并标明 A4-only:%s", adv)
 	}
 }
 
