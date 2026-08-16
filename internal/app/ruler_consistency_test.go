@@ -39,9 +39,11 @@ func TestRuler_ClusterGapMatchesSolverGap(t *testing.T) {
 func TestRuler_GateDefaultsShared(t *testing.T) {
 	// `sch status --gate` 复用 collectSchGate,必须传 gate 自己的默认阈值;
 	// 各抄一份字面量的话,某次调参后同一张画布会给出两个判定。
-	if gateDefaultMinGap != 2.54 || gateDefaultPinEps != 0 || gateDefaultOverlapEps != 0.5 {
-		t.Fatalf("gate 默认阈值被改了(%v/%v/%v)—— 确认 `sch gate` 的 flag 默认值与 `sch status --gate` 的传参都跟着改",
-			gateDefaultMinGap, gateDefaultPinEps, gateDefaultOverlapEps)
+	// overlapEps 不再钉字面量:它的真值源是 schMarkerOverlapEps(2026-08-17 归一,
+	// 见 TestRuler_GateOverlapEpsMatchesCheck)—— 这里只钉「gate 与 check 同源」。
+	if gateDefaultMinGap != 2.54 || gateDefaultPinEps != 0 {
+		t.Fatalf("gate 默认阈值被改了(%v/%v)—— 确认 `sch gate` 的 flag 默认值与 `sch status --gate` 的传参都跟着改",
+			gateDefaultMinGap, gateDefaultPinEps)
 	}
 }
 
@@ -109,5 +111,14 @@ func TestRuler_TidyLabelRotationMatchesFrozenTable(t *testing.T) {
 				t.Errorf("%s %s:Go 表 %g ≠ frozenTable %g(两把尺!)", row, dir, got, want)
 			}
 		}
+	}
+}
+
+// gate 的 check 段与 `sch check` 必须用同一个 marker-overlap 阈值:2026-08-17
+// 真机上 check 报 0、gate --strict 报 9,根因是 gateDefaultOverlapEps 手抄了 0.5。
+func TestRuler_GateOverlapEpsMatchesCheck(t *testing.T) {
+	if gateDefaultOverlapEps != schMarkerOverlapEps {
+		t.Fatalf("gate overlap eps %g ≠ check 的 schMarkerOverlapEps %g(两把尺!)",
+			gateDefaultOverlapEps, schMarkerOverlapEps)
 	}
 }

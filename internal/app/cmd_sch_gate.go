@@ -88,9 +88,13 @@ type gateReport struct {
 // `sch status --gate` 复用 collectSchGate 时若各自抄一份字面量,两条路就会在
 // 某次调参后悄悄给出不同判定 —— 同一张画布两个答案是最难查的那种不一致。
 const (
-	gateDefaultMinGap     = 2.54
-	gateDefaultPinEps     = 0.0
-	gateDefaultOverlapEps = 0.5
+	gateDefaultMinGap = 2.54
+	gateDefaultPinEps = 0.0
+	// gateDefaultOverlapEps **必须**引用 schMarkerOverlapEps,不许抄字面量:
+	// 2026-08-17 真机复验时 `sch check` 已按新容差报 0,`sch gate --strict` 的
+	// check 段却还报 9 —— 就是这里的一份 0.5 手抄没跟着动。配对由
+	// TestRuler_GateOverlapEpsMatchesCheck 钉死。
+	gateDefaultOverlapEps = schMarkerOverlapEps
 )
 
 const (

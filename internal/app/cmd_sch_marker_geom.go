@@ -515,6 +515,10 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 		case "marker-overlap":
 			rep.Summary.MarkerOverlaps++
 		case "missing-partition", "missing-note", "missing-titleblock":
+			// 交付三件套(区框/说明/图签)共用一个聚合计数槽 —— 汇总行必须写成
+			// missing-deliverable 而不是 missing-partition:2026-08-17 真机上一条
+			// missing-titleblock 被汇总行标成「1 missing-partition」,引着人去查
+			// 明明画好的框。逐条明细(WARN 行)始终带真实类型,判读以明细为准。
 			rep.Summary.MissingPartitions++
 		case "redundant-net-marker":
 			rep.Summary.RedundantNetMarkers++

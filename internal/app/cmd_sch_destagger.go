@@ -45,7 +45,13 @@ const destaggerGrid = 5.0
 // (issue #148)。`sch check --overlap-eps` 与 `sch destagger --overlap-eps` 共用
 // 同一个默认 —— 两边一旦漂移就会出现"check 报重叠、destagger 说不重叠"的
 // 死循环。
-const schMarkerOverlapEps = 0.5
+//
+// 0.5 → 1.0(2026-08-17):引脚节距 10 的 IC 引脚列上,netport 标签高 11,任何
+// 同侧相邻两支标签**必然**恰好竖向重叠 1 单位 —— 换方向/offset/stagger 都消不掉
+// (标签 70+ 宽,x 区间必相交)。真机 P3 复验时 9 条 69×1/81×1 的"重叠"全是这类
+// 字体现实,而判据给的修法一条也执行不了 —— 判据必须给能执行的下一步,给不出
+// 就该容忍。≥2 单位的真实叠(如 GND 旗压 MCU_TX 标签 6 单位)仍然报。
+const schMarkerOverlapEps = 1.0
 
 // destaggerDirs 是四个正交方向的单位向量(y-UP:up = +y)。
 var destaggerDirs = map[string][2]float64{

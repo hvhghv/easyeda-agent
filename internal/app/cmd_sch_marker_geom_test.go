@@ -280,3 +280,23 @@ func TestRedundantNetMarkerFindings(t *testing.T) {
 		t.Fatalf("clean scene must have no findings, got %+v", got)
 	}
 }
+
+// eps 1.0 的容差契约(2026-08-17):引脚节距 10 的 IC 列上相邻 netport 标签必然
+// 恰好竖叠 1 单位(标签高 11),任何 offset/stagger 都消不掉 —— 判据给不出能
+// 执行的下一步就该容忍;≥2 单位的真实叠必须照报。
+func TestMarkerOverlap_PitchFontGrazeTolerated(t *testing.T) {
+	mk := func(id string, minY, maxY float64) layoutComp {
+		return layoutComp{ID: id, ComponentType: "netlabel", Net: "N" + id,
+			BBox: &layoutBBox{MinX: 0, MinY: minY, MaxX: 70, MaxY: maxY}}
+	}
+	// 竖向恰叠 1(节距 10、高 11 的字体现实)→ 容忍。
+	graze := []layoutComp{mk("a", 0, 11), mk("b", 10, 21)}
+	if got := markerOverlapFindings(graze, schMarkerOverlapEps); len(got) != 0 {
+		t.Fatalf("1 单位竖叠该容忍,报了 %d 条", len(got))
+	}
+	// 竖叠 2 → 真实叠,必须报(容差不许吞掉真问题)。
+	real := []layoutComp{mk("a", 0, 11), mk("b", 9, 20)}
+	if got := markerOverlapFindings(real, schMarkerOverlapEps); len(got) != 1 {
+		t.Fatalf("2 单位竖叠该报 1 条,报了 %d 条", len(got))
+	}
+}
