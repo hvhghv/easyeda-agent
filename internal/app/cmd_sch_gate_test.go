@@ -290,3 +290,64 @@ func TestFormatTypeTallyIsDeterministicAndMostFrequentFirst(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+// DRC 关的阻塞判据 —— 这一关的 strict 参数曾经**收了不用**,而 --help 承诺
+// 「non-fatal DRC items are advisory,--strict promotes them to blocking」。
+// 文档承诺了判据没做的事,方向还是「你以为管住了」,所以逐档钉死。
+//
+// 测的是 drcBlockingReasons 本身,不是在测试里把判据重写一遍 —— 那样只会测到
+// 测试自己的逻辑,被测代码改坏了照样绿。
+func TestDrcBlockingReasons_MatchesDocumentedContract(t *testing.T) {
+	mk := func(fatal, errs, warns, infos int) drcReport {
+		r := drcReport{Fatal: fatal}
+		r.Summary.Fatal, r.Summary.Error, r.Summary.Warn, r.Summary.Info = fatal, errs, warns, infos
+		return r
+	}
+	cases := []struct {
+		name      string
+		rep       drcReport
+		strict    bool
+		wantBlock bool
+		wantHint  string // 阻塞理由里必须出现的字样
+	}{
+		{"全清", mk(0, 0, 0, 0), false, false, ""},
+		{"全清 + strict", mk(0, 0, 0, 0), true, false, ""},
+		{"fatal 任何档位都阻塞", mk(1, 0, 0, 0), false, true, "fatal"},
+		{"error 任何档位都阻塞(与 check 关同口径)", mk(0, 2, 0, 0), false, true, "error-level"},
+		{"warn 默认不阻塞", mk(0, 0, 3, 0), false, false, ""},
+		{"warn 在 strict 下阻塞(--help 的承诺)", mk(0, 0, 3, 0), true, true, "DRC 面板"},
+		{"info 即便 strict 也不阻塞", mk(0, 0, 0, 5), true, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := drcBlockingReasons(c.rep, c.strict)
+			if blocked := len(got) > 0; blocked != c.wantBlock {
+				t.Fatalf("blocking=%v want %v (reasons=%v)", blocked, c.wantBlock, got)
+			}
+			if c.wantHint == "" {
+				return
+			}
+			joined := strings.Join(got, " | ")
+			if !strings.Contains(joined, c.wantHint) {
+				t.Errorf("理由里缺 %q:%s", c.wantHint, joined)
+			}
+		})
+	}
+}
+
+func TestDrcBlockingReasons_WarnBlockSaysWhereToLook(t *testing.T) {
+	// 平台只回聚合计数,逐条明细没有 API —— 所以这条阻塞如果不写明「去 EasyEDA 的
+	// DRC 面板看」,它就是一条无法行动的阻塞,会被直接绕过,连它以后报的真问题
+	// 一起绕过。
+	var rep drcReport
+	rep.Summary.Warn = 1
+	got := drcBlockingReasons(rep, true)
+	if len(got) != 1 {
+		t.Fatalf("want 1 reason, got %v", got)
+	}
+	for _, want := range []string{"--strict", "聚合", "DRC 面板"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("缺 %q:%s", want, got[0])
+		}
+	}
+}

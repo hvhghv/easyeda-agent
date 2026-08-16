@@ -429,19 +429,48 @@ func gateDrcStage(cfg *appConfig, window string, strict bool) gateStage {
 		return st
 	}
 	st.Detail = rep
-	st.Errors = rep.Fatal
-	st.Warnings = rep.Summary.Error + rep.Summary.Warn
+	st.Errors = rep.Fatal + rep.Summary.Error
+	st.Warnings = rep.Summary.Warn
 	st.Summary = fmt.Sprintf("%d fatal, %d error, %d warn, %d info (total %d)",
 		rep.Summary.Fatal, rep.Summary.Error, rep.Summary.Warn, rep.Summary.Info, rep.Summary.Total)
-	if rep.Fatal > 0 {
-		st.BlockingReasons = append(st.BlockingReasons, fmt.Sprintf("%d fatal DRC violation", rep.Fatal))
-	}
+	st.BlockingReasons = append(st.BlockingReasons, drcBlockingReasons(rep, strict)...)
 	if len(st.BlockingReasons) > 0 {
 		st.Status = gateStatusFail
 	} else {
 		st.Status = gateStatusPass
 	}
 	return st
+}
+
+// drcBlockingReasons 是 DRC 关的**阻塞判据**,抽成纯函数以便逐档钉死契约。
+//
+//	fatal  任何档位都阻塞
+//	error  任何档位都阻塞 —— 与 check 关同口径(那边是 fatal||error||strict)
+//	warn   仅 --strict 阻塞 —— 兑现 `--help` 的「non-fatal DRC items are advisory,
+//	       --strict promotes them to blocking」
+//	info   从不阻塞
+//
+// 这一关此前只看 rep.Fatal,**收了 strict 参数却不用**:官方 DRC 判定的 error 在
+// 任何档位下都不阻塞,而文档写着 strict 会提升非 fatal。文档承诺了判据没做的事,
+// 方向还是「你以为管住了」(2026-08-16 回归测试翻出)。
+func drcBlockingReasons(rep drcReport, strict bool) []string {
+	var out []string
+	if rep.Fatal > 0 {
+		out = append(out, fmt.Sprintf("%d fatal DRC violation", rep.Fatal))
+	}
+	if rep.Summary.Error > 0 {
+		out = append(out, fmt.Sprintf("%d error-level DRC violation", rep.Summary.Error))
+	}
+	// warn 的阻塞**必须带上「去哪看」**:平台的 sch_Drc.check 只回聚合计数,
+	// 逐条明细没有 API(memory: schematic-drc-aggregate-only),我们能报的只有
+	// 「有几条」。不写清楚就是一条无法行动的阻塞 —— 而无法行动的阻塞会被直接
+	// 绕过,连它以后报的真问题一起绕过。
+	if strict && rep.Summary.Warn > 0 {
+		out = append(out, fmt.Sprintf(
+			"%d warn-level DRC violation (--strict;平台只回聚合数,逐条明细请在 EasyEDA 的 DRC 面板查看)",
+			rep.Summary.Warn))
+	}
+	return out
 }
 
 // gateAdviceRule maps a substring of a blocking reason to the prescribed fix.
