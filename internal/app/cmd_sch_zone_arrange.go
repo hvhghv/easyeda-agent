@@ -56,6 +56,20 @@ type zoneArrangeOut struct {
 	Arrange    zaResult             `json:"arrange"`
 	Validation *partitionValidation `json:"validation,omitempty"`
 	Verdict    string               `json:"verdict"` // pass | blocked
+	// SheetAssumed:页上没有图框图元(sheet),按 A4-only 域界假定 1170×825 +
+	// 标准图签角在规划。真机 2026-08-16:P3 的图框在一次连接器停摆期的 save 中
+	// 丢失,而平台没有任何重建图框的 API(sheet 组件 uuid 为空,titleblock 写
+	// 通道对无框页拒写)—— 唯一修复是**人工**在 EasyEDA UI 给该页重放图框。
+	// 假定必须在输出里可见,不许静默。
+	SheetAssumed bool `json:"sheetAssumed,omitempty"`
+}
+
+// schSheetOrA4 返回活页图框 bbox;图框图元缺失时按 A4-only 域界假定(带标志)。
+func schSheetOrA4(comps []layoutComp) (*layoutBBox, bool) {
+	if s := sheetBBoxOf(comps); s != nil {
+		return s, false
+	}
+	return &layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}, true
 }
 
 // zfGroupFromCluster 把一个 L1 虚拟组折成 phase A 的类型化输入。
@@ -133,10 +147,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	if perr != nil {
 		return nil, nil, perr
 	}
-	sheet := sheetBBoxOf(comps)
-	if sheet == nil {
-		return nil, nil, fmt.Errorf("no sheet bbox on the active page — `easyeda doc switch` to the schematic page first")
-	}
+	sheet, sheetAssumed := schSheetOrA4(comps)
 	keepout, _ := titleBlockKeepout(sheet)
 	// 标签入框是硬约束:导线是端子归属的唯一可靠来源,读不到就不规划。
 	wires, werr := fetchSchWirePolylines(cfg, window, docUUID)
@@ -161,7 +172,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	}
 	sort.Strings(names)
 
-	out := &zoneArrangeOut{Sheet: *sheet, Keepout: keepout}
+	out := &zoneArrangeOut{Sheet: *sheet, Keepout: keepout, SheetAssumed: sheetAssumed}
 	var zaZones []zaZone
 	for _, name := range names {
 		zc := zones[name]
@@ -215,6 +226,9 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 }
 
 func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
+	if out.SheetAssumed {
+		fmt.Fprintf(w, "⚠ 本页没有图框图元 —— 按 A4-only 域界假定 1170×825 + 标准图签角规划;图框需人工在 EasyEDA UI 重放(平台无重建 API)\n")
+	}
 	fmt.Fprintf(w, "phase A 区内收敛(跟随规则 R1-R5)\n")
 	for _, z := range out.Zones {
 		fmt.Fprintf(w, "  %-8s %-42s 框 %.0f×%.0f → %.0f×%.0f\n",

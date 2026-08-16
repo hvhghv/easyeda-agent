@@ -120,6 +120,9 @@ type partitionPlan struct {
 	// LabelScopeDegraded:导线读取失败,模块 bbox 退回了距离启发式 —— 标签入框
 	// 是硬约束(用户裁定),降级必须可见,漏掉的旗恰恰是判据看不见的那种。
 	LabelScopeDegraded bool `json:"labelScopeDegraded,omitempty"`
+	// SheetAssumed:页上没有图框图元,按 A4-only 域界假定 1170×825 规划
+	// (图框需人工在 UI 重放;见 schSheetOrA4)。
+	SheetAssumed bool `json:"sheetAssumed,omitempty"`
 }
 
 type partitionOpts struct {
@@ -624,10 +627,9 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	if perr != nil {
 		return partitionPlan{}, nil, perr
 	}
-	sheet := sheetBBoxOf(comps)
-	if sheet == nil {
-		return partitionPlan{}, nil, fmt.Errorf("no sheet bbox on the active page — `easyeda doc switch` to the schematic page first")
-	}
+	// 图框图元缺失时按 A4-only 域界假定(真机 2026-08-16:P3 的图框在连接器停摆期
+	// 的 save 中丢失,平台无重建 API,唯一修复是人工重放)。假定必须可见,不许静默。
+	sheet, sheetAssumed := schSheetOrA4(comps)
 	keepout, _ := titleBlockKeepout(sheet)
 	// 框住的是「器件 + 它自己的 marker/桩线」(L1 虚拟组),不是器件本体 ——
 	// 归属走导线,不靠距离。读不到导线就退回旧的距离启发式(会漏远处的旗)。
@@ -654,6 +656,7 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	foldZoneNotesIntoModules(cfg, window, docUUID, zones, modules)
 	plan := planPartitions(*sheet, keepout, modules, opts)
 	plan.LabelScopeDegraded = degraded
+	plan.SheetAssumed = sheetAssumed
 	return plan, zones, nil
 }
 
