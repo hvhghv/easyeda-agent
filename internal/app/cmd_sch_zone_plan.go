@@ -20,6 +20,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -775,9 +776,25 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	if _, err := clearPriorZoneFrames(st, docUUID, exec, stderr); err != nil {
 		return err
 	}
-	v, err := exec("draw partition frames", buildPartitionDrawJS(plan, fontSize, color))
+	// **清了旧框之后,画失败就是净损失** —— 实拍:`cleared 8 previous zone-frame
+	// primitive(s)` 紧接着 `text create returned undefined for D_ESD`,页面从「有框」
+	// 变成「无框」,而命令只报了那句平台错误,没说页面现在处于什么状态。
+	//
+	// 重试是安全的:buildPartitionDrawJS 的 catch 会删掉本次创建的每一个 id
+	// (半成品不会留在画布上),所以重发等价于第一次 —— 与 connect_pin 的重试判据
+	// 同一条原则:**能证明干净才重试**。实测同一页重试一次即成功。
+	js := buildPartitionDrawJS(plan, fontSize, color)
+	v, err := exec("draw partition frames", js)
 	if err != nil {
-		return err
+		time.Sleep(settleDelay)
+		v, err = exec("draw partition frames (retry)", js)
+	}
+	if err != nil {
+		// 两次都失败:**必须说清页面现在是什么状态**。旧框已删、新框没画成 ——
+		// 不明说的话,调用方会以为「只是这条命令没成功」而继续往下走,直到
+		// 交付前才发现分区框不见了。
+		return fmt.Errorf("%w —— 注意:旧的分区框已被清除、新的没画成,**本页现在没有分区框**;"+
+			"重跑 `sch zone-draw --mode partition` 即可(平台偶发吞创建请求,重试通常就成)", err)
 	}
 	frames, verr := validateZoneDrawResult(v, len(plan.Partitions))
 	if verr != nil {
