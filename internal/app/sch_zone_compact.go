@@ -145,3 +145,59 @@ func estimateColumnBBox(anchorW, anchorH, colItemW, spacing float64, n int) (w, 
 	}
 	return w, h
 }
+
+// tidyPatternSignalColumn 是 `group tidy --pattern` 的新档:signal-row 件竖排。
+const tidyPatternSignalColumn = "signal-column"
+
+// tidySignalStaged 是收集阶段的暂存:件的 live 状态、规划输入、以及要竖直化的
+// 电源/地旗。分两遍是因为**列内 Y 分布要知道全部成员**才算得出来。
+type tidySignalStaged struct {
+	Live  tidyLiveMember
+	In    tidySignalMemberIn
+	Rails []tidyRailPin
+}
+
+// tidyColumnSide 选把列排在锚件的哪一侧:**跟随这些件当前的重心**。
+//
+// 不选「页面空间大的那侧」是有意的:那要把纸面尺寸传进这个纯函数,而且会让同一
+// 组在不同页得出不同结果;跟随重心则是就近收拢 —— 件原本在锚件左边就排左边,
+// 视觉跳变最小,跨区连线也不会平白绕到另一侧。
+func tidyColumnSide(ins []tidySignalMemberIn, anchor tidyAnchor) float64 {
+	if len(ins) == 0 {
+		return -1
+	}
+	var sum float64
+	var n int
+	for _, in := range ins {
+		if in.CenterX != 0 {
+			sum += in.CenterX
+			n++
+		}
+	}
+	if n == 0 || sum/float64(n) <= anchor.X {
+		return -1
+	}
+	return 1
+}
+
+// ── 接线状态:**未接入**(2026-08-16 真机回退)────────────────────────────────
+//
+// 试过把 planSignalColumn 接进 `group tidy --pattern signal-column`,在 J_USB
+// (g2: J1/R3/R4)上真机跑,**把 R3/R4 的连接搞断了** —— 回退了那部分改动,
+// 规划器与单测留下。现象与线索记在这里,免得下次从零查:
+//
+//  1. dry-run 正确:三件都出了「竖排落位 @ (600,240/290/340)」,同列不同 Y。
+//  2. `--apply` 只落地 1 件(J1)。而 **deep sweep 是按整组删的**(输出
+//     「删除 12 个旧桩/旗/残段(整树)」),R3/R4 的桩线跟着被删,重连却没轮到
+//     它们 —— 落地后 `sch clusters` 显示两件 marker 0 / 桩线 0,
+//     `sch nets` 报 U3_N7 变成单引脚网。
+//  3. 抢修:`sch autoconnect` 逐脚补回 4 个连接,18 张网恢复。
+//
+// 下次接线前要先答清楚的三个问题:
+//   • 为什么 plan.Signal 到执行侧只剩一件?(dry-run 与 apply 走的是同一个
+//     buildTidyPlan,差别只在 forceAll —— 先把两条路径的 plan 打出来对比)
+//   • deep sweep 的删除范围与 plan.Signal 的重建范围**必须同集**,现在没有任何
+//     判据在保证这件事 —— 少一件就是静默断线。这条不变式该做成执行前的断言。
+//   • 断线发生在 tidyApply 内部,而它的自检(layout-lint + bridge-check)**没报**:
+//     两件孤立器件既不重叠也不短路,判据结构上看不见 —— 自检该加一条
+//     「sweep 前有连接的 pin,重建后必须仍有连接」。
