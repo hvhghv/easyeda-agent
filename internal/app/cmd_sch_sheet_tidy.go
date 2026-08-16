@@ -30,6 +30,57 @@ const (
 )
 
 // planSheetTidy 是纯规划:zones(名字→draw bbox)在纸张带内 pack。
+// sheetTidyDiag 填一份**能行动**的失败诊断。
+//
+// 三个失败分支原本只填 BandW/BandH,NeedW/NeedH 从没算过 —— 于是错误消息照着模板
+// 打出「纸面装不下(needW=0 needH=0 bandW=1066 bandH=691)」:需要 0×0 却装不下,
+// 读的人只能困惑。不是算错,是压根没算(2026-08-16 真机)。
+//
+// 现在分两种,因为**修法完全不同**:
+//   - 单个区自己就超出可用带 → 换更大图纸/拆页,再怎么排都没用;
+//   - 每个区都装得下、合起来排不进 → 拆页或收紧区内布局(`sch zone tidy`)。
+func sheetTidyDiag(reason string, groups []zonePackGroup, band layoutBBox, obs []layoutBBox) *zonePackDiag {
+	d := &zonePackDiag{Reason: reason, BandW: band.MaxX - band.MinX, BandH: band.MaxY - band.MinY}
+	var corner *layoutBBox
+	if len(obs) > 0 {
+		corner = &obs[0] // sheet tidy 只有图签一个障碍
+	}
+	var area float64
+	var worst string
+	for _, g := range groups {
+		w := g.BBox.MaxX - g.BBox.MinX
+		h := g.BBox.MaxY - g.BBox.MinY
+		area += w * h
+		if w > d.NeedW {
+			d.NeedW = w
+		}
+		if h > d.NeedH {
+			d.NeedH = h
+		}
+		// **判「单区放不进」要算上图签这个角落障碍**,与 zone-plan 的容量诊断
+		// 同一把尺(fitsAroundCorner)。只比区尺寸和整幅带尺寸会过松 —— 真机
+		// P2_MCU 因此被说成「各区单独放得下,是排布问题」,而 zone-plan 同一页
+		// 说「装不下」:同一页两个命令两个结论,读的人无所适从。
+		if !fitsAroundCorner(w, h, band, corner) {
+			worst = g.ID
+		}
+	}
+	switch {
+	case worst != "":
+		d.Reason = fmt.Sprintf("%s —— 功能区 %q 自己就放不进可用带(它 %.0f×%.0f,带 %.0f×%.0f,"+
+			"且避不开图签角落):换更大图纸或把它拆到下一页,重排没用",
+			reason, worst, d.NeedW, d.NeedH, d.BandW, d.BandH)
+	case area > d.BandW*d.BandH:
+		d.Reason = fmt.Sprintf("%s —— 各区单独都放得下,但总面积 %.0f 超过可用带 %.0f:"+
+			"拆页,或先 `sch zone tidy` 收紧各区内部", reason, area, d.BandW*d.BandH)
+	default:
+		d.Reason = fmt.Sprintf("%s —— 各区单独放得下、总面积也够(%.0f/%.0f),是**排布**放不下"+
+			"(行排 + 图签避让):调 --h-gap/--v-gap,或把最大的区拆到下一页",
+			reason, area, d.BandW*d.BandH)
+	}
+	return d
+}
+
 func planSheetTidy(modules []partitionModule, sheet layoutBBox, keepout *layoutBBox, opts partitionOpts, hGap, vGap float64) zonePackPlan {
 	// band 是**内容**可占区域;分区框在内容外画 pad(四向)+ 顶部标题带,可用
 	// 区按框的最终占位收缩(不收缩 = 内容顶到纸边 → 框压边/标题带压 IC 头顶)。
@@ -91,22 +142,19 @@ func planSheetTidy(modules []partitionModule, sheet layoutBBox, keepout *layoutB
 	sort.Slice(groups, func(i, j int) bool { return zonePackBeats(groups[i], groups[j]) })
 	moves, ok := packRowsInto(groups, band, obs, hGap, vGap)
 	if !ok {
-		return zonePackPlan{Fits: false, Diag: &zonePackDiag{
-			Reason: "zones do not fit the sheet band (title block avoided as an obstacle)",
-			BandW:  band.MaxX - band.MinX, BandH: band.MaxY - band.MinY}}
+		return zonePackPlan{Fits: false,
+			Diag: sheetTidyDiag("zones do not fit the sheet band (title block avoided as an obstacle)", groups, band, obs)}
 	}
 	if err := zonePackValidate(groups, moves, band); err != nil {
-		return zonePackPlan{Fits: false, Diag: &zonePackDiag{Reason: err.Error(),
-			BandW: band.MaxX - band.MinX, BandH: band.MaxY - band.MinY}}
+		return zonePackPlan{Fits: false, Diag: sheetTidyDiag(err.Error(), groups, band, obs)}
 	}
 	// packRowsInto 只保证不叠区;图签避让终验(validate 不知道障碍)。
 	for i, g := range groups {
 		eff := zonePackOffset(g.BBox, moves[i].DX, moves[i].DY)
 		for _, o := range obs {
 			if boxesOverlap(eff, o) {
-				return zonePackPlan{Fits: false, Diag: &zonePackDiag{
-					Reason: fmt.Sprintf("zone %s cannot avoid the title block", g.ID),
-					BandW:  band.MaxX - band.MinX, BandH: band.MaxY - band.MinY}}
+				return zonePackPlan{Fits: false,
+					Diag: sheetTidyDiag(fmt.Sprintf("zone %s cannot avoid the title block", g.ID), groups, band, obs)}
 			}
 		}
 	}
@@ -177,7 +225,10 @@ func newSchSheetTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 				fmt.Fprintf(stdout, "  %-8s Δ(%g,%g)%s\n", mv.ID, mv.DX, mv.DY, tag)
 			}
 			if !pk.Fits {
-				return fmt.Errorf("sheet tidy: %s — 纸面装不下(needW=%g needH=%g bandW=%g bandH=%g);缩紧各区(zone tidy)或换更大图纸",
+				// Diag.Reason 已经带上了「哪种装不下 + 该怎么办」(sheetTidyDiag),
+				// 这里不再拼一句放之四海的「缩紧各区或换更大图纸」——两种失败的修法
+				// 相反,给一句通用建议等于让人两条都试一遍。
+				return fmt.Errorf("sheet tidy: %s(最大区 %.0f×%.0f,可用带 %.0f×%.0f)",
 					pk.Diag.Reason, pk.Diag.NeedW, pk.Diag.NeedH, pk.Diag.BandW, pk.Diag.BandH)
 			}
 			fmt.Fprintln(stdout, "✓ sheet plan fits — 区两两不叠且落纸面带内")

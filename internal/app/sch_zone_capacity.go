@@ -51,6 +51,32 @@ type schZoneCapacity struct {
 	Suggest  string  `json:"suggestedSheet,omitempty"`
 }
 
+// fitsAroundCorner 判一个 w×h 的矩形能不能放进「可用区 usable 减去角落障碍
+// obstacle」的 L 形区域。
+//
+// **两个命令必须用同一把尺**:zone-plan 的容量诊断与 sheet tidy 的排布诊断此前
+// 各判各的 —— 同一页 P2_MCU,前者说「装不下,换 A3」、后者说「各区单独放得下,
+// 是排布问题」。矛盾的根源是双方都只做了一半:前者无脑扣掉整条图签高度(过严),
+// 后者只比区尺寸和整幅带尺寸(过松,完全没算图签)。
+//
+// 正确判据是 L 形:矩形要么塞进障碍**左侧**的窄长条(宽受限、高不受限),要么落在
+// 障碍**上方**的整幅(宽不受限、高要让开)。两条都不成立才是真装不下。
+func fitsAroundCorner(w, h float64, usable layoutBBox, obstacle *layoutBBox) bool {
+	uw, uh := usable.MaxX-usable.MinX, usable.MaxY-usable.MinY
+	if obstacle == nil {
+		return w <= uw && h <= uh
+	}
+	leftW := obstacle.MinX - usable.MinX // 障碍左侧的净宽
+	aboveH := uh - (obstacle.MaxY - usable.MinY)
+	if leftW < 0 {
+		leftW = 0
+	}
+	if aboveH < 0 {
+		aboveH = 0
+	}
+	return (w <= leftW && h <= uh) || (w <= uw && h <= aboveH)
+}
+
 // diagnoseZoneCapacity 判「这一页是不是根本装不下」。纯函数,可单测。
 //
 // 只问一个问题:**最大的那个模块**,它自己的框(内容 + pad + 区名带 + 说明带)
@@ -62,32 +88,38 @@ func diagnoseZoneCapacity(sheet layoutBBox, keepout *layoutBBox, modules []parti
 	}
 	usableW := (sheet.MaxX - sheet.MinX) - 2*opts.Margin
 	usableH := (sheet.MaxY - sheet.MinY) - 2*opts.Margin
-	// 图签把可用区的一角吃掉。竖直方向按最坏情况扣:框要整体抬到 keepout 上沿
-	// 之上(inflatedTitleKeepout 的口径),所以可用高度直接减去它的高度 + 安全带。
-	if keepout != nil {
-		usableH -= (keepout.MaxY - keepout.MinY) + titleBlockSafety
+	// **图签是角落障碍,不是整条底带**。首版直接把 keepout 高度从可用高里减掉,
+	// 于是 P2_MCU 被判「装不下、换 A3」——而那颗模组放在图签左边(x < keepout.MinX)
+	// 根本不碰它,`sheet tidy` 同一页算出的可用带就有 691 高。**把「摆得不好」
+	// 误判成「装不下」会让人白换一张大纸,而真正的毛病原封不动** —— 这正是本文件
+	// 开头声明要防的那件事,首版自己犯了。
+	//
+	// 现在按两段算,取宽松者:
+	//   ① 放在图签左侧的窄长条 —— 宽度受限、**高度不受限**;
+	//   ② 跨过图签横向的整幅 —— 宽度不受限、高度要让开图签。
+	// 与 sheet tidy 的「keepout 作障碍物参与行排」同一口径。
+	usable := layoutBBox{
+		MinX: sheet.MinX + opts.Margin, MinY: sheet.MinY + opts.Margin,
+		MaxX: sheet.MaxX - opts.Margin, MaxY: sheet.MaxY - opts.Margin,
 	}
 	cap.HaveW, cap.HaveH = usableW, usableH
 
 	for _, m := range modules {
 		b := m.BBox // draw 口径:器件 ∪ 它自己的 marker —— 框要框住的正是这些
 		w := (b.MaxX - b.MinX) + 2*partitionContentPad
-		h := (b.MaxY-b.MinY) + 2*partitionContentPad + opts.TitleBand + opts.NoteBand
+		h := (b.MaxY - b.MinY) + 2*partitionContentPad + opts.TitleBand + opts.NoteBand
 		if w > cap.NeedW {
 			cap.NeedW = w
 		}
 		if h > cap.NeedH {
 			cap.NeedH = h
-			if h > usableH {
-				cap.Blocking = m.Name
-			}
-		}
-		if w > usableW && cap.Blocking == "" {
-			cap.Blocking = m.Name
+			cap.Blocking = m.Name // 先记最大的那个;装不装得下由下面两段判据定
 		}
 	}
-	cap.Fits = cap.NeedW <= usableW && cap.NeedH <= usableH
-	if !cap.Fits {
+	cap.Fits = fitsAroundCorner(cap.NeedW, cap.NeedH, usable, inflatedTitleKeepout(keepout))
+	if cap.Fits {
+		cap.Blocking = "" // 上面那轮循环记的是"超出整幅"的粗判,这里推翻它
+	} else {
 		cap.Suggest = suggestSheetFor(cap.NeedW, cap.NeedH, keepout, opts)
 	}
 	return cap
@@ -117,7 +149,11 @@ func capacityAdvice(cap schZoneCapacity) string {
 	if who == "" {
 		who = "最大的模块"
 	}
-	base := fmt.Sprintf("这一页**装不下**:%s 的框要 %.0f×%.0f,而可用区(扣掉页边距与图签安全带)只有 %.0f×%.0f",
+	// 措辞必须与判据一致:判的是 L 形(图签左侧的长条 ∪ 图签上方的整幅),
+	// 说成「可用区只有 W×H」会让人拿框去比那个矩形,越比越糊涂 —— 框明明比它小,
+	// 凭什么说装不下?
+	base := fmt.Sprintf("这一页**装不下**:%s 的框要 %.0f×%.0f;纸面去掉页边距是 %.0f×%.0f,"+
+		"但图签占着右下角,可用区是 L 形 —— 要么窄到能塞进图签左侧,要么矮到能落在图签上方,这个框两条都不满足",
 		who, cap.NeedW, cap.NeedH, cap.HaveW, cap.HaveH)
 	if cap.Suggest != "" {
 		return base + fmt.Sprintf(" —— 换 %s 图纸,或把这个模块单独拆一页;调 margin/gutter 无解。", cap.Suggest)
