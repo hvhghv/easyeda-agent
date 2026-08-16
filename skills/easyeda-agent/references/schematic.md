@@ -459,6 +459,28 @@ placed), and a `validation` summary (`partOverlaps` / `titleBlockHits` /
   `sch autoconnect` (power/ground/netport) + wiring, then the full per-page S5 gate
   (`sch gate --strict --doc <page>` + the `sch read` topology comparison).
 
+### Deterministic zone layout plan — `sch zone-arrange` (A4-only)
+
+排布功能区前先跑 `sch zone-arrange`(纯规划零改动,同一输入唯一输出):
+
+```bash
+easyeda sch zone-arrange --project <p> --doc <page>          # 人读
+easyeda sch zone-arrange --project <p> --doc <page> --json   # 机器
+```
+
+两段流水线:**phase A 区内收敛**(跟随规则 R1-R5:卫星无源件竖放平行跟随锚件、
+GND 下/电源上由 rail 推导不查固定表、netport 恒水平、同件端子互不重叠是硬不变式)
+→ **phase B 区间求解**(边归属 = 声明 > 质心回退 + 回退链;货架扫描只沿边轴,
+5 格律)→ 复用 zone-plan 的 validatePartitions(同一把尺)→ 三态 verdict:
+
+- `pass`:每区给出目标框 + 区内成员落位;
+- `blocked`:报出是谁、回退链每条边距离 —— 出路是进一步收敛或 `sch page-new`
+  拆页。**A4-only:永不建议换纸。**
+
+区框口径 = 成员 L1 虚拟组**全图元并集**(标签必在框内)。导线读不到会直接报错
+(端子归属靠导线,距离启发式必错)。落地执行(--apply)尚未开放 —— 规划先行,
+挪件仍走 `sch group-move` / `group tidy` 并逐步核对。
+
 ### Functional frames + text labels (multi-page safe)
 
 `easyeda sch zones set --spec <spec.json>` persists `modules[].zone/parts/page`
