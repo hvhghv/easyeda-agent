@@ -511,6 +511,25 @@ agent 写脚本时排障成本比 JS API 的异常高得多。另外 KiCad 10 �
 
 ---
 
+## 10. 图纸尺寸:平台**没有** API(2026-08-16 实测,四条路全查)
+
+`zone-plan` / `sheet tidy` 判出「这一页装不下,该换 A3」之后,自然的下一步是让 CLI
+去换 —— **做不到**。四条路都查过:
+
+| 探测 | 结果 |
+|---|---|
+| `easyeda api search` 全部 `dmt_Schematic`(17 个方法) | create/copy/delete/rename/reorder/titleBlock,**无尺寸** |
+| 运行时扫全部 `eda.*` 命名空间,正则 `sheet\|paper\|size\|format\|frame\|border` | 零命中(只有无关的 sys_IFrame / sys_Dialog / placePcbOrder) |
+| `getSchematicPageInfo` 的返回字段 | `itemType / uuid / name / parentSchematicUuid / titleBlockData / showTitleBlock` —— 没有尺寸 |
+| `sheet` 图元(componentType=="sheet")的 setter | 只有通用的 `setState_X/Y/Rotation/Mirror/...`,**尺寸相关 getter 为空**;它的 bbox 是渲染结果,不是可写属性 |
+
+**结论**:改图纸尺寸只能在 EasyEDA 界面手工做。`createSchematicPage` 能建新页,
+但新页尺寸是平台默认,同样指定不了。
+
+**对判据的影响**(已落实在 `capacityAdvice`):凡是建议「换 A3」的地方都必须标明
+**这是人工动作**,否则 agent 会去找一条不存在的命令。可自动化的那条出路是**拆页**
+(`sch page-new` + 把模块搬过去)。
+
 ## 来源
 
 - [EasyEDA 官方 GitHub 组织](https://github.com/easyeda) — 全部 eext-* 扩展开源

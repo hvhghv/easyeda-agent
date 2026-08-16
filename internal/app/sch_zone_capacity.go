@@ -155,8 +155,14 @@ func capacityAdvice(cap schZoneCapacity) string {
 	base := fmt.Sprintf("这一页**装不下**:%s 的框要 %.0f×%.0f;纸面去掉页边距是 %.0f×%.0f,"+
 		"但图签占着右下角,可用区是 L 形 —— 要么窄到能塞进图签左侧,要么矮到能落在图签上方,这个框两条都不满足",
 		who, cap.NeedW, cap.NeedH, cap.HaveW, cap.HaveH)
+	// **必须标明换纸是人工动作**:2026-08-16 实测,平台没有任何改图纸尺寸的 API ——
+	// dmt_Schematic 的 17 个方法里没有,运行时扫全部 eda.* 命名空间对
+	// sheet|paper|size|format 零命中,getSchematicPageInfo 不返回尺寸字段,
+	// sheet 图元也只有通用的 setState_X/Y/Rotation(bbox 是渲染结果不是可写属性)。
+	// 不写清楚的话,这条建议看起来像 CLI 能做的事,而 agent 会去找那条不存在的命令。
 	if cap.Suggest != "" {
-		return base + fmt.Sprintf(" —— 换 %s 图纸,或把这个模块单独拆一页;调 margin/gutter 无解。", cap.Suggest)
+		return base + fmt.Sprintf(" —— 两条出路:①在 EasyEDA 界面把图纸手工改成 %s"+
+			"(**平台无 API,只能人工**);②把这个模块拆到单独一页(`sch page-new`)。调 margin/gutter 无解。", cap.Suggest)
 	}
-	return base + " —— 标准图纸里没有装得下的,必须把这个模块拆开到多页;调 margin/gutter 无解。"
+	return base + " —— 标准图纸里没有装得下的,必须把这个模块拆开到多页(`sch page-new`);调 margin/gutter 无解。"
 }
