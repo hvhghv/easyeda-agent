@@ -163,11 +163,15 @@ func TestTidyLabelRotationFullTable(t *testing.T) {
 		{"netport", "up", 90, false},
 		{"netport", "down", 270, false},
 		{"net_port_bi", "up", 90, false},
-		// 表外组合一律拒绝,不猜。
-		{"power", "left", 0, true},
-		{"power", "right", 0, true},
-		{"ground", "left", 0, true},
-		{"ground", "right", 0, true},
+		// 横向旗:frozenTable 本就校准了四方向(2026-06-29 竖直重校准时
+		// 「Horizontal unaffected」);此前这里错把手抄不全钉成了「表外拒绝」,
+		// zone-arrange --apply 首跑被 D1 的右向 GND 旗拦下才暴露。
+		// 一致性由 TestRuler_TidyLabelRotationMatchesFrozenTable 对 JSON 钉死。
+		{"power", "left", 90, false},
+		{"power", "right", 270, false},
+		{"ground", "left", 270, false},
+		{"ground", "right", 90, false},
+		// 表外组合仍一律拒绝,不猜。
 		{"power", "sideways", 0, true},
 		{"mystery", "up", 0, true},
 		{"", "up", 0, true},
