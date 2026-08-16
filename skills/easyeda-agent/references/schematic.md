@@ -478,8 +478,14 @@ GND 下/电源上由 rail 推导不查固定表、netport 恒水平、同件端�
   拆页。**A4-only:永不建议换纸。**
 
 区框口径 = 成员 L1 虚拟组**全图元并集**(标签必在框内)。导线读不到会直接报错
-(端子归属靠导线,距离启发式必错)。落地执行(--apply)尚未开放 —— 规划先行,
-挪件仍走 `sch group-move` / `group tidy` 并逐步核对。
+(端子归属靠导线,距离启发式必错)。
+
+`--apply` 落地执行(断言① 删除集=重建集 → 页级深度清扫 → 逐件落位重连 →
+断言② 曾连接 pin 仍连接 → 对账修复循环 → bridge-check 红才整体回滚 → save)。
+**真机注意**:连接器在持续变更负载下会停摆,停摆期「报失败的写可能已落地」
+(假失败)——apply 已内置重试+对账,但若结束仍报缺口,先用
+`sch autoconnect --pin 位号:脚 --kind … --net …` 逐脚补(它幂等,already-connected
+会跳过,不会造重复标记),再跑 `sch bridge-check` + `sch nets` 三验。
 
 ### Functional frames + text labels (multi-page safe)
 

@@ -180,24 +180,17 @@ func tidyColumnSide(ins []tidySignalMemberIn, anchor tidyAnchor) float64 {
 	return 1
 }
 
-// ── 接线状态:**未接入**(2026-08-16 真机回退)────────────────────────────────
+// ── 接线状态:**已被 zone-arrange 取代**(2026-08-16 晚)──────────────────────
 //
-// 试过把 planSignalColumn 接进 `group tidy --pattern signal-column`,在 J_USB
-// (g2: J1/R3/R4)上真机跑,**把 R3/R4 的连接搞断了** —— 回退了那部分改动,
-// 规划器与单测留下。现象与线索记在这里,免得下次从零查:
-//
-//  1. dry-run 正确:三件都出了「竖排落位 @ (600,240/290/340)」,同列不同 Y。
-//  2. `--apply` 只落地 1 件(J1)。而 **deep sweep 是按整组删的**(输出
-//     「删除 12 个旧桩/旗/残段(整树)」),R3/R4 的桩线跟着被删,重连却没轮到
-//     它们 —— 落地后 `sch clusters` 显示两件 marker 0 / 桩线 0,
-//     `sch nets` 报 U3_N7 变成单引脚网。
-//  3. 抢修:`sch autoconnect` 逐脚补回 4 个连接,18 张网恢复。
-//
-// 下次接线前要先答清楚的三个问题:
-//   • 为什么 plan.Signal 到执行侧只剩一件?(dry-run 与 apply 走的是同一个
-//     buildTidyPlan,差别只在 forceAll —— 先把两条路径的 plan 打出来对比)
-//   • deep sweep 的删除范围与 plan.Signal 的重建范围**必须同集**,现在没有任何
-//     判据在保证这件事 —— 少一件就是静默断线。这条不变式该做成执行前的断言。
-//   • 断线发生在 tidyApply 内部,而它的自检(layout-lint + bridge-check)**没报**:
-//     两件孤立器件既不重叠也不短路,判据结构上看不见 —— 自检该加一条
-//     「sweep 前有连接的 pin,重建后必须仍有连接」。
+// 首次接线(接进 group tidy signal-column)在 J_USB 上把 R3/R4 搞断并回退;
+// 当时留下的三个问题已在 `sch zone-arrange --apply` 里逐条落地
+// (cmd_sch_zone_arrange_apply.go):
+//   • 「删除集 = 重建集」→ zaaGateSetEquality + zaaGatePinCoverage(执行前硬门,
+//     纯函数可单测,事故场景 {J1,R3,R4} vs [J1] 有直接回放测试);
+//   • 「sweep 前有连接的 pin 重建后仍连接」→ zaaVerifyConnectivity(断言②,
+//     layout-lint + bridge-check 对孤立断线结构性失明,唯它看得见);
+//   • plan 缩水之谜:真机复跑揭示了更深一层 —— 连接器在持续变更负载下会停摆,
+//     停摆期间「报失败的写操作可能已落地」(假失败),重试即重复;修复策略因此
+//     从「整页回滚」改为「对账修复优先,真短路才回滚」。
+// 本文件的 planSignalColumn 一族保留为收敛规划的早期形态;正式路径是
+// sch_zone_follow.go(跟随规则 R1-R5)+ sch_zone_arrange.go(区间求解)。

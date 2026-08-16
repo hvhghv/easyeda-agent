@@ -1,6 +1,9 @@
 package app
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -77,5 +80,34 @@ func TestRuler_ConnectPinBudgetExceedsConnectorWorstCase(t *testing.T) {
 	const connectorWorstCase = 21250 * time.Millisecond
 	if acConnectPinTimeout <= connectorWorstCase {
 		t.Fatalf("connect_pin 预算 %v 没超过连接器最坏耗时 %v", acConnectPinTimeout, connectorWorstCase)
+	}
+}
+
+// tidyLabelRotation 是 orientation.json frozenTable 的 Go 手抄本 —— 手抄必漂:
+// 2026-08-16 zone-arrange --apply 首跑被 D1 的右向 GND 旗拦下,根因是手抄本缺了
+// 横向四值却把缺失说成「契约未校准」。钉死:12 个值逐项等于 frozenTable。
+func TestRuler_TidyLabelRotationMatchesFrozenTable(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "skills", "easyeda-agent", "references", "orientation.json"))
+	if err != nil {
+		t.Fatalf("读 orientation.json:%v", err)
+	}
+	var doc struct {
+		FrozenTable map[string]map[string]float64 `json:"frozenTable"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	kindOf := map[string]string{"power": "power", "ground": "ground", "port": "net_port_bi"}
+	for row, kind := range kindOf {
+		for dir, want := range doc.FrozenTable[row] {
+			got, gerr := tidyLabelRotation(kind, dir)
+			if gerr != nil {
+				t.Errorf("%s %s:frozenTable 有值 %g,Go 表却拒绝:%v", row, dir, want, gerr)
+				continue
+			}
+			if got != want {
+				t.Errorf("%s %s:Go 表 %g ≠ frozenTable %g(两把尺!)", row, dir, got, want)
+			}
+		}
 	}
 }

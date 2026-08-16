@@ -19,8 +19,8 @@ package app
 // 标签入框是硬约束:导线读不到**直接报错**(不像 zone-plan 降级可见)——收敛规划
 // 依赖端子归属,距离启发式在这里必错,静默降级会规划出把标签甩在框外的收敛。
 //
-// --apply 未接入:执行要走 ADR-0003 舞步,且必须先补上 J_USB 事故的两条断言
-// (删除集=重建集、sweep 前有连接的 pin 重建后仍连接)—— 见 sch_zone_compact.go 尾注。
+// --apply 走 ADR-0003 舞步,J_USB 事故的两条断言是执行前后的硬门 ——
+// 见 cmd_sch_zone_arrange_apply.go(断言①删除集=重建集、断言②曾连接 pin 仍连接)。
 
 import (
 	"encoding/json"
@@ -43,6 +43,9 @@ type zoneArrangeZoneOut struct {
 	FrameH float64         `json:"frameH"`
 	Home   [2]float64      `json:"home"`
 	Groups []zfPlacedGroup `json:"groups"` // 区内局部坐标(说明带上沿为 y=0 基准之上)
+	// Content 是收敛后全图元并集(区内局部)—— 执行侧把局部坐标映射到落位框的
+	// 绝对坐标要靠它:abs = rect.Min + (pad, noteBand+pad) + (local − Content.Min)。
+	Content layoutBBox `json:"content"`
 }
 
 // zoneArrangeOut 是 --json 的完整输出。
@@ -101,36 +104,44 @@ func absF(v float64) float64 {
 	return v
 }
 
+// zaScene 是规划所用的那一份场景快照。--apply 必须与规划共用同一快照
+// (判定坐标 = 落地坐标定律):重新取数得到的场景可能已变,拿它执行等于
+// 按另一张图落位。
+type zaScene struct {
+	comps []layoutComp
+	wires []schGroupWire
+}
+
 // computeZoneArrange 取真机数据 → 两段规划。纯读,零改动。
-func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOpts) (*zoneArrangeOut, error) {
+func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOpts) (*zoneArrangeOut, *zaScene, error) {
 	zones, project, err := loadSchZoneModules(cfg, window, docUUID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(zones) == 0 {
-		return nil, fmt.Errorf("%q 这一页既没有虚拟组也没有 zone 认领 —— 用 `sch block-apply` 落块,或手工 `sch group create` / `sch zones set`", project)
+		return nil, nil, fmt.Errorf("%q 这一页既没有虚拟组也没有 zone 认领 —— 用 `sch block-apply` 落块,或手工 `sch group create` / `sch zones set`", project)
 	}
 	if err := ensureActiveDoc(cfg, window); err != nil {
-		return nil, fmt.Errorf("zone-arrange: restore pinned page %s: %w", docUUID, err)
+		return nil, nil, fmt.Errorf("zone-arrange: restore pinned page %s: %w", docUUID, err)
 	}
 	res, err := requestAutolayoutAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "read zone-arrange geometry")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	comps, perr := parseLayoutComps(res.Result)
 	if perr != nil {
-		return nil, perr
+		return nil, nil, perr
 	}
 	sheet := sheetBBoxOf(comps)
 	if sheet == nil {
-		return nil, fmt.Errorf("no sheet bbox on the active page — `easyeda doc switch` to the schematic page first")
+		return nil, nil, fmt.Errorf("no sheet bbox on the active page — `easyeda doc switch` to the schematic page first")
 	}
 	keepout, _ := titleBlockKeepout(sheet)
 	// 标签入框是硬约束:导线是端子归属的唯一可靠来源,读不到就不规划。
 	wires, werr := fetchSchWirePolylines(cfg, window, docUUID)
 	if werr != nil {
-		return nil, fmt.Errorf("zone-arrange 需要导线数据做端子归属(标签入框是硬约束,距离启发式必错):%w", werr)
+		return nil, nil, fmt.Errorf("zone-arrange 需要导线数据做端子归属(标签入框是硬约束,距离启发式必错):%w", werr)
 	}
 	clusters, _ := buildSchClusters(comps, wires)
 	byDesig := map[string]schCluster{}
@@ -173,7 +184,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		}
 		plan, ferr := planZoneFollow(name, groups, opts)
 		if ferr != nil {
-			return nil, fmt.Errorf("phase A(%s): %w", name, ferr)
+			return nil, nil, fmt.Errorf("phase A(%s): %w", name, ferr)
 		}
 		rawW := (raw.MaxX - raw.MinX) + 2*partitionContentPad
 		rawH := (raw.MaxY - raw.MinY) + 2*partitionContentPad + opts.TitleBand + opts.NoteBand
@@ -181,11 +192,12 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		out.Zones = append(out.Zones, zoneArrangeZoneOut{
 			Name: name, Mode: plan.Mode, RawW: rawW, RawH: rawH,
 			FrameW: plan.FrameW, FrameH: plan.FrameH, Home: home, Groups: plan.Groups,
+			Content: plan.Content,
 		})
 		zaZones = append(zaZones, zaZone{Name: name, W: plan.FrameW, H: plan.FrameH, Home: home})
 	}
 	if len(zaZones) == 0 {
-		return nil, fmt.Errorf("no zone resolved any parts on this page — 认领的件不在本页(place / `doc switch`)")
+		return nil, nil, fmt.Errorf("no zone resolved any parts on this page — 认领的件不在本页(place / `doc switch`)")
 	}
 	out.Arrange = zonesArrange(zaZones, *sheet, keepout, opts)
 	if out.Arrange.OK {
@@ -199,7 +211,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	} else {
 		out.Verdict = "blocked"
 	}
-	return out, nil
+	return out, &zaScene{comps: comps, wires: wires}, nil
 }
 
 func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
@@ -232,8 +244,8 @@ func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
 }
 
 // newSchZoneArrangeCmd 注册 `sch zone-arrange`。
-func newSchZoneArrangeCmd(cfg *appConfig, window *string, stdout, _ io.Writer) *cobra.Command {
-	var asJSON bool
+func newSchZoneArrangeCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
+	var asJSON, apply bool
 	var margin, gutter, titleBand float64
 	c := &cobra.Command{
 		Use:   "zone-arrange",
@@ -253,24 +265,29 @@ A4-only:装不下的出路是收敛或 ` + "`sch page-new`" + ` 拆页,不建议
 			if err != nil {
 				return err
 			}
-			out, err := computeZoneArrange(pinnedCfg, win, docUUID,
-				partitionOptsFrom(margin, gutter, titleBand, 0, 0))
+			opts := partitionOptsFrom(margin, gutter, titleBand, 0, 0)
+			out, scene, err := computeZoneArrange(pinnedCfg, win, docUUID, opts)
 			if err != nil {
 				return err
 			}
-			if asJSON {
+			if asJSON && !apply {
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(out)
 			}
 			renderZoneArrange(out, stdout)
-			if out.Verdict != "pass" {
-				return fmt.Errorf("zone-arrange: %s", out.Verdict)
+			if !apply {
+				if out.Verdict != "pass" {
+					return fmt.Errorf("zone-arrange: %s", out.Verdict)
+				}
+				fmt.Fprintln(stdout, "dry-run(默认):未改画布 —— 加 --apply 落地(断言① → 页级 sweep → 落位重连 → 断言② → 自检)")
+				return nil
 			}
-			return nil
+			return runZoneArrangeApply(pinnedCfg, win, docUUID, out, scene, opts, stdout, stderr)
 		},
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the full two-phase plan + validation as JSON")
+	c.Flags().BoolVar(&apply, "apply", false, "落地执行:断言①(删除集=重建集) → 页级深度清扫 → 逐件落位重连 → 断言②(曾连接 pin 仍连接) → layout-lint+bridge-check → save;任一红逐步回滚")
 	def := defaultPartitionOpts()
 	c.Flags().Float64Var(&margin, "margin", def.Margin, "page margin inset from the sheet edge")
 	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "gutter between zone frames (and keep-out inflation)")

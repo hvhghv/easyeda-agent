@@ -239,12 +239,16 @@ func tidyKindFamily(kind string) string {
 // tidyLabelRotation 是契约的「文字朝外」rotation 校准表(真机校准 2026-08-12,
 // 铁则3:connect 显式传 --rotation,值只从这张表出,勿散写):
 //
-//	power  up   → 0(文字上)    power  down → 180
-//	ground down → 0(文字下)    ground up   → 180
+//	power  up   → 0(文字上)    power  down → 180   left → 90   right → 270
+//	ground down → 0(文字下)    ground up   → 180   left → 270  right → 90
 //	netport left → 180  right → 0(orientation.json frozenTable port 行)
 //
-// netport 的 up/down 直接返回错误(铁则4:长条标竖排=折叠);power/ground 的
-// left/right 契约未校准,同样拒绝 —— 表外组合宁可报错也不猜。
+// 全部 12 个值与 orientation.json frozenTable 逐项一致(单一真值源;其 _doc 记明
+// 2026-06-29 竖直重校准时「Horizontal (left/right) was unaffected」——横向本就在
+// 校准集内,autoconnect 在真机造的横向旗正是按这套值)。此前 power/ground 的
+// left/right 在这里被拒 —— 那是把「本表手抄不全」误写成了「契约未校准」:
+// zone-arrange --apply 首跑被 D1 的右向 GND 旗当场拦下(断言门 fail-closed 正常,
+// 但拦错了对象)。表外组合(如 flag 的斜向)仍宁可报错也不猜。
 func tidyLabelRotation(kind, direction string) (float64, error) {
 	dir := strings.ToLower(strings.TrimSpace(direction))
 	switch tidyKindFamily(kind) {
@@ -254,16 +258,24 @@ func tidyLabelRotation(kind, direction string) (float64, error) {
 			return 0, nil
 		case "down":
 			return 180, nil
+		case "left":
+			return 90, nil
+		case "right":
+			return 270, nil
 		}
-		return 0, fmt.Errorf("tidy 校准表没有 power flag direction %q 的文字 rotation(契约只校准了 up/down)", direction)
+		return 0, fmt.Errorf("power flag direction %q 无效(up/down/left/right)", direction)
 	case "ground":
 		switch dir {
 		case "down":
 			return 0, nil
 		case "up":
 			return 180, nil
+		case "left":
+			return 270, nil
+		case "right":
+			return 90, nil
 		}
-		return 0, fmt.Errorf("tidy 校准表没有 ground flag direction %q 的文字 rotation(契约只校准了 up/down)", direction)
+		return 0, fmt.Errorf("ground flag direction %q 无效(up/down/left/right)", direction)
 	case "netport":
 		switch dir {
 		case "left":
