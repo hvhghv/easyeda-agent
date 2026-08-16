@@ -152,17 +152,39 @@ func capacityAdvice(cap schZoneCapacity) string {
 	// 措辞必须与判据一致:判的是 L 形(图签左侧的长条 ∪ 图签上方的整幅),
 	// 说成「可用区只有 W×H」会让人拿框去比那个矩形,越比越糊涂 —— 框明明比它小,
 	// 凭什么说装不下?
-	base := fmt.Sprintf("这一页**装不下**:%s 的框要 %.0f×%.0f;纸面去掉页边距是 %.0f×%.0f,"+
-		"但图签占着右下角,可用区是 L 形 —— 要么窄到能塞进图签左侧,要么矮到能落在图签上方,这个框两条都不满足",
-		who, cap.NeedW, cap.NeedH, cap.HaveW, cap.HaveH)
+	// **说清是哪个方向、差多少**,并且**必须写明这是「当前摆法」而不是「这一页」**。
+	//
+	// 用户实测质疑(2026-08-16):P2_MCU 页面上肉眼看空间很大 —— 因为水平方向确实
+	// 空着一大片,紧张的只有垂直。而模块 bbox 是**器件 ∪ 它自己的 marker**,那一页
+	// 576 的内容高里有一半是标签撑出来的(C4 本体 21 高、组 134 高),而 marker 的
+	// 方向是可调的。把「当前摆法装不下」说成「这一页装不下」,还建议换 A3,
+	// 是把一个能重排解决的问题推给了买纸。
+	short := "垂直"
+	gap := cap.NeedH - cap.HaveH
+	if cap.NeedW > cap.HaveW && cap.NeedW-cap.HaveW > gap {
+		short, gap = "水平", cap.NeedW-cap.HaveW
+	}
+	base := fmt.Sprintf("%s 的框在**当前摆法**下放不进:框 %.0f×%.0f,纸面去掉页边距 %.0f×%.0f,"+
+		"图签占右下角(可用区是 L 形:要么窄到塞进图签左侧,要么矮到落在图签上方)—— **%s方向**不够",
+		who, cap.NeedW, cap.NeedH, cap.HaveW, cap.HaveH, short)
+	if gap > 0 {
+		base += fmt.Sprintf("(差约 %.0f)", gap)
+	}
+	// 先给能自己动手的那条路:bbox 含 marker,而 marker 方向可调。
+	base += "。**先试重排**:模块 bbox = 器件 ∪ 它自己的 marker,竖排的标签能把组撑高好几倍" +
+		"(实测本体 21 高的电容,组高 134;改成横向后 58)。步骤:①`sch clusters` 看「组高 vs 本体高」" +
+		"找出被自己 marker 撑大的组;②对它的脚 `sch disconnect --pin X:n` + " +
+		"`sch connect --pin X:n --kind … --net … --direction left|right`(**方向要用 `sch connect`;" +
+		"`autoconnect` 自己打分选方向,不接受 --direction**);③件本身超出主芯片 y 跨度时还要挪件" +
+		"(`sch group-move`)。真机实测:改 4 个标签方向,一页总高 576→537"
 	// **必须标明换纸是人工动作**:2026-08-16 实测,平台没有任何改图纸尺寸的 API ——
 	// dmt_Schematic 的 17 个方法里没有,运行时扫全部 eda.* 命名空间对
 	// sheet|paper|size|format 零命中,getSchematicPageInfo 不返回尺寸字段,
 	// sheet 图元也只有通用的 setState_X/Y/Rotation(bbox 是渲染结果不是可写属性)。
 	// 不写清楚的话,这条建议看起来像 CLI 能做的事,而 agent 会去找那条不存在的命令。
 	if cap.Suggest != "" {
-		return base + fmt.Sprintf(" —— 两条出路:①在 EasyEDA 界面把图纸手工改成 %s"+
-			"(**平台无 API,只能人工**);②把这个模块拆到单独一页(`sch page-new`)。调 margin/gutter 无解。", cap.Suggest)
+		return base + fmt.Sprintf(";重排后仍放不下再考虑 ①手工把图纸改成 %s"+
+			"(**平台无 API,只能人工**)或 ②拆到单独一页(`sch page-new`)。调 margin/gutter 无解。", cap.Suggest)
 	}
-	return base + " —— 标准图纸里没有装得下的,必须把这个模块拆开到多页(`sch page-new`);调 margin/gutter 无解。"
+	return base + ";重排后仍放不下就必须拆到多页(`sch page-new`)——标准图纸里没有装得下的。调 margin/gutter 无解。"
 }

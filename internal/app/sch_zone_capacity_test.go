@@ -37,7 +37,7 @@ func TestDiagnoseZoneCapacity_WroomOnA4DoesNotFit(t *testing.T) {
 		t.Errorf("该建议换 A3,得到 %q", cap.Suggest)
 	}
 	adv := capacityAdvice(cap)
-	for _, want := range []string{"装不下", "U2", "A3", "调 margin/gutter 无解"} {
+	for _, want := range []string{"当前摆法", "U2", "A3", "先试重排", "调 margin/gutter 无解"} {
 		if !strings.Contains(adv, want) {
 			t.Errorf("建议里缺 %q:%s", want, adv)
 		}
@@ -69,7 +69,7 @@ func TestDiagnoseZoneCapacity_NoSheetFitsAtAll(t *testing.T) {
 	if cap.Fits || cap.Suggest != "" {
 		t.Fatalf("超出全部标准纸时不该推荐纸张,得到 suggest=%q", cap.Suggest)
 	}
-	if !strings.Contains(capacityAdvice(cap), "拆开到多页") {
+	if !strings.Contains(capacityAdvice(cap), "拆到多页") {
 		t.Errorf("该建议拆页:%s", capacityAdvice(cap))
 	}
 }
