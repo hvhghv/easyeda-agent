@@ -42,6 +42,17 @@ type schCluster struct {
 	Members []layoutBBox `json:"-"`
 	// Detail 是每个成员的可读描述(类型/网名/bbox),--members 时打印给人核对。
 	Detail []string `json:"members,omitempty"`
+	// Typed 是同一份归属信息的**机器口径**(kind/net/bbox)—— phase A 收敛规划器
+	// (sch_zone_follow.go)从这里折出类型化端子。Detail 只给人看;机器路径解析
+	// 字符串是第二把尺,禁止。
+	Typed []schClusterTyped `json:"-"`
+}
+
+// schClusterTyped 是一个归属成员的类型化记录。
+type schClusterTyped struct {
+	Kind string // part | wire | netflag | netport | netlabel …
+	Net  string
+	BBox layoutBBox
 }
 
 // schClusterFinding 是一条判定结果。
@@ -115,8 +126,10 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 		members[d] = append(members[d], b)
 	}
 	detail := map[string][]string{}
+	typed := map[string][]schClusterTyped{}
 	note := func(d, kind, net string, b layoutBBox) {
 		detail[d] = append(detail[d], fmt.Sprintf("%-8s %-8s x=[%.0f,%.0f] y=[%.0f,%.0f]", kind, net, b.MinX, b.MaxX, b.MinY, b.MaxY))
+		typed[d] = append(typed[d], schClusterTyped{Kind: kind, Net: net, BBox: b})
 	}
 	for d, b := range body {
 		note(d, "part", d, b)
@@ -256,7 +269,7 @@ func buildSchClusters(comps []layoutComp, wires []schGroupWire) ([]schCluster, i
 		out = append(out, schCluster{
 			Designator: d, PrimitiveID: idOf[d], Device: devOf[d],
 			Body: body[d], Box: box[d], Markers: markers[d], Wires: wireCount[d],
-			Members: members[d], Detail: detail[d],
+			Members: members[d], Detail: detail[d], Typed: typed[d],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
