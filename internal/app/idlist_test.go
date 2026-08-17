@@ -19,6 +19,9 @@ func TestParseIDList(t *testing.T) {
 		{"csv single padded", "  184fd1d7742ac942  ", []string{"184fd1d7742ac942"}, false},
 		{"csv trailing comma", "id1,id2,", []string{"id1", "id2"}, false},
 		{"csv empty items dropped", "id1,,id2", []string{"id1", "id2"}, false},
+		// 平台对含重复 id 的删除批次整批静默拒(2026-08-17 P2 实锤)——去重保序。
+		{"duplicates dropped keep first", "id1,id2,id1,id3,id2", []string{"id1", "id2", "id3"}, false},
+		{"duplicate with padding", "id1, id1 ,id1", []string{"id1"}, false},
 		{"empty string", "", nil, true},
 		{"whitespace only", "   ", nil, true},
 		{"only commas", ",,,", nil, true},

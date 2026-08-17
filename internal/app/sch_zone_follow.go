@@ -55,6 +55,11 @@ type zfPlacedTerm struct {
 	Net  string     `json:"net"`
 	Dir  string     `json:"dir"` // 旗:up/down/left/right;port:left/right(恒水平)
 	BBox layoutBBox `json:"bbox"`
+	// Offset 是 pin → 标签锚点的桩长,--apply 原样喂给 connect_pin。规划的几何
+	// 必须是执行模型能表达的:connect_pin 的桩只能从 pin 沿 direction 直出
+	// offset,别无自由度 —— 所以「怎么错开」只能编码在这里,不能编码在 BBox 的
+	// 横向位置里(执行侧没有那个旋钮)。
+	Offset float64 `json:"offset"`
 }
 
 // zfPlacedGroup 是一个组的落位。
@@ -135,11 +140,11 @@ func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 			} else {
 				b.MinY, b.MaxY = y1-t.H, y1
 			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b})
+			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b, Offset: zfStub})
 			return
 		}
 		// R4:netport 恒水平,无源件统一朝右(阅读方向)
-		out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: "right",
+		out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: "right", Offset: zfStub,
 			BBox: layoutBBox{MinX: cx, MinY: y1 - zfPortH/2, MaxX: cx + t.W, MaxY: y1 + zfPortH/2}})
 	}
 	place(top, true)
@@ -210,41 +215,39 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 			} else {
 				b = layoutBBox{MinX: x1, MinY: cy - h/2, MaxX: x1 + t.W, MaxY: cy + h/2}
 			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side, BBox: b})
+			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side, BBox: b, Offset: zfStub})
 			y -= zfPitch
 		}
 	}
-	// 上/下:按**实际旗宽**排成横向序列,居中于本体 —— 首版按 (i+1)/(n+1) 均匀
-	// 散开,没算旗宽,U3 的 GND(37宽)与 5V(23宽)在 72 宽的本体下重叠 6 个单位,
-	// 被 R5 校验器当场抓住 —— 判定与生成分离的价值。旗顺引脚朝外。
+	// 上/下:**垂直梯次**(桩长递增)。二版 —— 首版按实际旗宽排横向序列,几何上
+	// 成立,但执行模型表达不了:connect_pin 的桩只能从 pin 沿 direction 直出,
+	// pin 的 x 由符号锁死,「旗中心横向挪开」没有对应的旋钮。落地时全部旗退回
+	// 默认桩长,pitch 10 的相邻引脚上三旗当场竖叠(P1 U1 打地鼠真因,人肉梯次
+	// 20/50/85 顶了算法的班)。梯次把错开量放进唯一可控的自由度 —— 桩长:
+	// Offset_i = zfStub + Σ_{j<i}(H_j + gap),y 向分离与 pin 密度无关。
 	for _, side := range []string{"down", "up"} {
-		total := 0.0
-		for i, t := range bySide[side] {
-			total += t.W
-			if i > 0 {
-				total += zfFlagGap
-			}
-		}
-		x := bw/2 - total/2
+		off := zfStub
 		for _, t := range bySide[side] {
-			cx := x + t.W/2
-			x += t.W + zfFlagGap
 			y0, dir := 0.0, "down"
 			if side == "up" {
 				y0, dir = bh, "up"
 			}
-			y1 := y0 - zfStub
+			y1 := y0 - off
 			if side == "up" {
-				y1 = y0 + zfStub
+				y1 = y0 + off
 			}
+			// 规划期不知道 pin 的 x(符号细节)——桩画在本体中线;bbox 横向取
+			// 「pin 可落本体任意 x、旗以 pin 居中」的包络(bw+W 宽),框尺寸不低估。
+			cx := bw / 2
 			out.Wires = append(out.Wires, layoutBBox{MinX: cx, MinY: minF(y0, y1), MaxX: cx, MaxY: maxF(y0, y1)})
-			b := layoutBBox{MinX: cx - t.W/2, MaxX: cx + t.W/2}
+			b := layoutBBox{MinX: cx - (bw+t.W)/2, MaxX: cx + (bw+t.W)/2}
 			if side == "up" {
 				b.MinY, b.MaxY = y1, y1+t.H
 			} else {
 				b.MinY, b.MaxY = y1-t.H, y1
 			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b})
+			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b, Offset: off})
+			off += t.H + zfFlagGap
 		}
 	}
 	return out

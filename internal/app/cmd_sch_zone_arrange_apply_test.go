@@ -57,8 +57,8 @@ func TestZaaMapTerms_DoubleNetBySide(t *testing.T) {
 		{Desig: "J1", Pin: "B5", Net: "U3_N4", Kind: "net_port_bi"},
 	}
 	terms := []zfPlacedTerm{
-		{Kind: "netport", Net: "U3_N4", Dir: "left"},
-		{Kind: "netport", Net: "U3_N4", Dir: "right"},
+		{Kind: "netport", Net: "U3_N4", Dir: "left", Offset: 20},
+		{Kind: "netport", Net: "U3_N4", Dir: "right", Offset: 46},
 	}
 	side := map[string]string{"A5": "right", "B5": "left"}
 	out, err := zaaMapTerms(pre, terms, side, func(zfPlacedTerm) bool { return false })
@@ -67,6 +67,10 @@ func TestZaaMapTerms_DoubleNetBySide(t *testing.T) {
 	}
 	if out[0].Pin != "B5" || out[1].Pin != "A5" {
 		t.Errorf("该按现侧配对(left→B5, right→A5),得到 %s/%s", out[0].Pin, out[1].Pin)
+	}
+	// 计划桩长必须透传 —— 丢掉它,connect_pin 落默认桩长,多旗梯次白算(竖叠复发)。
+	if out[0].Offset != 20 || out[1].Offset != 46 {
+		t.Errorf("Offset 该透传 20/46,得到 %g/%g", out[0].Offset, out[1].Offset)
 	}
 	// 断言①已过却映射不上 = 内部不一致,必须报错而不是静默丢。
 	if _, err := zaaMapTerms(pre[:1], terms, side, func(zfPlacedTerm) bool { return false }); err == nil {

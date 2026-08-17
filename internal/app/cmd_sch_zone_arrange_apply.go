@@ -46,7 +46,8 @@ type zaaPinSnap struct {
 type zaaTermExec struct {
 	Pin, Kind, Net, Dir string
 	LabelRot            float64
-	ExpectUpper         bool // 转竖件消解用:该端子在计划里位于本体上方
+	Offset              float64 // 计划桩长(多旗垂直梯次靠它错开;0 = connect_pin 默认)
+	ExpectUpper         bool    // 转竖件消解用:该端子在计划里位于本体上方
 }
 
 // zaaMemberExec 是一件的执行指令。
@@ -157,7 +158,7 @@ func zaaMapTerms(pre []zaaPinSnap, terms []zfPlacedTerm, pinSide map[string]stri
 			return nil, err
 		}
 		out = append(out, zaaTermExec{Pin: sorted[pick].Pin, Kind: zaaConnectKind(t), Net: t.Net,
-			Dir: t.Dir, LabelRot: rot, ExpectUpper: termUpper(t)})
+			Dir: t.Dir, LabelRot: rot, Offset: t.Offset, ExpectUpper: termUpper(t)})
 	}
 	return out, nil
 }
@@ -343,6 +344,9 @@ func zaaExecMember(cfg *appConfig, win, docUUID string, m zaaMemberExec, stdout,
 		}
 		payload := map[string]any{"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
 			"direction": t.Dir, "rotation": t.LabelRot}
+		if t.Offset > 0 {
+			payload["offset"] = t.Offset // 计划梯次桩长 —— 不带它,同向多旗全落默认桩长必竖叠
+		}
 		if err := zaaRetry(func() error {
 			_, e := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "zone-arrange connect")
 			return e
@@ -461,6 +465,7 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	if err != nil {
 		return fmt.Errorf("deep-sweep 规划:%w", err)
 	}
+	ids = uniqueIDs(ids) // 平台对含重复 id 的删除批次整批静默拒(P2 实锤)
 	if len(ids) > 0 {
 		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
 			map[string]any{"primitiveIds": ids}, docUUID, "zone-arrange deep-sweep"); err != nil {
@@ -511,6 +516,9 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 			}
 			payload := map[string]any{"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
 				"direction": t.Dir, "rotation": t.LabelRot}
+			if t.Offset > 0 {
+				payload["offset"] = t.Offset
+			}
 			if err := zaaRetry(func() error {
 				_, e := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "zone-arrange repair")
 				return e
@@ -525,6 +533,16 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		return fmt.Errorf("对账修复后仍红:%w —— 按清单逐脚 `sch connect --pin 位号:脚 --kind … --net … --direction …` 补齐", verr)
 	}
 	fmt.Fprintf(stdout, "断言②绿:%d 只曾连接 pin 全部仍连接且网名一致\n", len(allSnaps(execs)))
+
+	// 假失败清创(自动化的例行步,此前每页人肉扫多轮):停摆期「报失败的写」
+	// 大概率已落地,重试即同位重复/同树冗余标记 —— 判据现成(check 的
+	// duplicate/redundant-net-marker 带 suggestDeleteIds),这里直接执行处方。
+	// best-effort:清不掉只 warn,电气正确性由 bridge-check 把关。
+	if n, derr := zaaSweepGhostMarkers(cfg, win, docUUID); derr != nil {
+		fmt.Fprintf(stderr, "⚠ 假失败清创未完成(%v)—— 手补:`sch check` 按 suggestDeleteIds `sch prim-delete`\n", derr)
+	} else if n > 0 {
+		fmt.Fprintf(stdout, "假失败清创:清除 %d 个重复/冗余标记(停摆期已落地的\"失败\"写)\n", n)
+	}
 
 	// 分级收尾:bridge-check 红 = 真短路,主动有害 → 整体回滚;
 	// layout-lint 红 = 标签实测伸展超出规划估算 → 如实报,重跑一轮收敛即修
@@ -555,6 +573,42 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	}
 	fmt.Fprintln(stdout, "note: 分区框未重画 —— `sch zone-draw --mode partition` 更新;区名/说明带随框走")
 	return nil
+}
+
+// zaaSweepGhostMarkers 清掉停摆期假失败留下的鬼影标记:同位重复
+// (duplicate-net-marker)与同树冗余(redundant-net-marker)。判据复用 `sch check`
+// 的函数本体(同一把尺),删除清单 = 两条规则的 suggestDeleteIds 并集(去重 ——
+// 平台对含重复 id 的批次整批静默拒)。返回实际提交删除的 id 数。
+func zaaSweepGhostMarkers(cfg *appConfig, win, docUUID string) (int, error) {
+	res, err := requestAutolayoutAction(cfg, "schematic.components.list", win,
+		map[string]any{"includeBBox": true}, docUUID, "ghost-marker sweep read")
+	if err != nil {
+		return 0, err
+	}
+	comps, err := parseLayoutComps(res.Result)
+	if err != nil {
+		return 0, err
+	}
+	wires, err := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for _, f := range duplicateNetMarkerFindings(comps) {
+		ids = append(ids, f.SuggestDeleteIds...)
+	}
+	for _, f := range redundantNetMarkerFindings(comps, wires) {
+		ids = append(ids, f.SuggestDeleteIds...)
+	}
+	ids = uniqueIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
+		map[string]any{"primitiveIds": ids}, docUUID, "ghost-marker sweep delete"); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }
 
 // zaaBrokenPins 从断言②的报文提取「位号:脚」键(与 zaaVerifyConnectivity 的

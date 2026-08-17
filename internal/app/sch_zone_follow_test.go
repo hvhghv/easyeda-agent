@@ -202,7 +202,7 @@ func TestZfCheckTermOverlap(t *testing.T) {
 	if err := zfCheckTermOverlap(bad); err == nil {
 		t.Fatal("重叠端子该报 R5 违例")
 	}
-	// U3 两个下旗横向散开 —— 同侧但不重叠,合法。
+	// U3 两个下旗垂直梯次 —— 同侧但不重叠,合法。
 	p, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts())
 	if err != nil {
 		t.Fatal(err)
@@ -245,5 +245,51 @@ func TestPlanZoneFollow_ShrinksP3Zones(t *testing.T) {
 			t.Errorf("%s 收敛后框宽 %.0f 未小于现状 %.0f", zone, p.FrameW, rawW[zone])
 		}
 		t.Logf("%s: %s → 框 %.0f×%.0f", zone, p.Mode, p.FrameW, p.FrameH)
+	}
+}
+
+// 上/下侧多旗:垂直梯次。connect_pin 的桩只能从 pin 沿 direction 直出,pin 的 x
+// 由符号锁死 —— 「横向散开」执行侧表达不了,落地全退默认桩长,pitch 10 的相邻
+// 引脚上旗当场竖叠(P1 U1 打地鼠真因,人肉梯次 20/50/85 顶了算法的班)。钉死:
+// 同侧旗 Offset 严格递增,且后旗桩长越过前旗旗体;左右侧端子恒 zfStub。
+func TestZfGenMultiPin_TopBottomFlagsVerticalLadder(t *testing.T) {
+	g := zfGenMultiPin(zfGroup{Designator: "U1", BodyW: 60, BodyH: 40, MultiPin: true,
+		Terms: []zfTerm{
+			{Kind: "netflag", Net: "3V3", W: 24, H: 18, Side: "up"},
+			{Kind: "netflag", Net: "VBUS", W: 30, H: 18, Side: "up"},
+			{Kind: "netflag", Net: "5V", W: 20, H: 18, Side: "up"},
+			{Kind: "netport", Net: "IO0", W: 40, Side: "left"},
+		}})
+	var ups []zfPlacedTerm
+	for _, tm := range g.Terms {
+		switch tm.Dir {
+		case "up":
+			ups = append(ups, tm)
+		case "left", "right":
+			if tm.Offset != zfStub {
+				t.Errorf("左右端子桩长该恒 %g,%s 得到 %g", zfStub, tm.Net, tm.Offset)
+			}
+		}
+	}
+	if len(ups) != 3 {
+		t.Fatalf("该有 3 只上旗,得到 %d", len(ups))
+	}
+	for i, tm := range ups {
+		if tm.Offset <= 0 {
+			t.Errorf("旗 %s 缺 Offset —— apply 不带 offset 就退回默认桩长(竖叠复发)", tm.Net)
+		}
+		if i == 0 {
+			continue
+		}
+		prev := ups[i-1]
+		if tm.Offset <= prev.Offset {
+			t.Errorf("梯次不增:%s %g ≤ %s %g", tm.Net, tm.Offset, prev.Net, prev.Offset)
+		}
+		if want := prev.Offset + (prev.BBox.MaxY - prev.BBox.MinY); tm.Offset < want {
+			t.Errorf("%s 桩长 %g 没越过前旗旗体(需 ≥ %g)—— 落地仍会叠", tm.Net, tm.Offset, want)
+		}
+	}
+	if err := zfCheckTermOverlap(g); err != nil {
+		t.Errorf("梯次布置不该触发 R5:%v", err)
 	}
 }

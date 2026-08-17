@@ -481,11 +481,17 @@ GND 下/电源上由 rail 推导不查固定表、netport 恒水平、同件端�
 (端子归属靠导线,距离启发式必错)。
 
 `--apply` 落地执行(断言① 删除集=重建集 → 页级深度清扫 → 逐件落位重连 →
-断言② 曾连接 pin 仍连接 → 对账修复循环 → bridge-check 红才整体回滚 → save)。
+断言② 曾连接 pin 仍连接 → 对账修复循环 → **假失败清创**(自动删同位重复/
+同树冗余标记,复用 check 的 suggestDeleteIds 判据)→ bridge-check 红才整体
+回滚 → save)。同侧多旗按**垂直梯次**桩长错开(规划的 offset 直达 connect_pin;
+pin 再密也不竖叠)。
 **真机注意**:连接器在持续变更负载下会停摆,停摆期「报失败的写可能已落地」
-(假失败)——apply 已内置重试+对账,但若结束仍报缺口,先用
+(假失败)——apply 已内置重试+对账+清创,但若结束仍报缺口,先用
 `sch autoconnect --pin 位号:脚 --kind … --net …` 逐脚补(它幂等,already-connected
 会跳过,不会造重复标记),再跑 `sch bridge-check` + `sch nets` 三验。
+**不要陷入逐器件手工修补**:apply 报出的问题优先重跑一轮
+`zone-arrange --apply`(两遍法,落地实测反哺规划),手写 exec 挪件是最后手段
+(且必须 5 的倍数坐标 —— 件是格点公民,脱格 connect_pin 全灭)。
 
 ### Functional frames + text labels (multi-page safe)
 
