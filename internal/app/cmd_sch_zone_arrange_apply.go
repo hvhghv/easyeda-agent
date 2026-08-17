@@ -466,6 +466,7 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		return fmt.Errorf("deep-sweep 规划:%w", err)
 	}
 	ids = uniqueIDs(ids) // 平台对含重复 id 的删除批次整批静默拒(P2 实锤)
+	ids = dropSheetIDs(ids, scene.comps) // 图框守卫:CLI prim-delete 有守卫,内部删单也不能裸奔
 	if len(ids) > 0 {
 		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
 			map[string]any{"primitiveIds": ids}, docUUID, "zone-arrange deep-sweep"); err != nil {
@@ -600,7 +601,7 @@ func zaaSweepGhostMarkers(cfg *appConfig, win, docUUID string) (int, error) {
 	for _, f := range redundantNetMarkerFindings(comps, wires) {
 		ids = append(ids, f.SuggestDeleteIds...)
 	}
-	ids = uniqueIDs(ids)
+	ids = dropSheetIDs(uniqueIDs(ids), comps)
 	if len(ids) == 0 {
 		return 0, nil
 	}

@@ -53,3 +53,25 @@ func schSheetGuard(cfg *appConfig, window string, ids []string, allowSheet bool,
 	return fmt.Errorf("拒绝删除:%s 是图框(sheet)图元 —— 图框在 list 里就是「无位号 @(0,0)」的样子,极易被当残件误删,而平台没有重建图框的 API(丢了只能人工在 UI 重放)。确认要删就加 --allow-sheet",
 		strings.Join(hit, ","))
 }
+
+// dropSheetIDs filters sheet primitives out of a programmatic delete batch
+// (deep-sweep / ghost-marker prescriptions) against an already-loaded scene —
+// the CLI guard protects `prim-delete`, but internal deleters must not run bare.
+func dropSheetIDs(ids []string, comps []layoutComp) []string {
+	sheet := map[string]bool{}
+	for _, c := range comps {
+		if c.ComponentType == "sheet" && c.ID != "" {
+			sheet[c.ID] = true
+		}
+	}
+	if len(sheet) == 0 {
+		return ids
+	}
+	out := ids[:0:0]
+	for _, id := range ids {
+		if !sheet[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
