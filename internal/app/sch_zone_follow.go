@@ -34,6 +34,10 @@ const (
 	// 吃掉了 6~9 个单位,10 的 gap 当场穿帮。20 是仓库既有的间距基准,不另立数。
 	zfGroupGap  = bslPartGap // 卫星之间的间距
 	zfAnchorGap = bslPartGap // 锚件与卫星排/列的间距
+	// MultiPin 组的裸引脚(无端子的 pin)伸出本体 bbox 之外的最大触达(SOT-23
+	// 实测 9~15)。规划器没有 pin 几何,排列时对 MultiPin 邻接的 gap 补这个量,
+	// 防两组 pin 端点在走廊里物理同点(隐式短路)。
+	zfPinReach = 15.0
 )
 
 // zfTerm 是一个端子的类型化描述(从 schCluster 的归属 marker 折出)。
@@ -322,8 +326,9 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 	sort.SliceStable(gs, func(i, j int) bool { return tidyDesignatorLess(gs[i].Designator, gs[j].Designator) })
 
 	type genned struct {
-		g  zfPlacedGroup
-		bb layoutBBox
+		g        zfPlacedGroup
+		bb       layoutBBox
+		multiPin bool
 	}
 	gen := make([]genned, 0, len(gs))
 	for _, g := range gs {
@@ -331,7 +336,7 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 		if err != nil {
 			return zfZonePlan{}, err
 		}
-		gen = append(gen, genned{pg, zfGroupBBox(pg)})
+		gen = append(gen, genned{pg, zfGroupBBox(pg), g.MultiPin})
 	}
 	plan := zfZonePlan{Zone: zone}
 	area := func(x genned) float64 { return (x.bb.MaxX - x.bb.MinX) * (x.bb.MaxY - x.bb.MinY) }
@@ -352,11 +357,19 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 		putAt(gen[0], -gen[0].bb.MinX, -gen[0].bb.MinY)
 	case area(byArea[0]) < 2*area(byArea[1]):
 		// 无主导锚件 → 全员单列,位号序,左缘对齐,自上而下。
+		// 相邻组任一是 MultiPin 时加 zfPinReach:MultiPin 的无端子裸引脚伸出
+		// 本体 bbox 之外(SOT-23 实测 9~15),规划器没有 pin 几何,单列 gap 20
+		// 曾让 Q1-E 与 Q2-C 端点在组间走廊物理同点(隐式短路,pin-coincidence
+		// ERROR 真机两次复现)—— 保守按最大触达补余量。
 		plan.Mode = "无主导锚件 → 全员单列(位号序)"
 		y := 0.0
-		for _, g := range gen {
+		for i, g := range gen {
 			putAt(g, -g.bb.MinX, y-g.bb.MaxY)
-			y -= (g.bb.MaxY - g.bb.MinY) + zfGroupGap
+			gap := float64(zfGroupGap)
+			if g.multiPin || (i+1 < len(gen) && gen[i+1].multiPin) {
+				gap += zfPinReach
+			}
+			y -= (g.bb.MaxY - g.bb.MinY) + gap
 		}
 	default:
 		anchor := byArea[0]
@@ -395,17 +408,22 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 		label := map[string]string{"left": "列(左)", "right": "列(右)", "below": "排(下,竖放平行)"}
 		plan.Mode = fmt.Sprintf("锚件 %s + 卫星%s · argmin max(w,h)", anchor.g.Designator, label[best])
 		putAt(anchor, -anchor.bb.MinX, -anchor.bb.MinY)
+		// MultiPin 锚件的裸引脚伸出本体 bbox(见 zfPinReach)——卫星别贴进触达带。
+		aGap := float64(zfAnchorGap)
+		if anchor.multiPin {
+			aGap += zfPinReach
+		}
 		if best == "below" {
 			// 横排一排竖立的件,顶边对齐在锚件下缘 - gap。
 			x := 0.0
 			for _, s := range sats {
-				putAt(s, x-s.bb.MinX, -zfAnchorGap-s.bb.MaxY)
+				putAt(s, x-s.bb.MinX, -aGap-s.bb.MaxY)
 				x += (s.bb.MaxX - s.bb.MinX) + zfGroupGap
 			}
 		} else {
-			dx := aw + zfAnchorGap
+			dx := aw + aGap
 			if best == "left" {
-				dx = -zfAnchorGap - colW
+				dx = -aGap - colW
 			}
 			y := ah
 			for _, s := range sats {

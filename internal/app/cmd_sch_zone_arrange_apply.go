@@ -127,6 +127,61 @@ func zaaGatePinCoverage(desig string, pre []zaaPinSnap, terms []zfPlacedTerm) er
 	return nil
 }
 
+// zaaPadTermsToPins 把计划端子按实际已连接 pin 的网名多重集「同网扩容」:
+// 某网的实际 pin 数 > 计划端子数时,克隆该网第一个端子补齐(J2 真机:USB-C 的
+// GND 焊盘组 6 只 pin 全部接地,块计划只有 5 只 —— 同网冗余接地是合法甚至更好
+// 的画布状态,不该被断言①按「集合不等」拒掉;sweep 删几只就重建几只)。
+// 只扩容不收缩:实际比计划**少**仍是「删了不重建」的红线,交给 gate 原样拒。
+func zaaPadTermsToPins(terms []zfPlacedTerm, pre []zaaPinSnap, pageNets map[string]bool) []zfPlacedTerm {
+	planCount := map[string]int{}
+	firstOf := map[string]zfPlacedTerm{}
+	for _, t := range terms {
+		planCount[t.Net]++
+		if _, ok := firstOf[t.Net]; !ok {
+			firstOf[t.Net] = t
+		}
+	}
+	preCount := map[string]int{}
+	for _, p := range pre {
+		preCount[p.Net]++
+	}
+	out := append([]zfPlacedTerm(nil), terms...)
+	nets := make([]string, 0, len(preCount))
+	for net := range preCount {
+		nets = append(nets, net)
+	}
+	sort.Strings(nets) // 确定性:补齐顺序与 map 遍历序无关
+	for _, net := range nets {
+		tpl, hasTpl := firstOf[net]
+		for i := planCount[net]; i < preCount[net]; i++ {
+			if hasTpl {
+				out = append(out, tpl) // 同网冗余(J2 六只 GND 焊盘):克隆计划端子
+				continue
+			}
+			// 本组计划没有这个网,但它在**页内其他组**的计划里(pageNets)——
+			// 共树 pin(Q1-E 与 R3 的 USB_DTR 合法共树,cluster 的「专属 marker」
+			// 规则不把树算给 Q1,端子就缺了;而页级 sweep 会把整棵树删掉)。
+			// 按实测侧合成端子一并重建,否则它是注定修不回来的静默断线。
+			if !pageNets[net] {
+				continue // 页内无人认领的网 = 真意外连接,留给 gate 拒
+			}
+			kind := "netport"
+			if cls := tidyNetClass(net); cls == "ground" || cls == "power" {
+				kind = "netflag"
+			}
+			dir := "right"
+			for _, p := range pre {
+				if p.Net == net && p.Dir != "" {
+					dir = p.Dir
+					break
+				}
+			}
+			out = append(out, zfPlacedTerm{Kind: kind, Net: net, Dir: dir, Offset: zfStub})
+		}
+	}
+	return out
+}
+
 // zaaMapTerms 把计划端子映射到具体 pin:优先 (net, 现侧) 匹配,退 net 匹配;
 // 全确定性(pin 号自然序 × 计划序),J1 的双 U3_N4(左右各一)靠现侧区分。
 func zaaMapTerms(pre []zaaPinSnap, terms []zfPlacedTerm, pinSide map[string]string,
@@ -183,6 +238,15 @@ func zaaBuildExec(out *zoneArrangeOut, scene *zaScene, opts partitionOpts) ([]za
 		rectOf[p.Name] = p.Rect
 	}
 	sweepSet := map[string]bool{}
+	// 页级计划网集合:共树 pin 的端子合成要判「这个网页内有没有人认领」。
+	pageNets := map[string]bool{}
+	for _, z := range out.Zones {
+		for _, g := range z.Groups {
+			for _, t := range g.Terms {
+				pageNets[t.Net] = true
+			}
+		}
+	}
 	var rebuild []string
 	var execs []zaaMemberExec
 	for _, z := range out.Zones {
@@ -231,11 +295,12 @@ func zaaBuildExec(out *zoneArrangeOut, scene *zaScene, opts partitionOpts) ([]za
 					pinSide[p.Number] = "up"
 				}
 			}
-			if err := zaaGatePinCoverage(g.Designator, snaps, g.Terms); err != nil {
+			gTerms := zaaPadTermsToPins(g.Terms, snaps, pageNets)
+			if err := zaaGatePinCoverage(g.Designator, snaps, gTerms); err != nil {
 				return nil, nil, err
 			}
 			gcy := (g.Body.MinY + g.Body.MaxY) / 2
-			terms, err := zaaMapTerms(snaps, g.Terms, pinSide, func(t zfPlacedTerm) bool {
+			terms, err := zaaMapTerms(snaps, gTerms, pinSide, func(t zfPlacedTerm) bool {
 				return (t.BBox.MinY+t.BBox.MaxY)/2 > gcy
 			})
 			if err != nil {

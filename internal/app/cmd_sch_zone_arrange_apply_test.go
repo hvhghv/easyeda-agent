@@ -93,3 +93,54 @@ func TestZaaVerticalOrderOK(t *testing.T) {
 		t.Error("上端子 pin 在下,该判不符(换旋转候选)")
 	}
 }
+
+// 同网冗余 pin 的扩容:J2 真机 —— USB-C 的 GND 焊盘组 6 pin 全接地,块计划 5 只,
+// 断言①曾按「集合不等」拒掉整页 apply。扩容后 sweep 删几只就重建几只;
+// 计划完全没有的网(真正的意外连接)仍保持不等,交给 gate 拒。
+func TestZaaPadTermsToPins(t *testing.T) {
+	terms := []zfPlacedTerm{
+		{Net: "GND", Dir: "left", Offset: 20},
+		{Net: "5V", Dir: "right", Offset: 20},
+	}
+	pre := []zaaPinSnap{
+		{Pin: "A1", Net: "GND"}, {Pin: "B1", Net: "GND"}, {Pin: "EP", Net: "GND"},
+		{Pin: "A4", Net: "5V"},
+	}
+	got := zaaPadTermsToPins(terms, pre, map[string]bool{"GND": true, "5V": true, "IO0": true})
+	gnd := 0
+	for _, tm := range got {
+		if tm.Net == "GND" {
+			gnd++
+			if tm.Dir != "left" || tm.Offset != 20 {
+				t.Errorf("克隆端子该继承模板的 Dir/Offset,得到 %s/%g", tm.Dir, tm.Offset)
+			}
+		}
+	}
+	if gnd != 3 {
+		t.Fatalf("GND 端子该扩容到 3(实际 pin 数),得到 %d", gnd)
+	}
+	// 计划没有的网不扩容(真意外连接留给 gate)。
+	pre2 := append(pre, zaaPinSnap{Pin: "X1", Net: "MYSTERY"})
+	if got2 := zaaPadTermsToPins(terms, pre2, map[string]bool{"GND": true, "5V": true}); len(got2) != len(got) {
+		t.Fatalf("计划外的网不该被扩容进端子:%d → %d", len(got), len(got2))
+	}
+	// 共树 pin:计划外但页内有人认领的网 → 按实测侧合成端子(Q1-E 与 R3 共树案)。
+	pre3 := append(pre[:4:4], zaaPinSnap{Pin: "2", Net: "USB_DTR", Dir: "down", Kind: "net_port_bi"})
+	got4 := zaaPadTermsToPins(terms, pre3, map[string]bool{"GND": true, "5V": true, "USB_DTR": true})
+	found := false
+	for _, tm := range got4 {
+		if tm.Net == "USB_DTR" {
+			found = true
+			if tm.Dir != "down" || tm.Kind != "netport" {
+				t.Errorf("合成端子该用实测侧/信号口径,得到 %s/%s", tm.Dir, tm.Kind)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("页内认领的共树网该被合成端子")
+	}
+	// 实际比计划少:不收缩(「删了不重建」仍要红)。
+	if got3 := zaaPadTermsToPins(terms, pre[:1], map[string]bool{"GND": true, "5V": true}); len(got3) != 2 {
+		t.Fatalf("不收缩:%d", len(got3))
+	}
+}
