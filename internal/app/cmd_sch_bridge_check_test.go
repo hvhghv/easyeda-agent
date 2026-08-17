@@ -115,3 +115,61 @@ func TestEncodeResultEnvelope_BridgeReport(t *testing.T) {
 		t.Errorf("rule type/level lost in envelope: %+v", env.Result.Trees[0])
 	}
 }
+
+// ORPHAN_TREE: a wire tree touching NO pin at all — the component-move-residue
+// form (flag+stub survives the move) that ORPHAN (needs a touched pin) and
+// ORPHAN_FLAG (needs the flag to sit on NO wire) were both structurally blind
+// to (live 2026-08-18: two GND flag+stub trees on P2_MCU reported clean).
+func TestParseAndRenderBridge_OrphanTree(t *testing.T) {
+	result := map[string]any{
+		"passed": false,
+		"summary": map[string]any{
+			"trees":          float64(2),
+			"bridges":        float64(0),
+			"orphans":        float64(0),
+			"orphanFlags":    float64(0),
+			"orphanTrees":    float64(2),
+			"wireTreesTotal": float64(14),
+		},
+		"trees": []any{
+			map[string]any{ // move residue: GND flag + 20u stub, no pin under it
+				"kind":    "ORPHAN_TREE",
+				"wireIds": []any{"w9"},
+				"flagIds": []any{"f9"},
+				"pins":    []any{},
+				"nets":    []any{"GND"},
+			},
+			map[string]any{ // bare dead wire: neither flags nor pins
+				"kind":    "ORPHAN_TREE",
+				"wireIds": []any{"w10"},
+				"flagIds": []any{},
+				"pins":    []any{},
+				"nets":    []any{},
+			},
+		},
+	}
+	rep, err := parseBridgeReport(result)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if rep.Passed {
+		t.Error("expected passed=false")
+	}
+	if rep.Summary.OrphanTrees != 2 {
+		t.Errorf("orphanTrees not parsed: %+v", rep.Summary)
+	}
+	for i := range rep.Trees {
+		if rep.Trees[i].Type != "orphan-tree" || rep.Trees[i].Level != "warn" {
+			t.Errorf("tree %d not typed orphan-tree/warn: %+v", i, rep.Trees[i])
+		}
+	}
+
+	var buf bytes.Buffer
+	renderBridgeReport(rep, &buf)
+	out := buf.String()
+	for _, want := range []string{"orphan-tree", "2 orphan-tree(s) (tree touching no pin)", "nets=[GND]", "w9", "f9", "悬空树"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}

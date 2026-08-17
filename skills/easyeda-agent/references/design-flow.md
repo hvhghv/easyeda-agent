@@ -275,7 +275,7 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
    > → 串网」留下 PARTIAL STATE),按 dry-run 的计划手工 `sch disconnect` + `sch connect`
    > 逐个改,每改一个跑 `sch check` 复验。
 
-   | 4 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag 是告警,strict 下阻塞 |
+   | 4 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag/**tree** 是告警,strict 下阻塞。`orphan-tree` = flag+桩线成树却**不触任何引脚**(挪件残留)或裸死线 —— 修法 `sch prim-delete` 整树(wireIds+flagIds)删净;需连接器 ≥0.26.1,旧连接器对此形态报不出来(结构性盲区,2026-08-18 真机定案) |
    | 5 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
 
    **verdict 三态,`blocked` ≠ `fail`**:

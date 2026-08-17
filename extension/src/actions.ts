@@ -3065,13 +3065,15 @@ const schematicCheck: Handler = async (payload) => {
 // vertices (union-find) and aggregates the net names of every netflag/netport
 // anchored on that tree:
 //   • len(set(nets)) > 1  → BRIDGE (real short, ERROR)
-//   • nets empty & tree touches a component pin → ORPHAN (dangling stub, WARN)
+//   • nets empty & tree touches a SINGLE pin → ORPHAN (dangling stub, WARN)
+//   • tree touches NO pin at all → ORPHAN_TREE (move-residue flag+stub or bare
+//     dead wire, WARN) — the form both ORPHAN and ORPHAN_FLAG were blind to
 // Read-only: reports wire ids / flag ids / touched pins (designator:pin) per
 // problem tree so the fix (integral-tree delete + occupancy-aware reconnect)
 // can be driven by hand or a later --repair pass (issue #73).
 
 interface BridgeTree {
-	kind: 'BRIDGE' | 'ORPHAN' | 'ORPHAN_FLAG';
+	kind: 'BRIDGE' | 'ORPHAN' | 'ORPHAN_FLAG' | 'ORPHAN_TREE';
 	wireIds: Array<string>;
 	flagIds: Array<string>;
 	pins: Array<string>; // "designator:pin"
@@ -3201,6 +3203,15 @@ const schematicBridgeCheck: Handler = async (payload) => {
 				trees.push({ kind: 'ORPHAN', wireIds: [...t.wireIds], flagIds, pins: uniquePins, nets: netList });
 			}
 		}
+		else if (touchedPins.length === 0) {
+			// A wire tree that touches NO pin at all: either flag(s)+stub left behind
+			// by a component move (live 2026-08-18: two GND flag+stub trees survived
+			// C4/SW2 moves — ORPHAN requires touched pins and ORPHAN_FLAG requires no
+			// wire, so BOTH were structurally blind to this form), or a bare wire tree
+			// with neither flags nor pins (dead copper). netList.length===1 lands here
+			// too — a single-net tree with zero pins contributes nothing electrically.
+			trees.push({ kind: 'ORPHAN_TREE', wireIds: [...t.wireIds], flagIds, pins: [], nets: netList });
+		}
 	}
 
 	// ── Orphan FLAGS: a netflag/netport attached to NO wire at all (issue #137).
@@ -3224,7 +3235,8 @@ const schematicBridgeCheck: Handler = async (payload) => {
 	const bridges = trees.filter(t => t.kind === 'BRIDGE').length;
 	const orphans = trees.filter(t => t.kind === 'ORPHAN').length;
 	const orphanFlags = trees.filter(t => t.kind === 'ORPHAN_FLAG').length;
-	const summary = { trees: trees.length, bridges, orphans, orphanFlags, wireTreesTotal: treeMap.size };
+	const orphanTrees = trees.filter(t => t.kind === 'ORPHAN_TREE').length;
+	const summary = { trees: trees.length, bridges, orphans, orphanFlags, orphanTrees, wireTreesTotal: treeMap.size };
 	return { result: { passed: trees.length === 0, summary, trees } };
 };
 

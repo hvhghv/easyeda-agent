@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-08-18
+
+### Added
+- **`schematic.bridgeCheck` 新判据 `ORPHAN_TREE`(悬空树)**:wire 树不触任何
+  引脚 —— 挪件残留(flag+桩线随器件移动被遗留原地)或纯裸死线。此前
+  `ORPHAN`(要求树触到引脚)与 `ORPHAN_FLAG`(要求 flag 不挨任何导线)对这种
+  形态**结构性盲区**:真机 2026-08-18 P2_MCU 页两棵 GND flag+桩线残留树,
+  bridge-check 连报 0 orphan,靠渲染图人工数 flag 才抓到。summary 新增
+  `orphanTrees` 计数;CLI ≥ 同版把它渲染为 `orphan-tree`(WARN,gate `--strict`
+  阻塞)。旧 CLI 读新连接器只是忽略新字段,不破坏兼容。
+
 ## [0.26.0] - 2026-08-17
 
 **连接器侧无代码变更** —— 版本号随 CLI 同步(四件套同版约定)。本版全部变更在

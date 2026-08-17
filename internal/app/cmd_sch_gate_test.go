@@ -249,6 +249,7 @@ func TestGateAdviceRulesCoverEveryReasonTheStagesCanEmit(t *testing.T) {
 		"7 个 error/fatal finding: floating-pin×7",
 		"23 个 warn/info finding (--strict): floating-pin×23",
 		"2 wire-bridge(真短路)", "11 orphan-stub (--strict)", "1 orphan-flag (--strict)",
+		"2 orphan-tree (--strict)",
 		"3 fatal DRC violation",
 	}
 	for _, reason := range emitted {

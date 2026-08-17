@@ -387,9 +387,9 @@ func gateBridgeStage(cfg *appConfig, window string, allPages, strict bool) gateS
 	}
 	st.Detail = rep
 	st.Errors = rep.Summary.Bridges
-	st.Warnings = rep.Summary.Orphans + rep.Summary.OrphanFlags
-	st.Summary = fmt.Sprintf("%d bridge(short), %d orphan-stub, %d orphan-flag (%d wire tree(s))",
-		rep.Summary.Bridges, rep.Summary.Orphans, rep.Summary.OrphanFlags, rep.Summary.WireTreesTotal)
+	st.Warnings = rep.Summary.Orphans + rep.Summary.OrphanFlags + rep.Summary.OrphanTrees
+	st.Summary = fmt.Sprintf("%d bridge(short), %d orphan-stub, %d orphan-flag, %d orphan-tree (%d wire tree(s))",
+		rep.Summary.Bridges, rep.Summary.Orphans, rep.Summary.OrphanFlags, rep.Summary.OrphanTrees, rep.Summary.WireTreesTotal)
 	if rep.Summary.Bridges > 0 {
 		st.BlockingReasons = append(st.BlockingReasons,
 			fmt.Sprintf("%d wire-bridge(真短路)", rep.Summary.Bridges))
@@ -402,6 +402,10 @@ func gateBridgeStage(cfg *appConfig, window string, allPages, strict bool) gateS
 		if rep.Summary.OrphanFlags > 0 {
 			st.BlockingReasons = append(st.BlockingReasons,
 				fmt.Sprintf("%d orphan-flag (--strict)", rep.Summary.OrphanFlags))
+		}
+		if rep.Summary.OrphanTrees > 0 {
+			st.BlockingReasons = append(st.BlockingReasons,
+				fmt.Sprintf("%d orphan-tree (--strict)", rep.Summary.OrphanTrees))
 		}
 	}
 	if len(st.BlockingReasons) > 0 {
@@ -497,6 +501,7 @@ var gateAdviceRules = []struct{ match, advice string }{
 	{"wire-bridge", "真短路:按 tree 的 primitiveIds 定位后 `sch prim-delete` 拆掉压线,再 `sch connect` 重连"},
 	{"orphan-stub", "孤儿桩(仅 --strict 阻塞):要么 `sch connect` 补上网络标识,要么 `sch prim-delete` 清掉"},
 	{"orphan-flag", "孤儿标识(仅 --strict 阻塞):flag 不挨任何导线,`sch prim-delete` 清掉 —— 新线穿过会静默继承其网名"},
+	{"orphan-tree", "悬空树(仅 --strict 阻塞):flag+桩线成树却不触任何引脚(挪件残留)或纯裸死线,`sch prim-delete` 整树(wireIds+flagIds)清掉"},
 	{"finding", "按 finding 类型分治:duplicate-net-marker 喂 `sch prim-delete`(带 suggestDeleteIds),floating-pin 用 `sch no-connect`,wire-* 用 `sch disconnect` 后重连"},
 	{"fatal DRC", "跑 `sch drc --verbose` 看逐条明细(gate 只汇总);DRC 需要 EasyEDA 窗口在前台"},
 }
