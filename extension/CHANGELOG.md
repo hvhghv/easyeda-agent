@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-18
+
+**里程碑:原理图功能正式上线(S0–S6 可交付)。** 版本从 0.26.x 跃迁至 1.0.0,
+连接器与 CLI/skill 同版(四件套同版约定)。0.26.1 未单独发布,其连接器变更
+(`schematic.bridgeCheck` 的 `ORPHAN_TREE` 悬空树判据,见下方 0.26.1 条目)随本版
+一并发布。1.0.0 的主体变更在 CLI/skill 侧:三层布局体系(Sheet→Zone→Group,
+分区框/区名/电路说明算法落位,生成与校验同一把尺)、`sch gate --strict` 五关
+机械门禁、跨页网名审计 `sch nets --strict`、块对账 `sch reconcile`、netlist
+黄金表逐脚比对;esp32Mini 真机端到端回归通过(3 页 / 26 件 / 18 网全对)。
+连接器 0.26.x 与本版 CLI 协议兼容,但 `orphan-tree` 判据需本版连接器才生效。
+
 ## [0.26.1] - 2026-08-18
 
 ### Added
