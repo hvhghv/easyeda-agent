@@ -62,7 +62,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 | S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
 | S5 | 校验门(机械真值) | 逐页 `sch gate --strict --doc <页>` + 全工程 `sch nets --strict` + `sch reconcile` | 每页 verdict=pass;无网名变体/单引脚网;意图对账无差异 |
 | S6 | 调整闭环 | 照 gate 报告「下一步」修 → 重跑 gate | verdict=pass → `sch save` 确认 `saved:true` 💾 |
-| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>` + `sch titleblock` | `sch check` 无 `missing-deliverable` |
+| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>` + ~~`sch titleblock`~~(⚠图签写入当前禁用:写路径损毁 sheet 引用→重启丢图框,见 actions.md;留白如实报) | `sch check` 无 missing-partition/note(titleblock 挂账) |
 
 > `blocked` ≠ `fail`(检查器没跑成,先修环境别改电路);判状态看数据不看截图;每过门显式 save。
 
