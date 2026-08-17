@@ -6,6 +6,15 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-17
+
+**连接器侧无代码变更** —— 版本号随 CLI 同步(四件套同版约定)。本版全部变更在
+CLI/skill 侧:`sch zone-arrange`(功能区确定性布局两段求解 + `--apply` 断言门)、
+`sch status`/`sch nets`/`sch reconcile`/`sch clusters`/`audit cost` 新子命令、
+图框(sheet)误删双层守卫与 `sch titleblock --data` 写入禁用令(写路径会损毁
+sheet 符号引用,重启后图框丢失 —— 修复处方见 skill actions.md)、原理图 SOP
+步骤卡。连接器 0.25.x 与本版 CLI 完全兼容。
+
 ## [0.25.1] - 2026-08-13
 
 修复立创插件市场审核驳回「README图片未加载成功，请检查存储路径」(0.24.0 被拒)。
