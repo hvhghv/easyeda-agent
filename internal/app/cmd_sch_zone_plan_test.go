@@ -145,3 +145,40 @@ func TestZoneNoteFoldEstimate(t *testing.T) {
 		t.Fatalf("height estimate off: %+v", nb)
 	}
 }
+
+// ── 生成器与校验器同一把尺(P2_MCU 真机复现,2026-08-18)──────────────────
+//
+// 真机:esp32Mini P2 页,MCU 组 content 顶 770.5(离纸边 54.5,本体完全装得下),
+// 但框 = content+pad24+titleBand30 = 824.5,距纸边 0.5 < sheetEdgeMinGap(12)
+// → 自己产生的框被自己的 SheetMarginHits 拒绝,zone-draw 永远画不出来。
+// 预留带(pad/title/note)是我们加的,不是内容 —— 撞纸边就该缩,内容一寸不让;
+// 只有内容本体自己贴边时才有资格报 marginHit。图签方向已有此逻辑(说明带撞
+// 图签就缩),纸边四周此前没有 —— 判定与生成两把尺。
+func TestPlanPartitions_ReservedBandsYieldToSheetEdge(t *testing.T) {
+	sheet := layoutBBox{0, 0, 1170, 825}
+	keepout := &layoutBBox{468, 0, 1170, 198}
+	mods := []partitionModule{
+		// content 顶 770.5:+24+30=824.5 会贴到纸边(825-12=813 才合规)
+		{Name: "MCU", BBox: layoutBBox{444.5, 265.5, 1053.5, 770.5}},
+	}
+	plan := planPartitions(sheet, keepout, mods, defaultPartitionOpts())
+	if len(plan.Partitions) != 1 {
+		t.Fatalf("want 1 partition, got %+v", plan.Partitions)
+	}
+	p := plan.Partitions[0]
+	if plan.Validation.SheetMarginHits != 0 {
+		t.Errorf("reserved bands must shrink at the sheet edge, got marginHits=%d bbox=%+v",
+			plan.Validation.SheetMarginHits, p.BBox)
+	}
+	if p.BBox.MaxY > sheet.MaxY-sheetEdgeMinGap+0.01 {
+		t.Errorf("frame top %.1f exceeds sheet edge budget %.1f", p.BBox.MaxY, sheet.MaxY-sheetEdgeMinGap)
+	}
+	// 内容一寸不让:框仍须包住模块。
+	if !bboxContains(p.BBox, mods[0].BBox) {
+		t.Errorf("clamped frame no longer contains its module: %+v vs %+v", p.BBox, mods[0].BBox)
+	}
+	if plan.Validation.TitleBlockHits != 0 {
+		t.Errorf("note band must yield to the inflated title keepout, got titleBlockHits=%d bbox=%+v",
+			plan.Validation.TitleBlockHits, p.BBox)
+	}
+}

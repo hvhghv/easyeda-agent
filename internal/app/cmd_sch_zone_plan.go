@@ -245,6 +245,24 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 				rect.MinY = lift
 			}
 		}
+		// 纸边与图签同理(同一把尺,2026-08-18 P2 真机定案):pad/标题带/说明带是
+		// **我们加的预留**,撞纸边(sheetEdgeMinGap)就缩,内容一寸不让 —— 此前只有
+		// 图签方向这么做,纸边四周没有,于是「内容顶 770.5(离纸边 54.5,完全装得下)
+		// + pad24 + 标题带30 = 824.5」贴到纸边,planner 自己产生的框被自己的
+		// SheetMarginHits 拒绝,zone-draw 永远画不出来。clamp 后 marginHit 只剩一种
+		// 触发方式:内容本体自己贴边 —— 那才是真该报的。
+		if lim := sheet.MinX + sheetEdgeMinGap; rect.MinX < lim {
+			rect.MinX = math.Min(lim, content.MinX)
+		}
+		if lim := sheet.MinY + sheetEdgeMinGap; rect.MinY < lim {
+			rect.MinY = math.Min(lim, content.MinY)
+		}
+		if lim := sheet.MaxX - sheetEdgeMinGap; rect.MaxX > lim {
+			rect.MaxX = math.Max(lim, content.MaxX)
+		}
+		if lim := sheet.MaxY - sheetEdgeMinGap; rect.MaxY > lim {
+			rect.MaxY = math.Max(lim, content.MaxY)
+		}
 		band := opts.TitleBand
 		if h := rect.MaxY - rect.MinY; band > h/2 {
 			band = h / 2
@@ -340,12 +358,32 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 	// against the bare estimate while lifting by a different amount is exactly the
 	// false-green this replaced.
 	safe := inflatedTitleKeepout(keepout)
+	coreOf := map[string]layoutBBox{}
+	for _, m := range modules {
+		coreOf[m.Name] = moduleCoreBBox(m)
+	}
 	for _, p := range ps {
 		if !bboxContains(plan.Sheet, p.BBox) {
 			v.SheetOverflow++
 		}
 		if safe != nil && boxesOverlap(p.BBox, *safe) {
-			v.TitleBlockHits++
+			// 分层(2026-08-18):框压到**裸 keepout**(真图签表格)= hard hit;
+			// 只擦到膨胀安全带时,仅当某成员模块的 CoreBBox(器件本体)也侵入
+			// 安全带才计 —— 旗/标签探进安全带是注释级余量问题(partitionModule
+			// 注释既有的设计意图),此前框因包住 marker 而擦线就整个 hard-block,
+			// 与「titleBlockHits 用 CoreBBox」的声明是两把尺。
+			hard := keepout != nil && boxesOverlap(p.BBox, *keepout)
+			if !hard {
+				for _, name := range p.Modules {
+					if core, ok := coreOf[name]; ok && boxesOverlap(core, *safe) {
+						hard = true
+						break
+					}
+				}
+			}
+			if hard {
+				v.TitleBlockHits++
+			}
 		}
 		// A frame edge hugging the printed sheet frame reads as a double line.
 		if p.BBox.MinX-plan.Sheet.MinX < sheetEdgeMinGap || plan.Sheet.MaxX-p.BBox.MaxX < sheetEdgeMinGap ||
