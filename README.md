@@ -16,6 +16,11 @@
 
 ![easyeda-agent workflow](docs/assets/easyeda-agent-workflow.svg)
 
+> **当前版本:v1.0.0 —— 原理图功能正式上线。** AI Agent 通过类型化命令操作 EasyEDA Pro,
+> 从一份客户口吻的需求文档出发,原理图全流程(S0–S6:方案书 → 分页 → 分区 → 摆放 →
+> 布线 → 机械门禁 → 交付)已可正式交付;PCB 流程(P0–P10)持续演进中。
+> 真机成图见下方[实战展示](#实战展示一份需求文档--三页原理图正式交付)。
+
 `easyeda-agent` 把官方 EasyEDA 扩展 API 变成一套**有类型、可观测、Skill 友好**的系统。EasyEDA 插件保持极薄——它连到本地 agent、只执行被批准的动作;Go CLI/daemon 掌管协议、状态、产物、校验和面向用户的工作流。
 
 ## 为什么做这个
@@ -55,8 +60,9 @@
 
 | 能力域 | 做什么 |
 |---|---|
-| **电路块库(旗舰特色)** | 社区共建、署名可追的**成熟外设电路库**:CH340 USB 串口、ESP32 自动下载、按键去抖、USB-HUB、降压…**照抄拓扑、只重绑引脚网络**即可复用 |
-| 原理图 | 库优先放件(真实 LCSC/JLC 器件)、编组、布线、netflag/netport、`sch check`/`layout-lint` 真实 bbox 校验 |
+| **电路块库(旗舰特色)** | 社区共建、署名可追的**成熟外设电路库**(`easyeda blocks`,**37 块:19 ready / 13 verified / 5 draft**):CH340 USB 串口、ESP32 自动下载、按键去抖、USB-HUB、降压…`sch block-apply` **一条命令放件 + 连线 + 网表对账**,照抄拓扑、只重绑引脚网络即可复用 |
+| 原理图(**v1.0.0 正式上线**) | 全流程 S0–S6 可交付:库优先放件(真实 LCSC/JLC 器件)、编组、布线、netflag/netport;**三层布局体系 Sheet→Zone→Group**——分区框 + 区名 + 电路说明由算法计算落位,生成与校验用同一把尺 |
+| 机械门禁与审计 | `sch gate --strict` 一条命令过**五关**(layout-lint→clusters→check→bridge-check→drc),bridge-check 新增 **orphan-tree 悬空树**判据(连接器 ≥0.26.1);跨页网名审计 `sch nets --strict` + 块对账 `sch reconcile` + netlist 黄金表逐脚比对 |
 | PCB | 自动布局、板框、禁布区、规则感知短线布线、4 层电源平面、铺铜、丝印避让、DRC/`pcb check` |
 | 设计流程 | 从**客户口吻需求**到成品的门控主脊(S0–S6 + P0–P10),里程碑确认,存盘检查点 |
 | 产物 | BOM(补 LCSC C 号)、网表、导出、原生截图、审计日志、录制→回放 |
@@ -65,16 +71,17 @@
 
 **固定模块的外设电路可以直接照抄。** ESP32 自动下载电路、CH340 USB 烧录、按键去抖、
 USB-HUB…这些电路的**内部拓扑是死的**,每次重画等于重趟坑。电路块库把它们
-沉淀成**验证过的、可复用的电路块**——你只需重绑对外的几根线(ports)到主控网络,
-引脚用**功能名**引用所以**零改号**,器件直接指回标准器件库(BOM 就绪)。
+沉淀成**验证过的、可复用的电路块**(当前 **37 块:19 ready / 13 verified / 5 draft**)——
+`sch block-apply` 一条命令完成**放件 + 连线 + 网表对账**,你只需重绑对外的几根线(ports)
+到主控网络,引脚用**功能名**引用所以**零改号**,器件直接指回标准器件库(BOM 就绪)。
 
 - **社区共建 + 署名可追**:每个块带 `author`/`contributors`,**一次学习贡献、永久收益**;
 - **验证门禁**:块必须跑过 `place → wire → check → DRC=0` 才入库,不是「看着对」的散文堆;
 - **三维知识**:器件(可替换选择)+ 原理图链接注意 + PCB 布局电气特性,一块讲全;
 - **AI 直接消费**:agent 放外设前先查块库,命中即抄,省掉一整个模块的选型与接线。
 
-> 库目录 [`references/blocks/`](skills/easyeda-agent/references/blocks)(一块一文件) ·
-> 浏览 `blocks.py ls/show` · 贡献指南
+> 库已**内嵌进 CLI**:`easyeda blocks ls/show/search` 离线可查(无需 daemon/窗口) ·
+> 贡献指南
 > [`standard-blocks-contributing.md`](skills/easyeda-agent/references/standard-blocks-contributing.md)
 
 ## 安装
@@ -107,7 +114,7 @@ curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/easyeda-agent/main
 easyeda update              # CLI 二进制(sha256 校验 + 原子替换)+ skill 目录 → latest
 easyeda update --check      # 只读:cli / skill / connector 三方版本对齐表
 easyeda update --check --exit-code   # 有落后退出码 10(CI/agent 可 gate)
-easyeda update --version 0.25.0      # 钉版本;--skill-only / --cli-only 缩范围
+easyeda update --version <x.y.z>     # 钉版本;--skill-only / --cli-only 缩范围
 ```
 
 连接器 `.eext` 不在自动升级范围内(侧载无原地更新)—— `update` 会**报出**它落后并打印重导地址。
@@ -119,7 +126,7 @@ dev 构建(git-describe 版本号)默认不覆盖,`--force` 才强升;二进制�
 EASYEDA_INSTALL_SKILLS=codex,claude curl -fsSL .../install.sh | sh  # 指定目标
 EASYEDA_INSTALL_SKILLS=none          curl -fsSL .../install.sh | sh  # 跳过 skill
 EASYEDA_SKILL_PRESERVE=1             curl -fsSL .../install.sh | sh  # 保留本地改动
-EASYEDA_VERSION=v0.18.2              curl -fsSL .../install.sh | sh  # 指定版本(跳过 API 查询)
+EASYEDA_VERSION=<vX.Y.Z>              curl -fsSL .../install.sh | sh  # 指定版本(跳过 API 查询)
 ```
 
 **遇到 `403` / GitHub API 限流**:脚本默认要调一次 `api.github.com` 解析 latest
@@ -130,7 +137,7 @@ release,匿名调用每个 IP 每小时只有 60 次 —— 公司出口 / NAT /
 export GITHUB_TOKEN=<token>   # 或 GH_TOKEN;已登录 gh CLI 时会自动取 `gh auth token`
 gh auth login                 # 等价做法,额度提升到 5000/小时
 
-EASYEDA_VERSION=v0.18.2 curl -fsSL .../install.sh | sh   # 或者直接锁版本,完全不碰 API
+EASYEDA_VERSION=<vX.Y.Z> curl -fsSL .../install.sh | sh   # 或者直接锁版本,完全不碰 API
 ```
 
 可用 tag 见 [Releases](https://github.com/zhoushoujianwork/easyeda-agent/releases)。
@@ -167,6 +174,26 @@ codex mcp add easyeda-agent \
 详细工具清单与开发验证见 [`mcp/README.md`](mcp/README.md)。
 
 ## 效果演示
+
+### 实战展示:一份需求文档 → 三页原理图正式交付
+
+v1.0.0 的原理图全流程真机成图(esp32Mini 固定回归用例):输入只是一份**不含 BOM/网表的
+客户口吻需求文档**,agent 沿 S0–S6 自己完成选型、放置、连线、分区与门禁——
+**3 页原理图 / 26 个真实 LCSC 库件 / 18 网黄金表逐脚全对 / 复用 6 个电路块 /
+8 个分区框 + 7 条电路说明**,分区框、区名与电路说明全部由算法计算落位,逐页
+`sch gate --strict` 通过。
+
+![P1 电源页:AMS1117 LDO 降压,分区框 + 区名 + 电路说明由算法落位](docs/images/sch-p1-power.png)
+
+P1 电源页:AMS1117 LDO(5V→3V3)分区框 + 区名 + 电路说明,全部算法计算落位。
+
+![P2 主控页:ESP32 WROOM 最小系统 + 按键 + LED,三个分区框](docs/images/sch-p2-mcu.png)
+
+P2 主控页:WROOM 最小系统、BOOT/RESET 按键、指示 LED 三个功能分区。
+
+![P3 USB 页:CH340 + USB-C + 自动下载电路,四个分区框](docs/images/sch-p3-usb.png)
+
+P3 USB 页:CH340 USB 串口、USB-C 接口、自动下载等四个功能分区。
 
 > **完整实战案例:[一份需求文档 → AI 全自动画完 ESP32-S3 四层板](docs/showcase-esp32-mini.md)** ——
 > 19 器件原理图 + 四层 PCB(GND 内电层/VCC 电源层/天线禁铜/四角 M3),
@@ -214,9 +241,10 @@ codex mcp add easyeda-agent \
 **原理图** — 完整功能地图(已支持 40+ 子命令按功能域 + 待支持路线)见 **[docs/cli/schematic.md](docs/cli/schematic.md)**(CLI 功能索引:[docs/cli/](docs/cli/README.md));摘要:
 - **器件与库**:从立创/LCSC 库按 uuid 放**真实器件**、换型号(`replace`)、符号/封装重绑、C 号确定性解析(`resolve-lcsc`);`modify` 属性 **merge 语义**(只 patch 顶层字段不再清空自定义属性,#175)。
 - **连线**:`connect`/`autoconnect`(**打分器**自选方向——碰撞/穿件/图签/fanout 全几何成本,netport **竖排折叠惩罚**让密集引脚列标签保持水平)/`disconnect` 成对删;电源/地标志自动补偿旋转存储的坑。
-- **布局与可读性三件套**:模块感知**自动布局**(template/official 双引擎)、对齐/等距/刚体平移;**分页 reconcile + 数据驱动分区框(`zone-plan`/`zone-draw`,校验压图签/贴边全 0 才许画)+ 每模块电路说明(`note`)**——多器件页未分区会被 `sch check` 的 missing-partition 机械拦下。
-- **校验门**:`sch gate` 一条龙(layout-lint→check→bridge-check→drc);check 重建逐项 finding(悬空脚/交叉/压引脚/重合标志/**标签折叠**…);**layout-score** 五维布局质量诊断,逐项归因**带可执行 fix 命令**。
-- **电路块库**:`block-apply` 一键实例化验证过的拓扑(20 块/11 类目,离线可查);`extract-layout` 真板反推模板。
+- **布局与可读性——三层布局体系 Sheet→Zone→Group**:模块感知**自动布局**(template/official 双引擎)、对齐/等距/刚体平移;**分页 reconcile + 数据驱动分区框(`zone-plan`/`zone-draw`,校验压图签/贴边全 0 才许画)+ 每模块电路说明(`note`)**——分区框/区名/说明由算法计算落位,**生成与校验用同一把尺**;多器件页未分区会被 `sch check` 的 missing-partition 机械拦下。
+- **校验门**:`sch gate --strict` 一条命令过**五关**(layout-lint→clusters→check→bridge-check→drc);bridge-check 新增 **orphan-tree 悬空树**判据(挪件残留 flag+桩线/裸死线,连接器 ≥0.26.1);check 重建逐项 finding(悬空脚/交叉/压引脚/重合标志/**标签折叠**…);**layout-score** 布局质量诊断,逐项归因**带可执行 fix 命令**。
+- **跨页网名审计与对账**:`sch nets --strict`(网名变体/单引脚网机械拦截)+ `sch reconcile` 设计意图对账 + netlist **黄金表逐脚比对**——「接得合法」与「接对没有」分别有门。
+- **电路块库**:`block-apply` 一键实例化验证过的拓扑(37 块:19 ready / 13 verified / 5 draft,离线可查),放件+连线+网表对账一条命令;`extract-layout` 真板反推模板。
 - 一次调用 **`sch read`**(器件+网络+检查)、**BOM**/**网表**导出(自动补 LCSC C 号)、页面导图 SVG/PNG/PDF。
 
 **PCB — 布局**

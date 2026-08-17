@@ -29,7 +29,7 @@ Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 
 ## 它是什么
 
-这是一个真实可打包、可导入的 **EasyEDA Pro 扩展**。它桥接本地 `easyeda-agent` Go daemon 与官方 `eda.*` API，并且是整个系统中**唯一直接调用 `eda.*` 的组件**。
+这是一个真实可打包、可导入的 **EasyEDA Pro 扩展**：一个**常驻连接器**，桥接本地 `easyeda-agent` Go daemon 与官方 `eda.*` API，并且是整个系统中**唯一直接调用 `eda.*` 的组件**。
 
 它主要负责：
 
@@ -40,11 +40,20 @@ Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 
 ## 已支持的典型能力
 
-- 原理图：放真实器件、布线、网络标志、选择、截图、DRC、BOM 导出、网表导出。
+- 原理图：放真实器件、布线、网络标志、选择、截图、DRC、结构校验（bridge-check：短路/悬空判据）、BOM 导出、网表导出。CLI 侧以此为底座提供原理图全流程（S0–S6）交付与 `sch gate --strict` 五关机械门禁。
 - PCB：新建板、导入、自动布局、板框贴合、铺铜、禁布区、叠层设置、截图、DSN 往返。
 - 基础设施：自动重连、上下文感知、结构化错误、`debug.exec_js` 逃生口。
 
 完整能力清单见 GitHub 仓库中的 `docs/FEATURES.md`。
+
+## 0.26.1 新增：bridge-check 的 ORPHAN_TREE（悬空树）判据
+
+`schematic.bridgeCheck` 新增 **ORPHAN_TREE** 判据：识别**不触及任何引脚的导线树**——
+典型形态是挪动器件后残留在原地的网络标志 + 桩线，或纯裸死线。此前的
+orphan-stub（要求树触到引脚）与 orphan-flag（要求标志不挨任何导线）两个判据对这种
+形态**双双结构性盲区**，只能靠人工看图才能发现。现在 summary 返回 `orphanTrees`
+计数，配套 CLI（同版及以上）将其渲染为 `orphan-tree` 告警，`sch gate --strict`
+会阻塞放行；旧版 CLI 读新连接器只是忽略新字段，不破坏兼容。
 
 ## 安装
 
@@ -55,7 +64,7 @@ Skill / CLI -> Go daemon -> EDA Agent Connector -> official eda.* API
 - 在[立创官方插件市场](https://jlc-ext.com/item/zhoushoujian/easyeda-agent-connector)点击「安装」—— 平台可原地自动更新，最省心；
 - 或从 [GitHub Release](https://github.com/zhoushoujianwork/easyeda-agent/releases/latest) 侧载 `easyeda-agent-connector.eext` —— 与 CLI **严格同版**。
 
-> 市场上架版本可能**滞后于 CLI**。四件套需严格同版时，请以 GitHub Release 里与 CLI 对齐的 `.eext` 为准；市场版胜在平台自动更新，但可能落后。
+> **版本配套**：连接器与 CLI 遵循**同一版本号**（四件套——CLI/daemon、连接器、Skill、EasyEDA——同版约定）。市场上架版本可能**滞后于 CLI**（市场无发布 API，每版需人工重新提交）。需严格同版时，请以 GitHub Release 里与 CLI 对齐的 `.eext` 为准；市场版胜在平台自动更新，但可能落后。
 
 > **更名说明（2026-08）**：应市场管理规范要求，本插件**显示名**改为
 > **EDA Agent Connector**（不再含 "easyeda" 字样）。内部包名与 uuid 均保持不变，
