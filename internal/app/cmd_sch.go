@@ -831,6 +831,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 	// type coverage was a real agent trap.
 	{
 		var idsRaw string
+		var allowSheet bool
 		c := &cobra.Command{
 			Use:   "prim-delete",
 			Short: "Delete schematic primitives of ANY type by id (or the current selection if --ids omitted)",
@@ -842,6 +843,11 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 				if idsRaw != "" {
 					ids, err := parseIDList(idsRaw)
 					if err != nil {
+						return err
+					}
+					// 图框守卫(2026-08-17 误删实锤):sheet 在 list 里就是「无位号
+					// @(0,0)」,与 PARTIAL 残件同脸;删了没有 API 能重建。
+					if err := schSheetGuard(cfg, window, ids, allowSheet, stderr); err != nil {
 						return err
 					}
 					payload["primitiveIds"] = ids
@@ -861,6 +867,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 			},
 		}
 		c.Flags().StringVar(&idsRaw, "ids", "", "primitive IDs to delete (any type) — CSV: id1,id2; omit to delete the current selection")
+		c.Flags().BoolVar(&allowSheet, "allow-sheet", false, "allow deleting sheet/图框 primitives (blocked by default — a deleted sheet cannot be recreated via API)")
 		sch.AddCommand(c)
 	}
 
