@@ -29,4 +29,10 @@ Changes made vs. upstream (per Apache-2.0 §4b):
   • Added a `dryRun` mode that computes the plan without mutating the board.
   • Line-width bezier smoothing (widthTransition.ts) is not yet ported.
 
-Both this project and Easy_EDA_PCB_Beautify are licensed under Apache-2.0.
+Licensing: this project is MIT-licensed as a whole (see `LICENSE`), except for
+the four files under `extension/src/beautify/`, which remain under the Apache
+License 2.0 inherited from Easy_EDA_PCB_Beautify. A verbatim copy of that
+license sits next to them at `extension/src/beautify/LICENSE`. MIT and
+Apache-2.0 are compatible; redistributing this repository (or the compiled
+`.eext`, which contains the beautify output) means carrying this NOTICE and
+that Apache-2.0 copy along.

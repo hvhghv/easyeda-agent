@@ -324,6 +324,18 @@ Built on / inspired by these open projects — thank you:
 - **Official EasyEDA extensions** ([github.com/easyeda](https://github.com/easyeda)) — we study their `eda.*` API usage + algorithms (not their UI) as prior art; the absorb-list lives in [`docs/ecosystem-survey.md`](docs/ecosystem-survey.md). Notably [`eext-run-api-gateway`](https://github.com/easyeda/eext-run-api-gateway) proved the in-editor code channel, and [`eext-export-design-report`](https://github.com/easyeda/eext-export-design-report) informed our design-report reads.
 - Candidate not yet absorbed: [**polyclip-ts**](https://github.com/luizbarboza/polyclip-ts) (polygon boolean) — for a future silkscreen-fill-with-obstacle-avoidance (`docs/ecosystem-survey.md` A10).
 
+## License
+
+[MIT](LICENSE) — use it, fork it, ship it commercially; just keep the copyright
+notice.
+
+One exception: the four files under `extension/src/beautify/` are ported from
+[Easy_EDA_PCB_Beautify](https://github.com/m-RNA/Easy_EDA_PCB_Beautify) (author:
+m-RNA) and stay under **Apache-2.0** (license text at
+[`extension/src/beautify/LICENSE`](extension/src/beautify/LICENSE); attribution
+and the modification list are in [`NOTICE`](NOTICE)). The two licenses are
+compatible — the project as a whole is still yours to use under MIT.
+
 ## Star History
 
 Thanks for every star.

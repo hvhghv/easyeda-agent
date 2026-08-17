@@ -15,6 +15,16 @@ CLI/skill 侧:`sch zone-arrange`(功能区确定性布局两段求解 + `--apply
 sheet 符号引用,重启后图框丢失 —— 修复处方见 skill actions.md)、原理图 SOP
 步骤卡。连接器 0.25.x 与本版 CLI 完全兼容。
 
+### Changed
+- **许可证正式落地为 MIT**：此前仓库根本没有 `LICENSE` 文件(GitHub 视角 = 版权
+  全保留,严格讲不是开源),声明只散落在 `NOTICE`/清单里且互相打架(根
+  `package.json` 写 MIT、连接器写 Apache-2.0)。现在补齐根 `LICENSE`(MIT),
+  `extension.json` 的 `license` 随之改为 `MIT`、`package.json` 改为 SPDX 复合
+  表达式 `(MIT AND Apache-2.0)`。**例外**:`src/beautify/` 下四个文件移植自
+  Easy_EDA_PCB_Beautify(m-RNA),继续沿用 Apache-2.0 —— 无权改,也不必改(两者
+  兼容)。许可证全文放在 `src/beautify/LICENSE`,`.eext` 包内新增 `extension/
+  LICENSE` 承载 MIT 全文 + 第三方告知(`dist/` 里含 beautify 的编译产物)。
+
 ## [0.25.1] - 2026-08-13
 
 修复立创插件市场审核驳回「README图片未加载成功，请检查存储路径」(0.24.0 被拒)。

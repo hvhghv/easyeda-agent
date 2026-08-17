@@ -293,6 +293,16 @@ API。整个自动化层都建立在这个开放的插件平台之上——没�
 - **官方 EasyEDA 扩展**([github.com/easyeda](https://github.com/easyeda))—— 我们研究它们的 `eda.*` API 用法与算法(不抄 UI)作为前置工作;吸收清单见 [`docs/ecosystem-survey.md`](docs/ecosystem-survey.md)。其中 [`eext-run-api-gateway`](https://github.com/easyeda/eext-run-api-gateway) 证明了编辑器内代码通道,[`eext-export-design-report`](https://github.com/easyeda/eext-export-design-report) 启发了设计报告读取。
 - 尚未吸收的候选:[**polyclip-ts**](https://github.com/luizbarboza/polyclip-ts)(多边形布尔)—— 用于未来的丝印填充避让(见 `docs/ecosystem-survey.md` A10)。
 
+## 许可证
+
+[MIT](LICENSE) —— 随便用、随便改、随便商用,保留版权声明即可。
+
+唯一例外:`extension/src/beautify/` 下的四个文件移植自
+[Easy_EDA_PCB_Beautify](https://github.com/m-RNA/Easy_EDA_PCB_Beautify)(作者 m-RNA),
+沿用其 **Apache-2.0** 许可(许可证全文在
+[`extension/src/beautify/LICENSE`](extension/src/beautify/LICENSE),署名与改动清单见
+[`NOTICE`](NOTICE))。两者兼容,不影响整体以 MIT 使用。
+
 ## Star History
 
 感谢每一颗 star。
