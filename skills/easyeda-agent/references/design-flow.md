@@ -13,7 +13,7 @@
 
 深在某阶段想回看别阶段的约束/顺序,先扫这张目录定位(💾 = 该阶段过门后 save 检查点):
 
-- **原理图 S0–S6**:S0 设计方案书 · S1 图纸/分页 💾 · S2 模块编组 · S3 按组摆放 💾 · S4 通道布线 💾 · S5 校验门(gate 五关,含 clusters)· S6 调整闭环 💾 · 录制/演示模式
+- **原理图 S0–S6**:S0 设计方案书 · S1 图纸/分页 💾 · S2 模块编组 · S3 按组摆放 💾(S3′ 分区收敛 `zone-arrange` 按需)· S4 通道布线 💾 · S5 校验门(gate 五关,含 clusters)· S6 调整闭环 💾 · 录制/演示模式(**固定步骤速查:下方「原理图 SOP 步骤卡」**)
 - **PCB P0–P10**:P0 新板 · P1 导器件 · P2 摆放 · P3 板框 · P4 禁布区(靠前)· P5 丝印对齐(靠前)· P6 可布性门 · **P7 布线**(三档阶梯 + **P7.0 关键网先行** + **自动布线对话框清单** + P7.9 beautify)· P8 叠层+电源+铺铜 · P9 引脚级丝印/极性 · P10 DRC+check 门 💾 · 反模式
 
 ## 核心原则
@@ -49,6 +49,22 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
                                             ↑___________________________________|
 ```
 > 💾 = 该阶段通过后 `easyeda sch save` 存盘检查点(见原则 5)。整板放置时,S3 每放完几组(或每 ~10 件)就 save 一次,别等全放完——崩一次就白干。
+
+### 原理图 SOP 步骤卡(固定步骤,执行时照表走;每步细节见下方对应 S 节)
+
+| 步 | 做什么 | 固定命令 | 过门判据(不过不进下一步) |
+|---|---|---|---|
+| S0 | 方案书:选块选型、网名表、分页计划、架构决策 | `blocks ls/search/show` → spec 写盘 → `easyeda spec validate` | validate 无 ERROR;milestone 档经用户确认 |
+| S1 | 图纸/分页 reconcile 到模块计划 | `sch pages` → `page-rename`/`page-new`/`page-delete` → `sch sheet-geometry --json` | 页集合=模块计划;每页有 A4 sheet 💾 |
+| S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 |
+| S3 | 按组摆放(块优先;命中块 S3+S4 一条命令) | `sch block-apply <id> --bind 端口=网名` / `sch autolayout --engine template` / `sch place`+`modify` | `sch gate --only layout-lint,clusters` 无 ERROR 💾 |
+| S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解)→ `--apply`(断言①②+假失败清创+分级回滚) | verdict=pass 且断言①②绿;报出的问题**重跑一轮 apply(两遍法),不逐器件手挪** |
+| S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
+| S5 | 校验门(机械真值) | 逐页 `sch gate --strict --doc <页>` + 全工程 `sch nets --strict` + `sch reconcile` | 每页 verdict=pass;无网名变体/单引脚网;意图对账无差异 |
+| S6 | 调整闭环 | 照 gate 报告「下一步」修 → 重跑 gate | verdict=pass → `sch save` 确认 `saved:true` 💾 |
+| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>` + `sch titleblock` | `sch check` 无 `missing-deliverable` |
+
+> `blocked` ≠ `fail`(检查器没跑成,先修环境别改电路);判状态看数据不看截图;每过门显式 save。
 
 **随时问「我在哪一步」:`easyeda sch status --all-pages`**(加 `--gate` 连 S5 一起验)。
 它**当场从画布算**每一格,不读任何记录 —— 因为记录会撒谎:`workflow status` 曾把
@@ -302,7 +318,11 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 
 ### S6 — 调整闭环(立刻调,再验)
 - **先看 gate 报告的「下一步」** —— 每个失败 stage 自带规定的修法,别自己另发明一套。
-- `layout-lint` 失败 → `sch modify`(单件)/`sch align`/`sch distribute`(成排)/`sch autoplace-free`(自动找空位)把冲突元件挪开。**几何先修**:重叠会连锁出一堆电气误报,先治几何再看电气,能省掉大半来回。
+- `layout-lint` 失败 → **成片的布局问题(分区拥挤/标签互叠/partitionOverlap)先跑
+  `sch zone-arrange --apply`**(分区级确定性收敛,两遍法:落地实测反哺下一轮规划)——
+  **不要陷入逐器件手工修补**;只有孤立单件冲突才用 `sch modify`(单件)/`sch align`/
+  `sch distribute`(成排)/`sch autoplace-free`(自动找空位)。**几何先修**:重叠会连锁出
+  一堆电气误报,先治几何再看电气,能省掉大半来回。
 - `check` / `bridge-check` / `drc` 失败 → 补线、拆桥、清孤儿或补 NC → **重跑 gate 并重新 `sch read` 对账**。
 - `blocked` 不是修电路的信号 → 按 S5 的三态说明先修环境(health / doc switch),再重跑。
 - **💾 循环直到 `sch gate` verdict=pass 且设计意图对账无差异，再 `easyeda sch save --doc <page>` 收尾并确认 `saved:true`**。这就是“调整后立刻验证”的闭环。
