@@ -30,6 +30,14 @@ const noteGap = 16.0
 // noteAnchorStep 是候选锚点的扫描步长(落在 5 格连接网格上)。
 const noteAnchorStep = 20.0
 
+// wrapNoteContent 把一段可能含 \n 的说明按 maxWidth 折行。**必须先按 \n 拆行再
+// 逐行 wrap**:此前把整段当一行传给 wrapNoteLines,宽度累计跨过换行符继续加,
+// 于是「首行完整、第二行开头 3~4 字就被折断」(2026-08-18 P2 LED 说明真机定案:
+// "丝印标正负极性" 折成 "丝印标正/负极性",与宽度无关、纯粹是账没清零)。
+func wrapNoteContent(content string, maxWidth float64) string {
+	return strings.Join(wrapNoteLines(strings.Split(content, "\n"), maxWidth), "\n")
+}
+
 // noteSizeOf 估算一段说明文字的渲染尺寸。schNoteBBoxEstimate 是它的 bbox 版本
 // (锚点=左上角,y-UP 向下排行) —— 两者共用同一套字宽/行高口径。
 func noteSizeOf(content string, fontSize float64) (w, h float64) {
@@ -212,7 +220,7 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 					zoneRect = &r
 					nb := p.NoteBBox
 					noteBand = &nb
-					if wrapped := strings.Join(wrapNoteLines([]string{*content}, r.MaxX-r.MinX-2*noteGap), "\n"); wrapped != *content {
+					if wrapped := wrapNoteContent(*content, r.MaxX-r.MinX-2*noteGap); wrapped != *content {
 						*content = wrapped
 						w, h = noteSizeOf(*content, fontSize)
 					}

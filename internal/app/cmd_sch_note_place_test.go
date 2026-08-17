@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // ── sch note 自动落点(2026-08-13 用户纠偏)────────────────────────────────
 //
@@ -134,5 +137,23 @@ func TestCollectNoteObstacles_IncludesMarkerTextBand(t *testing.T) {
 	// 文字带朝下(ground/down 真值表),障碍框应向下扩出裸 bbox 的 279。
 	if flagBox.MinY >= 279 {
 		t.Errorf("障碍框应含向下的文字带(MinY < 279),实际 %+v", flagBox)
+	}
+}
+
+// 已有换行的说明,逐行折行时宽度必须按行清零 —— 此前整段当一行累计宽度,
+// 首行吃掉大半预算后,第二行开头 3~4 个字就被误折("丝印标正/负极性",
+// 2026-08-18 P2 LED 说明真机定案)。
+func TestWrapNoteContentRespectsExistingNewlines(t *testing.T) {
+	// 首行 ~10 全角(90u @font9 口径按 wrapNoteLines 的 groupNoteFontSize 计),
+	// 第二行 8 全角;maxWidth 给 160:两行各自都装得下,谁都不该被折。
+	content := "IO2高=亮 R3=1k限流\n丝印标正负极性(PCB)"
+	got := wrapNoteContent(content, 160)
+	if got != content {
+		t.Fatalf("both lines fit; wrap must be a no-op\nwant: %q\ngot:  %q", content, got)
+	}
+	// 真超宽的单行仍要折。
+	long := strings.Repeat("宽", 40)
+	if wrapped := wrapNoteContent(long, 160); !strings.Contains(wrapped, "\n") {
+		t.Fatalf("a genuinely overwide line must still wrap, got %q", wrapped)
 	}
 }
