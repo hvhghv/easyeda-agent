@@ -24,12 +24,16 @@ import (
 )
 
 const (
-	zfStub      = 20.0 // 重生短桩长(引脚 → 旗/port 起点)
-	zfPitch     = 12.0 // 多脚件同侧端子的纵向节距
-	zfPortH     = 11.0 // netport 标签高(实测 10~12,取平台默认)
-	zfFlagGap   = 6.0  // 本体/桩线与旗体的间隙
-	zfGroupGap  = 10.0 // 卫星之间的间距
-	zfAnchorGap = 12.0 // 锚件与卫星排/列的间距
+	zfStub  = 20.0 // 重生短桩长(引脚 → 旗/port 起点)
+	zfPitch = 12.0 // 多脚件同侧端子的纵向节距
+	zfPortH = 11.0 // netport 标签高(实测 10~12,取平台默认)
+	zfFlagGap = 6.0 // 本体/桩线与旗体的间隙
+	// 组间/锚卫间距与块布局求解器同一把尺(bslPartGap=20,见 ruler_consistency_test):
+	// 首版各立 10/12,P3 真机三处浅擦全是它 —— 规划按裸 bbox 排,check 按**文字
+	// 渲染宽度**判(netport 的平台 bbox 只有裸六边形,网名画在外面),渲染外延
+	// 吃掉了 6~9 个单位,10 的 gap 当场穿帮。20 是仓库既有的间距基准,不另立数。
+	zfGroupGap  = bslPartGap // 卫星之间的间距
+	zfAnchorGap = bslPartGap // 锚件与卫星排/列的间距
 )
 
 // zfTerm 是一个端子的类型化描述(从 schCluster 的归属 marker 折出)。
@@ -196,12 +200,22 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 		bySide[t.Side] = append(bySide[t.Side], t)
 	}
 	// 左/右:自上而下 zfPitch 节距;port 水平指向实测侧,旗亦同侧。
+	// 旗(netflag)走**水平梯次**:执行侧旗的 y 跟 pin 锁死(zfPitch 只是规划愿望,
+	// 真 pin pitch 常是 10 < 旗高 12+),相邻同向两旗纵向必然交叠 —— 唯一可控的
+	// 自由度还是桩长,连续旗按前旗宽 + gap 递增错开(P3 真机:J2 左侧 5V/GND
+	// 相邻脚旗深叠 22×12,与 U1 三旗竖叠同病,只是转了 90°)。port 恒水平、
+	// 高 11 < 最小 pin pitch,保持短桩不参与梯次。
 	for _, side := range []string{"left", "right"} {
 		y := bh - zfPortH
+		off := zfStub
 		for _, t := range bySide[side] {
-			x0, x1 := -zfStub, 0.0
+			stub := zfStub
+			if t.Kind == "netflag" {
+				stub = off
+			}
+			x0, x1 := -stub, 0.0
 			if side == "right" {
-				x0, x1 = bw, bw+zfStub
+				x0, x1 = bw, bw+stub
 			}
 			cy := y + zfPortH/2
 			out.Wires = append(out.Wires, layoutBBox{MinX: x0, MinY: cy, MaxX: x1, MaxY: cy})
@@ -215,7 +229,10 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 			} else {
 				b = layoutBBox{MinX: x1, MinY: cy - h/2, MaxX: x1 + t.W, MaxY: cy + h/2}
 			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side, BBox: b, Offset: zfStub})
+			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side, BBox: b, Offset: stub})
+			if t.Kind == "netflag" {
+				off += t.W + zfFlagGap
+			}
 			y -= zfPitch
 		}
 	}

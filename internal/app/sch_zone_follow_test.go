@@ -293,3 +293,36 @@ func TestZfGenMultiPin_TopBottomFlagsVerticalLadder(t *testing.T) {
 		t.Errorf("梯次布置不该触发 R5:%v", err)
 	}
 }
+
+// 左/右侧连续旗:水平梯次。执行侧旗的 y 跟 pin 锁死(真 pin pitch 10 < 旗高 12+),
+// 相邻同向旗纵向必叠 —— P3 真机 J2 左侧 5V/GND 相邻脚旗深叠,与 U1 三旗竖叠
+// 同病转 90°。port 恒水平高 11 < pitch,保持短桩不参与梯次。
+func TestZfGenMultiPin_SideFlagsHorizontalLadder(t *testing.T) {
+	g := zfGenMultiPin(zfGroup{Designator: "J2", BodyW: 70, BodyH: 72, MultiPin: true,
+		Terms: []zfTerm{
+			{Kind: "netport", Net: "U3_N4", W: 68, Side: "left"},
+			{Kind: "netflag", Net: "5V", W: 23, H: 17, Side: "left"},
+			{Kind: "netflag", Net: "GND", W: 37, H: 23, Side: "left"},
+			{Kind: "netport", Net: "U3_N7", W: 68, Side: "left"},
+		}})
+	var flags []zfPlacedTerm
+	for _, tm := range g.Terms {
+		if tm.Kind == "netport" {
+			if tm.Offset != zfStub {
+				t.Errorf("port %s 该保持短桩 %g,得到 %g", tm.Net, zfStub, tm.Offset)
+			}
+			continue
+		}
+		flags = append(flags, tm)
+	}
+	if len(flags) != 2 {
+		t.Fatalf("该有 2 只旗,得到 %d", len(flags))
+	}
+	if flags[0].Offset != zfStub {
+		t.Errorf("首旗桩长该 %g,得到 %g", zfStub, flags[0].Offset)
+	}
+	w0 := flags[0].BBox.MaxX - flags[0].BBox.MinX
+	if want := zfStub + w0 + zfFlagGap; flags[1].Offset != want {
+		t.Errorf("次旗桩长该 %g(首旗宽 %g + gap 递增),得到 %g", want, w0, flags[1].Offset)
+	}
+}

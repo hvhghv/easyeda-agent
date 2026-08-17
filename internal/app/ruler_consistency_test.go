@@ -34,6 +34,11 @@ func TestRuler_ClusterGapMatchesSolverGap(t *testing.T) {
 	if got := bslPartGap; got != 20 {
 		t.Errorf("间距基准变成了 %v —— 改它要同时确认 `sch clusters --min-gap` 的默认值与帮助文本", got)
 	}
+	// zone-arrange Phase A 的组间/锚卫间距也归这把尺(2026-08-17:各立 10/12 时
+	// P3 真机三处浅擦 —— 规划裸 bbox vs check 文字渲染宽度,gap 必须吃下外延)。
+	if zfGroupGap != bslPartGap || zfAnchorGap != bslPartGap {
+		t.Fatalf("zfGroupGap=%v / zfAnchorGap=%v ≠ bslPartGap=%v(两把尺!)", zfGroupGap, zfAnchorGap, bslPartGap)
+	}
 }
 
 func TestRuler_GateDefaultsShared(t *testing.T) {
