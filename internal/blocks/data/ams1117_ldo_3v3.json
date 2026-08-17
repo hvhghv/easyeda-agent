@@ -77,12 +77,12 @@
     }
   },
   "schematic_layout": {
-    "note": "关系形态(issue #180):只声明意图,坐标由布局求解器算 —— 吃锚件 U 的实测引脚坐标、页面碰撞表、图纸边界。信号流 5V→VIN 进、VOUT→3V3 出;C_IN 贴 VIN 脚、C_OUT/C_BYP 贴 VOUT 脚。**VOUT 是 pin2+pin4 两个同名焊盘**,attach 目标写功能名 U.VOUT(校验器要求 attach 必须有电气依据 —— 编号 U.2 在 internal_nets 里对不上 U.VOUT*),求解器按实测引脚表取该功能名的落点。补此模板前本块无 schematic_layout,block-apply 回退等距网格,SOT-223 与 0805 混排时把去耦甩到离电源脚很远的位置。",
+    "note": "关系形态(issue #180):只声明意图,坐标由布局求解器算 —— 吃锚件 U 的实测引脚坐标、页面碰撞表、图纸边界。信号流 5V→VIN 进、VOUT→3V3 出;C_IN 贴 VIN 脚、C_OUT/C_BYP 贴 VOUT 脚。**VOUT 是 pin2+pin4 两个同名焊盘**,attach 目标写引脚编号 U.2(V3 要求单点;V4 电气依据对纯数字编号按「同 role fanout 网」宽恕,编号真伪由 blocks-audit 的引脚表把关)。补此模板前本块无 schematic_layout,block-apply 回退等距网格,SOT-223 与 0805 混排时把去耦甩到离电源脚很远的位置。",
     "anchor": "U",
     "attach": {
       "C_IN": "U.VIN",
-      "C_OUT": "U.VOUT",
-      "C_BYP": "U.VOUT"
+      "C_OUT": "U.2",
+      "C_BYP": "U.2"
     }
   },
   "schematic_notes": [

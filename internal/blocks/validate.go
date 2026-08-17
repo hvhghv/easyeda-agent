@@ -427,8 +427,18 @@ func blockInternalNets(b Block) [][]string {
 
 // attachHasElectricalBasis 报告是否存在一条内部网,同时连着 target 引脚与
 // keyRole 的任一引脚。`*`(fanout)在两侧都按同一个边界处理。
+//
+// 编号宽恕(2026-08-17,三方互斥实锤):V3 对同名多脚(如 AMS1117 的 VOUT
+// pin2+pin4)禁 `*` 并建议写引脚编号,但 internal_nets 用的是功能名 fanout
+// (`U.VOUT*`)—— 字符串级匹配对不上,`U.VOUT`/`U.VOUT*`/`U.2` 三种写法被
+// V3/V4/audit 三个校验器各拒一种,数据无解。离线校验器没有符号引脚表,判不了
+// 「编号 2 是否属于 VOUT」;宽恕条件收敛为:target 是**纯数字编号** 且存在一条
+// 网同时含「同 role 的 fanout 成员」与 key 的脚 —— 编号的真伪由带引脚表快照的
+// blocks-audit(`make blocks-audit`)把关,两器互补不重叠。
 func attachHasElectricalBasis(nets [][]string, keyRole, target string) bool {
 	tgt := strings.TrimSuffix(target, pinFanoutSuffix)
+	tRole, tPin, tOK := splitPinRef(tgt)
+	numericPin := tOK && strings.IndexFunc(tPin, func(r rune) bool { return r < '0' || r > '9' }) < 0
 	for _, net := range nets {
 		hasTarget, hasKey := false, false
 		for _, m := range net {
@@ -437,6 +447,11 @@ func attachHasElectricalBasis(nets [][]string, keyRole, target string) bool {
 			}
 			if strings.TrimSuffix(m, pinFanoutSuffix) == tgt {
 				hasTarget = true
+			}
+			if numericPin && !hasTarget && strings.HasSuffix(m, pinFanoutSuffix) {
+				if r, _, ok := splitPinRef(strings.TrimSuffix(m, pinFanoutSuffix)); ok && r == tRole {
+					hasTarget = true // 同 role 的 fanout 网:编号真伪交给 blocks-audit
+				}
 			}
 			if r, _, ok := splitPinRef(m); ok && r == keyRole {
 				hasKey = true
