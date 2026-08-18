@@ -6,6 +6,16 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-19
+
+ADR-0004「挪动收敛为单一安全 move 内核」首批随版(源自 issue #181 两份 E2E
+复盘)。CLI 侧:schMoveKernel 五步管线(快照→删证回读→snap 移动→快照重连→
+电气对账,失败自动恢复、目标页失效 fail-closed),group-move/zone move/
+zone-arrange/relayout/**destagger(解禁)**五命令收敛为内核调用方,
+`group-move --groups` 多子组一次整体移动;`--zone/--group` 统一命名空间
+(一张注册表+来源标签,报错列全量可用名);dry-run 纯计算机械保证(派发层
+拒 Mutates)。连接器侧两条见下。
+
 ### Fixed
 - **`pcb.component.modify` 解锁假成功(#174)**:平台 `modify()` 的真实锁字段是
   `primitiveLock`,而我们的读侧(`pcb list`)一直报 `locked`,调用方自然传
