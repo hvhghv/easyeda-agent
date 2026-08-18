@@ -235,6 +235,12 @@ on the already-connected pins, which `NetKnown=false` after a connector drop can
 detect). **Always run `sch check` right after a batch autoconnect** — its new
 `duplicate-net-marker` rule is the guard that catches those stacked markers.
 
+**带痕候选不再静默入选。** 硬拒之外的碰撞惩罚是软性累加,此前选中候选哪怕
+score 上千(真机:score=1737 的长桩扎进邻组标签区)也照连且报告只显示落选项。
+现在**选中候选** score 超过软阈值或 reasons 里含碰撞类惩罚时,结果行会带
+`⚠ WARN`(默认档照连);**`--strict`** 则把这类连接直接判失败、不落地。
+看到 WARN 的处方是**挪件腾位后重连**,不是忽略它。
+
 **平台会随机吞掉一个连接(stuck-at-99%),autoconnect 现在自己救一次。** 实测 2821 次
 connect_pin 里 57 次失败,其中 23 次是 netflag 卡在「请求被丢掉但平台不报错」——
 它是随机的,同一脚重发通常就成。所以失败后**重试一次,但只在连接器明确声明回滚
@@ -243,11 +249,15 @@ connect_pin 里 57 次失败,其中 23 次是 netflag 卡在「请求被丢掉�
 第二条桩线和第二面旗。被救回来的连接在报告里标 `retried`,**别忽略这个字段**:
 它是平台在变差还是变好的唯一现场证据。
 
-另外 connect_pin 用的是 **35s 专用预算**而非默认 20s:连接器内部最坏路径
+另外 connect_pin 用的是 **35s 专用预算**而非默认 20s(**裸 `sch connect` 也
+已对齐**,此前它还吃 20s 默认值,慢速成功被报成失败):连接器内部最坏路径
 (wire 7s + 重试 0.25s + wire 重试 7s + netflag 7s = 21.25s)本来就超过 20s,
 默认预算会让 daemon 先于连接器放弃 —— 报「connector did not respond」而对方其实
-已经把线和旗建完了(实测 57 次失败里 17 次是这么来的)。**CLI 认为失败、画布上却有
-东西**,是最难查的那种不一致;所以重试判据宁可保守,也要先靠 `sch check` 兜底。
+已经把线和旗建完了(实测 57 次失败里 17 次是这么来的)。**`sch connect` 现在对
+超时/DISPATCH_FAILED 自动做一次轻读复核**:回读确认 pin 已在目标网,就按
+`slowLanded` 成功返回并在 stderr 警告勿重试 —— 「connector did not respond 后
+禁止盲重试」不再需要你人工执行,**按命令输出判断即可**;真失败(复核也没看到
+落地)照旧非零退出,那时仍以 `sch check` 兜底。
 
 ```bash
 # single pin by designator:pin (number OR name)
