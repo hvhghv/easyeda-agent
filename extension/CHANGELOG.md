@@ -6,6 +6,14 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-18
+
+连接器侧一条修复(见下);CLI 侧同批落地:artifact 目录递归嵌套归一、
+`--doc` 对读命令生效、`board.rebind` 目录补登记(UNKNOWN_ACTION 出口补审计)、
+裸 `sch connect` 35s 预算 + 慢速落地复核(slowLanded)、`sch group-move`
+半途失败自动重连恢复、`sch note --zone` 框满走廊落点、`sch autoconnect`
+带痕候选 WARN + `--strict`。
+
 ### Fixed
 - **`schematic.pin.disconnect` 假成功**:此前删除只调 delete 后不回读,平台对
   并入共享树/共线段的桩线**静默 no-op 仍返 true**,动作照样报
