@@ -1206,3 +1206,122 @@ test('prim-delete: a fully successful delete carries no partial flag', async () 
 		delete (globalThis as any).eda;
 	}
 });
+
+// ─── schematic.pin.disconnect (multi-stub sweep + delete verified by re-read) ──
+import { schematicPinDisconnect } from './actions';
+
+/**
+ * A pin at (100,100) hosting TWO stubs (one flag each) — the shape that exposed
+ * the false success: the old locator took the FIRST wire touching the pin and
+ * broke, and the delete was never verified, so `disconnected:true` came back
+ * with a stub still wired (real machine: R5:1 / R5:2 / C4:2).
+ *
+ * `keepWireIds` models the platform's lying delete: those ids are kept on the
+ * page while the delete call still resolves as success.
+ */
+function installDisconnectStub(opts: { keepWireIds?: Array<string> } = {}) {
+	const keep = new Set(opts.keepWireIds ?? []);
+	let wires = [
+		{ id: 'w1', line: [100, 100, 100, 130] }, // stub up → flag f1
+		{ id: 'w2', line: [100, 100, 70, 100] },  // stub left → flag f2
+	];
+	let flags = [
+		{ id: 'f1', x: 100, y: 130 },
+		{ id: 'f2', x: 70, y: 100 },
+	];
+	const mkWire = (w: { id: string; line: Array<number> }): any => ({
+		getState_PrimitiveId: () => w.id,
+		getState_Line: () => [...w.line],
+	});
+	const mkFlag = (f: { id: string; x: number; y: number }): any => ({
+		getState_PrimitiveId: () => f.id,
+		getState_ComponentType: () => 'netflag',
+		getState_X: () => f.x,
+		getState_Y: () => f.y,
+	});
+	const part: any = {
+		getState_PrimitiveId: () => 'r5',
+		getState_ComponentType: () => 'part',
+		getState_Designator: () => 'R5',
+		getState_X: () => 100,
+		getState_Y: () => 100,
+	};
+	const deleteCalls: Array<{ kind: string; ids: Array<string> }> = [];
+	(globalThis as any).eda = {
+		sch_PrimitiveWire: {
+			getAll: async () => wires.map(mkWire),
+			delete: async (ids: Array<string>) => {
+				deleteCalls.push({ kind: 'wires', ids: [...ids] });
+				wires = wires.filter(w => keep.has(w.id) || !ids.includes(w.id));
+				return true; // the platform reports success even when it silently kept some
+			},
+		},
+		sch_PrimitiveComponent: {
+			getAll: async () => [part, ...flags.map(mkFlag)],
+			getAllPinsByPrimitiveId: async (id: string) => (id === 'r5'
+				? [{ getState_PinNumber: () => '1', getState_X: () => 100, getState_Y: () => 100 }]
+				: []),
+			delete: async (ids: Array<string>) => {
+				deleteCalls.push({ kind: 'components', ids: [...ids] });
+				flags = flags.filter(f => !ids.includes(f.id));
+				return true;
+			},
+		},
+	};
+	return { deleteCalls, liveWireIds: () => wires.map(w => w.id) };
+}
+
+test('disconnect: collects EVERY stub on the pin (no first-wire break) and verifies by re-read', async () => {
+	const fx = installDisconnectStub();
+	try {
+		const res: any = await schematicPinDisconnect({ designator: 'R5', pin: '1' });
+		assert.equal(res.result.disconnected, true);
+		assert.equal(res.result.partial, undefined);
+		assert.deepEqual([...res.result.deletedWires].sort(), ['w1', 'w2']);
+		assert.deepEqual([...res.result.deletedFlags].sort(), ['f1', 'f2']);
+		assert.deepEqual(res.result.notApplied, []);
+		assert.deepEqual(res.result.survivedIds, []);
+		assert.equal(res.warnings, undefined);
+		// Both stubs went through the wire delete in ONE group call.
+		const wireDeletes = fx.deleteCalls.filter(c => c.kind === 'wires');
+		assert.equal(wireDeletes.length, 1);
+		assert.deepEqual([...wireDeletes[0].ids].sort(), ['w1', 'w2']);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('disconnect: a lying platform delete yields structured partial, never disconnected:true', async () => {
+	const fx = installDisconnectStub({ keepWireIds: ['w2'] });
+	try {
+		const res: any = await schematicPinDisconnect({ designator: 'R5', pin: '1' });
+		assert.equal(res.result.disconnected, false, 'survivor present → must NOT claim disconnected');
+		assert.equal(res.result.partial, true);
+		assert.deepEqual(res.result.survivedIds, ['w2']);
+		assert.deepEqual(res.result.notApplied, [{ kind: 'wire', id: 'w2' }]);
+		// Only ids PROVEN gone are claimed deleted.
+		assert.deepEqual(res.result.deletedWires, ['w1']);
+		assert.deepEqual([...res.result.deletedFlags].sort(), ['f1', 'f2']);
+		assert.equal(res.warnings?.length, 1);
+		assert.match(String(res.warnings?.[0] ?? ''), /survived/);
+		assert.deepEqual(fx.liveWireIds(), ['w2'], 'fixture sanity: the kept wire is still live');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('disconnect: wire-id locator stays targeted (single wire) and still verifies', async () => {
+	installDisconnectStub();
+	try {
+		const res: any = await schematicPinDisconnect({ wirePrimitiveId: 'w1' });
+		assert.equal(res.result.disconnected, true);
+		assert.deepEqual(res.result.deletedWires, ['w1']);
+		// Only the flag riding w1 goes with it.
+		assert.deepEqual(res.result.deletedFlags, ['f1']);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});

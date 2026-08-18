@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`schematic.pin.disconnect` 假成功**:此前删除只调 delete 后不回读,平台对
+  并入共享树/共线段的桩线**静默 no-op 仍返 true**,动作照样报
+  `disconnected:true`(真机复现:R5:1 / R5:2 / C4:2 断开后网表仍连)。且坐标
+  定位只取第一根触脚导线就 break,同脚多桩场景天然漏删。现在:(1) 收集**全部**
+  触及目标 pin 端点的导线一起删;(2) 删除后 getAll 回读验证,存活即按部分应用
+  约定返回结构化 partial(`ok:true` + `partial:true` + `notApplied`/
+  `survivedIds`,`disconnected` 仅在全部证实消失时为 true,`deletedWires`/
+  `deletedFlags` 只计证实删除的 id)并附 warnings;CLI `sch disconnect` 把
+  partial 渲染为醒目 stderr 警告(不再静默成功)。
+
 ## [1.0.0] - 2026-08-18
 
 **里程碑:原理图功能正式上线(S0–S6 可交付)。** 版本从 0.26.x 跃迁至 1.0.0,

@@ -4981,7 +4981,7 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 //
 // Target the pin by either `designator`+`pin`, or a known `flagPrimitiveId` /
 // `wirePrimitiveId` (whatever connect_pin returned). At least one locator required.
-const schematicPinDisconnect: Handler = async (payload) => {
+export const schematicPinDisconnect: Handler = async (payload) => {
 	const designator = optionalString(payload, 'designator');
 	const pinNumber = optionalString(payload, 'pin');
 	const flagPrimitiveId = optionalString(payload, 'flagPrimitiveId');
@@ -5055,21 +5055,29 @@ const schematicPinDisconnect: Handler = async (payload) => {
 		return [verts[0], verts[verts.length - 1]];
 	};
 
-	// Locate the stub wire.
-	let stubWire: { pid: string; ends: Array<[number, number]> } | undefined;
+	// Locate the stub wire(s). A pin can host SEVERAL stubs (one per flag, or a
+	// stub merged into a shared/collinear tree) — taking only the first one left
+	// the rest behind while the action still reported disconnected:true (real
+	// machine: R5:1 / R5:2 / C4:2 stayed wired). Collect every wire that touches
+	// the target, delete them together, and verify below.
+	const stubWires: Array<{ pid: string; ends: Array<[number, number]> }> = [];
+	const addStub = (pid: string, ends: Array<[number, number]>): void => {
+		if (!pid) return;
+		if (!stubWires.some(s => s.pid === pid)) stubWires.push({ pid, ends });
+	};
 	if (wirePrimitiveId) {
 		for (const w of wires ?? []) {
 			if (String(w.getState_PrimitiveId?.() ?? '') === wirePrimitiveId) {
-				stubWire = { pid: wirePrimitiveId, ends: endpointsOf(w) };
+				addStub(wirePrimitiveId, endpointsOf(w));
 			}
 		}
 	}
 	// Derive pin coordinate from a flag if that's all we were given.
-	if (!stubWire && flagPrimitiveId && (pinX === undefined || pinY === undefined)) {
+	if (stubWires.length === 0 && flagPrimitiveId && (pinX === undefined || pinY === undefined)) {
 		for (const c of components ?? []) {
 			if (String(c.getState_PrimitiveId?.() ?? '') === flagPrimitiveId) {
 				// The wire endpoint that coincides with THIS flag is the free end;
-				// the opposite endpoint is the pin. Find the wire touching the flag.
+				// the opposite endpoint is the pin. Collect EVERY wire touching the flag.
 				const fx = c.getState_X();
 				const fy = c.getState_Y();
 				for (const w of wires ?? []) {
@@ -5080,53 +5088,55 @@ const schematicPinDisconnect: Handler = async (payload) => {
 					const bFlag = Math.hypot(b[0] - fx, b[1] - fy) <= TOL;
 					if (aFlag || bFlag) {
 						const pinEnd = aFlag ? b : a;
-						pinX = pinEnd[0];
-						pinY = pinEnd[1];
-						stubWire = { pid: String(w.getState_PrimitiveId?.() ?? ''), ends };
+						if (pinX === undefined || pinY === undefined) {
+							pinX = pinEnd[0];
+							pinY = pinEnd[1];
+						}
+						addStub(String(w.getState_PrimitiveId?.() ?? ''), ends);
 					}
 				}
 			}
 		}
 	}
-	// With a pin coordinate but no wire yet, find the wire with an endpoint on the pin.
-	if (!stubWire && pinX !== undefined && pinY !== undefined) {
+	// With a pin coordinate but no wire yet, collect EVERY wire with an endpoint
+	// on the pin — a pin with multiple stubs needs all of them removed (no break).
+	if (stubWires.length === 0 && pinX !== undefined && pinY !== undefined) {
 		for (const w of wires ?? []) {
 			const ends = endpointsOf(w);
 			if (ends.length !== 2) continue;
 			const onPin = ends.some(e => Math.hypot(e[0] - pinX!, e[1] - pinY!) <= TOL);
 			if (onPin) {
-				stubWire = { pid: String(w.getState_PrimitiveId?.() ?? ''), ends };
-				break;
+				addStub(String(w.getState_PrimitiveId?.() ?? ''), ends);
 			}
 		}
 	}
 
-	if (!stubWire) {
+	if (stubWires.length === 0) {
 		throw new ActionError(
 			ErrorCodes.EDA_CALL_FAILED,
 			'No stub wire found on the target pin — nothing to disconnect (already clean?).',
 		);
 	}
 
-	// The located wire may be a MERGED tree (EasyEDA fuses touching collinear
+	// Any located wire may be a MERGED tree (EasyEDA fuses touching collinear
 	// wires): its flags can sit on mid-vertices or mid-SPAN, and it may serve
 	// OTHER pins besides the target (issue #137 — deleting it endpoint-blind left
 	// a swallowed flag orphaned and silently disconnected a neighbour pin). So:
-	// collect every vertex + segment of the wire, sweep flags across the WHOLE
-	// polyline (they lose their host wire either way), and report any other pin
-	// the deletion will disconnect so the caller knows to reconnect it.
+	// collect every vertex + segment of EVERY doomed wire, sweep flags across the
+	// WHOLE polyline set (they lose their host wire either way), and report any
+	// other pin the deletion will disconnect so the caller knows to reconnect it.
+	const stubPids = new Set(stubWires.map(s => s.pid));
 	const wireSegsAll: Array<[number, number, number, number]> = [];
 	for (const w of wires ?? []) {
-		if (String(w.getState_PrimitiveId?.() ?? '') !== stubWire.pid) continue;
+		if (!stubPids.has(String(w.getState_PrimitiveId?.() ?? ''))) continue;
 		let line: Array<number> | undefined;
 		try { line = w.getState_Line() as Array<number>; }
-		catch { break; }
+		catch { continue; }
 		if (Array.isArray(line)) {
 			for (let i = 0; i + 3 < line.length; i += 2) {
 				wireSegsAll.push([line[i], line[i + 1], line[i + 2], line[i + 3]]);
 			}
 		}
-		break;
 	}
 	const distToSegD = (px: number, py: number, x0: number, y0: number, x1: number, y1: number): number => {
 		const dx = x1 - x0, dy = y1 - y0;
@@ -5138,7 +5148,7 @@ const schematicPinDisconnect: Handler = async (payload) => {
 	};
 	const onWire = (x: number, y: number): boolean => {
 		if (wireSegsAll.length > 0) return wireSegsAll.some(s => distToSegD(x, y, s[0], s[1], s[2], s[3]) <= TOL);
-		return stubWire!.ends.some(e => Math.hypot(e[0] - x, e[1] - y) <= TOL);
+		return stubWires.some(sw => sw.ends.some(e => Math.hypot(e[0] - x, e[1] - y) <= TOL));
 	};
 
 	const NET_MARKER_TYPES = new Set(['netflag', 'netport', 'netlabel', 'short_symbol']);
@@ -5171,34 +5181,62 @@ const schematicPinDisconnect: Handler = async (payload) => {
 		}
 	}
 
-	// Delete wire + any flags together via the same routed delete used elsewhere.
-	const deleted: { wires: Array<string>; components: Array<string> } = { wires: [], components: [] };
+	// Delete wires + any flags together via the same routed delete used elsewhere.
+	const wireIds = [...stubPids].filter(Boolean);
+	const validFlags = [...new Set(flagIds.filter(Boolean))];
 	try {
-		if (stubWire.pid) {
-			await deleteSchGroup('wires', [stubWire.pid]);
-			deleted.wires.push(stubWire.pid);
+		if (wireIds.length) {
+			await deleteSchGroup('wires', wireIds);
 		}
-		const validFlags = flagIds.filter(Boolean);
 		if (validFlags.length) {
 			await deleteSchGroup('components', validFlags);
-			deleted.components.push(...validFlags);
 		}
 	}
 	catch (err) {
 		throw edaError(err, 'Failed to delete stub wire / flag.');
 	}
 
+	// A delete that returned true is NOT evidence — the platform silently
+	// no-ops on wires merged into shared trees / collinear segments yet still
+	// reports success (real machine: R5:1, R5:2, C4:2 stayed connected after a
+	// "disconnected:true"). Re-read and report survivors as a structured partial
+	// (partial-application convention: ok stays true, the canvas HAS changed for
+	// whatever really got deleted; nothing is claimed applied without proof).
+	const surviving = await survivingSchPrimitives({ wires: wireIds, components: validFlags });
+	const survivedWireIds = surviving.wires ?? [];
+	const survivedFlagIds = surviving.components ?? [];
+	const survivedIds = [...survivedWireIds, ...survivedFlagIds];
+	const notApplied = [
+		...survivedWireIds.map(id => ({ kind: 'wire', id })),
+		...survivedFlagIds.map(id => ({ kind: 'flag', id })),
+	];
+	const fullyApplied = survivedIds.length === 0;
+
 	return {
 		result: {
-			disconnected: true,
+			// True only when every targeted primitive is PROVEN gone by re-read.
+			disconnected: fullyApplied,
+			...(fullyApplied ? {} : { partial: true }),
 			pin: designator && pinNumber ? `${designator}:${pinNumber}` : undefined,
 			at: pinX !== undefined && pinY !== undefined ? { x: pinX, y: pinY } : undefined,
-			deletedWires: deleted.wires,
-			deletedFlags: deleted.components,
+			// Only ids verified gone — never the mere delete-call arguments.
+			deletedWires: wireIds.filter(id => !survivedWireIds.includes(id)),
+			deletedFlags: validFlags.filter(id => !survivedFlagIds.includes(id)),
+			// Survivors of the delete call (platform silently kept them): the pin
+			// may still be electrically connected. Empty on full success.
+			notApplied,
+			survivedIds,
 			// Non-empty when the deleted wire was a merged tree serving other pins:
 			// those pins are now floating and need reconnecting (issue #137).
 			alsoDisconnectedPins: [...new Set(alsoDisconnectedPins)],
 		},
+		...(fullyApplied ? {} : {
+			warnings: [
+				`disconnect only partially applied: ${survivedIds.length} primitive(s) survived deletion `
+				+ `(${survivedIds.join(', ')}) — the pin may still be connected; verify with the netlist `
+				+ `and retry or delete the survivors explicitly.`,
+			],
+		}),
 	};
 };
 
