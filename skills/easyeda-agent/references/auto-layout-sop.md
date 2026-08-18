@@ -48,7 +48,9 @@ netflag、去耦贴 IC、框和文字按页保存。**
 3. 清理旧的 agent 功能框时只用 `sch zone-draw --clear --doc <page>`；不要按图元类型
    批量删除用户文字/图形。
 4. 按模块小批移动：
-   - 整簇优先 `sch group-move`，保持器件、局部线和 marker 的相对关系；
+   - 整簇优先 `sch group-move`，保持器件、局部线和 marker 的相对关系；同块多个
+     子组用 `--groups g1,g2` 一次整体移动（逐子组移动会撕裂组间共享导线，已根治
+     为一次内核调用；失败自动恢复到快照重连）；
    - 单件用 `sch modify`，成排用 `sch align`/`sch distribute`；
    - 需要断开时用 `sch disconnect`，处理返回的 `alsoDisconnectedPins[]` 后逐脚重连。
 5. 每批修改后立即 `sch read` 对照黄金表；任何 pin→net、NC 集合变化都先修复，不带病

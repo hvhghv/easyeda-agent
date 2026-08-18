@@ -26,6 +26,9 @@ easyeda apply steps.json --yes              # 放行确认门控(delete/clear/ri
 - **错误纪律**:失败即终止;只读步骤自动重试 2 次;**变更类步骤超时不自动重试**
   (mutation 可能已生效——先读回校验再 `--resume`);变更步骤可带 `verify:` 读回块自证。
 - journal 头带 playbook sha,文件改动会拒绝 `--resume`(改用 `--from`)。
+- **dry-run 纯计算铁律(ADR-0004)**:所有 `--dry-run` **机械保证零 mutation** ——
+  dry-run 模式下派发层直接拒绝任何 Mutates 动作,预览绝不落件;可以放心把
+  dry-run 当纯只读预演用。
 
 **录制导出**:`easyeda audit export --playbook --day 2026-07-03 --since 15:17 --until 15:19
 -o replay.json` 把真实会话(审计日志)提取成 playbook——只留变更步骤、自动挤压 autosave
@@ -82,7 +85,7 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 - `pcb.component.attrs_backfill` — **PCB 器件属性回填（器件标准化 PCB 侧）**。平台 sch→PCB 导入把 otherProperty 建成**键在值空**（Value/耐压/精度/Datasheet 全 ""），且原理图实例属性值 save/reload 后同样为空（不可作源）——唯一稳定源是 **device 库记录**：按实例 C 号 `getByLcscIds` 解析，只填 PCB 侧空值键（手改值优先，`--overwrite` 强制），全程 PCB 前台。无 C 号器件跳过并报告。`pcb import-changes` 成功后**自动跑**（`--no-sync-attrs` 关）。⚠️ **平台投影键绝不参与 merge**（`Designator`/`Unique ID`/`Name`/`Add into BOM`/`Manufacturer*`/`Supplier*`——它们存在顶层图元状态；库记录的 `Designator:"C?"` 占位键灌进实例会被平台同步成图元位号,一板位号全灭 = 166/166 U? 事故真因,2026-08-09 根治）。CLI：`easyeda pcb sync-attrs [--overwrite]`
 - `pcb sync-designators`（`pcb.components.list` + `pcb.component.modify` 编排,无新 action）— **修占位位号**（`U?`/`C?`）：按 `uniqueId`（平台首次导入铸造、跨文档同一命名空间）从原理图回填。只动占位符（手设真实位号绝不覆盖）；每笔回读验证；修完立落 `pcb.save` 检查点；原理图侧同为占位符的件归类「先标注原理图」。`--dry-run`/`--json`（Failed>0 非零退出）。`import-changes` 后自动**殿后**跑（在 attrs 之后,`--no-sync-designators` 关）。CLI：`easyeda pcb sync-designators`
 - `schematic.component.modify` — 修改位置、位号、BOM 属性等
-- `schematic.component.delete` — 删除元件（需确认）
+- `schematic.component.delete` — 删除元件（需确认）。**级联清理独占桩线/flag**（ADR-0004 Decision 5：只挂在被删件引脚上的桩线树+旗随件删净，**共享树只断不删**；回读证实，结果带 `cascaded` 字段列明细；payload `cascade:false` 退回旧行为）
 - `schematic.wire.create` — 创建导线折线
 - `schematic.netflag.create` — 创建电源/地/网络端口/短路 flag
 - `schematic.power.connect_pin` — 复合操作：从 pin 拉导线 + 在末端放 flag（防止 flag-on-pin DRC fatal）

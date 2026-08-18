@@ -39,8 +39,14 @@ type fakeMoveOps struct {
 
 	autoconnectFn func(conns []acConnSpec) ([]string, []string, error)
 	connectErr    error
+	docErr        error // resolveDoc 注入:目标页不可解析(工程被重建)
 
 	log []string
+}
+
+func (f *fakeMoveOps) resolveDoc() error {
+	f.record("resolveDoc")
+	return f.docErr
 }
 
 func (f *fakeMoveOps) record(format string, args ...any) {
@@ -373,6 +379,61 @@ func TestMoveKernel_SharedTreeRefusesWithZeroMutation(t *testing.T) {
 	}
 	if f.calls("delete ") != 0 || f.calls("modify ") != 0 || f.calls("autoconnect ") != 0 {
 		t.Fatalf("拒绝必须零 mutation,log=%v", f.log)
+	}
+}
+
+// ── 目标页不可解析(工程被重建)→ fail-closed:零 mutation、零恢复输出 ────────
+//
+// 真机 smoke 实录:ceshi 工程被重建后,旧内核一路走到重连步才报 `--doc no
+// document named or with uuid`,恢复段因同一错误再失败,最后输出一份虚假的
+// 「31 pin 断开」警告 —— 页面根本不存在,无实际损伤,但报告严重误导。
+
+func TestMoveKernel_DocUnresolvableFailsClosed(t *testing.T) {
+	f := kernelFixture()
+	f.docErr = errors.New(`no document named or with uuid "doc-gone" (run ` + "`easyeda doc ls`" + ` to see options)`)
+	rep, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
+	}, kernelTestOpts())
+	if err == nil {
+		t.Fatal("目标页不可解析必须报错拒绝操作")
+	}
+	if !strings.Contains(err.Error(), "目标页不存在/已被重建") {
+		t.Fatalf("错误必须明说目标页不存在/已被重建:%v", err)
+	}
+	// 零 mutation:快照之后的任何一步都不许发生。
+	if f.calls("delete ") != 0 || f.calls("modify ") != 0 || f.calls("connectPin ") != 0 {
+		t.Fatalf("fail-closed 必须零 mutation,log=%v", f.log)
+	}
+	// 零恢复输出:不许再对不存在的页面跑恢复重连、更不许报虚假的断开清单。
+	if f.calls("autoconnect ") != 0 {
+		t.Fatalf("不存在的页面不许跑恢复重连,log=%v", f.log)
+	}
+	if len(rep.Recovered) != 0 || len(rep.StillBroken) != 0 {
+		t.Fatalf("不许输出虚假的恢复/断开清单:recovered=%v stillBroken=%v", rep.Recovered, rep.StillBroken)
+	}
+}
+
+// ── 空画布矛盾:items 非空但页面 0 器件 + 空网表 → fail-closed 零 mutation ────
+
+func TestMoveKernel_EmptyPageContradictionFailsClosed(t *testing.T) {
+	f := kernelFixture()
+	f.comps = nil // 页面被重建成空页:没有任何器件
+	f.wires = nil
+	f.netSeq = []map[string]map[string]bool{{}} // 网表为空
+	rep, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
+	}, kernelTestOpts())
+	if err == nil {
+		t.Fatal("空画布与非空 items 矛盾必须报错拒绝操作")
+	}
+	if !strings.Contains(err.Error(), "已被重建") && !strings.Contains(err.Error(), "器件数为 0") {
+		t.Fatalf("错误必须点明矛盾:%v", err)
+	}
+	if f.calls("delete ") != 0 || f.calls("modify ") != 0 || f.calls("autoconnect ") != 0 {
+		t.Fatalf("fail-closed 必须零 mutation 零恢复,log=%v", f.log)
+	}
+	if len(rep.Recovered) != 0 || len(rep.StillBroken) != 0 {
+		t.Fatalf("不许输出虚假的恢复/断开清单:%+v", rep)
 	}
 }
 

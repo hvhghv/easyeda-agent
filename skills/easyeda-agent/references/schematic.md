@@ -318,7 +318,7 @@ easyeda sch zone relayout --zone MCU --apply    # ★首选:placement-first 区�
                                                 #   重连。不搬带线图元,没有组刚移的 merge 撕裂问题
 easyeda sch group tidy --group g5 --apply       # 组内:竖放/上电下地/文字朝外;--deep 连残线清扫
 easyeda sch zone tidy --zone MCU --deep --apply # 区内增量:组间 pack(保持连线不重生成时用;
-                                                #   注意组刚移有暂态 merge 风险,relayout 更稳)
+                                                #   组刚移的暂态 merge 短路由 move 内核对账抓住并自动恢复)
 easyeda sch zone move --zone MCU --dx -510 --dy -95   # 区整体刚移(注册 note 随行,框自动重画)
 easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体依纸张排布(图签作障碍
                                                 #   L 形避让;已达标幂等 no-op;完毕统一重画框)
@@ -328,6 +328,22 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
 核心器件方向位置,外围电容电阻的方向/间隔纯计算,最后才生成连线;不要在已连线
 的东西上打补丁式挪动。
 
+**统一挪动内核(ADR-0004)**:上面所有挪动/重排命令(zone move / zone tidy /
+zone relayout,以及 `sch group-move`、`zone-arrange --apply`、`destagger --apply`)
+共用同一个安全 move 内核 —— 快照 → 整树删证回读 → 移动 → 快照重连 →
+netlist+bridge 增量对账,**任一步失败自动恢复到快照重连**,输出结构化
+`moveReport`(moved/recovered/stillBroken/partial),**判据是电气对账不是坐标**。
+不再存在「半途失败需手工重连」的形态;仅 `stillBroken` 非空才需要手修。
+
+**`--zone`/`--group` 统一命名空间(ADR-0004 Decision 3)**:所有吃
+`--zone`/`--group` 的命令(zone move/tidy/relayout、group-move、group tidy、
+`sch note --zone`)走同一个解析器 —— 模块认领 + 虚拟组/子组投影成一张带
+来源标签的布局对象表,匹配规则**精确名 > 大小写折叠 > 唯一前缀**,组 id(g1)
+与块子组末段名(D_ESD)是别名;`sch zones status` 看全表(名字+来源+别名);
+解析失败报错自带全量可用名,类型不适配会指路正确命令。「不同命令认不同名」
+的老坑已根治(块页 `zone move --zone POWER` 不再隐身、`note --zone` 不再把
+格位名当区名)。
+
 硬知识(实测踩坑):
 - **顺序**:先 `sheet tidy` 排开各区(给区生长空间),再逐区 `zone tidy --deep`,
   最后 `sheet tidy` 收尾(幂等,已达标不动)。区带装不下 ≠ 无解——常是邻区挡路,
@@ -335,9 +351,10 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
 - **横竖分桶**:zone tidy 自动把竖放组(双电源旗去耦)与横放组(带 netport 的
   信号链——netport 竖排文字必折叠,只能水平)排**不同的行**,竖一排横一排;
   组的移动次序按暂态依赖自动排序(目标位压谁的原位谁先走)——平台会把暂态
-  叠位的共点线 merge 成一根,乱序移动会撕出短路。apply 自检红自动回滚,回滚
-  后还会复检 bridge-check,报「板已受损」就按 findings 修(multi-net wire →
-  删线 + 两端 autoconnect 重连),别当回滚一定无损。
+  叠位的共点线 merge 成一根,乱序移动会撕出短路。apply 走统一 move 内核:
+  自检红自动恢复到快照重连并复检,`moveReport` 如实报 `recovered`/`stillBroken`;
+  仅 `stillBroken` 非空才按 findings 手修(multi-net wire → 删线 + 两端
+  autoconnect 重连)。
 - **组间 hGap 默认 117** = 两个相向水平 netport 标签实测最小距;压到 40 省空间的
   代价是 `marker-overlap` 一片(实测 3 处)。
 - **区间 vGap 默认 90** = 两框 pad(24×2)+ 标题带(30)+ 缝(12)——区内容间距
@@ -493,8 +510,9 @@ GND 下/电源上由 rail 推导不查固定表、netport 恒水平、同件端�
 `--apply` 落地执行(断言① 删除集=重建集 → 页级深度清扫 → 逐件落位重连 →
 断言② 曾连接 pin 仍连接 → 对账修复循环 → **假失败清创**(自动删同位重复/
 同树冗余标记,复用 check 的 suggestDeleteIds 判据)→ bridge-check 红才整体
-回滚 → save)。同侧多旗按**垂直梯次**桩长错开(规划的 offset 直达 connect_pin;
-pin 再密也不竖叠)。
+回滚 → save)。落地执行统一走 ADR-0004 move 内核(失败自动恢复到快照重连,
+结构化 `moveReport`,判据是电气对账)。同侧多旗按**垂直梯次**桩长错开(规划的
+offset 直达 connect_pin;pin 再密也不竖叠)。
 **真机注意**:连接器在持续变更负载下会停摆,停摆期「报失败的写可能已落地」
 (假失败)——apply 已内置重试+对账+清创,但若结束仍报缺口,先用
 `sch autoconnect --pin 位号:脚 --kind … --net …` 逐脚补(它幂等,already-connected
@@ -604,14 +622,14 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - **`easyeda sch sheet-geometry`** — **图纸边界 + 标题栏 keep-out**(放置/布线规划器的统一几何源,issue #26)。读 `components.list --include-bbox` 里 `componentType == "sheet"` 的实测 bbox,按**长宽比**匹配已知模板(A 系列横/纵向 ≈ √2),在**右下角**按归一化比例切出标题栏(图框/明细表)子矩形;`schematic.titleblock.get` 的 `showTitleBlock` 隐藏时不输出 keep-out。返回 `{sheet, titleBlock, keepouts[], warnings[]}`,每项带 **provenance**(`known-template-ratio` / `fallback-ratio` / `none`),无法确定时只给 warning、不输出虚假精度。`--json`。规划器消费 `keepouts[]`(`{name,bbox,hard}`)即可,**不要再各处硬编码 A4 坐标**。比例表见 `references/sheet-templates.json`。
 - `schematic.component.place`
 - `schematic.component.modify` — 位置/位号/BOM 标志/自定义属性。`customAttributes` 是 SDK `otherProperty` 的兼容别名(二选一,不能同传);属性补丁与现有值**合并**后写入(不清空其他元数据),未知顶层键**前置拒绝**(SDK 会静默丢弃)。写后用新句柄回读,**分级语义(#151)**:全部生效=ok;**部分生效=ok + `result.{partial,applied,alreadySet,notApplied,addedKeys,propertiesBefore}` + warnings**(已应用子集留画布并照常 autosave;`sch modify` 子命令与 playbook 重放此时**按失败处理**,但裸 `easyeda call` 只有 stderr 警告、退出码仍 0,需自查 `result.partial`)。恢复注意:**重放 `propertiesBefore` 只能恢复被覆盖键的原值,本次新增键(`addedKeys`)merge 语义下删不掉**,要删须编辑器手工操作;`applied` 只计回读可证明的写入,期望值与原值本就相同的键归 `alreadySet`(写入不可证)。纯属性补丁无一可证明写入=报错(画布未变)。回读通道本身失败会降级 `verified:false` + warning 而非报错(报错会让 daemon 跳过 autosave,丢已落画布的变更)。**merge 语义对只含顶层字段的补丁同样成立(#175)**:平台 modify 对 `otherProperty` 是**整体重写**语义,曾导致 `{"supplierId":...}` 这类顶层补丁把全部自定义属性静默清空;连接器现在会回读现有自定义属性并在同一次 modify 里原样写回 —— 全保住时 `result.propertiesPreserved` 列出被连带重写但保留的键(+`propertiesBefore` 快照),平台仍丢的键进 `result.notApplied`(`partial:true`,CLI 非零退出),没有静默面。
-- `schematic.component.delete` — ⚠️ **只删组件,不删导线/总线/图形**。删完 `schematic.components.list` 只剩 A4 sheet 会让你误以为页面已干净,实际残留导线还在(DRC 仍会报)。要真正清页用 `schematic.page.clear`。
+- `schematic.component.delete` — **级联清理独占桩线/flag(ADR-0004 Decision 5)**:只挂在被删件引脚上的桩线树连同其上的旗随件删净,**共享树只断不删**(树还触别的器件就留下),结果带 `cascaded` 字段(回读证实的 wire/flag id 明细);payload `cascade:false` 退回旧行为。不再留「删器件不清理桩线」的幽灵连接。⚠️ 级联只针对被删件的附着物——与该件无关的导线/总线/图形不动,要真正清页仍用 `schematic.page.clear`。
 - `schematic.page.clear` — **一键清空当前页**:删除所有页级 primitive(组件、网络标志/端口/标签、导线、总线、图形),默认保留图框 sheet(`--no-preserve-sheet` 连图框一起删)。`--dry-run` 只统计不删。返回各类型删除计数 `{deleted:{...}, total, deletedIds}`。**无 undo**,确认门控。生成→检测→清页→重试闭环用这个。生产流程必须先 dry-run、报告、等用户确认;清完再读回确认 sheet 仍在。CLI:`easyeda sch clear [--dry-run] [--no-preserve-sheet]`。
 - `schematic.primitives.delete` — 按 id **跨类型**删除(组件/标志/导线/总线/图形都行),省略 `--ids` 则删当前选区(配合 `schematic.select` 做"全选→删除")。无 undo,确认门控。CLI:`easyeda sch prim-delete [--ids id1,id2]`(CSV,重复 id 自动去重——平台对含重复 id 的批次整批静默拒)。**图框守卫(2026-08-17 误删实锤)**:sheet 图元在 `sch list` 里是「无位号 @(0,0)」——与 PARTIAL 残件同脸,曾被残件清理误删,而平台没有重建图框的 API(丢了只能人工 UI 重放)。`prim-delete` 发送前自动比对活画布,命中 sheet 即拒;确认要删图框加 `--allow-sheet`。**清理残件前先看 componentType,别只看「无位号 + 原点坐标」**。**计数是回读验证出来的,不是请求数(#164)**:删完重新枚举各类目,`deleted`/`total` 只计真正消失的;有图元活下来则 `result.partial:true` + `survived`(按类目列 id),CLI **非零退出**。此前它把请求数当删除数上报,于是「删旧+重画」的 zone-draw 标签每轮都报干净、实则只加不减(P5 累积到 56 个)。**删除走通用图元类(#164 已修)**:`eda.sch_PrimitiveText.delete()` 只从内存/渲染索引摘除、**从不进持久化模型** —— 删完立即读=0、`sch save` 后=0,`doc reload` 后**原 id 全部复活**(矩形/导线不受影响,只有文本;文本的 `modify` 同样被丢弃,等于一经创建就冻结)。现已统一改走 `eda.sch_PrimitiveObject.delete(ids)`(跨类型、真落盘),`sch prim-delete` 与 `sch zone-draw --clear` 都已真机验过 reload 后归零。**留下的判据教训**:立即回读**证明不了持久化**,凡是判断"删干净没有",判据是 `doc reload` 后再 `sch text-list`——这条对任何自研的 fail-closed 校验都成立(`zone-draw --clear` 当初就是这么一路报"cleared 6"、实则标签全在的)。
 - `schematic.wire.create`
-- **`schematic.group.move`**(`easyeda sch group-move --ids id1,id2,... --dx <mil> --dy <mil>`)——把一个器件和它周边的 stub 导线/flag **当一个整体刚性平移**,内部相对布局不变,只挪外框。⚠️ **不对接 EasyEDA 原生"组合"UI 字段**(2026-07-07 查证:该字段在 `ESCH_PrimitiveType` 里没有对应类型、`sch_PrimitiveComponent` 的 47 个方法里没有任何 getter/setter 碰它、也没藏在 `OtherProperty` 里——纯 UI 内部状态,扩展 API 完全读不到写不了)。这是**无状态虚拟分组**:每次调用都要传完整成员 id 列表,不记忆跨调用状态。器件走普通 `x/y` modify(id 不变);导线没有原地 modify,走删除重建(net/color/width/lineType 保留,**id 会变**,后续操作要重新拉 id)。`--ids` 解析走 `getAll()` 本地过滤而非逐个 `.get(id)`——刚创建的图元直接 `.get(id)` 可能瞬时 404(实测踩过),同批次 `getAll()` 能看到。用于「摆放一个模块后想整体挪位置微调」的场景,S3 布局调整阶段可用。**持久编组已可用**:`easyeda sch group create --members R1,C5,U2 [--name mcu-core]` / `list [--all-pages]` / `add` / `remove` / `ungroup` —— 平台无编组 API(真机探测:`eda.*` 零编组面、组件实例零 group/parent 字段),easyeda-agent 按 documentUuid 把组关系存进 workflow state(`~/.easyeda-agent/workflow/<project>.json`,同 zones claims 模式)。成员存**位号**(页内稳定;primitiveId 会 churn),`sch group-move --group g1 --dx 100` 时解析当前 id 并**自动展开附着物**(成员 pin 上的桩线 + 远端 netflag/netport,线树粒度同 disconnect;触碰非成员脚的线树=真连线,留在原地并报告)。同一位号只属一个组;组空自动删;`list` 标 stale 成员。`sch align`/`distribute` 对**部分覆盖**某组的选集硬拒绝(`--break-group` 显式放行);autolayout/autoplace-free 检测到组时警告(不保组内相对几何)。
+- **`schematic.group.move`**(`easyeda sch group-move --ids id1,id2,... --dx <mil> --dy <mil>`)——把一个器件和它周边的 stub 导线/flag **当一个整体刚性平移**,内部相对布局不变,只挪外框。⚠️ **不对接 EasyEDA 原生"组合"UI 字段**(2026-07-07 查证:该字段在 `ESCH_PrimitiveType` 里没有对应类型、`sch_PrimitiveComponent` 的 47 个方法里没有任何 getter/setter 碰它、也没藏在 `OtherProperty` 里——纯 UI 内部状态,扩展 API 完全读不到写不了)。这是**无状态虚拟分组**:每次调用都要传完整成员 id 列表,不记忆跨调用状态。器件走普通 `x/y` modify(id 不变);导线没有原地 modify,走删除重建(net/color/width/lineType 保留,**id 会变**,后续操作要重新拉 id)。`--ids` 解析走 `getAll()` 本地过滤而非逐个 `.get(id)`——刚创建的图元直接 `.get(id)` 可能瞬时 404(实测踩过),同批次 `getAll()` 能看到。用于「摆放一个模块后想整体挪位置微调」的场景,S3 布局调整阶段可用。**持久编组已可用**:`easyeda sch group create --members R1,C5,U2 [--name mcu-core]` / `list [--all-pages]` / `add` / `remove` / `ungroup` —— 平台无编组 API(真机探测:`eda.*` 零编组面、组件实例零 group/parent 字段),easyeda-agent 按 documentUuid 把组关系存进 workflow state(`~/.easyeda-agent/workflow/<project>.json`,同 zones claims 模式)。成员存**位号**(页内稳定;primitiveId 会 churn),`sch group-move --group g1 --dx 100` 时解析当前 id 并**自动展开附着物**(成员 pin 上的桩线 + 远端 netflag/netport,线树粒度同 disconnect;触碰非成员脚的线树=真连线,留在原地并报告)。**`--groups g1,g2,…` 把同块的多个子组当一个刚体集合、一次内核调用整体移动**——逐子组 move 会撕裂组间共享导线的老坑已根治,同块多子组一律用它。执行走 ADR-0004 统一 move 内核(见「三层布局体系」):失败自动恢复到快照重连,结构化 `moveReport`,判据是电气对账。同一位号只属一个组;组空自动删;`list` 标 stale 成员。`sch align`/`distribute` 对**部分覆盖**某组的选集硬拒绝(`--break-group` 显式放行);autolayout/autoplace-free 检测到组时警告(不保组内相对几何)。
 - `schematic.netflag.create`
 - `schematic.power.connect_pin`
-- **`easyeda sch destagger`** — **marker-overlap 的修复侧**(#171;检测侧是 `sch check` 的 marker-overlap,#148)。`sch check` 早能检测、一直没法修:直接 `sch modify` 挪 netflag/netport 坐标会把标识从导线端点上**挪脱→断网**,所以实测一块 4 页板报出的 101 条纯视觉重叠长期"修不动",只能手工一个个拆了重连(2026-08-12 真实会话:6 处重叠,AI 临场猜 offset 30/40/50/70 改了三轮才收敛,中途还引入一次 `multi-net-wire` 短路)。四条安全原语:①**只搬两点直线短桩**上的 marker,挂在多段折线/网络主干/斜线上的一律跳过并带原因(`not-a-stub`/`stub-too-long`/`diagonal-stub`);②**带桩线一起挪**——走 `disconnect`(旗+桩一起删)→ `connect_pin`(按新方向/桩长重拉),**宿主端(pin 侧)坐标一字不动**,电气拓扑天然不变;③桩长候选**量出来**(跟着该旗 `flagTextBand` 文字带尺寸递增)并吸附 5 单位连接网格(= 连接器 `SCH_GRID`,不吸附则实际落点与规划差半格),方向按「电上地下」偏好序分配、rotation 走与 `reversed-net-flag` 判据**同一张真值表**;④落地后跑**真实 `sch check` 复验**,电气项任何一项变差就回滚并如实上报回滚是否干净(PARTIAL STATE 绝不谎报复原)。**⚠ `--apply` 当前被硬性禁用**——2026-08-13 真机三次验证三次留下 PARTIAL STATE:挪旗要先 `disconnect` 删桩线,而**删掉一根桩线会让 EasyEDA 把它原本分隔开的相邻共线导线自动合并成一棵树 → 当场串网**(实测 `multiNetWires 0→1`),新桩线又会被邻居吞掉导致连回滚都拆不动(#164 删除撒谎)。根因是这条技术路线本身(逐个 disconnect+reconnect 做手术),不是候选打分——正解是复用 `sch autoconnect` 的整体重连(它有成熟的落点评分与 hard-reject),属重构未完成。**现在只用 dry-run 看计划,再按计划手工 `sch disconnect` + `sch connect` 逐个改,每改一个跑 `sch check` 复验。**挤不下时**宁可不动**(记 `no-free-slot`),不硬塞一个还撞的位置。默认 dry-run;`--json` 出完整计划(每个 skip 带原因);`--max-rounds N` 迭代(marker-overlap 归零提前收敛)。**单页作用域**(桩线只能从激活页读),跨页逐页 `doc switch` 后各跑一次。判据是「电气项不许变差」而非「必须全 0」——真实板本来就带着未 NC 标的 floating IO。
+- **`easyeda sch destagger`** — **marker-overlap 的修复侧**(#171;检测侧是 `sch check` 的 marker-overlap,#148)。`sch check` 早能检测、一直没法修:直接 `sch modify` 挪 netflag/netport 坐标会把标识从导线端点上**挪脱→断网**,所以实测一块 4 页板报出的 101 条纯视觉重叠长期"修不动",只能手工一个个拆了重连(2026-08-12 真实会话:6 处重叠,AI 临场猜 offset 30/40/50/70 改了三轮才收敛,中途还引入一次 `multi-net-wire` 短路)。四条安全原语:①**只搬两点直线短桩**上的 marker,挂在多段折线/网络主干/斜线上的一律跳过并带原因(`not-a-stub`/`stub-too-long`/`diagonal-stub`);②**带桩线一起挪**——走 `disconnect`(旗+桩一起删)→ `connect_pin`(按新方向/桩长重拉),**宿主端(pin 侧)坐标一字不动**,电气拓扑天然不变;③桩长候选**量出来**(跟着该旗 `flagTextBand` 文字带尺寸递增)并吸附 5 单位连接网格(= 连接器 `SCH_GRID`,不吸附则实际落点与规划差半格),方向按「电上地下」偏好序分配、rotation 走与 `reversed-net-flag` 判据**同一张真值表**;④落地后跑**真实 `sch check` 复验**,电气项任何一项变差就回滚并如实上报回滚是否干净(PARTIAL STATE 绝不谎报复原)。**`--apply` 已解禁(ADR-0004)**——执行统一走安全 move 内核:宿主器件不动,把宿主的桩线/旗**整树删净(删证回读)**后按新方向/桩长一遍性重连,再做网表逐 pin 对账 + bridge 增量检查,任一步失败**自动恢复到快照重连**并如实上报。当年三次三败的死因是逐根 `disconnect` 删桩线触发相邻共线导线自动合并 → 串网(缺安全执行层,非规划错);整树删净后器件身上没有任何导线,重建零合并风险。**dry-run 预览仍推荐**:先看计划,满意再 `--apply`。**挤不下时**宁可不动**(记 `no-free-slot`),不硬塞一个还撞的位置。默认 dry-run;`--json` 出完整计划(每个 skip 带原因);`--max-rounds N` 迭代(marker-overlap 归零提前收敛)。**单页作用域**(桩线只能从激活页读),跨页逐页 `doc switch` 后各跑一次。判据是「电气项不许变差」而非「必须全 0」——真实板本来就带着未 NC 标的 floating IO。
 - `schematic.pin.set_no_connect` — 打/清「非连接标识」(NC, X 标记),让 DRC 不再对故意悬空的引脚报"未连接"。按位号+引脚号定位:`easyeda sch no-connect --designator U1 --pin 23,24[,…]`(`--clear` 清除)。实现必须从器件实例 `getAllPins()` 取引脚,`setState_NoConnected(...)` 后逐脚 `await pin.done()` 应用到画布,再重新获取器件实例回读;只调 setter 会得到当前句柄假 `true`、实际画布不变。
 - `schematic.select`
 - ~~`schematic.snapshot`~~ — 已移除(2026-08-12,出图统一 `sch export-image`)。**产物保存在 CLI 运行目录下的隐藏目录 `<cwd>/.easyeda/artifacts/`,文件名带本地时间戳**(`<YYYYMMDD-HHMMSS>-<kind>-<短id>.png`);响应里的 `artifacts[].path` 是绝对路径。netlist/BOM 等其他产物同此规则。

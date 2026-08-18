@@ -106,6 +106,12 @@ type moveKernelOpts struct {
 // moveKernelOps 是内核对平台的全部依赖面 —— 生产走 daemonMoveOps(连接器),
 // 测试用 fake 注入三个平台病(删除撒谎 / 超时假失败 / 合并短路)。
 type moveKernelOps interface {
+	// resolveDoc 验证目标页在当前窗口仍可解析(doc ls / ensureActiveDoc 同源
+	// 判定)。目标页被删除/工程被重建时,不做这一步会一路走到重连步才报
+	// 「no document named or with uuid」,恢复段又因同一错误失败,最后输出
+	// 一份「N pin 断开」的虚假警告(页面根本不存在,无实际损伤,但报告
+	// 严重误导)—— 真机 smoke 实录。不可解析 → fail-closed 零 mutation。
+	resolveDoc() error
 	// scene 读一次场景:components(带 bbox+pins)+ stable 导线快照。
 	scene() ([]layoutComp, []schGroupWire, error)
 	// liveNets 读实时网表(net → pin 集合;唯一可信的连接判据)。
@@ -156,6 +162,10 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 	}
 
 	// ── 1. 快照 ────────────────────────────────────────────────────────────
+	// 先验目标页:不可解析(被删除/工程被重建)→ fail-closed 零 mutation。
+	if derr := ops.resolveDoc(); derr != nil {
+		return rep, fmt.Errorf("%s:目标页不存在/已被重建,拒绝操作(画布零改动):%w", label, derr)
+	}
 	comps, wires, err := ops.scene()
 	if err != nil {
 		return rep, fmt.Errorf("%s 快照读场景:%w", label, err)
@@ -171,6 +181,18 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 	live, err := ops.liveNets()
 	if err != nil {
 		return rep, fmt.Errorf("%s 快照读网表(重连的唯一依据):%w", label, err)
+	}
+	// 空画布矛盾判定:items 非空但页面器件数为 0 且网表为空 —— 操作对象根本
+	// 不在画布上(目标页多半已被重建成空页),继续走会输出虚假的断连报告。
+	partCount := 0
+	for _, c := range comps {
+		if c.ComponentType == "" || c.ComponentType == schLayoutPartType {
+			partCount++
+		}
+	}
+	if partCount == 0 && len(live) == 0 {
+		return rep, fmt.Errorf("%s:页面器件数为 0 且网表为空,与 %d 个待移动成员矛盾 —— 目标页可能已被重建,拒绝操作(画布零改动);`easyeda doc ls` 核对后重跑",
+			label, len(items))
 	}
 	conns, movable := groupRebuildConnSpecs(comps, memberSet, live)
 	byDesig := map[string]groupRebuildMember{}
@@ -469,6 +491,26 @@ type daemonMoveOps struct {
 	win     string
 	docUUID string
 	stderr  io.Writer
+}
+
+// resolveDoc:与 `doc ls` / ensureActiveDoc 同源(discoverDocs + resolveDoc)
+// 判定目标页仍可解析。docUUID 为空(如 destagger 直接操作激活页)时验证窗口
+// 仍有激活文档。
+func (o *daemonMoveOps) resolveDoc() error {
+	docs, activeUUID, _, err := discoverDocs(o.cfg, o.win)
+	if err != nil {
+		return fmt.Errorf("枚举窗口文档:%w", err)
+	}
+	if o.docUUID == "" {
+		if activeUUID == "" {
+			return fmt.Errorf("窗口没有激活文档(`easyeda doc ls` 查看)")
+		}
+		return nil
+	}
+	if _, rerr := resolveDoc(docs, o.docUUID); rerr != nil {
+		return rerr
+	}
+	return nil
 }
 
 func (o *daemonMoveOps) scene() ([]layoutComp, []schGroupWire, error) {

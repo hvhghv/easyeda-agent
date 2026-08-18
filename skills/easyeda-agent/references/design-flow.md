@@ -232,7 +232,8 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
     去耦 / `pair` 并列组),CH340C 因此自动拆成 `J_USB`(Type-C + CC 下拉)/ `D_ESD` /
     `U`(桥芯片 + 去耦)三组。整块糊成一个大框等于没分区 —— 框会摊到大半张纸、
     里面大片空白,读图的人得不到任何信息。
-  - **组间留通道用 `sch group-move --group <id>`**(每组一个抓手,平移后自带电气自检)。
+  - **组间留通道用 `sch group-move --group <id>`**(每组一个抓手,平移后自带电气自检;
+    同块多个子组要一起挪时用 `--groups g1,g2` 一次整体移动,不撕裂组间共享导线)。
     `sch zone-plan` 的 `partitionOverlap` 就是「通道没留够」的判据:它非 0 说明两个功能
     子群的虚拟组在版面上交叠 —— 那时**不存在**既框住各自内容又互不重叠的矩形,
     只能挪件,不能靠画框迁就。
@@ -272,10 +273,10 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
    > **首选重跑 `sch autoconnect`**:落点现在按「长短两档标准长度」循环排 lane(相邻脚的标签
    > 自动错开),而且判定含**网名的实际渲染宽度**(平台给 netport 的 bbox 只有裸六边形,
    > 名字画在外面 —— 这是三把尺曾经集体报 0 的原因)。重跑还不干净,再
-   > 跑 `easyeda sch destagger`(#171,dry-run)看计划——它按文字带尺寸量算方向/桩长、
-   > 只动能安全重连的短桩。**`--apply` 当前禁用**(真机三次都因「删桩线触发导线自动合并
-   > → 串网」留下 PARTIAL STATE),按 dry-run 的计划手工 `sch disconnect` + `sch connect`
-   > 逐个改,每改一个跑 `sch check` 复验。
+   > 跑 `easyeda sch destagger`(#171)——它按文字带尺寸量算方向/桩长、
+   > 只动能安全重连的短桩。**`--apply` 已解禁(ADR-0004)**:执行走统一安全 move 内核
+   > (整树删证+快照重连+电气对账,失败自动恢复),不再需要按计划手工逐个改;
+   > 仍推荐先 dry-run 预览再 `--apply`。
 
    | 4 | `bridge-check` | `wire-bridge` 真短路(一棵 wire tree 带多个网名);orphan stub/flag/**tree** 是告警,strict 下阻塞。`orphan-tree` = flag+桩线成树却**不触任何引脚**(挪件残留)或裸死线 —— 修法 `sch prim-delete` 整树(wireIds+flagIds)删净;需连接器 ≥0.26.1,旧连接器对此形态报不出来(结构性盲区,2026-08-18 真机定案) |
    | 5 | `drc` | 官方 SDK fatal。**放最后**:最慢、需窗口前台,且聚合结果最不可行动 |
