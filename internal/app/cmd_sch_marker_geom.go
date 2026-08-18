@@ -52,10 +52,12 @@ const (
 // tests directly. overlapEps is the minimum positive-area extent (smaller axis)
 // the overlap rules report — below it, edge grazing and the ~1-unit float noise of
 // parallel same-side ports are ignored.
-func analyzeMarkerGeometry(comps []layoutComp, titleBlock *layoutBBox, overlapEps float64) []checkFinding {
+// titleBlockSource is the keep-out's provenance (sheetSourceKnownTemplate /
+// sheetSourceFallback / sheetSourceNone) — it grades titleblock-overlap severity.
+func analyzeMarkerGeometry(comps []layoutComp, titleBlock *layoutBBox, titleBlockSource string, overlapEps float64) []checkFinding {
 	var findings []checkFinding
 	findings = append(findings, duplicateNetMarkerFindings(comps)...)
-	findings = append(findings, titleblockOverlapFindings(comps, titleBlock, overlapEps)...)
+	findings = append(findings, titleblockOverlapFindings(comps, titleBlock, titleBlockSource, overlapEps)...)
 	findings = append(findings, markerOverlapFindings(comps, overlapEps)...)
 	findings = append(findings, foldedNetLabelFindings(comps)...)
 	return findings
@@ -227,10 +229,17 @@ func duplicateNetMarkerFindings(comps []layoutComp) []checkFinding {
 // titleblockOverlapFindings reports any part or net marker whose bbox positively
 // intrudes the title-block keep-out. The sheet itself (spans the page) and
 // anything without a bbox are skipped.
-func titleblockOverlapFindings(comps []layoutComp, titleBlock *layoutBBox, eps float64) []checkFinding {
+//
+// Severity is graded by the keep-out's provenance (issue #172): only a CONFIRMED
+// keep-out (source=known-template-ratio, i.e. the A4-calibrated geometry) reports
+// warn; an ESTIMATED keep-out (fallback-ratio — non-A4 sheet or unmatched aspect)
+// reports info, because the rectangle is a best-effort fixed-size guess and a hit
+// needs human confirmation before it may block anything.
+func titleblockOverlapFindings(comps []layoutComp, titleBlock *layoutBBox, source string, eps float64) []checkFinding {
 	if titleBlock == nil {
 		return nil
 	}
+	confirmed := source == sheetSourceKnownTemplate
 	var out []checkFinding
 	for _, c := range comps {
 		if c.BBox == nil {
@@ -243,9 +252,17 @@ func titleblockOverlapFindings(comps []layoutComp, titleBlock *layoutBBox, eps f
 		if !overlap || math.Min(ox, oy) <= eps {
 			continue
 		}
+		level := "warn"
+		msg := fmt.Sprintf("%s(%s) 侵入标题栏 keep-out（重叠 %.2f×%.2f）— 移出图签区或换连线方向",
+			markerLabel(c), c.ComponentType, round2(ox), round2(oy))
+		if !confirmed {
+			level = "info"
+			msg = fmt.Sprintf("%s(%s) 命中基于估计的图签区（source=%s，重叠 %.2f×%.2f）— keep-out 非 A4 标定，仅供参考,建议人工确认真实图签位置",
+				markerLabel(c), c.ComponentType, source, round2(ox), round2(oy))
+		}
 		out = append(out, checkFinding{
 			Type:          "titleblock-overlap",
-			Level:         "warn",
+			Level:         level,
 			PrimitiveId:   c.ID,
 			ComponentType: c.ComponentType,
 			Designator:    c.Designator,
@@ -254,8 +271,7 @@ func titleblockOverlapFindings(comps []layoutComp, titleBlock *layoutBBox, eps f
 			Keepout:       titleBlock,
 			OverlapX:      round2(ox),
 			OverlapY:      round2(oy),
-			Message: fmt.Sprintf("%s(%s) 侵入标题栏 keep-out（重叠 %.2f×%.2f）— 移出图签区或换连线方向",
-				markerLabel(c), c.ComponentType, round2(ox), round2(oy)),
+			Message:       msg,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PrimitiveId < out[j].PrimitiveId })
@@ -470,11 +486,8 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 		fmt.Fprintf(stderr, "sch check: marker-geometry skipped — %v\n", perr)
 		return
 	}
-	var titleBlock *layoutBBox
-	if sheet := sheetBBoxOf(comps); sheet != nil {
-		titleBlock, _ = titleBlockKeepout(sheet)
-	}
-	geo := analyzeMarkerGeometry(comps, titleBlock, overlapEps)
+	titleBlock, tbSource := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
+	geo := analyzeMarkerGeometry(comps, titleBlock, tbSource, overlapEps)
 
 	// redundant-net-marker needs the wire trees (exec_js read, stable). Best-effort:
 	// a wire-read failure skips this rule only. Single-page only (wires are read

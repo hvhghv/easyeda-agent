@@ -218,7 +218,7 @@ func gateLayoutStage(cfg *appConfig, window string, minGap, pinEps float64, allP
 }
 
 // gateCheckStage runs the reconstructed design check. fatal/error findings block;
-// warn/info are advisory unless --strict.
+// warn is advisory unless --strict; info never blocks (see checkLevelBlocks).
 func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overlapEps float64, stderr io.Writer, geom *schGeomSnapshot) gateStage {
 	st := gateStage{Name: "check"}
 	payload := map[string]any{}
@@ -239,38 +239,51 @@ func gateCheckStage(cfg *appConfig, window string, allPages, strict bool, overla
 	}
 	mergeMarkerGeomFindingsWith(cfg, window, allPages, overlapEps, &rep, stderr, geom)
 	st.Detail = rep
-	for _, f := range rep.Findings {
-		switch strings.ToLower(f.Level) {
-		case "fatal", "error":
-			st.Errors++
-		default:
-			st.Warnings++
-		}
-	}
-	// Name the finding TYPES that block, not just a count — "3 个 error" sends
-	// the agent back to re-run the checker; "3 个 error: duplicate-net-marker,
-	// floating-pin" is already the fix list.
-	blockingTypes := map[string]int{}
-	for _, f := range rep.Findings {
-		lvl := strings.ToLower(f.Level)
-		if lvl == "fatal" || lvl == "error" || strict {
-			blockingTypes[f.Type]++
-		}
-	}
+	st.Errors, st.Warnings, st.BlockingReasons = gradeGateCheckFindings(rep, strict)
 	st.Summary = fmt.Sprintf("%d finding(s): %d error/fatal, %d warn/info", rep.Summary.Total, st.Errors, st.Warnings)
-	if st.Errors > 0 {
-		st.BlockingReasons = append(st.BlockingReasons,
-			fmt.Sprintf("%d 个 error/fatal finding: %s", st.Errors, formatTypeTally(blockingTypes)))
-	} else if strict && st.Warnings > 0 {
-		st.BlockingReasons = append(st.BlockingReasons,
-			fmt.Sprintf("%d 个 warn/info finding (--strict): %s", st.Warnings, formatTypeTally(blockingTypes)))
-	}
 	if len(st.BlockingReasons) > 0 {
 		st.Status = gateStatusFail
 	} else {
 		st.Status = gateStatusPass
 	}
 	return st
+}
+
+// gradeGateCheckFindings is the check stage's pure grading: severity tallies plus
+// the blocking reasons. Blocking follows checkLevelBlocks — the ONE severity
+// ruler shared with `sch check --strict` (issue #172): fatal/error always block,
+// warn only under --strict, info NEVER (it marks hits against estimated geometry,
+// e.g. a fallback-ratio titleblock keep-out, that need human confirmation).
+// Reasons name the finding TYPES that block, not just a count — "3 个 error"
+// sends the agent back to re-run the checker; "3 个 error: duplicate-net-marker,
+// floating-pin" is already the fix list.
+func gradeGateCheckFindings(rep checkReport, strict bool) (errors, warnings int, reasons []string) {
+	blockingTypes := map[string]int{}
+	promoted := 0 // warn-level findings promoted to blocking by --strict
+	for _, f := range rep.Findings {
+		isErr := false
+		switch strings.ToLower(f.Level) {
+		case "fatal", "error":
+			errors++
+			isErr = true
+		default:
+			warnings++
+		}
+		if checkLevelBlocks(f.Level, strict) {
+			blockingTypes[f.Type]++
+			if !isErr {
+				promoted++
+			}
+		}
+	}
+	if errors > 0 {
+		reasons = append(reasons,
+			fmt.Sprintf("%d 个 error/fatal finding: %s", errors, formatTypeTally(blockingTypes)))
+	} else if strict && promoted > 0 {
+		reasons = append(reasons,
+			fmt.Sprintf("%d 个 warn finding (--strict;info 不阻塞): %s", promoted, formatTypeTally(blockingTypes)))
+	}
+	return errors, warnings, reasons
 }
 
 // formatTypeTally renders a rule-type histogram as a stable, compact string.

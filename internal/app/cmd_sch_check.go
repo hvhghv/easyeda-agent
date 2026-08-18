@@ -165,8 +165,13 @@ func runSchCheck(cfg *appConfig, window string, allPages, strict, asJSON bool, o
 		renderCheckReport(rep, stdout)
 	}
 
-	if strict && len(rep.Findings) > 0 {
-		return fmt.Errorf("sch check: %d finding(s) (--strict)", len(rep.Findings))
+	// --strict blocks only on blocking-level findings (fatal/error/warn); info
+	// findings — e.g. titleblock-overlap against an ESTIMATED (non-A4) keep-out,
+	// issue #172 — are advisory and never gate.
+	if strict {
+		if n := blockingCheckFindings(rep, true); n > 0 {
+			return fmt.Errorf("sch check: %d blocking finding(s) (--strict; info 级不计入)", n)
+		}
 	}
 	return nil
 }
@@ -184,6 +189,35 @@ func parseCheckReport(result map[string]any) (checkReport, error) {
 		return rep, fmt.Errorf("unexpected check result shape: %w", err)
 	}
 	return rep, nil
+}
+
+// checkLevelBlocks is the ONE severity ruler for whether a check finding blocks
+// (issue #172): fatal/error always block; warn (and any unknown level — fail
+// closed) blocks only under strict; info NEVER blocks — it exists precisely for
+// hits against estimated geometry (e.g. a fallback-ratio titleblock keep-out)
+// that need human confirmation, and promoting it would re-create the false-
+// positive gate the level was introduced to prevent. Both `sch check --strict`
+// and the gate's check stage must call this, not re-derive it.
+func checkLevelBlocks(level string, strict bool) bool {
+	switch strings.ToLower(level) {
+	case "fatal", "error":
+		return true
+	case "info":
+		return false
+	default:
+		return strict
+	}
+}
+
+// blockingCheckFindings counts the findings that block at the given strictness.
+func blockingCheckFindings(rep checkReport, strict bool) int {
+	n := 0
+	for _, f := range rep.Findings {
+		if checkLevelBlocks(f.Level, strict) {
+			n++
+		}
+	}
+	return n
 }
 
 func checkLevelTag(level string) string {

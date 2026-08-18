@@ -318,13 +318,17 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 			markerNoBBox++
 		}
 	}
-	var titleBlock *layoutBBox
 	postSheet := sheetBBoxOf(comps)
-	if postSheet != nil {
-		sheet := postSheet
-		titleBlock, _ = titleBlockKeepout(sheet)
+	titleBlock, tbSource := titleBlockKeepoutWithSource(postSheet)
+	markerFindings := analyzeMarkerGeometry(comps, titleBlock, tbSource, 0.5)
+	// info-level findings (e.g. titleblock-overlap against an ESTIMATED keep-out on
+	// a non-A4 sheet, issue #172) are advisory and must not fail the post-check.
+	blockingMarkerFindings := 0
+	for _, f := range markerFindings {
+		if checkLevelBlocks(f.Level, true) { // strict grading: warn blocks here, info never
+			blockingMarkerFindings++
+		}
 	}
-	markerFindings := analyzeMarkerGeometry(comps, titleBlock, 0.5)
 
 	checkRep, cerr := schCheckReport(cfg, win, docUUID)
 	if cerr != nil {
@@ -370,8 +374,8 @@ func runOfficialAutolayout(cfg *appConfig, window string, apply, rewire bool, st
 	if pinCoincidences > 0 {
 		failures = append(failures, fmt.Sprintf("%d cross-part pin coincidence(s)", pinCoincidences))
 	}
-	if len(markerFindings) > 0 {
-		failures = append(failures, fmt.Sprintf("%d blocking marker/title-block geometry finding(s)", len(markerFindings)))
+	if blockingMarkerFindings > 0 {
+		failures = append(failures, fmt.Sprintf("%d blocking marker/title-block geometry finding(s)", blockingMarkerFindings))
 	}
 	if blocking := officialBlockingCheckFindings(checkRep); blocking > 0 {
 		failures = append(failures, fmt.Sprintf("%d blocking schematic.check finding(s)", blocking))

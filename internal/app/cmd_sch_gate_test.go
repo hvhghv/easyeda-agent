@@ -247,7 +247,7 @@ func TestGateAdviceRulesCoverEveryReasonTheStagesCanEmit(t *testing.T) {
 		"1 invalid geometry value (--strict)",
 		"zone-check unavailable (--strict): no sheet",
 		"7 个 error/fatal finding: floating-pin×7",
-		"23 个 warn/info finding (--strict): floating-pin×23",
+		"23 个 warn finding (--strict;info 不阻塞): floating-pin×23",
 		"2 wire-bridge(真短路)", "11 orphan-stub (--strict)", "1 orphan-flag (--strict)",
 		"2 orphan-tree (--strict)",
 		"3 fatal DRC violation",
@@ -350,5 +350,46 @@ func TestDrcBlockingReasons_WarnBlockSaysWhereToLook(t *testing.T) {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("缺 %q:%s", want, got[0])
 		}
+	}
+}
+
+// The gate's check stage shares the checkLevelBlocks ruler (issue #172):
+// info-level findings (titleblock-overlap against an ESTIMATED keep-out) never
+// block, not even under --strict; warn still blocks under --strict; error always.
+func TestGradeGateCheckFindings_InfoNeverBlocks(t *testing.T) {
+	infoOnly := checkReport{Findings: []checkFinding{
+		{Type: "titleblock-overlap", Level: "info"},
+		{Type: "titleblock-overlap", Level: "info"},
+	}}
+	errs, warns, reasons := gradeGateCheckFindings(infoOnly, true)
+	if errs != 0 || warns != 2 {
+		t.Fatalf("tally = %d/%d, want 0 errors / 2 warn-info displays", errs, warns)
+	}
+	if len(reasons) != 0 {
+		t.Fatalf("info-only findings must not block even under --strict, got %v", reasons)
+	}
+
+	mixed := checkReport{Findings: []checkFinding{
+		{Type: "titleblock-overlap", Level: "info"},
+		{Type: "wire-crossing", Level: "warn"},
+	}}
+	if _, _, r := gradeGateCheckFindings(mixed, false); len(r) != 0 {
+		t.Fatalf("warn is advisory without --strict, got %v", r)
+	}
+	_, _, r := gradeGateCheckFindings(mixed, true)
+	if len(r) != 1 || !strings.Contains(r[0], "1 个 warn finding") || !strings.Contains(r[0], "wire-crossing×1") {
+		t.Fatalf("strict must promote ONLY the warn finding (count 1, typed), got %v", r)
+	}
+	if strings.Contains(r[0], "titleblock-overlap") {
+		t.Fatalf("the info finding's type must not appear in the blocking tally: %v", r)
+	}
+
+	withErr := checkReport{Findings: []checkFinding{
+		{Type: "titleblock-overlap", Level: "info"},
+		{Type: "multi-net-wire", Level: "error"},
+	}}
+	_, _, r = gradeGateCheckFindings(withErr, false)
+	if len(r) != 1 || !strings.Contains(r[0], "1 个 error/fatal finding") {
+		t.Fatalf("error must always block, got %v", r)
 	}
 }

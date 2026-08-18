@@ -292,3 +292,50 @@ func TestParseAndRenderCheck_GeomNetMismatch(t *testing.T) {
 		}
 	}
 }
+
+// checkLevelBlocks is the ONE strict-blocking severity ruler (issue #172):
+// fatal/error always block; warn (and unknown — fail closed) only under strict;
+// info NEVER — it marks hits against estimated geometry (fallback-ratio
+// titleblock keep-out) that need human confirmation, not a gate.
+func TestCheckLevelBlocks(t *testing.T) {
+	cases := []struct {
+		level          string
+		lax, strictRes bool
+	}{
+		{"fatal", true, true},
+		{"error", true, true},
+		{"ERROR", true, true},
+		{"warn", false, true},
+		{"", false, true},        // unknown level fails closed under strict
+		{"mystery", false, true}, // ditto
+		{"info", false, false},   // never blocks
+		{"INFO", false, false},
+	}
+	for _, tc := range cases {
+		if got := checkLevelBlocks(tc.level, false); got != tc.lax {
+			t.Errorf("checkLevelBlocks(%q, false) = %v, want %v", tc.level, got, tc.lax)
+		}
+		if got := checkLevelBlocks(tc.level, true); got != tc.strictRes {
+			t.Errorf("checkLevelBlocks(%q, true) = %v, want %v", tc.level, got, tc.strictRes)
+		}
+	}
+}
+
+// `sch check --strict` must pass a report whose only findings are info-level
+// (the issue #172 estimated-keepout case) and still count warn+ findings.
+func TestBlockingCheckFindings_InfoNeverGates(t *testing.T) {
+	rep := checkReport{Findings: []checkFinding{
+		{Type: "titleblock-overlap", Level: "info"},
+		{Type: "titleblock-overlap", Level: "info"},
+	}}
+	if n := blockingCheckFindings(rep, true); n != 0 {
+		t.Fatalf("info-only report must not block under --strict, got %d", n)
+	}
+	rep.Findings = append(rep.Findings, checkFinding{Type: "titleblock-overlap", Level: "warn"})
+	if n := blockingCheckFindings(rep, true); n != 1 {
+		t.Fatalf("the warn finding must block under --strict, got %d", n)
+	}
+	if n := blockingCheckFindings(rep, false); n != 0 {
+		t.Fatalf("warn must stay advisory without --strict, got %d", n)
+	}
+}

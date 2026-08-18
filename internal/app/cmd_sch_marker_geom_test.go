@@ -74,12 +74,16 @@ func TestTitleblockOverlap_RealMotorG(t *testing.T) {
 		{ID: "safe", ComponentType: "netport", Net: "SAFE", BBox: bb(100, 200, 120, 220)}, // clear
 		{ID: "sheet", ComponentType: "sheet", BBox: bb(0, 0, 1170, 825)},                  // spans page → must NOT report
 	}
-	got := titleblockOverlapFindings(comps, keepout, 0.5)
+	got := titleblockOverlapFindings(comps, keepout, sheetSourceKnownTemplate, 0.5)
 	if len(got) != 1 {
 		t.Fatalf("want exactly 1 titleblock-overlap (MOTOR_G), got %d: %+v", len(got), got)
 	}
 	if got[0].PrimitiveId != "motorG" {
 		t.Errorf("expected MOTOR_G, got %q", got[0].PrimitiveId)
+	}
+	// A CONFIRMED (A4-calibrated) keep-out reports at warn.
+	if got[0].Level != "warn" {
+		t.Errorf("confirmed keep-out hit must be warn, got %q", got[0].Level)
 	}
 	// overlap = 11 (x) × 31 (y).
 	if got[0].OverlapX != 11 || got[0].OverlapY != 31 {
@@ -89,8 +93,56 @@ func TestTitleblockOverlap_RealMotorG(t *testing.T) {
 
 func TestTitleblockOverlap_NoKeepoutIsNoop(t *testing.T) {
 	comps := []layoutComp{{ID: "x", ComponentType: "netport", BBox: bb(1000, 50, 1010, 60)}}
-	if got := titleblockOverlapFindings(comps, nil, 0.5); len(got) != 0 {
+	if got := titleblockOverlapFindings(comps, nil, sheetSourceNone, 0.5); len(got) != 0 {
 		t.Errorf("nil keep-out must yield no findings, got %+v", got)
+	}
+}
+
+// Issue #172: a hit against an ESTIMATED keep-out (source=fallback-ratio — non-A4
+// sheet or unmatched aspect) downgrades to info and says the geometry is a guess;
+// only the confirmed A4-calibrated source keeps warn.
+func TestTitleblockOverlap_EstimatedSourceIsInfo(t *testing.T) {
+	keepout := bb(953, 0, 1655, 198)
+	comps := []layoutComp{
+		{ID: "hit", Designator: "R23", ComponentType: "part", BBox: bb(1400, 20, 1440, 60)},
+	}
+	got := titleblockOverlapFindings(comps, keepout, sheetSourceFallback, 0.5)
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding, got %d: %+v", len(got), got)
+	}
+	if got[0].Level != "info" {
+		t.Errorf("estimated keep-out hit must be info, got %q", got[0].Level)
+	}
+	if !containsStr(got[0].Message, "建议人工确认") || !containsStr(got[0].Message, sheetSourceFallback) {
+		t.Errorf("info message must say the keep-out is estimated + suggest human confirmation, got %q", got[0].Message)
+	}
+}
+
+// Issue #172 end-to-end reproduction: on the 1655×1170 sheet the old A4-fraction
+// keep-out ([662,0 → 1655,234]) false-flagged parts at x≈700–770 mid-sheet. With
+// the fixed-size estimate they must not be reported at all, and a part genuinely
+// inside the bottom-right table region reports at info (not warn).
+func TestTitleblockOverlap_Issue172NonA4NoFalsePositives(t *testing.T) {
+	sheet := bb(0, 0, 1655, 1170)
+	keepout, source := titleBlockKeepoutWithSource(sheet)
+	if keepout == nil || source != sheetSourceFallback {
+		t.Fatalf("non-A4 sheet must yield an estimated keep-out, got %+v source=%q", keepout, source)
+	}
+	comps := []layoutComp{
+		// The issue's real false positives (x ≈ 43–46% of the sheet width).
+		{ID: "L1", Designator: "L1", ComponentType: "part", BBox: bb(750, 100, 790, 160)},
+		{ID: "C6", Designator: "C6", ComponentType: "part", BBox: bb(690, 90, 730, 150)},
+		{ID: "R5", Designator: "R5", ComponentType: "part", BBox: bb(690, 160, 730, 220)},
+		{ID: "gnd1", ComponentType: "netflag", Net: "GND", BBox: bb(700, 80, 710, 101)},
+		// A part truly inside the bottom-right table area.
+		{ID: "deep", Designator: "R99", ComponentType: "part", BBox: bb(1400, 20, 1450, 80)},
+	}
+	got := titleblockOverlapFindings(comps, keepout, source, 0.5)
+	if len(got) != 1 {
+		t.Fatalf("only the truly bottom-right part may be reported, got %d: %+v", len(got), got)
+	}
+	if got[0].PrimitiveId != "deep" || got[0].Level != "info" {
+		t.Errorf("want deep@info, got %s@%s", got[0].PrimitiveId, got[0].Level)
 	}
 }
 

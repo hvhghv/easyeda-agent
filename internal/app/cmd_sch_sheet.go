@@ -65,6 +65,23 @@ type sheetTemplate struct {
 // table documents above.
 var defaultTitleBlockRatio = titleBlockRatio{WidthFrac: 0.6, HeightFrac: 0.24}
 
+// a4SheetW/H is the A4 landscape sheet size (EasyEDA schematic units, overlay-
+// measured on 3.2.148) that defaultTitleBlockRatio was calibrated against.
+const (
+	a4SheetW = 1170.0
+	a4SheetH = 825.0
+)
+
+// titleBlockFixedW/H is the real title block's FIXED table size, derived from the
+// A4 calibration (ratio × A4 sheet ≈ 702×198). Issue #172: on a non-A4 sheet the
+// table does NOT scale with the page, so the honest estimate is this fixed size
+// anchored to the bottom-right corner — scaling the A4 fraction up with an A3
+// sheet over-reserved ~60% of the width and false-flagged mid-sheet parts.
+var (
+	titleBlockFixedW = defaultTitleBlockRatio.WidthFrac * a4SheetW
+	titleBlockFixedH = defaultTitleBlockRatio.HeightFrac * a4SheetH
+)
+
 // sheetTemplates is the known sheet → title-block ratio table. Mirrored for
 // humans/skills in skills/easyeda-agent/references/sheet-templates.json;
 // this Go table is the runtime authority (the CLI is the interface planners use).
@@ -114,8 +131,23 @@ type sheetGeometry struct {
 // without reaching A3 (×√2 ≈ 1654 wide) or A5 (÷√2 ≈ 827 wide), which share A4's
 // aspect but carry the same fixed-size title block at a different fraction.
 func isA4LandscapeSize(w, h float64) bool {
-	const a4W, a4H, tol = 1170.0, 825.0, 0.2
-	return math.Abs(w-a4W) <= a4W*tol && math.Abs(h-a4H) <= a4H*tol
+	const tol = 0.2
+	return math.Abs(w-a4SheetW) <= a4SheetW*tol && math.Abs(h-a4SheetH) <= a4SheetH*tol
+}
+
+// titleBlockKeepoutWithSource derives the title-block keep-out plus its
+// provenance (sheetSourceKnownTemplate / sheetSourceFallback / sheetSourceNone),
+// so consumers (the titleblock-overlap check rule, issue #172) can grade how much
+// to trust a hit: a fallback/estimated keep-out is advisory, not a hard gate.
+func titleBlockKeepoutWithSource(sheet *layoutBBox) (*layoutBBox, string) {
+	if sheet == nil {
+		return nil, sheetSourceNone
+	}
+	g := deriveSheetGeometry(sheet, nil)
+	if g.TitleBlock.BBox == nil {
+		return nil, sheetSourceNone
+	}
+	return g.TitleBlock.BBox, g.TitleBlock.Source
 }
 
 // matchSheetTemplate picks the template whose aspect matches w/h within tolerance.
@@ -157,26 +189,35 @@ func deriveSheetGeometry(sheet *layoutBBox, showTitleBlock *bool) sheetGeometry 
 		return g
 	}
 
+	// fixedSize: derive the keep-out from the FIXED A4-calibrated table size
+	// (titleBlockFixedW/H) anchored bottom-right, instead of scaling the A4
+	// fraction with the sheet. Issue #172: the real title block is a fixed-size
+	// table, so on a 1655×1170 sheet the ratio form reserved ~60% of the width
+	// (left edge x=662) and titleblock-overlap false-flagged parts mid-sheet.
+	fixedSize := false
+
 	tmpl, matched := matchSheetTemplate(w, h)
 	g.Sheet.Template = tmpl.Name
 	if matched {
 		g.TitleBlock.Source = sheetSourceKnownTemplate
 	} else {
 		g.TitleBlock.Source = sheetSourceFallback
+		fixedSize = true
 		g.Warnings = append(g.Warnings, fmt.Sprintf(
-			"sheet aspect %.3f did not match a known template; title-block keep-out uses a generic fallback ratio, not template geometry",
+			"sheet aspect %.3f did not match a known template; title-block keep-out is an ESTIMATE — the fixed-size A4-calibrated table anchored bottom-right, not template geometry",
 			w/h))
 	}
 
 	// A4 first: the landscape title-block ratio is calibrated ONLY for A4. The real
-	// title block is a fixed-size table, so on a larger A3+ landscape sheet it is a
-	// proportionally smaller fraction and the A4 ratio OVER-reserves (and on a
-	// smaller A5 it would under-reserve). Keep a best-effort keep-out but downgrade
-	// provenance + warn, so a non-A4 keep-out is never silently trusted.
+	// title block is a fixed-size table, so on any other A-series landscape size the
+	// honest estimate is that same fixed size anchored bottom-right (the ratio form
+	// would over-reserve on A3+ and under-reserve on A5). Provenance still downgrades
+	// + warns, so a non-A4 keep-out is never silently trusted as calibrated truth.
 	if matched && tmpl.Name == "a-series-landscape" && !isA4LandscapeSize(w, h) {
 		g.TitleBlock.Source = sheetSourceFallback
+		fixedSize = true
 		g.Warnings = append(g.Warnings, fmt.Sprintf(
-			"title-block keep-out is calibrated for A4 landscape only; this sheet (%.0f×%.0f) is a different A-series size, so the keep-out is an approximate OVER-estimate (the real title block is fixed-size) — verify manually before trusting it as a hard gate",
+			"title-block keep-out is calibrated for A4 landscape only; this sheet (%.0f×%.0f) is a different A-series size, so the keep-out is an ESTIMATE (the fixed-size A4 table anchored bottom-right) — verify manually before trusting it as a hard gate",
 			w, h))
 	}
 
@@ -196,12 +237,17 @@ func deriveSheetGeometry(sheet *layoutBBox, showTitleBlock *bool) sheetGeometry 
 	// ceshi render bottom/top respectively), so the visual bottom-right corner
 	// the title block occupies is the MaxX/MIN-Y corner. The previous MaxY form
 	// protected the visual TOP-right — a keep-out on the wrong corner.
-	ratio := tmpl.TitleBlock
+	tbW, tbH := tmpl.TitleBlock.WidthFrac*w, tmpl.TitleBlock.HeightFrac*h
+	if fixedSize {
+		// Fixed-size estimate, clamped so a sheet smaller than the table never
+		// yields a keep-out poking past the sheet's own bounds.
+		tbW, tbH = math.Min(titleBlockFixedW, w), math.Min(titleBlockFixedH, h)
+	}
 	tb := &layoutBBox{
-		MinX: round2(sheet.MaxX - ratio.WidthFrac*w),
+		MinX: round2(sheet.MaxX - tbW),
 		MinY: sheet.MinY,
 		MaxX: sheet.MaxX,
-		MaxY: round2(sheet.MinY + ratio.HeightFrac*h),
+		MaxY: round2(sheet.MinY + tbH),
 	}
 	g.TitleBlock.BBox = tb
 	g.Keepouts = append(g.Keepouts, keepout{Name: "titleBlock", BBox: tb, Hard: true})
