@@ -1323,6 +1323,145 @@ export const schematicComponentModify: Handler = async (payload) => {
 	};
 };
 
+// ─── Component-delete cascade (ADR-0004 Decision 5) ──────────────────────
+//
+// Deleting a part leaves its stub wires + netflags behind; the residue is a
+// ghost-connection boobytrap — the next part placed there silently inherits
+// the stray net name (v1.0.1's orphan-tree rule only catches it AFTER the
+// fact). The cascade removes each EXCLUSIVE wire tree (touches only the
+// deleted parts' pins) plus every net marker anchored on it. A tree that
+// still touches any SURVIVING part's pin is shared: never deleted.
+
+/** One planned cascade tree: its wires, the markers riding it, and which of
+ *  the delete-target components touch it (owners). */
+export interface SchDeleteCascadeTree {
+	wireIds: Array<string>;
+	flagIds: Array<string>;
+	ownerIds: Array<string>;
+}
+
+/**
+ * Pure cascade planner (exported for tests): group wires into trees by shared
+ * vertices (union-find, same tolerance family as bridge-check), then keep the
+ * trees that touch at least one target pin and NO survivor pin. Marker/pin
+ * anchoring is point-on-SEGMENT, not vertex proximity (merged collinear wires
+ * swallow flags mid-span — issue #135).
+ */
+export function planSchDeleteCascadeTrees(
+	targets: Array<{ id: string; pins: Array<{ x: number; y: number }> }>,
+	wires: Array<{ id: string; points: Array<number> }>,
+	markers: Array<{ id: string; x: number; y: number }>,
+	survivorPins: Array<{ x: number; y: number }>,
+): Array<SchDeleteCascadeTree> {
+	const TOL = CHECK_EPS * 8;
+	const segsOf = (points: Array<number>): Array<[number, number, number, number]> => {
+		const segs: Array<[number, number, number, number]> = [];
+		for (let i = 0; i + 3 < points.length; i += 2) {
+			segs.push([points[i], points[i + 1], points[i + 2], points[i + 3]]);
+		}
+		return segs;
+	};
+	const distToSeg = (px: number, py: number, x0: number, y0: number, x1: number, y1: number): number => {
+		const dx = x1 - x0, dy = y1 - y0;
+		const len2 = dx * dx + dy * dy;
+		if (len2 === 0) return Math.hypot(px - x0, py - y0);
+		let t = ((px - x0) * dx + (py - y0) * dy) / len2;
+		t = Math.max(0, Math.min(1, t));
+		return Math.hypot(px - (x0 + t * dx), py - (y0 + t * dy));
+	};
+
+	// Union-find over wires sharing a vertex.
+	const usable = wires.filter(w => w.id && w.points.length >= 4);
+	const parent = usable.map((_, i) => i);
+	const find = (a: number): number => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+	const union = (a: number, b: number) => { parent[find(a)] = find(b); };
+	const verts = usable.map(w => {
+		const vs: Array<[number, number]> = [];
+		for (let i = 0; i + 1 < w.points.length; i += 2) vs.push([w.points[i], w.points[i + 1]]);
+		return vs;
+	});
+	for (let i = 0; i < usable.length; i++) {
+		for (let j = i + 1; j < usable.length; j++) {
+			if (verts[i].some(a => verts[j].some(b => Math.hypot(a[0] - b[0], a[1] - b[1]) <= TOL))) union(i, j);
+		}
+	}
+	const byRoot = new Map<number, { wireIds: Array<string>; segs: Array<[number, number, number, number]> }>();
+	usable.forEach((w, i) => {
+		const root = find(i);
+		const t = byRoot.get(root) ?? { wireIds: [], segs: [] };
+		t.wireIds.push(w.id);
+		t.segs.push(...segsOf(w.points));
+		byRoot.set(root, t);
+	});
+
+	const out: Array<SchDeleteCascadeTree> = [];
+	for (const t of byRoot.values()) {
+		const onTree = (x: number, y: number) => t.segs.some(s => distToSeg(x, y, s[0], s[1], s[2], s[3]) <= TOL);
+		const ownerIds = targets
+			.filter(target => target.pins.some(p => onTree(p.x, p.y)))
+			.map(target => target.id);
+		if (ownerIds.length === 0) continue; // tree untouched by the delete
+		if (survivorPins.some(p => onTree(p.x, p.y))) continue; // shared — never delete
+		const flagIds = markers.filter(m => m.id && onTree(m.x, m.y)).map(m => m.id);
+		out.push({ wireIds: [...t.wireIds], flagIds: [...new Set(flagIds)], ownerIds });
+	}
+	return out;
+}
+
+/** Read everything the cascade planner needs BEFORE the components are deleted
+ *  (their pins vanish with them). Throws on read failure — the caller treats
+ *  that as "skip the cascade with a warning", never as "block the delete". */
+async function collectSchDeleteCascadePlan(ids: Array<string>): Promise<Array<SchDeleteCascadeTree>> {
+	const idSet = new Set(ids);
+	const components = await eda.sch_PrimitiveComponent.getAll();
+	const rawWires = await eda.sch_PrimitiveWire.getAll();
+	if (!Array.isArray(components) || !Array.isArray(rawWires)) {
+		throw new Error('component/wire enumeration did not return arrays');
+	}
+	const wires: Array<{ id: string; points: Array<number> }> = [];
+	for (const w of rawWires) {
+		try {
+			const line = w.getState_Line();
+			if (Array.isArray(line)) {
+				// Nested [[x,y],…] and flat [x,y,…] both occur; normalize to flat.
+				const flat: Array<number> = Array.isArray(line[0])
+					? (line as unknown as Array<Array<number>>).flatMap(p => [p[0], p[1]])
+					: (line as Array<number>);
+				wires.push({ id: String(w.getState_PrimitiveId?.() ?? ''), points: flat });
+			}
+		}
+		catch { /* a wire without geometry cannot anchor anything */ }
+	}
+	const NET_MARKER_TYPES = new Set(['netflag', 'netport', 'netlabel', 'short_symbol']);
+	const targets: Array<{ id: string; pins: Array<{ x: number; y: number }> }> = [];
+	const markers: Array<{ id: string; x: number; y: number }> = [];
+	const survivorPins: Array<{ x: number; y: number }> = [];
+	for (const c of components) {
+		let type = '';
+		let pid = '';
+		try { type = String(c.getState_ComponentType?.() ?? ''); pid = String(c.getState_PrimitiveId?.() ?? ''); }
+		catch { continue; }
+		if (NET_MARKER_TYPES.has(type)) {
+			// A marker that is itself a delete target goes away with the component
+			// delete — exclude it so it is not double-deleted by the cascade.
+			if (idSet.has(pid)) continue;
+			try { markers.push({ id: pid, x: c.getState_X(), y: c.getState_Y() }); }
+			catch { /* marker without coords */ }
+			continue;
+		}
+		if (type === SCH_SHEET_TYPE) continue;
+		let pins: Array<{ x: number; y: number }> = [];
+		try {
+			const raw = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(pid);
+			pins = (raw ?? []).map(p => ({ x: p.getState_X(), y: p.getState_Y() }));
+		}
+		catch { /* a part whose pins cannot be read contributes none */ }
+		if (idSet.has(pid)) targets.push({ id: pid, pins });
+		else survivorPins.push(...pins);
+	}
+	return planSchDeleteCascadeTrees(targets, wires, markers, survivorPins);
+}
+
 const schematicComponentDelete: Handler = async (payload) => {
 	const primitiveIds = payload.primitiveIds;
 	if (
@@ -1334,10 +1473,26 @@ const schematicComponentDelete: Handler = async (payload) => {
 			'Missing required field "primitiveIds" (string or string[]).',
 		);
 	}
+	const ids = typeof primitiveIds === 'string' ? [primitiveIds] : primitiveIds;
+	// ADR-0004 Decision 5: cascade the part's exclusive stub trees + riding
+	// flags. `cascade:false` opts out (a caller managing whole trees itself —
+	// e.g. the move kernel — must keep the old semantics).
+	const cascade = optionalBoolean(payload, 'cascade') !== false;
+	const warnings: Array<string> = [];
+	let plannedTrees: Array<SchDeleteCascadeTree> = [];
+	if (cascade) {
+		// Plan BEFORE deleting: the target pins vanish with the components.
+		try {
+			plannedTrees = await collectSchDeleteCascadePlan(ids);
+		}
+		catch (err) {
+			warnings.push(warnText('cascade cleanup skipped (could not read the scene before deleting)', err));
+		}
+	}
+
 	// Chunked + verified: the platform's delete silently no-ops on a large batch and
 	// returns true anyway (see SCH_DELETE_BATCH), so neither the call nor its return
 	// value can be trusted — only a re-read can say what actually went away.
-	const ids = typeof primitiveIds === 'string' ? [primitiveIds] : primitiveIds;
 	try {
 		for (let i = 0; i < ids.length; i += SCH_DELETE_BATCH) {
 			await eda.sch_PrimitiveComponent.delete(ids.slice(i, i + SCH_DELETE_BATCH));
@@ -1352,13 +1507,70 @@ const schematicComponentDelete: Handler = async (payload) => {
 		survived = ids.filter(id => alive.has(id));
 	}
 	catch { /* verification is best-effort; fall through reporting what we asked for */ }
+
+	// Execute the cascade — but only for trees whose touching targets are ALL
+	// proven gone: deleting the stubs of a component that survived would
+	// disconnect a live part.
+	let cascaded: { wires: Array<string>; flags: Array<string> } | undefined;
+	const notApplied: Array<{ kind: string; id: string }> = [];
+	if (cascade) {
+		const survivedSet = new Set(survived);
+		const wireIds: Array<string> = [];
+		const flagIds: Array<string> = [];
+		for (const tree of plannedTrees) {
+			if (tree.ownerIds.some(id => survivedSet.has(id))) {
+				warnings.push(`cascade skipped a stub tree (${tree.wireIds.join(', ')}): its component(s) survived the delete`);
+				continue;
+			}
+			wireIds.push(...tree.wireIds);
+			flagIds.push(...tree.flagIds);
+		}
+		if (wireIds.length || flagIds.length) {
+			// The canvas already changed (components are gone) — a cascade failure
+			// must degrade to warnings + notApplied, never throw (#151).
+			try {
+				if (wireIds.length) await deleteSchGroup('wires', wireIds);
+				if (flagIds.length) await deleteSchGroup('components', flagIds);
+			}
+			catch (err) {
+				warnings.push(warnText('cascade delete failed', err));
+			}
+			// Read back: only proven-removed ids are claimed; survivors are
+			// structured notApplied (the platform's delete lies — SCH_DELETE_BATCH).
+			const surviving = await survivingSchPrimitives({ wires: wireIds, components: flagIds });
+			const wiresLeft = new Set(surviving.wires ?? []);
+			const flagsLeft = new Set(surviving.components ?? []);
+			cascaded = {
+				wires: wireIds.filter(id => !wiresLeft.has(id)),
+				flags: flagIds.filter(id => !flagsLeft.has(id)),
+			};
+			notApplied.push(
+				...[...wiresLeft].map(id => ({ kind: 'wire', id })),
+				...[...flagsLeft].map(id => ({ kind: 'flag', id })),
+			);
+			if (notApplied.length) {
+				warnings.push(
+					`cascade cleanup: ${notApplied.length} primitive(s) survived the delete `
+					+ `(${notApplied.map(n => `${n.kind}:${n.id}`).join(', ')}) — re-read before assuming they are gone.`,
+				);
+			}
+		}
+		else {
+			cascaded = { wires: [], flags: [] };
+		}
+	}
+
 	return {
 		result: {
 			deleted: survived.length === 0,
 			requested: ids.length,
 			removed: ids.length - survived.length,
 			...(survived.length ? { survived } : {}),
+			...(cascaded ? { cascaded } : {}),
+			...(notApplied.length ? { partial: true, notApplied } : {}),
+			...(warnings.length ? { warnings } : {}),
 		},
+		...(warnings.length ? { warnings } : {}),
 	};
 };
 

@@ -184,6 +184,10 @@ A sheet bbox is required (verify with 'easyeda sch sheet-geometry').`,
 			if dryRun && apply {
 				return fmt.Errorf("--dry-run and --apply are mutually exclusive")
 			}
+			// ADR-0004 Decision 4: dry-run(默认档)必须纯计算 —— 机械保证。
+			if !apply {
+				defer setDispatchDryRun(true)()
+			}
 			if all && len(designators) > 0 {
 				return fmt.Errorf("--all and --designators are mutually exclusive")
 			}

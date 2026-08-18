@@ -467,6 +467,10 @@ func runAutolayout(cfg *appConfig, window string, spec alSpec, rules autolayoutR
 		if err := validateAutolayoutSpecForApply(spec); err != nil {
 			return err
 		}
+	} else {
+		// ADR-0004 Decision 4: 模板 dry-run(默认)必须纯计算 —— 机械保证,
+		// 任何 Mutates=true 派发直接在 dispatch 层被拒。
+		defer setDispatchDryRun(true)()
 	}
 
 	runCfg, win, targetUUID, err := pinTemplateAutolayoutTarget(cfg, window, spec, apply)

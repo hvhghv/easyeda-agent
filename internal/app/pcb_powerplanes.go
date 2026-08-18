@@ -35,6 +35,10 @@ type ppNet struct {
 // inner layer to 内电层/PLANE after pouring (the verified pour-while-SIGNAL → flip →
 // rebuild recipe; DRC stays clean — see the pcb-inner-plane-fill memory).
 func runPowerPlanes(cfg *appConfig, window string, gndLayer, powerLayer int, gndAsPlane, dryRun bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	// 1. Read the board: pads (grouped by power net), routed tracks, existing vias,
 	//    and the live spacing rule — the stitch planner scores against all of them.
 	pads, err := fetchPcbPads(cfg, window)

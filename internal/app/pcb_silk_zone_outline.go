@@ -462,6 +462,10 @@ func newPcbSilkZoneOutlineCmd(cfg *appConfig, window *string, stdout, stderr io.
 		Example: `  easyeda pcb silk-zone-outline --zone "POWER=U1,U64,C2,C6,C7,C8" --margin 40 --dry-run
   easyeda pcb silk-zone-outline --from-claims --margin 40`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+			if dryRun {
+				defer setDispatchDryRun(true)()
+			}
 			groups, err := parseSilkZoneFlags(zoneFlags)
 			if err != nil {
 				return err

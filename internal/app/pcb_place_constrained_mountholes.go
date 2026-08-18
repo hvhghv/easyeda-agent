@@ -173,6 +173,10 @@ func planMountHoles(board cpRect, corners []string, diaMil, insetMil, clearanceM
 // never force-placed (issue #102: a blind hole landed on C1).
 func runPcbMountHoles(cfg *appConfig, window string, dia, inset, clearance float64,
 	cornersCSV string, dryRun bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	r, err := outlineRect(cfg, window, 0)
 	if err != nil {
 		return fmt.Errorf("mount-holes needs a board outline: %v (run `easyeda pcb outline-fit` or `pcb outline set` first)", err)

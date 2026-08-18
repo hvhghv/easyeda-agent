@@ -160,6 +160,10 @@ func parseGndLayers(spec string) ([]int, error) {
 // runPowerPour is the live orchestrator: read outline + pads, plan the pours, then
 // (unless dry-run) clear same-net pours and create each region, optionally rebuilding.
 func runPowerPour(cfg *appConfig, window, gndLayersSpec, railsMode string, margin, inset float64, replace, rebuild, dryRun bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	switch railsMode {
 	case "pour", "skip":
 	default:

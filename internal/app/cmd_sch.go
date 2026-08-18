@@ -859,6 +859,9 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 				if err != nil {
 					return err
 				}
+				// ADR-0004 Decision 5: when a delete response carries a cascaded
+				// cleanup block (component.delete does; renderer is generic), say so.
+				printCascadeCleanup(res, stderr)
 				// The handler reports a verified count now (#164): primitives that
 				// survived the delete come back as result.partial. Fail the command
 				// rather than let "ok:true" read as "they are gone" — that is exactly
@@ -1052,11 +1055,11 @@ netflag 桩线占用的 x),把所有引脚点当作**点障碍**绕行,画完必
 	// that field has zero extension-API surface — no primitive type, no
 	// getter/setter, not smuggled into OtherProperty either).
 	{
-		var idsRaw, groupRef string
+		var idsRaw, groupRef, groupsRaw string
 		var dx, dy float64
 		c := &cobra.Command{
 			Use:   "group-move",
-			Short: "Translate components+wires together as one rigid assembly (dx,dy) — by --ids or a persistent --group",
+			Short: "Translate components+wires together as one rigid assembly (dx,dy) — by --ids or persistent --group/--groups",
 			Long: `Move a component and its surrounding stub wires/flags together as a single
 unit — internal relative layout is untouched, only the whole assembly shifts by
 (dx,dy). Two ways to name the members:
@@ -1094,24 +1097,35 @@ endpoints (net/color/width/lineType preserved) — a wire's primitiveId CHANGES;
 pull fresh ids before any follow-up mutation on it.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda sch group-move --ids idComp1,idWire1,idWire2 --dx 200 --dy 0
-  easyeda sch group-move --group g1 --dx 100 --dy 0   # members + stubs + flags auto-expanded`,
+  easyeda sch group-move --group g1 --dx 100 --dy 0   # members + stubs + flags auto-expanded
+  easyeda sch group-move --groups g2,g3 --dx 0 --dy -80   # 同块多子组:一次内核调用整体移动`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				if idsRaw != "" && groupRef != "" {
-					return fmt.Errorf("--ids and --group are mutually exclusive")
+				var groupRefs []string
+				if groupRef != "" {
+					groupRefs = append(groupRefs, groupRef)
 				}
-				if idsRaw == "" && groupRef == "" {
-					return fmt.Errorf("pass --ids (primitiveId CSV) or --group <id> (persistent group, `sch group list`)")
+				for _, r := range strings.Split(groupsRaw, ",") {
+					if r = strings.TrimSpace(r); r != "" {
+						groupRefs = append(groupRefs, r)
+					}
+				}
+				if idsRaw != "" && len(groupRefs) > 0 {
+					return fmt.Errorf("--ids and --group/--groups are mutually exclusive")
+				}
+				if idsRaw == "" && len(groupRefs) == 0 {
+					return fmt.Errorf("pass --ids (primitiveId CSV) or --group/--groups (persistent groups, `sch group list`)")
 				}
 				if !cmd.Flags().Changed("dx") && !cmd.Flags().Changed("dy") {
 					return fmt.Errorf("at least one of --dx / --dy is required (a zero-move is a no-op)")
 				}
-				// --group 走「删净 → 平移 → 一遍性重连 → 电气自检」(ADR-0003)。
-				// **不再带着导线一起搬**:平台会合并共享端点的同网导线,逐根删建时
-				// 新桩线会被邻居吞掉 —— 真机可复现,ch340c 块平移一次静默丢 3 个
-				// GND 引脚而命令报告一切正常。--ids 是裸图元模式,调用方自己负责,
-				// 保持原语义。
-				if groupRef != "" {
-					return groupMoveRebuild(cfg, window, groupRef, dx, dy, stdout, stderr)
+				// --group/--groups 走 ADR-0004 安全 move 内核(快照→删证→移动→
+				// 重连→对账,失败自动恢复)。**不再带着导线一起搬**:平台会合并
+				// 共享端点的同网导线,逐根删建时新桩线会被邻居吞掉 —— 真机可复现,
+				// ch340c 块平移一次静默丢 3 个 GND 引脚而命令报告一切正常。
+				// 多组必须一次调用整体移动(逐组 move 会撕裂共享导线,ADR-0004
+				// Decision 2 推论)。--ids 是裸图元模式,调用方自己负责,保持原语义。
+				if len(groupRefs) > 0 {
+					return groupsMoveRebuild(cfg, window, groupRefs, dx, dy, stdout, stderr)
 				}
 				var ids []string
 				{
@@ -1157,6 +1171,7 @@ pull fresh ids before any follow-up mutation on it.`,
 		}
 		c.Flags().StringVar(&idsRaw, "ids", "", "primitiveIds (components and/or wires) to move together — CSV: id1,id2 (mutually exclusive with --group)")
 		c.Flags().StringVar(&groupRef, "group", "", "persistent group id/name (`sch group list`) — members' stub wires + flags are auto-included")
+		c.Flags().StringVar(&groupsRaw, "groups", "", "多个持久组一次整体移动 — CSV: g2,g3(同块多子组必须一次调用,逐组 move 会撕裂共享导线;可与 --group 并用取并集)")
 		c.Flags().Float64Var(&dx, "dx", 0, "X translation (mil)")
 		c.Flags().Float64Var(&dy, "dy", 0, "Y translation (mil)")
 		sch.AddCommand(c)

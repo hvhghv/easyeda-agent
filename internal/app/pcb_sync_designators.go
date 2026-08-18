@@ -148,6 +148,10 @@ func fetchSchematicUniqueIDs(cfg *appConfig, window string) (schDesignators, err
 
 // runSyncDesignators 执行回填。
 func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Writer) (syncDesignatorsResult, error) {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	var rep syncDesignatorsResult
 	rep.DryRun = dryRun
 

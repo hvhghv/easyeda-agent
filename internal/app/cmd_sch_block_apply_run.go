@@ -442,6 +442,10 @@ func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacemen
 			rep.DeleteError = err.Error()
 		} else if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
 			rep.DeleteError = "schematic.component.delete reported deleted=false"
+		} else {
+			// ADR-0004 Decision 5: the connector cascades exclusive stub trees +
+			// riding flags — report the cleanup so it never looks like data loss.
+			printCascadeCleanup(res, os.Stderr)
 		}
 	}
 
@@ -542,6 +546,10 @@ func failBlockApplyAfterPlacement(cfg *appConfig, window string, man *bapManifes
 func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPath string,
 	dryRun, asJSON bool, stdout, stderr io.Writer) error {
 
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	b, ok, err := blocks.Get(blockID)
 	if err != nil {
 		return err

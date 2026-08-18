@@ -52,6 +52,10 @@ func roundedRectPoints(x0, y0, x1, y1, r float64, seg int) [][]float64 {
 // runOutlineRound resolves the rectangle (explicit --rect, else the current outline
 // bbox), expands by margin, rounds the corners, and replaces the outline.
 func runOutlineRound(cfg *appConfig, window, rectSpec string, radius, margin float64, segments int, dryRun bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	var x0, y0, x1, y1 float64
 	if rectSpec != "" {
 		var err error

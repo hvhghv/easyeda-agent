@@ -173,6 +173,8 @@ Precedence: CLI flag > playbook file > built-in default.`,
 				stepDelay:   time.Duration(stepDelay * float64(time.Second)),
 			}
 			if dryRun {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				defer setDispatchDryRun(true)()
 				return r.printPlan()
 			}
 			if resume {

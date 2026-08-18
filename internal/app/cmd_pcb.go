@@ -1671,6 +1671,10 @@ clears existing pours on the same net so you don't stack them.`,
 			Example: `  easyeda pcb pour-fit --project ceshi --net GND --layer 1
   easyeda pcb pour-fit --net GND --layer 1 --inset 25 --dry-run`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				// Inset defaults to the board's copper-to-edge rule (JLCPCB fab floor
 				// ~8mil; ceshi live ~10mil) instead of a fixed 20 — the real
 				// Board-Outline-to-Copper clearance. --inset still overrides. (#32)
@@ -1765,6 +1769,10 @@ matches same-net pours. --dry-run lists what would be deleted without deleting.`
 			Example: `  easyeda pcb pour-clean --netless
   easyeda pcb pour-clean --netless --dry-run`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				if !netless {
 					return fmt.Errorf("pass --netless to select which pours to clean (only netless is supported today)")
 				}
@@ -1826,6 +1834,10 @@ fit early. --dry-run previews the computed frame.`,
 			Example: `  easyeda pcb outline-fit --project ceshi --margin 100
   easyeda pcb outline-fit --dry-run`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				res, err := requestAction(cfg, "pcb.components.list", window, map[string]any{"includeBBox": true})
 				if err != nil {
 					return err
@@ -1913,6 +1925,10 @@ onto the new vias.`,
 			Example: `  easyeda pcb via-stitch --net GND --rect "2300,-1750,2500,-1550" --pitch 40
   easyeda pcb via-stitch --net GND --rect "0,-2600,3100,-400" --pitch 200 --dry-run`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				var x0, y0, x1, y1 float64
 				if n, err := fmt.Sscanf(rectCSV, "%g,%g,%g,%g", &x0, &y0, &x1, &y1); err != nil || n != 4 {
 					return fmt.Errorf("--rect must be \"x0,y0,x1,y1\" (mil), got %q", rectCSV)
@@ -2235,6 +2251,10 @@ This is a SEED, not a final layout — verify with 'pcb drc'.
   easyeda pcb auto-place --project ceshi             # apply it`,
 			Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				// 1. Read placed components with pads (net surface) + rendered bbox.
 				res, err := requestAction(cfg, "pcb.components.list", window,
 					map[string]any{"includePads": true, "includeBBox": true})
@@ -2360,6 +2380,10 @@ A SEED — verify with 'pcb layout-lint'. --dry-run prints the plan.
   easyeda pcb place-constrained --project X`,
 			Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				res, err := requestAction(cfg, "pcb.components.list", window,
 					map[string]any{"includePads": true, "includeBBox": true})
 				if err != nil {
@@ -2502,6 +2526,10 @@ placement; re-run 'pcb check' to confirm the antenna-keepout warning clears.
   easyeda pcb antenna-keepout --project X`,
 			Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				res, err := requestAction(cfg, "pcb.components.list", window,
 					map[string]any{"includeBBox": true, "includePads": true})
 				if err != nil {
@@ -2682,6 +2710,10 @@ emits a chord-approximated fillet (native arcs do not commit on this build).
   easyeda pcb route-short --project ceshi --width-power 25     # fatter power tracks`,
 			Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				// 0. Routability gate (issue #97): drawing tracks requires an
 				// outline_confirmed + pre_route_passed project state; --dry-run only
 				// prints the plan (no mutation) so it bypasses the gate. --force
@@ -3812,6 +3844,10 @@ After a real import, follow reload → pcb.silk.list / pcb check → pcb save.`,
   easyeda pcb silk-import-svg --file ./logo.svg --at "1000,-1000" --width 600 --keep-aspect
   easyeda pcb silk-import-svg --file ./logo.svg --x 1000 --y -1000 --width 400 --layer 4`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证。
+				if dryRun {
+					defer setDispatchDryRun(true)()
+				}
 				if file == "" && svgStr == "" {
 					return fmt.Errorf("provide --file <path> or --svg <string>")
 				}

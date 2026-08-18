@@ -19,6 +19,20 @@ follow [SemVer](https://semver.org/).
   已变(部分字段落地)返回 ok + 结构化 `notApplied`,**零字段落地才报 ERROR**。
 
 ### Added
+- **`schematic.component.delete` 级联清理(ADR-0004 Decision 5)**:删件后自动
+  找出**只**挂在被删件 pin 上的桩线树(union-find 共点归树 + 点到线段锚定,与
+  bridge-check 同一套判定)以及挂在这些树上的 netflag/netport/netlabel,一并
+  删除并回读证实。树若还触及任何**存活**器件的 pin 即视为共享,绝不删;被删件
+  自身残留(删除撒谎)时其树也整体跳过。结果新增
+  `cascaded: {wires:[ids], flags:[ids]}`(只列**回读证明已删**的 id);级联删除
+  撒谎的存活 id 按 #151 部分应用约定计入 `notApplied`(ok 保持 true + warning)。
+  根治「删件残留桩线/旗被后放件静默继承网名」的幽灵连接(v1.0.1 的 orphan-tree
+  判据只能事后抓,现在事前防)。CLI 渲染点(prim-delete / block-apply 回滚)
+  带一行「级联清理 N 桩线 M 旗」。
+- **`schematic.component.delete` 新 payload 字段 `cascade:false`(退路)**:保持
+  旧行为(只删组件本体,不碰桩线/旗)——自己管整树删除的调用方(如 ADR-0004
+  的 move 内核)必须传它,避免级联与内核的整树管理相互踩踏。默认 `cascade:true`。
+
 - **`pcb.component.lock` — 批量组件锁定/解锁(#174)**:输入 `primitiveIds[]` +
   `locked`,走专用 `setState_PrimitiveLock` + `done()` 写路径,写后新鲜回读逐件
   核对;结果 `applied`/`alreadyInState`/`notApplied`/`missing` + `verified`。

@@ -305,6 +305,10 @@ overlap among the moved parts.`,
 		Example: `  easyeda sch align --designators C1,C2,C3 --mode centerx --project ceshi
   easyeda sch align --designators U1,C1 --mode top --ref U1 --apply`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ADR-0004 Decision 4: dry-run(默认档)必须纯计算 —— 机械保证。
+			if !apply {
+				defer setDispatchDryRun(true)()
+			}
 			selected := splitDesignators(designators)
 			if err := guardSchGroupIntegrity(cfg, *window, selected, breakGroup, stderr); err != nil {
 				return err
@@ -357,6 +361,10 @@ overlap among the moved parts.`,
 		Example: `  easyeda sch distribute --designators C1,C2,C3,C4 --axis x --project ceshi
   easyeda sch distribute --designators C1,C2,C3 --axis y --gap 20 --apply`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ADR-0004 Decision 4: dry-run(默认档)必须纯计算 —— 机械保证。
+			if !apply {
+				defer setDispatchDryRun(true)()
+			}
 			selected := splitDesignators(designators)
 			if err := guardSchGroupIntegrity(cfg, *window, selected, breakGroup, stderr); err != nil {
 				return err

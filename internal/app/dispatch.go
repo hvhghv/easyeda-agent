@@ -560,6 +560,86 @@ func ensureActiveDoc(cfg *appConfig, window string) error {
 	return fmt.Errorf("--doc %q: could not confirm it is the active page after retries — refusing to run a mutating action on the wrong page", cfg.doc)
 }
 
+// printCascadeCleanup surfaces a delete response's cascaded cleanup (ADR-0004
+// Decision 5: component delete removes its exclusive stub trees + riding flags)
+// as one human-readable stderr line. No-op when the response has no cascaded
+// block — safe to wire into any delete renderer.
+func printCascadeCleanup(res *actionResult, stderr io.Writer) {
+	if res == nil || res.Result == nil || stderr == nil {
+		return
+	}
+	c, ok := res.Result["cascaded"].(map[string]any)
+	if !ok {
+		return
+	}
+	count := func(key string) int {
+		arr, ok := c[key].([]any)
+		if !ok {
+			return 0
+		}
+		return len(arr)
+	}
+	wires, flags := count("wires"), count("flags")
+	if wires == 0 && flags == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "级联清理 %d 桩线 %d 旗\n", wires, flags)
+}
+
+// ── dry-run 纯计算铁律 (ADR-0004 Decision 4) ─────────────────────────────────
+//
+// `--dry-run`(或默认 dry-run)的路径必须是纯计算:可以读,但绝不允许发出任何
+// Mutates=true 的 action。#181 实证「靠自觉」不成立(有 dry-run 真落件的路径),
+// 所以在 CLI 派发层机械保证:标志开启期间,postAction 对 mutating action 直接
+// 拒绝——想在 dry-run 里偷偷落件的新代码第一次跑就炸,而不是让用户在画布上
+// 发现幽灵件。
+
+var (
+	dispatchDryRunMu sync.Mutex
+	dispatchDryRunOn bool
+)
+
+// setDispatchDryRun switches the process-wide dry-run purity guard and returns
+// the restore func. Idiomatic wiring at the top of a dry-run branch:
+//
+//	if dryRun {
+//		defer setDispatchDryRun(true)()
+//	}
+//
+// Restore semantics (save previous value) make nested wiring safe — e.g.
+// route-critical --dry-run calling runPowerPlanes(dryRun=true).
+func setDispatchDryRun(on bool) (restore func()) {
+	dispatchDryRunMu.Lock()
+	prev := dispatchDryRunOn
+	dispatchDryRunOn = on
+	dispatchDryRunMu.Unlock()
+	return func() {
+		dispatchDryRunMu.Lock()
+		dispatchDryRunOn = prev
+		dispatchDryRunMu.Unlock()
+	}
+}
+
+// dispatchDryRunActive reports whether the dry-run purity guard is set.
+func dispatchDryRunActive() bool {
+	dispatchDryRunMu.Lock()
+	defer dispatchDryRunMu.Unlock()
+	return dispatchDryRunOn
+}
+
+// dryRunGuard rejects a Mutates=true action while the dry-run purity flag is
+// set. Reads pass through untouched. NOTE: debug.exec_js is catalogued
+// Mutates=true, so an exec_js READ inside a guarded dry-run branch is rejected
+// too — best-effort probes (e.g. warnSchGroupsPresent) degrade gracefully;
+// hard-required exec_js reads mean that dry-run path cannot be wired until the
+// read is a typed action (runOfficialAutolayout is the known case).
+func dryRunGuard(action string) error {
+	if !dispatchDryRunActive() || !actionMutates(action) {
+		return nil
+	}
+	return fmt.Errorf("dry-run 模式禁止 mutating action %q —— dry-run 必须纯计算不落画布;这是 bug,请报 issue (ADR-0004 Decision 4)", action)
+}
+
 // artifactOutputDir resolves the outputDir sent with every action request (the
 // directory the daemon roots its .easyeda/artifacts tree under). Thin os.Getwd
 // wrapper around the pure, unit-tested resolveOutputDir.
@@ -628,6 +708,13 @@ func stripArtifactNesting(p string) string {
 // postAction is the shared HTTP core: find a live daemon, POST the typed action,
 // and return the raw response body.
 func postAction(cfg *appConfig, action, window string, payload any, timeout time.Duration) ([]byte, error) {
+	// dry-run 纯计算铁律 (ADR-0004 Decision 4): while the process-wide dry-run
+	// flag is set, a Mutates=true action is refused HERE — before any network
+	// traffic — so no dry-run path can ever write the canvas.
+	if err := dryRunGuard(action); err != nil {
+		return nil, err
+	}
+
 	// --doc guard: pin the action (mutating OR read — see docGuardApplies) to
 	// the requested page first. Skipped for the guard's own navigation actions
 	// (docGuardExempt) so it never recurses.

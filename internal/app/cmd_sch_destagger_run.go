@@ -4,19 +4,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/spf13/cobra"
 )
 
-// ── sch destagger 落地侧(issue #171)────────────────────────────────────────
+// ── sch destagger 落地侧(issue #171 → ADR-0004 解禁)───────────────────────
 //
-// 规划在 cmd_sch_destagger.go(纯函数)。这里只负责三件事:拉数据 → 按计划做
-// disconnect+connect 手术 → **用真实 `sch check` 复验,电气项一恶化就整批回滚**。
+// 规划在 cmd_sch_destagger.go(纯函数)。执行只准调 ADR-0004 单一安全 move
+// 内核(schMoveKernel):宿主器件不动(HasTarget=false),内核把宿主的桩线/旗
+// **整树删净(删证回读)**后按显式端子(新方向/桩长)+ 快照 autoconnect 重建,
+// 再做网表逐 pin 对账 + bridge 增量检查,失败自动恢复。
 //
-// 为什么复验必须用真机 check 而不是自己算:规划器的 bbox 是**预测**(平台不给
-// "某方向下的 bbox"),而真正的判据是平台渲染出来的几何 + 连接器重建的网表。
-// 2026-08-12 那次手动修复正是栽在没复验——改到第三轮才发现中途引入了一条
-// multi-net-wire 短路(两支旗的旧桩线端点重叠,共用了一条线树)。
+// 它当年三次三败、被禁用的根因正是**没有安全执行层**:逐根 disconnect 删桩线
+// 会让 EasyEDA 把相邻共线导线自动合并 → 串网,新桩线被邻居吞掉,连回滚都拆
+// 不动(marker-move-breaks-on-wire-merge 定案)。整树删净 → 器件身上没有任何
+// 导线 → 重建零合并风险,这正是内核的第 2/3 步;合并短路即便发生也会被内核
+// 对账的 bridge 增量当场抓住。
+//
+// 复验仍用真实 `sch check` 电气快照(规划器的 bbox 是预测,真正判据是平台
+// 渲染的几何+网表):电气项恶化 → 用内核按**原**方向/桩长再跑一遍还原,如实
+// 上报;2026-08-12 那次手动修复正是栽在没复验。
 
 // destaggerElectrical 是复验用的**电气项**快照。几何项(marker-overlap 等)故意
 // 不在内:那正是本命令要改的东西,把它算进"恶化"会自锁。
@@ -104,14 +112,6 @@ func fetchDestaggerElectrical(cfg *appConfig, window string, comps []layoutComp,
 	return e, nil
 }
 
-// destaggerAppliedMove 记一次已落地的搬迁,供回滚用。
-type destaggerAppliedMove struct {
-	Plan     destaggerMove
-	NewFlag  string // connect_pin 回的 flagPrimitiveId(回滚时删它)
-	NewWire  string
-	Rollback bool // 回滚是否成功
-}
-
 // destaggerRunReport 是命令的 JSON 输出。
 type destaggerRunReport struct {
 	Applied     bool                 `json:"applied"`
@@ -153,27 +153,6 @@ func runSchDestagger(cfg *appConfig, window string, apply bool, maxRounds, maxMo
 		return emitDestaggerJSON(stdout, asJSON, rep)
 	}
 
-	// ⚠ --apply 在真机上**三次三败**(2026-08-13 ceshi,CH340C + 自动下载两块的
-	// 6 条 marker-overlap):整批落地 → multiNetWires 0→2;加导线护栏后 → 0→1;
-	// 降到一次只搬一个 → 仍然 0→1,且 disconnect 拆不动新旗、强删被平台拒
-	// (#164 删除撒谎),每次都留下 PARTIAL STATE。
-	//
-	// 根因不在候选打分,而在**这条技术路线本身**:挪一支旗要先 disconnect(删旗+
-	// 桩线),而删掉一根桩线会让 EasyEDA 把它原本分隔开的相邻共线导线**自动合并**
-	// 成一棵树 —— 两个网当场串上;新桩线又可能被邻居吞掉,于是连回滚都拆不动。
-	// 正解是复用 `sch autoconnect` 的整体重连(它有成熟的落点评分与 hard-reject),
-	// 而不是自己算 direction/offset 做逐个手术 —— 那是一次重构,不是调参。
-	//
-	// 在那之前**不许武装 --apply**:留着它就是留一个会弄脏板子的命令。dry-run
-	// 的规划仍然有价值(看哪儿撞了、该往哪挪),照常可用。
-	if apply {
-		return fmt.Errorf("`--apply` 暂不可用 —— 真机三次验证三次留下 PARTIAL STATE(见 issue #171)。\n" +
-			"  挪旗要先 disconnect 删掉桩线,而删桩线会让 EasyEDA 把它原本分隔的相邻共线导线自动合并 → 当场串网\n" +
-			"  (实测 multiNetWires 0→1),新桩线又会被邻居吞掉,导致连回滚都拆不动(#164 删除撒谎)。\n" +
-			"  正解是改走 `sch autoconnect` 的整体重连,属于重构,尚未完成。\n" +
-			"  现在请用 dry-run 看计划,再按计划手工 `sch disconnect` + `sch connect` 逐个改,每改一个跑 `sch check` 复验")
-	}
-
 	before, err := fetchDestaggerElectrical(cfg, window, comps, eps)
 	if err != nil {
 		return fmt.Errorf("电气基线读取失败(没有基线就没法判断改坏没改坏,拒绝落地): %w", err)
@@ -192,26 +171,23 @@ func runSchDestagger(cfg *appConfig, window string, apply bool, maxRounds, maxMo
 			}
 		}
 		rep.Rounds = round
-		// **一轮只落地 maxMoves 个搬迁(默认 1)**。EasyEDA 会把相接的共线导线自动
-		// 合并,所以每做完一次 disconnect+connect,页面的线结构就变了 —— 同一批里
-		// 后续搬迁的候选位置是拿**动手前的快照**算的,已经过时:实测整批 5 个一起
-		// 落地会撞出 multiNetWires 0→1、且中途 disconnect 拆不动导致回滚不干净。
-		// 逐个落地 + 逐个复验虽然慢(每步一次 check),但每步都在最新几何上重新规划,
-		// 出事时也只需回滚一个。要冒险整批走,显式 --max-moves 0。
+		// **一轮只落地 maxMoves 个搬迁(默认 1)**:每轮都在最新几何上重新规划,
+		// 同批后续搬迁不会拿过时快照算候选。要整批走,显式 --max-moves 0
+		// (内核的删证/对账/恢复对整批同样生效)。
 		batch := plan.Moves
 		if maxMoves > 0 && len(batch) > maxMoves {
 			batch = batch[:maxMoves]
 		}
 		fmt.Fprintf(stderr, "round %d: %s(本轮落地 %d 个)\n", round, destaggerPlanSummary(plan), len(batch))
 
-		applied, aerr := applyDestaggerMoves(cfg, window, batch, stderr)
-		rep.Moved = append(rep.Moved, movesOf(applied)...)
-		if aerr != nil {
-			rep.RollbackSurvivors = rollbackDestagger(cfg, window, applied, before, eps, stderr)
-			rep.RolledBack = true
+		// 执行只准调内核(ADR-0004 解禁前提):宿主不动,整树删净后按新方向/
+		// 桩长显式重建,宿主其余 pin 按快照 autoconnect 连回,对账兜底。
+		if kerr := destaggerKernelRound(cfg, window, comps, batch, false, stdout, stderr); kerr != nil {
+			rep.Regressions = append(rep.Regressions, kerr.Error())
 			_ = emitDestaggerJSON(stdout, asJSON, rep)
-			return fmt.Errorf("搬迁中断,%s: %w", rollbackVerdict(rep.RollbackSurvivors), aerr)
+			return fmt.Errorf("destagger 内核执行失败(内核已按快照自动恢复,详见错误):%w", kerr)
 		}
+		rep.Moved = append(rep.Moved, batch...)
 
 		compsAfter, _, ferr := fetchDestaggerGeometry(cfg, window)
 		if ferr != nil {
@@ -219,19 +195,22 @@ func runSchDestagger(cfg *appConfig, window string, apply bool, maxRounds, maxMo
 		}
 		after, cerr := fetchDestaggerElectrical(cfg, window, compsAfter, eps)
 		if cerr != nil {
-			rep.RollbackSurvivors = rollbackDestagger(cfg, window, applied, before, eps, stderr)
-			rep.RolledBack = true
 			_ = emitDestaggerJSON(stdout, asJSON, rep)
-			return fmt.Errorf("复验失败(无法确认电气未被改坏),%s: %w", rollbackVerdict(rep.RollbackSurvivors), cerr)
+			return fmt.Errorf("复验失败(无法确认电气未被改坏;内核对账已过,几何复验请手工 `sch check`): %w", cerr)
 		}
 		if regs := before.regressions(after); len(regs) > 0 {
-			rep.RollbackSurvivors = rollbackDestagger(cfg, window, applied, before, eps, stderr)
-			rep.RolledBack = true
+			// 电气项恶化:用内核按**原**方向/桩长再跑一遍还原(同一条安全路径,
+			// 不是当年拆不动的逐根 disconnect)。
 			rep.Regressions = regs
 			rep.After = &after
+			rep.RolledBack = true
+			if rerr := destaggerKernelRound(cfg, window, compsAfter, batch, true, stdout, stderr); rerr != nil {
+				rep.RollbackSurvivors = append(rep.RollbackSurvivors, rerr.Error())
+				_ = emitDestaggerJSON(stdout, asJSON, rep)
+				return fmt.Errorf("电气项恶化(%v)且还原也失败 —— PARTIAL STATE,`sch check`/`sch bridge-check` 人工收拾:%w", regs, rerr)
+			}
 			_ = emitDestaggerJSON(stdout, asJSON, rep)
-			return fmt.Errorf("电气项恶化(%v),回滚了本轮 %d 个搬迁 —— %s",
-				regs, len(applied), rollbackVerdict(rep.RollbackSurvivors))
+			return fmt.Errorf("电气项恶化(%v),已用内核按原方向/桩长还原本轮 %d 个搬迁(内核对账绿)", regs, len(batch))
 		}
 		rep.After = &after
 		rep.OverlapsAfter = after.MarkerOverlaps
@@ -252,9 +231,78 @@ func runSchDestagger(cfg *appConfig, window string, apply bool, maxRounds, maxMo
 	return emitDestaggerJSON(stdout, asJSON, rep)
 }
 
-// fetchDestaggerGeometry 拉一次判定所需的全部几何:带 bbox 的图元表 + 线。
+// destaggerKernelRound 把一批 marker 搬迁折成**一次内核调用**(ADR-0004):
+// 按宿主件归组,宿主 HasTarget=false(器件在原位也能连回是内核契约),被搬
+// marker 用显式端子重建(restore=false 用新方向/桩长,true 用原方向/桩长 ——
+// 还原走同一条安全路径,不是当年拆不动的逐根 disconnect),宿主其余被清扫的
+// pin 由内核按快照 autoconnect 连回,网表逐 pin 对账 + bridge 增量兜底。
+func destaggerKernelRound(cfg *appConfig, window string, comps []layoutComp, batch []destaggerMove, restore bool, stdout, stderr io.Writer) error {
+	type hostTerm struct {
+		pin string
+		m   destaggerMove
+	}
+	byHost := map[string][]hostTerm{}
+	var order []string
+	for _, m := range batch {
+		desig, pin, ok := destaggerHostPin(comps, m.HostX, m.HostY)
+		if !ok {
+			return fmt.Errorf("找不到 (%g,%g) 上的宿主 pin(%s %s)—— 场景已变,重跑规划", m.HostX, m.HostY, m.Net, m.ComponentType)
+		}
+		if _, seen := byHost[desig]; !seen {
+			order = append(order, desig)
+		}
+		byHost[desig] = append(byHost[desig], hostTerm{pin: pin, m: m})
+	}
+	items := make([]moveItem, 0, len(order))
+	for _, d := range order {
+		terms := byHost[d]
+		items = append(items, moveItem{
+			Designator: d, // HasTarget=false:宿主一动不动,只重排它的 marker
+			Terms: func(pins []layoutPin) ([]moveConnTerm, error) {
+				out := make([]moveConnTerm, 0, len(terms))
+				for _, ht := range terms {
+					dir, off := ht.m.ToDir, ht.m.ToOffset
+					if restore {
+						dir, off = ht.m.FromDir, ht.m.FromOffset
+					}
+					rot, rerr := tidyLabelRotation(ht.m.Kind, dir)
+					if rerr != nil {
+						return nil, fmt.Errorf("%s(%s)方向 %s 无 rotation 校准:%w", ht.m.Net, ht.m.Kind, dir, rerr)
+					}
+					out = append(out, moveConnTerm{Pin: ht.pin, Kind: ht.m.Kind, Net: ht.m.Net,
+						Direction: dir, Rotation: rot, Offset: off})
+				}
+				return out, nil
+			},
+		})
+	}
+	label := "destagger"
+	if restore {
+		label = "destagger-restore"
+	}
+	_, err := schMoveKernel(cfg, window, "", items, moveKernelOpts{Label: label, Stdout: stdout, Stderr: stderr})
+	return err
+}
+
+// destaggerHostPin 按坐标找 (x,y) 上的宿主器件 pin(位号 + pin 号)。
+func destaggerHostPin(comps []layoutComp, x, y float64) (desig, pin string, ok bool) {
+	for _, c := range comps {
+		if c.ComponentType != "" && c.ComponentType != schLayoutPartType {
+			continue
+		}
+		for _, p := range c.Pins {
+			if math.Abs(p.X-x) <= schGroupEps && math.Abs(p.Y-y) <= schGroupEps {
+				return c.Designator, p.Number, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// fetchDestaggerGeometry 拉一次判定所需的全部几何:带 bbox+pins 的图元表 + 线
+// (pins 供宿主 pin 反查,内核端子重建要按位号:pin 号点名)。
 func fetchDestaggerGeometry(cfg *appConfig, window string) ([]layoutComp, []schGroupWire, error) {
-	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
+	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true, "includePins": true})
 	if err != nil {
 		return nil, nil, fmt.Errorf("components.list 失败: %w", err)
 	}
@@ -267,144 +315,6 @@ func fetchDestaggerGeometry(cfg *appConfig, window string) ([]layoutComp, []schG
 		return nil, nil, fmt.Errorf("导线读取失败(没有桩线几何就无法安全搬迁): %w", werr)
 	}
 	return comps, wires, nil
-}
-
-// applyDestaggerMoves 逐个执行 disconnect → connect_pin。任何一步失败即返回
-// 已完成的部分,由调用方回滚(部分应用绝不静默留在画布上)。
-func applyDestaggerMoves(cfg *appConfig, window string, moves []destaggerMove, stderr io.Writer) ([]destaggerAppliedMove, error) {
-	var applied []destaggerAppliedMove
-	for _, m := range moves {
-		if _, err := requestAction(cfg, "schematic.pin.disconnect", window, map[string]any{
-			"flagPrimitiveId": m.FlagID,
-		}); err != nil {
-			return applied, fmt.Errorf("拆除 %s(%s)失败: %w", m.FlagID, m.Net, err)
-		}
-		res, err := requestAction(cfg, "schematic.power.connect_pin", window, map[string]any{
-			"pinX":      m.HostX,
-			"pinY":      m.HostY,
-			"kind":      m.Kind,
-			"net":       m.Net,
-			"direction": m.ToDir,
-			"offset":    m.ToOffset,
-		})
-		if err != nil {
-			// 旧的已删、新的没建 —— 这个 marker 现在是缺的。交给回滚补回原位。
-			applied = append(applied, destaggerAppliedMove{Plan: m})
-			return applied, fmt.Errorf("在 %s 新位置重连 %s 失败: %w", m.Net, m.ToDir, err)
-		}
-		a := destaggerAppliedMove{Plan: m}
-		a.NewFlag, _ = res.Result["flagPrimitiveId"].(string)
-		a.NewWire, _ = res.Result["wirePrimitiveId"].(string)
-		applied = append(applied, a)
-		fmt.Fprintf(stderr, "  %s(%s) %s→%s offset %.0f→%.0f\n",
-			m.Net, m.ComponentType, m.FromDir, m.ToDir, m.FromOffset, m.ToOffset)
-	}
-	return applied, nil
-}
-
-// rollbackDestagger 逆序把每个搬迁还原:删掉新旗+新桩,再按**原**方向/桩长
-// 重连。宿主端从未动过,所以**理想情况下**还原即回到动手前的拓扑与几何。
-//
-// ⚠ 但回滚**会失败**,实测就是会(2026-08-13 ceshi):EasyEDA 把相接的共线导线
-// **自动合并**,新桩线一旦被吞进邻居线树,这支旗就不再"拥有"一根可拆的桩线,
-// `disconnect --flag-id` 报 "No stub wire found on the target pin"。所以除了
-// disconnect 还有一条强删退路,并且**回滚结果必须回读验证后如实上报** ——
-// 绝不能无条件打印"页面回到动手前状态"(那是本项目最忌讳的假成功)。
-func rollbackDestagger(cfg *appConfig, window string, applied []destaggerAppliedMove, baseline destaggerElectrical, eps float64, stderr io.Writer) []string {
-	for i := len(applied) - 1; i >= 0; i-- {
-		a := applied[i]
-		if a.NewFlag != "" {
-			if _, err := requestAction(cfg, "schematic.pin.disconnect", window, map[string]any{
-				"flagPrimitiveId": a.NewFlag,
-			}); err != nil {
-				fmt.Fprintf(stderr, "  回滚:拆除新建 %s 失败: %v\n", a.NewFlag, err)
-				// 退路:直接按图元删旗(+桩线)。disconnect 拆不动多半是桩线被合并
-				// 进了邻居线树 —— 那根线不能动,但这支旗必须删掉,否则它会和待会儿
-				// 重连出来的原旗一起留在页面上变成 redundant-net-marker。
-				ids := []string{a.NewFlag}
-				if a.NewWire != "" {
-					ids = append(ids, a.NewWire)
-				}
-				if _, derr := requestAction(cfg, "schematic.primitives.delete", window, map[string]any{
-					"primitiveIds": ids,
-				}); derr != nil {
-					fmt.Fprintf(stderr, "  回滚:强删 %v 也失败: %v\n", ids, derr)
-				}
-			}
-		}
-		if _, err := requestAction(cfg, "schematic.power.connect_pin", window, map[string]any{
-			"pinX":      a.Plan.HostX,
-			"pinY":      a.Plan.HostY,
-			"kind":      a.Plan.Kind,
-			"net":       a.Plan.Net,
-			"direction": a.Plan.FromDir,
-			"offset":    a.Plan.FromOffset,
-		}); err != nil {
-			fmt.Fprintf(stderr, "  回滚:还原 %s 到 %s/%.0f 失败: %v\n",
-				a.Plan.Net, a.Plan.FromDir, a.Plan.FromOffset, err)
-			continue
-		}
-		fmt.Fprintf(stderr, "  回滚:%s 还原到 %s/%.0f\n", a.Plan.Net, a.Plan.FromDir, a.Plan.FromOffset)
-	}
-	return verifyRollback(cfg, window, applied, baseline, eps, stderr)
-}
-
-// verifyRollback 判断回滚到底干不干净。
-//
-// **判据必须是电气快照,不能只看"新旗 id 还在不在"**(2026-08-13 真机教训:只查
-// id 存活时回读说"页面复原",实际留下 2 个 orphan-flag + 2 个悬空脚 —— 强删旗后
-// 它那根桩线已被合并进邻居线树、id 变了,既删不掉也查不到)。这里拿回滚后的电气
-// 快照与**动手前的基线**逐项比对:完全一致才算复原。
-func verifyRollback(cfg *appConfig, window string, applied []destaggerAppliedMove, baseline destaggerElectrical, eps float64, stderr io.Writer) []string {
-	var survived []string
-	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
-	if err == nil {
-		if comps, perr := parseLayoutComps(res.Result); perr == nil {
-			live := map[string]bool{}
-			for _, c := range comps {
-				live[c.ID] = true
-			}
-			for _, a := range applied {
-				if a.NewFlag != "" && live[a.NewFlag] {
-					survived = append(survived, a.NewFlag)
-				}
-			}
-			if after, cerr := fetchDestaggerElectrical(cfg, window, comps, eps); cerr == nil {
-				if d := baseline.diff(after); len(d) > 0 {
-					fmt.Fprintf(stderr, "  回滚:电气快照与动手前不一致(%v)\n", d)
-					survived = append(survived, d...)
-				}
-				return survived
-			}
-		}
-	}
-	fmt.Fprintf(stderr, "  回滚:无法回读确认——请手工检查\n")
-	for _, a := range applied {
-		if a.NewFlag != "" {
-			survived = append(survived, a.NewFlag)
-		}
-	}
-	return survived
-}
-
-// rollbackVerdict 把回滚的**验证结果**翻成一句不含糊的话。
-func rollbackVerdict(survivors []string) string {
-	if len(survivors) == 0 {
-		return "已回滚,回读确认页面与动手前一致"
-	}
-	return fmt.Sprintf("回滚不完全 —— PARTIAL STATE(%v):页面既不是动手前也不是搬迁后的样子,"+
-		"请人工检查(sch check / sch bridge-check 看 multi-net-wire / orphan-flag / "+
-		"redundant-net-marker,必要时 sch prim-delete 清残留)", survivors)
-}
-
-func movesOf(applied []destaggerAppliedMove) []destaggerMove {
-	out := make([]destaggerMove, 0, len(applied))
-	for _, a := range applied {
-		if a.NewFlag != "" {
-			out = append(out, a.Plan)
-		}
-	}
-	return out
 }
 
 func renderDestaggerPlan(w io.Writer, p destaggerPlan) {
@@ -446,14 +356,16 @@ func newSchDestaggerCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 
   1. 只搬**两点直线短桩**上的 marker;挂在多段折线/网络主干上的一律跳过
      (not-a-stub / stub-too-long / diagonal-stub,每个跳过都带原因);
-  2. **带桩线一起挪**:disconnect(旗+桩一起删)→ connect_pin(按新方向/桩长重
-     拉),宿主端(pin 侧)坐标一字不动,电气拓扑天然不变;
+  2. **执行走 ADR-0004 单一安全 move 内核**:宿主器件一动不动,内核把它的
+     桩线/旗整树删净(分批+回读证实,防平台删除撒谎)后按新方向/桩长重建,
+     宿主其余 pin 按快照重连 —— 逐根删桩触发的相邻导线自动合并串网(当年
+     三次三败禁用本命令的根因)在整树语义下不存在;
   3. 桩长候选是**量出来的**(跟着该旗文字带尺寸递增)并吸附 5 单位连接网格,
      不是拍脑袋常量;方向按「电上地下」偏好序分配,rotation 走与
      reversed-net-flag 判据同一张真值表;
-  4. --apply 每轮落地后自动跑真实 ` + "`sch check`" + ` 复验:floating pin /
-     dangling wire / net-marker mismatch / multi-net-wire 等电气项**任何一项
-     变差就整批回滚**,页面回到动手前状态并非零退出。
+  4. 内核每轮对账(网表逐 pin 与快照一致 + bridge 增量为零),外加真实
+     ` + "`sch check`" + ` 复验:电气项**任何一项变差**就用内核按原方向/桩长
+     还原本轮,非零退出;还原结果如实上报,绝不无条件宣称"页面已复原"。
 
 挤不下时**宁可不动**(记 no-free-slot),不硬塞一个还撞的位置。
 单页作用域(桩线只能从激活页读)——跨页请逐页 ` + "`doc switch`" + ` 后各跑一次。`,

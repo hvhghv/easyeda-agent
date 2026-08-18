@@ -1376,6 +1376,10 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 			if apply && dryRun {
 				return fmt.Errorf("--dry-run and --apply are mutually exclusive")
 			}
+			// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接**
+			// setDispatchDryRun:tidyReadScene 硬依赖 fetchSchWirePolylinesStable
+			// (debug.exec_js 读通道,catalog 上 Mutates=true),接了会把 dry-run
+			// 规划直接打死。等导线读升格为 typed action 后再接。
 			if hGap < 0 || vGap < 0 {
 				return fmt.Errorf("--h-gap / --v-gap must be ≥ 0")
 			}

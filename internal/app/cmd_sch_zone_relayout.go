@@ -164,6 +164,10 @@ func relayoutVerticalizeSignal(m tidyLiveMember) (tidyMemberPlan, bool) {
 }
 
 func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接** setDispatchDryRun:
+	// 规划段 tidyReadScene 硬依赖 fetchSchWirePolylinesStable(debug.exec_js 读通道,
+	// catalog 上 Mutates=true),接了会把 dry-run 规划直接打死。等导线读升格为
+	// typed action 后再接。
 	pinned, win, docUUID, err := pinZonePage(cfg, window)
 	if err != nil {
 		return err
@@ -321,7 +325,7 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 		fmt.Fprintln(stdout, "dry-run(默认):未改画布 —— 加 --apply 落地(sweep → 落位 → 一遍性重连)")
 		return nil
 	}
-	if err := tidyApply(pinned, win, docUUID, plan, members, comps, stdout, stderr); err != nil {
+	if err := tidyApply(pinned, win, docUUID, plan, members, stdout, stderr); err != nil {
 		return err
 	}
 	// 串联链落地:sweep 链树(成员=链件)→ 共线横放 → 端标 + 直线。

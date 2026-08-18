@@ -29,7 +29,9 @@ package app
 //   - 出 sheet / 压图签 keepout(titleBlockKeepout)→ 硬拒,--force 也不放行;
 //   - 与其它区认领件的 union bbox 相交 → 警告,--force 放行(压他区 layout-lint 会红)。
 //
-// 移动执行:器件+桩线+旗合成一个大 id 集,一次 schematic.group.move 刚移;
+// 移动执行(ADR-0004):走单一安全 move 内核 schMoveKernel(快照→删证→移动→
+// 重连→对账,失败自动恢复)—— 不再 schematic.group.move 带线刚移(平台 merge
+// 共点线的暂态短路一整类问题);区内直连线删后按同网 marker 对接。
 // 文本逐条 delete+recreate;成功后显式 schematic.save。
 // --redraw-frame(默认 true):move 后按本页框记录的 mode 重画 —— partition 模式
 // 直接复用 runPartitionDraw(内部先 computePartitionPlan 校验六项 0,不清洁拒绝重画),
@@ -747,17 +749,24 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 		full.MinX, full.MinY, full.MaxX, full.MaxY,
 		dest.Moved.MinX, dest.Moved.MinY, dest.Moved.MaxX, dest.Moved.MaxY)
 	if ids.shared > 0 {
-		fmt.Fprintf(stderr, "note: %d 条 wire tree 终止在区外件的 pin(真实跨区布线)— 留在原地,move 后 `sch check` 复核连通\n", ids.shared)
+		fmt.Fprintf(stderr, "note: %d 条 wire tree 终止在区外件的 pin(跨区直连线)— 安全内核会整树拒绝(删掉它会切断区外电路);先把跨区直连改为 netport 对接(`sch disconnect` + `sch connect`)再移区\n", ids.shared)
 	}
 	if dryRun {
 		fmt.Fprintf(stdout, "[dry-run] %s\n", summary)
 		return nil
 	}
 
-	// 7) 刚移:器件+导线+旗一次 schematic.group.move。
-	if _, err := requestAutolayoutAction(pinned, "schematic.group.move", win,
-		map[string]any{"primitiveIds": ids.all(), "dx": dx, "dy": dy}, docUUID, "zone rigid move"); err != nil {
-		return fmt.Errorf("zone move 刚移失败:%w", err)
+	// 7) 执行只准调内核(ADR-0004):不再 schematic.group.move 带线刚移(平台
+	//    merge 共点线的暂态短路一整类问题),改为内核的删净→平移→重连→对账;
+	//    区内跨单元直连线删后按同网 marker 对接,电气逐引脚一致由对账保证。
+	items := make([]moveItem, 0, len(movingList))
+	for _, d := range movingList {
+		c := partByDesig[d]
+		items = append(items, moveItem{Designator: d, HasTarget: true, X: c.X + dx, Y: c.Y + dy})
+	}
+	if _, kerr := schMoveKernel(pinned, win, docUUID, items,
+		moveKernelOpts{Label: "zone-move", Stdout: stdout, Stderr: stderr}); kerr != nil {
+		return fmt.Errorf("zone move 刚移失败:%w", kerr)
 	}
 
 	// 8) 文本 delete+recreate(create 先行,失败不丢原文;旧 id 删除必须复核)。

@@ -180,6 +180,11 @@ func newSchSheetTidyCommand(cfg *appConfig, window *string, stdout, stderr io.Wr
 			if apply && dryRun {
 				return fmt.Errorf("--dry-run and --apply are mutually exclusive")
 			}
+			// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接**
+			// setDispatchDryRun:computePartitionPlan 的标签入框归属走
+			// fetchSchWirePolylines(debug.exec_js 读通道,catalog 上 Mutates=true),
+			// 接了会让 dry-run 恒降级(labelScopeDegraded)而 --apply 不降 ——
+			// 规划分叉比不接更糟。等导线读升格为 typed action 后再接。
 			pinned, win, docUUID, err := pinZonePage(cfg, *window)
 			if err != nil {
 				return err

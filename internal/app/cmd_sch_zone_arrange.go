@@ -275,6 +275,10 @@ A4-only:装不下的出路是收敛或 ` + "`sch page-new`" + ` 拆页,不建议
 纯规划零改动;落地执行(--apply)未接入 —— 要先补齐 ADR-0003 执行断言。`,
 		Example: `  easyeda sch zone-arrange --project ceshi --doc P3_USB_DEBUG --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接**
+			// setDispatchDryRun:computeZoneArrange 硬依赖 fetchSchWirePolylines
+			// (debug.exec_js 读通道,catalog 上 Mutates=true),接了会把 dry-run
+			// 规划直接打死。等导线读升格为 typed action 后再接。
 			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
 			if err != nil {
 				return err

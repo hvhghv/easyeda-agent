@@ -20,28 +20,53 @@ import (
 //
 // **正确做法**:先把成员的桩线和旗**删净**,此刻器件身上没有任何导线,平移就退化成
 // 纯粹的 component.modify(零合并风险),再由 autoconnect 一遍性重连。这正是
-// ADR-0003 记的「时间窗」洞察,也是 `sch zone relayout --apply` 已在用的管线。
+// ADR-0003 记的「时间窗」洞察 —— ADR-0004 把这套管线升格为公共内核
+// (sch_move_kernel.go 的 schMoveKernel),本命令是它的第一个调用方:规划
+// (边界收拢)自己做,执行只准调内核。
 
-// groupMoveRebuild 平移一个持久虚拟组:删净成员的桩线/旗 → 逐件 modify → 重连 →
-// 电气自检。返回前后 netlist 的差异(空 = 电气完全不变)。
+// groupMoveRebuild 平移一个持久虚拟组(单组入口,groupsMoveRebuild 的薄封装)。
 func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
+	stdout, stderr io.Writer) error {
+	return groupsMoveRebuild(cfg, window, []string{groupRef}, dx, dy, stdout, stderr)
+}
+
+// groupsMoveRebuild 平移一个或多个持久虚拟组 —— **一次内核调用整体移动**
+// (ADR-0004 Decision 2 推论:同块多子组逐组 move 必撕裂共享导线;内核输入是
+// 刚体集合,多组并成一个集合天然支持)。规划(边界收拢)自己做,执行只准调
+// schMoveKernel(快照→删证→移动→重连→对账,失败自动恢复)。
+func groupsMoveRebuild(cfg *appConfig, window string, groupRefs []string, dx, dy float64,
 	stdout, stderr io.Writer) error {
 
 	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
 	if err != nil {
 		return err
 	}
-	g, err := findSchGroup(groups, groupRef)
-	if err != nil {
-		return err
-	}
 	memberSet := map[string]bool{}
-	for _, m := range g.Members {
-		memberSet[strings.ToUpper(m)] = true
+	var picked []*schGroup
+	seen := map[string]bool{}
+	for _, ref := range groupRefs {
+		g, ferr := findSchGroup(groups, ref)
+		if ferr != nil {
+			return ferr
+		}
+		if seen[g.ID] {
+			continue
+		}
+		seen[g.ID] = true
+		picked = append(picked, g)
+		for _, m := range g.Members {
+			memberSet[strings.ToUpper(m)] = true
+		}
 	}
+	var names []string
+	for _, g := range picked {
+		names = append(names, describeSchGroup(g))
+	}
+	groupLabel := strings.Join(names, "+")
 
-	// 1. 读场景 —— 一次拿全:器件几何、引脚当前网、已有导线。
-	res, err := requestAutolayoutAction(cfg, "schematic.components.list", win,
+	// 1. 读场景 —— 规划(边界收拢)所需的几何。执行侧的电气快照由内核自己采
+	//    (快照与执行同一份场景,不会拿 stale 数据 mutate)。
+	res, err := requestAutolayoutAction(pinned, "schematic.components.list", win,
 		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "group-move 读场景")
 	if err != nil {
 		return fmt.Errorf("读场景:%w", err)
@@ -50,20 +75,17 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 	if err != nil {
 		return fmt.Errorf("解析场景:%w", err)
 	}
-
-	// 2. **先记下每个成员引脚现在连着哪条网** —— 这是重连的唯一依据。必须在删除
-	//    之前采集:删完就无从得知这根桩线原本属于哪条网了。
-	live, _, lerr := readLiveNets(pinned, win)
-	if lerr != nil {
-		return fmt.Errorf("读网表(重连的唯一依据):%w", lerr)
+	var movable []groupRebuildMember
+	for _, c := range comps {
+		if (c.ComponentType == "" || c.ComponentType == schLayoutPartType) && memberSet[strings.ToUpper(c.Designator)] {
+			movable = append(movable, groupRebuildMember{ID: c.ID, Designator: c.Designator, X: c.X, Y: c.Y})
+		}
 	}
-	conns, movable := groupRebuildConnSpecs(comps, memberSet, live)
 	if len(movable) == 0 {
-		return fmt.Errorf("组 %s 在本页没有可移动的成员(位号可能已过时,用 `sch group list` 核对)", describeSchGroup(g))
+		return fmt.Errorf("组 %s 在本页没有可移动的成员(位号可能已过时,用 `sch group list` 核对)", groupLabel)
 	}
-	before := groupRebuildSnapshotOf(live)
 
-	wires, werr := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	wires, werr := fetchSchWirePolylinesStable(pinned, win, docUUID)
 	if werr != nil {
 		return fmt.Errorf("读导线:%w", werr)
 	}
@@ -99,64 +121,20 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 		return nil
 	}
 
-	// 3. 删净成员整树(旧桩 + 旧旗 + 不触 pin 的残段)。共享树(触到非成员引脚)
-	//    会被 tidyDeepSweepPlan 拒绝,零 mutation 退出 —— 删掉它会切断组外的电路。
-	deleteIDs, err := tidyDeepSweepPlan(memberSet, comps, wires)
-	if err != nil {
-		return err
+	// 3. 执行只准调内核(ADR-0004):快照 → 删证 → 移动(snap 5)→ 重连 → 对账,
+	//    任一步失败自动进入恢复段。删除撒谎/假失败/合并短路三个平台病都在内核
+	//    一处治,本命令不再自带删/移/连的实现。
+	items := make([]moveItem, 0, len(movable))
+	for _, m := range movable {
+		items = append(items, moveItem{Designator: m.Designator, HasTarget: true, X: m.X + dx, Y: m.Y + dy})
 	}
-	if len(deleteIDs) > 0 {
-		if err := groupRebuildDeleteVerified(cfg, win, docUUID, deleteIDs, stdout); err != nil {
-			return err
-		}
+	rep, kerr := schMoveKernel(pinned, win, docUUID, items,
+		moveKernelOpts{Label: "group-move", Stdout: stdout, Stderr: stderr})
+	if kerr != nil {
+		return kerr
 	}
-
-	// 4. 平移器件本体。此刻它们身上没有任何导线,modify 不会触发任何合并。
-	//    **任一件失败都不能裸退**:第 3 步已把全组桩线/旗清扫干净,直接 return 会把
-	//    组里十几个引脚全悬空地留在画布上(真机:J1+R4+R5 组桩线全清、器件没挪)。
-	//    手里的 conns 是移动前采集的重连依据 —— 失败时立即用它对**全部**成员重连
-	//    (挪成的在新位置、没挪成的在原位,autoconnect 都按当前几何重新解析引脚坐标,
-	//    两类都能连回),恢复后再带着结果返回错误。
-	if err := groupMoveTranslateWithRecovery(movable, dx, dy, conns,
-		func(m groupRebuildMember, nx, ny float64) error {
-			_, merr := requestAutolayoutAction(cfg, "schematic.component.modify", win,
-				map[string]any{"primitiveId": m.ID, "patch": map[string]any{"x": nx, "y": ny}},
-				docUUID, "group-move 平移")
-			return merr
-		},
-		func(cs []acConnSpec) (succeeded, failed []string, rerr error) {
-			rep, rerr := runAutoconnectOpts(pinned, win, cs, defaultAutoconnectRules(), acRunOpts{}, stderr, stderr)
-			return rep.Succeeded, rep.Failed, rerr
-		}, stderr); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "  平移:%d 件 Δ=(%.0f,%.0f)\n", len(movable), dx, dy)
-
-	// 5. 一遍性重连 —— 落点由 autoconnect 按**新几何**重新评分,而不是把旧 marker
-	//    平移过去:旧落点是在旧邻居关系下算出来的,平移后未必还是最优,更未必不撞。
-	if len(conns) > 0 {
-		if err := runAutoconnect(pinned, win, conns, defaultAutoconnectRules(),
-			false, false, false, false, stderr, stderr); err != nil {
-			fmt.Fprintf(stderr, "warn: 重连有失败项(%v)—— 器件已在新位置,补连失败的引脚即可\n", err)
-		}
-	}
-
-	// 6. **电气自检**:平移是刚体操作,网表必须逐引脚一致。这条判据是本命令存在的
-	//    理由 —— 旧实现正是在这里静默丢了三个引脚而无人察觉。
-	if before != nil {
-		after, aerr := groupRebuildNetSnapshot(cfg, win)
-		if aerr != nil {
-			fmt.Fprintf(stderr, "warn: 取不到移动后的网表(%v)—— 请手工跑 `sch check`\n", aerr)
-			return nil
-		}
-		if diffs := groupRebuildNetDiff(before, after); len(diffs) > 0 {
-			for _, d := range diffs {
-				fmt.Fprintf(stderr, "✗ %s\n", d)
-			}
-			return fmt.Errorf("整体平移改变了 %d 条网的连接 —— 器件已在新位置,用 `sch check` / `sch bridge-check` 核对后手工补连", len(diffs))
-		}
-		fmt.Fprintf(stdout, "✓ 电气自检:%d 条网逐引脚一致(刚体平移未改变任何连接)\n", len(before))
-	}
+	fmt.Fprintf(stdout, "✓ 组 %s 平移 %d 件 Δ=(%.0f,%.0f);内核对账绿(网表逐引脚一致,无新增 bridge)\n",
+		groupLabel, len(rep.Moved), dx, dy)
 	return nil
 }
 
@@ -165,55 +143,6 @@ type groupRebuildMember struct {
 	ID         string
 	Designator string
 	X, Y       float64
-}
-
-// groupMoveTranslateWithRecovery 逐件平移;任一件 modify 失败时**先恢复再报错**:
-// 此刻全组桩线/旗已被第 3 步清扫,弃用手里的连接表裸退会让每个成员引脚都悬空。
-// 恢复段对全部 conns 跑重连(reconnect 注入,生产路径是 runAutoconnectOpts),
-// 错误里注明「已自动重连,几成几败」;恢复本身失败则如实列出仍断的 pin。
-func groupMoveTranslateWithRecovery(movable []groupRebuildMember, dx, dy float64, conns []acConnSpec,
-	modify func(m groupRebuildMember, nx, ny float64) error,
-	reconnect func([]acConnSpec) (succeeded, failed []string, err error),
-	stderr io.Writer) error {
-
-	for i, m := range movable {
-		err := modify(m, m.X+dx, m.Y+dy)
-		if err == nil {
-			continue
-		}
-		return fmt.Errorf("平移 %s(第 %d/%d 件)失败:%w;%s",
-			m.Designator, i+1, len(movable), err, groupMoveRecoverConnections(conns, reconnect, stderr))
-	}
-	return nil
-}
-
-// groupMoveRecoverConnections 是平移中止后的恢复段:按移动前采集的连接表重连全部
-// 成员引脚 —— 已挪成的在新位置、没挪成的在原位,autoconnect 都按**当前几何**重新
-// 解析引脚坐标,所以两类都能连回。返回一句可拼进错误的结果摘要。
-func groupMoveRecoverConnections(conns []acConnSpec,
-	reconnect func([]acConnSpec) (succeeded, failed []string, err error),
-	stderr io.Writer) string {
-
-	if len(conns) == 0 {
-		return "组内没有已连引脚,无需恢复"
-	}
-	fmt.Fprintf(stderr, "warn: 平移中止 —— 旧桩线已清扫,立即按移动前的连接表重连 %d 个引脚\n", len(conns))
-	succeeded, failed, err := reconnect(conns)
-	if err != nil && len(succeeded)+len(failed) == 0 {
-		// 恢复重连没跑起来(读场景就失败了):一个都没连回,如实列出全部仍断的 pin。
-		refs := make([]string, 0, len(conns))
-		for _, c := range conns {
-			refs = append(refs, c.PinRef)
-		}
-		return fmt.Sprintf("恢复重连本身失败(%v),以下引脚仍断开,需 `sch autoconnect` 手工重连:%s",
-			err, strings.Join(refs, " "))
-	}
-	if len(failed) > 0 {
-		return fmt.Sprintf("已自动重连:%d 成 %d 败;仍断开的引脚:%s(用 `sch autoconnect` 补连)",
-			len(succeeded), len(failed), strings.Join(failed, " "))
-	}
-	return fmt.Sprintf("已自动重连:%d/%d 全部恢复(器件停在中止时的位置,电气未断)",
-		len(succeeded), len(conns))
 }
 
 // groupRebuildConnSpecs 采集「每个成员引脚现在连着哪条网」,输出重连规格。
@@ -234,7 +163,9 @@ func groupRebuildConnSpecs(comps []layoutComp, memberSet map[string]bool,
 	var conns []acConnSpec
 	var movable []groupRebuildMember
 	for _, c := range comps {
-		if c.ComponentType != "part" || !memberSet[strings.ToUpper(c.Designator)] {
+		// 真器件的 componentType 可能是 "part" 也可能为空(连接器版本差异),
+		// 与 zone/tidy 家族同口径地都接受。
+		if (c.ComponentType != "" && c.ComponentType != schLayoutPartType) || !memberSet[strings.ToUpper(c.Designator)] {
 			continue
 		}
 		movable = append(movable, groupRebuildMember{ID: c.ID, Designator: c.Designator, X: c.X, Y: c.Y})
@@ -280,55 +211,6 @@ func groupRebuildConnSpecs(comps []layoutComp, memberSet map[string]bool,
 	return conns, movable
 }
 
-// groupRebuildDeleteVerified 删除一批图元,**分批 + 回读验证**。
-//
-// 平台的删除 API 有一个已知的撒谎行为:**大批量提交时会静默 no-op 掉一部分,
-// 却仍然返回成功**。真机实测:一次提交 90 个 id,清扫后页面上还剩 20 个旧旗
-// (30 个应存在 → 实际 50 个),其中一个恰好落在新建的桩线上,把 C7_N6 整条网
-// 并进了 GND —— bridge-check 报 "nets=[GND,C7_N6] pins=[J1:A5]",而删除那步
-// 报告一切正常。所以删完必须**回读**,不能信返回值。
-func groupRebuildDeleteVerified(cfg *appConfig, win, docUUID string, ids []string, stdout io.Writer) error {
-	const batch = 40 // 经验安全批量;超过这个量级平台开始静默丢弃
-	for i := 0; i < len(ids); i += batch {
-		end := i + batch
-		if end > len(ids) {
-			end = len(ids)
-		}
-		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
-			map[string]any{"primitiveIds": ids[i:end]}, docUUID, "group-move 清扫"); err != nil {
-			return fmt.Errorf("清扫第 %d-%d 个旧桩/旗:%w", i+1, end, err)
-		}
-	}
-	// 回读:删除 API 返回成功不代表真删了。
-	left, err := groupRebuildStillPresent(cfg, win, docUUID, ids)
-	if err != nil {
-		fmt.Fprintf(stdout, "  清扫:提交删除 %d 个(回读校验失败 %v —— 若后续报串网,先跑 `sch bridge-check`)\n", len(ids), err)
-		return nil
-	}
-	if len(left) > 0 {
-		// 再补一轮:剩下的通常是首轮被静默丢弃的。
-		for i := 0; i < len(left); i += batch {
-			end := i + batch
-			if end > len(left) {
-				end = len(left)
-			}
-			if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
-				map[string]any{"primitiveIds": left[i:end]}, docUUID, "group-move 清扫补删"); err != nil {
-				return fmt.Errorf("补删残留的 %d 个旧桩/旗:%w", len(left), err)
-			}
-		}
-		still, err2 := groupRebuildStillPresent(cfg, win, docUUID, ids)
-		if err2 == nil && len(still) > 0 {
-			// 残留的旧旗会挂到新桩线上串网,这不是可以「继续试试」的状态。
-			return fmt.Errorf("清扫后仍残留 %d 个旧桩线/旗(平台静默丢弃了删除请求)—— 器件尚未移动,画布还是原样;重试本命令,或先手工删除后再移动", len(still))
-		}
-		fmt.Fprintf(stdout, "  清扫:删除 %d 个旧桩线/旗(补删 %d 个平台首轮静默丢弃的)\n", len(ids), len(left))
-		return nil
-	}
-	fmt.Fprintf(stdout, "  清扫:删除 %d 个旧桩线/旗,回读确认全部消失(器件保持不动)\n", len(ids))
-	return nil
-}
-
 // groupRebuildStillPresent 回读页面,返回 ids 中仍然存在的那些。
 func groupRebuildStillPresent(cfg *appConfig, win, docUUID string, ids []string) ([]string, error) {
 	want := map[string]bool{}
@@ -360,15 +242,6 @@ func groupRebuildStillPresent(cfg *appConfig, win, docUUID string, ids []string)
 	}
 	sort.Strings(left)
 	return left, nil
-}
-
-// groupRebuildNetSnapshot 取一份 net → 引脚集合的快照。
-func groupRebuildNetSnapshot(cfg *appConfig, window string) (map[string][]string, error) {
-	live, _, err := readLiveNets(cfg, window)
-	if err != nil {
-		return nil, err
-	}
-	return groupRebuildSnapshotOf(live), nil
 }
 
 // groupRebuildSnapshotOf 把 readLiveNets 的结果压成可比对的有序快照。

@@ -115,6 +115,10 @@ func newPcbRefineCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *
 // runRefineLoop 是环本体。
 func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts, gridMil float64, stderr io.Writer) (refineReport, error) {
 	rep := refineReport{DryRun: opts.DryRun}
+	// ADR-0004 Decision 4: dry-run(默认档)必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if opts.DryRun {
+		defer setDispatchDryRun(true)()
+	}
 
 	snap, err := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{withSilk: true, withRules: true, withLayers: true})
 	if err != nil {

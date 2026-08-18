@@ -17,12 +17,13 @@ package app
 //	  (zaaVerifyConnectivity)。上次事故里 layout-lint + bridge-check 双绿
 //	  却断了两件 —— 孤立器件既不重叠也不短路,唯有这条判据看得见。
 //
-// 执行走 ADR-0003 舞步,**页级一次 sweep**(旧位置上各区标签互相穿插,分区
-// sweep 必然把邻区 pin 判成「共享树」而拒绝;全员入集后这不再是共享):
+// 执行走 ADR-0004 单一安全 move 内核(schMoveKernel),**页级一次 sweep**
+// (旧位置上各区标签互相穿插,分区 sweep 必然把邻区 pin 判成「共享树」而拒绝;
+// 全员入集后这不再是共享):
 //
-//	快照(与规划同一份场景)→ 断言① → 全页深度清扫 → 逐件[落位(转竖件双候选
-//	实测消解)→ settle → connect_pin 重连] → 断言② → layout-lint + bridge-check
-//	→ save;任一步红 → 逐步回滚(位姿复原 + 按快照原 kind/net/方向重建)。
+//	快照 → 断言① → 内核[快照+bridge 基线 → 删证(回读)→ 逐件落位(转竖件
+//	双候选实测消解)→ 重连(计划端子显式 connect_pin)→ 对账(网表逐 pin +
+//	bridge 增量),失败自动恢复] → 断言②(区级)→ layout-lint → save。
 
 import (
 	"fmt"
@@ -58,10 +59,10 @@ type zaaMemberExec struct {
 	DX, DY float64
 	// 转竖件(R1):候选 OrigRot±90,实测 pin 上下序消解;落位按目标本体中心对
 	// pin 中点(旋转后 bbox 未知,pin 驱动)。
-	Rotate                 bool
-	TargetCX, TargetCY     float64
-	Terms                  []zaaTermExec
-	Snaps                  []zaaPinSnap // 本件的 pin 快照(回滚重建原料)
+	Rotate             bool
+	TargetCX, TargetCY float64
+	Terms              []zaaTermExec
+	Snaps              []zaaPinSnap // 本件的 pin 快照(回滚重建原料)
 }
 
 // zaaConnectKind 把规划端子折成 connect_pin 口径。
@@ -341,91 +342,6 @@ func zaaRetry(op func() error) error {
 	return op()
 }
 
-// zaaExecMember 落位 + 重连一件(舞步与 tidyExec* 同源:modify → settle 实测 →
-// connect_pin;转竖件双候选实测消解,与 tidyExecPowerMember 的 rot 二义同法)。
-//
-// 返回 (落位成败, 未接上的端子清单):**端子失败不打断本件也不打断整页** ——
-// 首跑实录(2026-08-16):连接器中途卡死一次,第 10 件的 connect 失败触发整页
-// 回滚,而回滚也是写操作,对着卡死的连接器全数无效 —— 10 件好的没保住,坏的
-// 也没修好;断言②的清单 + 逐脚补连两分钟就修完了。缺连接走对账修复,不回滚。
-func zaaExecMember(cfg *appConfig, win, docUUID string, m zaaMemberExec, stdout, stderr io.Writer) (bool, []zaaTermExec) {
-	var pins []layoutPin
-	var err error
-	if !m.Rotate {
-		if err = zaaRetry(func() error {
-			return tidyModifyPose(cfg, win, docUUID, m.PrimID, m.OrigX+m.DX, m.OrigY+m.DY, m.OrigRot)
-		}); err != nil {
-			fmt.Fprintf(stderr, "  ✗ %s 落位失败(重试后):%v —— 本件跳过,连接留给对账修复\n", m.Desig, err)
-			return false, m.Terms
-		}
-		if pins, err = tidySettledPins(cfg, win, docUUID, m.Desig); err != nil {
-			fmt.Fprintf(stderr, "  ✗ %s settle 失败:%v\n", m.Desig, err)
-			return false, m.Terms
-		}
-	} else {
-		cands := []float64{math.Mod(m.OrigRot+90, 360), math.Mod(m.OrigRot+270, 360)}
-		ok := false
-		for _, cand := range cands {
-			// 先原地转(旋转后 bbox 未知,pin 中点驱动落位),再平移对中。
-			if err = zaaRetry(func() error {
-				return tidyModifyPose(cfg, win, docUUID, m.PrimID, m.OrigX, m.OrigY, cand)
-			}); err != nil {
-				fmt.Fprintf(stderr, "  ✗ %s rot %g 失败:%v\n", m.Desig, cand, err)
-				return false, m.Terms
-			}
-			if pins, err = tidySettledPins(cfg, win, docUUID, m.Desig); err != nil {
-				fmt.Fprintf(stderr, "  ✗ %s settle 失败:%v\n", m.Desig, err)
-				return false, m.Terms
-			}
-			mx, my := zaaPinMidpoint(pins)
-			dx, dy := snap5(m.TargetCX-mx), snap5(m.TargetCY-my)
-			if err = zaaRetry(func() error {
-				return tidyModifyPose(cfg, win, docUUID, m.PrimID, m.OrigX+dx, m.OrigY+dy, cand)
-			}); err != nil {
-				fmt.Fprintf(stderr, "  ✗ %s 平移失败:%v\n", m.Desig, err)
-				return false, m.Terms
-			}
-			if pins, err = tidySettledPins(cfg, win, docUUID, m.Desig); err != nil {
-				fmt.Fprintf(stderr, "  ✗ %s settle 失败:%v\n", m.Desig, err)
-				return false, m.Terms
-			}
-			if zaaVerticalOrderOK(pins, m.Terms) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			fmt.Fprintf(stderr, "  ✗ %s 转竖两候选实测上下序都不符 —— 符号基向异常,本件跳过\n", m.Desig)
-			return false, m.Terms
-		}
-	}
-	var missed []zaaTermExec
-	for _, t := range m.Terms {
-		px, py, found := tidyPinCoord(pins, t.Pin)
-		if !found {
-			fmt.Fprintf(stderr, "  ⚠ %s 实测 pins 里没有 pin %s —— 留给对账修复\n", m.Desig, t.Pin)
-			missed = append(missed, t)
-			continue
-		}
-		payload := map[string]any{"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
-			"direction": t.Dir, "rotation": t.LabelRot}
-		if t.Offset > 0 {
-			payload["offset"] = t.Offset // 计划梯次桩长 —— 不带它,同向多旗全落默认桩长必竖叠
-		}
-		if err := zaaRetry(func() error {
-			_, e := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "zone-arrange connect")
-			return e
-		}); err != nil {
-			fmt.Fprintf(stderr, "  ⚠ connect %s:%s → %s %s(%s) 失败(重试后):%v —— 留给对账修复\n",
-				m.Desig, t.Pin, t.Dir, t.Kind, t.Net, err)
-			missed = append(missed, t)
-		}
-	}
-	fmt.Fprintf(stdout, "  ✓ %s 落位%s + 重连 %d/%d 端子\n", m.Desig,
-		map[bool]string{true: "(转竖)", false: ""}[m.Rotate], len(m.Terms)-len(missed), len(m.Terms))
-	return true, missed
-}
-
 func zaaPinMidpoint(pins []layoutPin) (float64, float64) {
 	if len(pins) == 0 {
 		return 0, 0
@@ -524,33 +440,48 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		return err
 	}
 	fmt.Fprintf(stdout, "断言①绿:删除集 = 重建集(%d 件),pin 级覆盖逐件相等\n", len(execs))
+	_ = sweepSet // 名单守卫已在 zaaBuildExec 落判;清扫本体归内核(同一份成员集)
 
-	// 页级一次深度清扫(见文件头:分区 sweep 会把邻区 pin 判成共享树而拒绝)。
-	ids, err := tidyDeepSweepPlan(sweepSet, scene.comps, scene.wires)
-	if err != nil {
-		return fmt.Errorf("deep-sweep 规划:%w", err)
-	}
-	ids = uniqueIDs(ids) // 平台对含重复 id 的删除批次整批静默拒(P2 实锤)
-	ids = dropSheetIDs(ids, scene.comps) // 图框守卫:CLI prim-delete 有守卫,内部删单也不能裸奔
-	if len(ids) > 0 {
-		if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
-			map[string]any{"primitiveIds": ids}, docUUID, "zone-arrange deep-sweep"); err != nil {
-			return fmt.Errorf("deep-sweep delete %d primitive(s):%w", len(ids), err)
-		}
-		fmt.Fprintf(stdout, "深度清扫:删除 %d 个旧桩/旗/残段(整树,页级一次)\n", len(ids))
-	}
-	// 执行:端子失败不打断(见 zaaExecMember 头注);落位失败跳过本件,坐等对账。
-	executed := 0
+	// 执行只准调内核(ADR-0004):快照 → 页级一次深度清扫(删证回读)→ 逐件
+	// 落位(snap5;转竖件双候选实测消解 + pin 中点对中)→ 重连(计划端子显式
+	// connect_pin,梯次桩长原样执行)→ 对账(网表逐 pin + bridge 增量),任一步
+	// 失败自动进入恢复段。此前散在这里的 sweep/exec/回滚逻辑全部由内核承接。
 	termByPin := map[string]zaaTermExec{}
+	items := make([]moveItem, 0, len(execs))
 	for _, m := range execs {
+		m := m
 		for _, t := range m.Terms {
 			termByPin[strings.ToUpper(m.Desig)+":"+t.Pin] = t
 		}
-		if ok, _ := zaaExecMember(cfg, win, docUUID, m, stdout, stderr); ok {
-			executed++
+		it := moveItem{Designator: m.Desig, HasTarget: true}
+		if m.Rotate {
+			// 转竖件(R1):候选 OrigRot±90,pin 中点驱动落位,上下序实测消解。
+			it.X, it.Y = m.TargetCX, m.TargetCY
+			it.CenterOnPins = true
+			it.RotCandidates = []float64{math.Mod(m.OrigRot+90, 360), math.Mod(m.OrigRot+270, 360)}
+			it.VerifyPins = func(pins []layoutPin) (bool, error) {
+				return zaaVerticalOrderOK(pins, m.Terms), nil
+			}
+		} else {
+			it.X, it.Y = m.OrigX+m.DX, m.OrigY+m.DY
 		}
+		it.Terms = func(pins []layoutPin) ([]moveConnTerm, error) {
+			out := make([]moveConnTerm, 0, len(m.Terms))
+			for _, t := range m.Terms {
+				out = append(out, moveConnTerm{Pin: t.Pin, Kind: t.Kind, Net: t.Net,
+					Direction: t.Dir, Rotation: t.LabelRot, Offset: t.Offset})
+			}
+			return out, nil
+		}
+		items = append(items, it)
 	}
-	fmt.Fprintf(stdout, "落位 %d/%d 件;进入断言②对账…\n", executed, len(execs))
+	krep, kerr := schMoveKernel(cfg, win, docUUID, items,
+		moveKernelOpts{Label: "zone-arrange", Stdout: stdout, Stderr: stderr})
+	if kerr != nil {
+		return kerr
+	}
+	executed := len(krep.Moved) + len(krep.Skipped)
+	fmt.Fprintf(stdout, "内核落位 %d/%d 件(对账绿);进入断言②区级对账…\n", executed, len(execs))
 
 	// 断言② + 对账修复:缺哪只 pin 就按计划端子补哪只(最多两轮),修不动才报。
 	// 首跑实录:平台随机吃掉 2/4 条补连,对账循环正是治它的(block-apply 同款)。
@@ -610,19 +541,9 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		fmt.Fprintf(stdout, "假失败清创:清除 %d 个重复/冗余标记(停摆期已落地的\"失败\"写)\n", n)
 	}
 
-	// 分级收尾:bridge-check 红 = 真短路,主动有害 → 整体回滚;
-	// layout-lint 红 = 标签实测伸展超出规划估算 → 如实报,重跑一轮收敛即修
-	// (两遍法:落地实测反哺下一轮规划),不为几个单位的标签擦碰拆掉整页落位。
-	if berr := zaaBridgeCheck(cfg, win, docUUID); berr != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", berr)
-		fmt.Fprintf(stderr, "真短路 → 整体回滚 %d 件…\n", len(execs))
-		var records []tidyStepRecord
-		for _, m := range execs {
-			records = append(records, zaaStepRecord(m))
-		}
-		tidyRollback(cfg, win, docUUID, records, stderr)
-		return berr
-	}
+	// 真短路(wire-bridge)判据已内置在内核对账(bridge 增量检查,红即失败 +
+	// 恢复段),这里不再重复跑;layout-lint 红 = 标签实测伸展超出规划估算 →
+	// 如实报,重跑一轮收敛即修(两遍法),不为几个单位的标签擦碰拆掉整页落位。
 	lintWarn := ""
 	if rep, lerr := collectLayoutLint(cfg, win, 2.54, 0, false, false, false); lerr != nil {
 		lintWarn = fmt.Sprintf("layout-lint 无法运行:%v", lerr)
@@ -633,9 +554,9 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		fmt.Fprintf(stderr, "⚠ 显式保存失败(%v)—— daemon 防抖自动保存仍会兜底\n", err)
 	}
 	if lintWarn != "" {
-		fmt.Fprintf(stdout, "△ zone-arrange 落地 %d/%d 件;断言①② + bridge-check 绿,已保存;%s\n", executed, len(execs), lintWarn)
+		fmt.Fprintf(stdout, "△ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)绿,已保存;%s\n", executed, len(execs), lintWarn)
 	} else {
-		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + layout-lint + bridge-check 全绿,已保存\n", executed, len(execs))
+		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)+ layout-lint 全绿,已保存\n", executed, len(execs))
 	}
 	fmt.Fprintln(stdout, "note: 分区框未重画 —— `sch zone-draw --mode partition` 更新;区名/说明带随框走")
 	return nil
@@ -696,44 +617,10 @@ func zaaBrokenPins(verr error) []string {
 	return out
 }
 
-// zaaBridgeCheck 只跑真短路判据(与 tidySelfCheck 的 bridge 段同源)。
-func zaaBridgeCheck(cfg *appConfig, win, docUUID string) error {
-	res, err := requestAutolayoutAction(cfg, "schematic.bridgeCheck", win, nil, docUUID, "zone-arrange bridge-check")
-	if err != nil {
-		return fmt.Errorf("bridge-check 无法运行(没有证明不算过):%w", err)
-	}
-	brep, err := parseBridgeReport(res.Result)
-	if err != nil {
-		return fmt.Errorf("bridge-check 结果不可解析:%w", err)
-	}
-	if brep.Summary.Bridges > 0 {
-		var nets []string
-		for _, t := range brep.Trees {
-			if strings.EqualFold(t.Kind, "BRIDGE") {
-				nets = append(nets, "["+strings.Join(t.Nets, ",")+"]")
-			}
-		}
-		return fmt.Errorf("bridge-check 红:%d 个 wire-bridge(真短路)%s", brep.Summary.Bridges, strings.Join(nets, " "))
-	}
-	return nil
-}
-
 func allSnaps(execs []zaaMemberExec) []zaaPinSnap {
 	var out []zaaPinSnap
 	for _, m := range execs {
 		out = append(out, m.Snaps...)
 	}
 	return out
-}
-
-// zaaStepRecord 把执行指令折成 tidy 的回滚记录(位姿 + 原连接)。
-func zaaStepRecord(m zaaMemberExec) tidyStepRecord {
-	rec := tidyStepRecord{Designator: m.Desig, PrimitiveID: m.PrimID,
-		OrigX: m.OrigX, OrigY: m.OrigY, OrigRot: m.OrigRot}
-	for _, s := range m.Snaps {
-		rec.Restores = append(rec.Restores, tidyPinRestore{
-			Pin: s.Pin, Net: s.Net, Kind: s.Kind, Direction: s.Dir, HasFlag: !s.Wired && s.Kind != "",
-		})
-	}
-	return rec
 }

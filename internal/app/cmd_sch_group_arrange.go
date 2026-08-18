@@ -262,6 +262,10 @@ func arrangeGroups(ordered []bslGroupItem, bounds layoutBBox, gap float64) ([]bs
 // 的两条刚体判据(位移逐件一致、网表逐引脚不变)是真机验过的,自造一条等于把同一个
 // 「带线搬必断线」的坑再踩一次。
 func runGroupArrange(cfg *appConfig, window string, gap float64, dryRun, annotate bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接** setDispatchDryRun:
+	// 占地计算依赖 fetchSchWirePolylinesStable(debug.exec_js 读通道,catalog 上
+	// Mutates=true)——接了会让 dry-run 恒缺导线占地,规划与 --apply 分叉。
+	// 等导线读升格为 typed action 后再接。
 	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
 	if err != nil {
 		return err

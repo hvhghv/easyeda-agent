@@ -1207,6 +1207,157 @@ test('prim-delete: a fully successful delete carries no partial flag', async () 
 	}
 });
 
+// ─── schematic.component.delete cascade (ADR-0004 Decision 5) ────────────────
+// Deleting a part must also remove its EXCLUSIVE stub-wire trees + the netflags
+// riding them (the residue is a ghost-connection boobytrap: the next part placed
+// there silently inherits the stray net). Shared trees (still touching another
+// live part's pin) are never deleted. `cascade:false` keeps the old behavior.
+
+/**
+ * eda stub for the delete-cascade tests: parts with real pins, wires as flat
+ * polylines, netflags with coordinates. `keepWireIds`/`keepFlagIds` model the
+ * platform's lying delete (returns true, keeps the primitive).
+ */
+function installComponentDeleteStub(opts: {
+	parts: Array<{ id: string; designator: string; pins: Array<[number, number]> }>;
+	flags?: Array<{ id: string; x: number; y: number; net?: string }>;
+	wires?: Array<{ id: string; points: Array<number> }>;
+	keepWireIds?: Array<string>;
+	keepFlagIds?: Array<string>;
+}) {
+	const keepWires = new Set(opts.keepWireIds ?? []);
+	const keepFlags = new Set(opts.keepFlagIds ?? []);
+	let parts = [...opts.parts];
+	let flags = [...(opts.flags ?? [])];
+	let wires = [...(opts.wires ?? [])];
+	const deleteCalls: Array<{ kind: string; ids: Array<string> }> = [];
+	const mkPart = (p: { id: string; designator: string }): any => ({
+		getState_PrimitiveId: () => p.id,
+		getState_ComponentType: () => 'part',
+		getState_Designator: () => p.designator,
+	});
+	const mkFlag = (f: { id: string; x: number; y: number; net?: string }): any => ({
+		getState_PrimitiveId: () => f.id,
+		getState_ComponentType: () => 'netflag',
+		getState_X: () => f.x,
+		getState_Y: () => f.y,
+		getState_Net: () => f.net ?? 'GND',
+	});
+	const mkWire = (w: { id: string; points: Array<number> }): any => ({
+		getState_PrimitiveId: () => w.id,
+		getState_Line: () => [...w.points],
+	});
+	(globalThis as any).eda = {
+		sch_PrimitiveComponent: {
+			getAll: async () => [...parts.map(mkPart), ...flags.map(mkFlag)],
+			getAllPinsByPrimitiveId: async (id: string) => {
+				const p = opts.parts.find(x => x.id === id);
+				return (p?.pins ?? []).map(([x, y], i) => ({
+					getState_PinNumber: () => String(i + 1),
+					getState_X: () => x,
+					getState_Y: () => y,
+				}));
+			},
+			delete: async (ids: Array<string>) => {
+				deleteCalls.push({ kind: 'components', ids: [...ids] });
+				parts = parts.filter(p => !ids.includes(p.id));
+				flags = flags.filter(f => keepFlags.has(f.id) || !ids.includes(f.id));
+				return true;
+			},
+		},
+		sch_PrimitiveWire: {
+			getAll: async () => wires.map(mkWire),
+			delete: async (ids: Array<string>) => {
+				deleteCalls.push({ kind: 'wires', ids: [...ids] });
+				wires = wires.filter(w => keepWires.has(w.id) || !ids.includes(w.id));
+				return true; // the platform reports success even when it silently kept some
+			},
+		},
+	};
+	return { deleteCalls, liveWireIds: () => wires.map(w => w.id), liveFlagIds: () => flags.map(f => f.id) };
+}
+
+test('component.delete: exclusive stub tree (wire + flag) is cascade-deleted and verified', async () => {
+	const fx = installComponentDeleteStub({
+		parts: [{ id: 'u1', designator: 'U1', pins: [[100, 100]] }],
+		flags: [{ id: 'f1', x: 100, y: 130 }],
+		wires: [{ id: 'w1', points: [100, 100, 100, 130] }],
+	});
+	try {
+		const res: any = await runAction('schematic.component.delete', { primitiveIds: 'u1' });
+		assert.equal(res.result.deleted, true);
+		assert.deepEqual(res.result.cascaded, { wires: ['w1'], flags: ['f1'] });
+		assert.equal(res.result.notApplied, undefined);
+		assert.deepEqual(fx.liveWireIds(), [], 'the exclusive stub wire must actually be gone');
+		assert.deepEqual(fx.liveFlagIds(), [], 'the riding netflag must actually be gone');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('component.delete: a tree still touching a SURVIVING part pin is shared — never deleted', async () => {
+	const fx = installComponentDeleteStub({
+		parts: [
+			{ id: 'u1', designator: 'U1', pins: [[100, 100]] },
+			{ id: 'r2', designator: 'R2', pins: [[200, 100]] },
+		],
+		wires: [{ id: 'w1', points: [100, 100, 200, 100] }],
+	});
+	try {
+		const res: any = await runAction('schematic.component.delete', { primitiveIds: ['u1'] });
+		assert.equal(res.result.deleted, true);
+		assert.deepEqual(res.result.cascaded, { wires: [], flags: [] });
+		assert.deepEqual(fx.liveWireIds(), ['w1'], 'the shared wire must survive');
+		const wireDeletes = fx.deleteCalls.filter(c => c.kind === 'wires');
+		assert.equal(wireDeletes.length, 0, 'no wire delete may even be attempted for a shared tree');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('component.delete: cascade:false keeps the old behavior (no wire/flag cleanup)', async () => {
+	const fx = installComponentDeleteStub({
+		parts: [{ id: 'u1', designator: 'U1', pins: [[100, 100]] }],
+		flags: [{ id: 'f1', x: 100, y: 130 }],
+		wires: [{ id: 'w1', points: [100, 100, 100, 130] }],
+	});
+	try {
+		const res: any = await runAction('schematic.component.delete', { primitiveIds: 'u1', cascade: false });
+		assert.equal(res.result.deleted, true);
+		assert.equal(res.result.cascaded, undefined, 'cascade:false must not report a cascaded block');
+		assert.deepEqual(fx.liveWireIds(), ['w1']);
+		assert.deepEqual(fx.liveFlagIds(), ['f1']);
+		assert.equal(fx.deleteCalls.filter(c => c.kind === 'wires').length, 0);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('component.delete: a lying cascade delete is reported as notApplied, never claimed removed', async () => {
+	const fx = installComponentDeleteStub({
+		parts: [{ id: 'u1', designator: 'U1', pins: [[100, 100]] }],
+		flags: [{ id: 'f1', x: 100, y: 130 }],
+		wires: [{ id: 'w1', points: [100, 100, 100, 130] }],
+		keepWireIds: ['w1'],
+	});
+	try {
+		const res: any = await runAction('schematic.component.delete', { primitiveIds: 'u1' });
+		assert.equal(res.result.deleted, true, 'the component itself did go away');
+		// Only PROVEN-removed ids are claimed; the survivor is structured notApplied (#151).
+		assert.deepEqual(res.result.cascaded, { wires: [], flags: ['f1'] });
+		assert.equal(res.result.partial, true);
+		assert.deepEqual(res.result.notApplied, [{ kind: 'wire', id: 'w1' }]);
+		assert.ok((res.warnings ?? []).some((w: string) => /w1/.test(w)), 'the survivor must be named in a warning');
+		assert.deepEqual(fx.liveWireIds(), ['w1'], 'fixture sanity: the kept wire is still live');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
 // ─── schematic.pin.disconnect (multi-stub sweep + delete verified by re-read) ──
 import { schematicPinDisconnect } from './actions';
 

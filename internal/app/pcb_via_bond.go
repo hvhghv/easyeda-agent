@@ -75,6 +75,10 @@ func planViaBond(pads []pcbPadP, vias []pcbViaP, only string) []viaBondAssign {
 // eda.pcb_PrimitiveVia.modify + an in-session readback), so it works on every
 // connector version already in the field.
 func runPcbViaBond(cfg *appConfig, window, only string, dryRun bool, stdout, stderr io.Writer) error {
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	pads, err := fetchPcbPads(cfg, window)
 	if err != nil {
 		return fmt.Errorf("read pads: %w", err)

@@ -376,6 +376,10 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 // 让调用方(如 group-move 的失败恢复段)拿到结构化的成败,而不是解析错误文案。
 func runAutoconnectOpts(cfg *appConfig, window string, conns []acConnSpec, rules autoconnectRules, opts acRunOpts, stdout, stderr io.Writer) (acReport, error) {
 	allPages, dryRun, replace, asJSON := opts.AllPages, opts.DryRun, opts.Replace, opts.JSON
+	// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+	if dryRun {
+		defer setDispatchDryRun(true)()
+	}
 	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{
 		"includeBBox": true,
 		"includePins": true,

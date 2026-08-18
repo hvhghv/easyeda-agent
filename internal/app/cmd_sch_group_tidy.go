@@ -24,8 +24,8 @@ package app
 //      (tidySettledPins);connect 全部用已实测的显式 pinX/pinY;
 //   3. 文字朝外 rotation 只走 tidyLabelRotation 校准表,勿散写;
 //   4. netport 永不竖放;
-//   5. 收尾 layout-lint + bridge-check 自检,红则按记录的每步前几何逐步回滚
-//      (tidyStepRecord / tidyRollback),不许半成品落地。
+//   5. 执行走 ADR-0004 单一安全 move 内核(schMoveKernel:快照→删证→移动→
+//      重连→对账,失败自动恢复);收尾再跑 layout-lint(几何判据)。
 //
 // 共享依赖只读复用(不改共享文件):cmd_sch_group.go(loadSchGroupsContext /
 // findSchGroup / describeSchGroup / fetchSchWirePolylinesStable / schGroupWire /
@@ -1170,53 +1170,6 @@ func tidyBuildRecord(live tidyLiveMember, touched []string) tidyStepRecord {
 	return rec
 }
 
-// tidyRollback 按记录的每步前几何逆序回滚(铁则5)。best-effort:单步失败打
-// 警告继续 —— 回滚里再抛错只会让现场更糟,残余交给收尾自检报告。
-func tidyRollback(cfg *appConfig, win, docUUID string, steps []tidyStepRecord, stderr io.Writer) {
-	for i := len(steps) - 1; i >= 0; i-- {
-		st := steps[i]
-		for _, r := range st.Restores {
-			if _, err := requestAutolayoutAction(cfg, "schematic.pin.disconnect", win,
-				map[string]any{"designator": st.Designator, "pin": r.Pin}, docUUID, "rollback disconnect"); err != nil {
-				fmt.Fprintf(stderr, "  ⚠ 回滚 %s:%s disconnect:%v(可能本就无旗,继续)\n", st.Designator, r.Pin, err)
-			}
-		}
-		if err := tidyModifyPose(cfg, win, docUUID, st.PrimitiveID, st.OrigX, st.OrigY, st.OrigRot); err != nil {
-			fmt.Fprintf(stderr, "  ⚠ 回滚 %s 姿态失败:%v\n", st.Designator, err)
-			continue
-		}
-		pins, err := tidySettledPins(cfg, win, docUUID, st.Designator)
-		if err != nil {
-			fmt.Fprintf(stderr, "  ⚠ 回滚 %s 实测 pin 失败:%v — 原连接未重建\n", st.Designator, err)
-			continue
-		}
-		for _, r := range st.Restores {
-			if !r.HasFlag {
-				continue
-			}
-			if r.Kind == "" {
-				fmt.Fprintf(stderr, "  ⚠ 回滚 %s:%s 原标记类型无法经 connect_pin 重建(netlabel 类)— 需手工补\n", st.Designator, r.Pin)
-				continue
-			}
-			px, py, ok := tidyPinCoord(pins, r.Pin)
-			if !ok {
-				fmt.Fprintf(stderr, "  ⚠ 回滚 %s:%s 实测 pins 里找不到该 pin\n", st.Designator, r.Pin)
-				continue
-			}
-			payload := map[string]any{"pinX": px, "pinY": py, "kind": r.Kind, "net": r.Net, "direction": r.Direction}
-			if r.Offset > 0 {
-				payload["offset"] = r.Offset
-			}
-			if rot, rerr := tidyLabelRotation(r.Kind, r.Direction); rerr == nil {
-				payload["rotation"] = rot
-			}
-			if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "rollback connect"); err != nil {
-				fmt.Fprintf(stderr, "  ⚠ 回滚 %s:%s 重连失败:%v\n", st.Designator, r.Pin, err)
-			}
-		}
-	}
-}
-
 // ── 执行 ────────────────────────────────────────────────────────────────────
 
 // tidyDisconnectCollateral 从 disconnect result 提取 alsoDisconnectedPins ——
@@ -1247,105 +1200,6 @@ func tidyPinNumbers(targets []tidyPinTarget) []string {
 		out[i] = t.Pin
 	}
 	return out
-}
-
-// tidyExecPowerMember 执行一件 power-updown:逐 pin disconnect → modify 到
-// (x,y)+rot 候选1 → settle 实测 → 电源 pin 不在上则换候选2 再实测 → 显式坐标
-// connect(铁则1/2/3 全程落实)。
-func tidyExecPowerMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, mp tidyMemberPlan, stdout io.Writer) error {
-	// 旧桩/旗已由 tidyDeepSweep 整树删净(共享树在 sweep 期即拒),此处直接落位。
-	usedRot := mp.RotationCandidates[0]
-	if err := tidyModifyPose(cfg, win, docUUID, live.Comp.ID, mp.X, mp.Y, usedRot); err != nil {
-		return fmt.Errorf("modify %s → (%g,%g) rot %g:%w", live.Comp.Designator, mp.X, mp.Y, usedRot, err)
-	}
-	pins, err := tidySettledPins(cfg, win, docUUID, live.Comp.Designator)
-	if err != nil {
-		return err
-	}
-	onTop, err := tidyPowerPinOnTop(pins, mp.PowerPin, mp.GndPin)
-	if err != nil {
-		return err
-	}
-	if !onTop {
-		// rot 二义消解(铁则1):候选1 实测电源 pin 不在上 → 镜像符号,换候选2。
-		usedRot = mp.RotationCandidates[1]
-		if err := tidyModifyPose(cfg, win, docUUID, live.Comp.ID, mp.X, mp.Y, usedRot); err != nil {
-			return fmt.Errorf("modify %s rot 候选2 %g:%w", live.Comp.Designator, usedRot, err)
-		}
-		if pins, err = tidySettledPins(cfg, win, docUUID, live.Comp.Designator); err != nil {
-			return err
-		}
-		if onTop, err = tidyPowerPinOnTop(pins, mp.PowerPin, mp.GndPin); err != nil {
-			return err
-		}
-		if !onTop {
-			return fmt.Errorf("%s rot %g/%g 两候选实测电源 pin %s 都不在上 — 符号基向异常,拒绝半成品",
-				live.Comp.Designator, mp.RotationCandidates[0], mp.RotationCandidates[1], mp.PowerPin)
-		}
-	}
-	// 竖放去耦统一总高(旗锚线上下取齐):offset=(标准高−pin距)/2 —— 同排组高
-	// 不一(块 wiring 桩 30 vs autoconnect 默认桩 20)顶对齐后底不齐,视觉参差
-	// (用户点名「横着和竖着不规范」的一半)。pin 距超标给不出 ≥15 的桩时退默认。
-	const tidyPowerFlagSpanH = 100.0
-	var stubOffset float64
-	if _, py1, ok1 := tidyPinCoord(pins, mp.PowerPin); ok1 {
-		if _, py2, ok2 := tidyPinCoord(pins, mp.GndPin); ok2 {
-			if d := math.Abs(py1 - py2); d > 0 {
-				if off := (tidyPowerFlagSpanH - d) / 2; off >= 15 {
-					stubOffset = snap5(off)
-				}
-			}
-		}
-	}
-	for _, t := range mp.Pins {
-		px, py, ok := tidyPinCoord(pins, t.Pin)
-		if !ok {
-			return fmt.Errorf("%s 实测 pins 里没有 pin %s", live.Comp.Designator, t.Pin)
-		}
-		payload := map[string]any{
-			"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
-			"direction": t.Direction, "rotation": t.LabelRotation,
-		}
-		if stubOffset > 0 {
-			payload["offset"] = stubOffset
-		}
-		if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "tidy connect"); err != nil {
-			return fmt.Errorf("connect %s:%s → %s %s(%s):%w", live.Comp.Designator, t.Pin, t.Direction, t.Kind, t.Net, err)
-		}
-	}
-	fmt.Fprintf(stdout, "  ✓ %s → (%g,%g) rot %g;pin%s→up(power) pin%s→down(gnd) 文字朝外\n",
-		live.Comp.Designator, mp.X, mp.Y, usedRot, mp.PowerPin, mp.GndPin)
-	return nil
-}
-
-// tidyExecSignalMember 执行一件 signal-row:只拆竖放的 netport(铁则4)→
-// settle 实测 → 按左入右出水平重连(器件位置/rotation 不动)。
-func tidyExecSignalMember(cfg *appConfig, win, docUUID string, live tidyLiveMember, sp tidySignalPlan, stdout io.Writer) error {
-	// 旧竖桩已由 tidyDeepSweep 整树删净(共享树 sweep 期即拒)。
-	if sp.HasPose { // placement-first(zone relayout):先落位再重连
-		if err := tidyModifyPose(cfg, win, docUUID, live.Comp.ID, sp.X, sp.Y, live.Rotation); err != nil {
-			return fmt.Errorf("modify %s → (%g,%g):%w", live.Comp.Designator, sp.X, sp.Y, err)
-		}
-	}
-	pins, err := tidySettledPins(cfg, win, docUUID, live.Comp.Designator)
-	if err != nil {
-		return err
-	}
-	for _, t := range sp.Pins {
-		px, py, ok := tidyPinCoord(pins, t.Pin)
-		if !ok {
-			return fmt.Errorf("%s 实测 pins 里没有 pin %s", live.Comp.Designator, t.Pin)
-		}
-		payload := map[string]any{
-			"pinX": px, "pinY": py, "kind": t.Kind, "net": t.Net,
-			"direction": t.Direction, "rotation": t.LabelRotation,
-		}
-		if _, err := requestAutolayoutAction(cfg, "schematic.power.connect_pin", win, payload, docUUID, "tidy connect"); err != nil {
-			return fmt.Errorf("connect %s:%s → %s netport(%s):%w", live.Comp.Designator, t.Pin, t.Direction, t.Net, err)
-		}
-	}
-	fmt.Fprintf(stdout, "  ✓ %s signal-row 重连 %d 个 pin(netport 水平 / 电源地旗竖直)\n", live.Comp.Designator, len(sp.Pins))
-	return nil
 }
 
 // tidySelfCheck 收尾自检(铁则5):layout-lint 0 overlap + bridge-check 0
@@ -1503,84 +1357,92 @@ func tidyDeepSweepPlan(memberDesigs map[string]bool, comps []layoutComp, wires [
 	return deleteIDs, nil
 }
 
-// tidyDeepSweep executes the sweep: one prim-delete for the whole debris set.
-// Replaces the old per-pin disconnect loop — that loop missed dangling remnants
-// that touch no pin (the grey half-segment), and its "No stub wire found" error
-// was a false failure on already-clean pins (live 2026-08-12).
-func tidyDeepSweep(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, comps []layoutComp, stdout, stderr io.Writer) error {
-	memberSet := map[string]bool{}
-	for _, mp := range plan.Power {
-		memberSet[strings.ToUpper(mp.Designator)] = true
-	}
-	for _, sp := range plan.Signal {
-		memberSet[strings.ToUpper(sp.Designator)] = true
-	}
-	if len(memberSet) == 0 {
-		return nil
-	}
-	wires, err := fetchSchWirePolylinesStable(cfg, win, docUUID)
-	if err != nil {
-		return fmt.Errorf("deep-sweep wire read:%w", err)
-	}
-	ids, err := tidyDeepSweepPlan(memberSet, comps, wires)
-	if err != nil {
-		return err
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	if _, err := requestAutolayoutAction(cfg, "schematic.primitives.delete", win,
-		map[string]any{"primitiveIds": ids}, docUUID, "tidy deep-sweep"); err != nil {
-		return fmt.Errorf("deep-sweep delete %d primitive(s):%w", len(ids), err)
-	}
-	fmt.Fprintf(stdout, "  深度清扫:删除 %d 个旧桩/旗/残段(整树)\n", len(ids))
-	return nil
-}
+// tidyPowerFlagSpanH:竖放去耦的统一总高(旗锚线上下取齐)—— 同排组高不一
+// (块 wiring 桩 30 vs autoconnect 默认桩 20)顶对齐后底不齐,视觉参差。
+const tidyPowerFlagSpanH = 100.0
 
-func tidyApply(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, comps []layoutComp, stdout, stderr io.Writer) error {
-	// 深度清扫先行:成员的整树(旧桩+旧旗+不触 pin 的残段)一次删净,重建才
-	// 从干净地基开始;共享树(触非成员 pin)拒绝 —— F2 同语义,零 mutation。
-	if err := tidyDeepSweep(cfg, win, docUUID, plan, members, comps, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return err
-	}
-	var executed []tidyStepRecord
-	fail := func(err error) error {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		if len(executed) > 0 {
-			fmt.Fprintf(stderr, "按记录的每步前几何逐步回滚 %d 步(铁则5)…\n", len(executed))
-			tidyRollback(cfg, win, docUUID, executed, stderr)
-		}
-		return err
-	}
+// tidyApply 把计划交给 ADR-0004 单一安全 move 内核(schMoveKernel)执行:
+// 内核负责 快照(pin→net 全表 + bridge 基线)→ 深度清扫(整树 + 删证回读;
+// 共享树 fail-closed 零 mutation)→ 逐件落位(snap5;rot 二义双候选 settle 实测
+// 消解 = 铁则1/2)→ 重连(显式端子走文字朝外校准表 rotation = 铁则3;统一总高
+// 桩长按实测 pin 距计算)→ 对账(网表逐 pin + bridge 增量),任一步失败自动
+// 进入恢复段(对当前实位全员重连)—— 旧的逐步位姿回滚(tidyRollback)由此
+// 取代:恢复的判据是电气不是坐标。收尾再跑 layout-lint(几何判据,内核不管)。
+func tidyApply(cfg *appConfig, win, docUUID string, plan *tidyPlanned, members map[string]tidyLiveMember, stdout, stderr io.Writer) error {
+	var items []moveItem
 	for _, mp := range plan.Power {
-		live, ok := members[strings.ToUpper(mp.Designator)]
-		if !ok {
-			return fail(fmt.Errorf("计划成员 %s 不在 live 集合(内部不一致)", mp.Designator))
+		mp := mp
+		if _, ok := members[strings.ToUpper(mp.Designator)]; !ok {
+			return fmt.Errorf("计划成员 %s 不在 live 集合(内部不一致)", mp.Designator)
 		}
-		executed = append(executed, tidyBuildRecord(live, tidyPinNumbers(mp.Pins)))
-		if err := tidyExecPowerMember(cfg, win, docUUID, live, mp, stdout); err != nil {
-			return fail(fmt.Errorf("tidy %s:%w", mp.Designator, err))
-		}
+		items = append(items, moveItem{
+			Designator:    mp.Designator,
+			HasTarget:     true,
+			X:             mp.X,
+			Y:             mp.Y,
+			RotCandidates: mp.RotationCandidates[:],
+			VerifyPins: func(pins []layoutPin) (bool, error) {
+				// rot 二义消解判据(铁则1):电源 pin 实测在上(y-UP)。
+				return tidyPowerPinOnTop(pins, mp.PowerPin, mp.GndPin)
+			},
+			Terms: func(pins []layoutPin) ([]moveConnTerm, error) {
+				// 竖放去耦统一总高:offset=(标准高−pin距)/2;给不出 ≥15 的桩退默认。
+				var stubOffset float64
+				if _, py1, ok1 := tidyPinCoord(pins, mp.PowerPin); ok1 {
+					if _, py2, ok2 := tidyPinCoord(pins, mp.GndPin); ok2 {
+						if d := math.Abs(py1 - py2); d > 0 {
+							if off := (tidyPowerFlagSpanH - d) / 2; off >= 15 {
+								stubOffset = snap5(off)
+							}
+						}
+					}
+				}
+				out := make([]moveConnTerm, 0, len(mp.Pins))
+				for _, t := range mp.Pins {
+					out = append(out, moveConnTerm{Pin: t.Pin, Kind: t.Kind, Net: t.Net,
+						Direction: t.Direction, Rotation: t.LabelRotation, Offset: stubOffset})
+				}
+				return out, nil
+			},
+		})
 	}
 	for _, sp := range plan.Signal {
+		sp := sp
 		live, ok := members[strings.ToUpper(sp.Designator)]
 		if !ok {
-			return fail(fmt.Errorf("计划成员 %s 不在 live 集合(内部不一致)", sp.Designator))
+			return fmt.Errorf("计划成员 %s 不在 live 集合(内部不一致)", sp.Designator)
 		}
-		executed = append(executed, tidyBuildRecord(live, tidyPinNumbers(sp.Pins)))
-		if err := tidyExecSignalMember(cfg, win, docUUID, live, sp, stdout); err != nil {
-			return fail(fmt.Errorf("tidy %s:%w", sp.Designator, err))
+		it := moveItem{Designator: sp.Designator}
+		if sp.HasPose { // placement-first(zone relayout):先落位再重连,rot 保持现值
+			rot := live.Rotation
+			it.HasTarget = true
+			it.X, it.Y = sp.X, sp.Y
+			it.Rot = &rot
 		}
+		it.Terms = func(pins []layoutPin) ([]moveConnTerm, error) {
+			out := make([]moveConnTerm, 0, len(sp.Pins))
+			for _, t := range sp.Pins {
+				out = append(out, moveConnTerm{Pin: t.Pin, Kind: t.Kind, Net: t.Net,
+					Direction: t.Direction, Rotation: t.LabelRotation})
+			}
+			return out, nil
+		}
+		items = append(items, it)
 	}
-	if len(executed) == 0 {
+	if len(items) == 0 {
 		fmt.Fprintln(stdout, "✓ 组内无需改动(已整理,幂等)")
 		return nil
 	}
-	if err := tidySelfCheck(cfg, win, docUUID); err != nil {
-		return fail(fmt.Errorf("收尾自检红,回滚:%w", err))
+	rep, err := schMoveKernel(cfg, win, docUUID, items,
+		moveKernelOpts{Label: "tidy", Stdout: stdout, Stderr: stderr})
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return err
 	}
-	fmt.Fprintf(stdout, "✓ tidy 落地 %d 件;layout-lint + bridge-check 自检绿\n", len(executed))
+	if err := tidySelfCheck(cfg, win, docUUID); err != nil {
+		return fmt.Errorf("收尾自检红:%w(电气一致性内核已对账;按 layout-lint findings 修几何)", err)
+	}
+	fmt.Fprintf(stdout, "✓ tidy 落地 %d 件;内核对账(网表+bridge)+ layout-lint 自检绿\n", len(rep.Moved)+len(rep.Skipped))
 	return nil
 }
 
@@ -1702,5 +1564,5 @@ func runSchGroupTidy(cfg *appConfig, window, groupRef, pattern string, spacing f
 		fmt.Fprintln(stdout, "dry-run(默认):未改画布 —— 加 --apply 落地")
 		return nil
 	}
-	return tidyApply(pinned, win, docUUID, plan, members, comps, stdout, stderr)
+	return tidyApply(pinned, win, docUUID, plan, members, stdout, stderr)
 }

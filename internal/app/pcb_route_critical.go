@@ -322,6 +322,10 @@ and identifies without mutating.`,
   easyeda pcb route-critical --project ceshi --skip-power   # pairs only`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ADR-0004 Decision 4: dry-run 必须纯计算 —— 机械保证,Mutates 派发直接被拒。
+			if dryRun {
+				defer setDispatchDryRun(true)()
+			}
 			if !dryRun {
 				if err := gateRouteCommand(cfg, *window, "route-critical", forceReason, forceUnsafeReason, stderr); err != nil {
 					return err
