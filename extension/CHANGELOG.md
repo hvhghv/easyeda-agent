@@ -6,6 +6,26 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`pcb.component.modify` 解锁假成功(#174)**:平台 `modify()` 的真实锁字段是
+  `primitiveLock`,而我们的读侧(`pcb list`)一直报 `locked`,调用方自然传
+  `{"locked":false}` —— 平台**静默忽略未知键仍返回成功**(真机 22/22 报 ok、
+  reload 后 22/22 仍锁定)。现在:(1) patch 归一化,`locked`/`lock` 别名映射到
+  官方键 `primitiveLock`,契约外的未知键**硬报错**(不再允许静默 no-op);
+  (2) 每次写后**新鲜回读**逐字段核对(modify 返回对象会回显输入,不可信),结果
+  带 `verified` + `applied`/`notApplied`/`unverified`;(3) 回读发现锁写被丢时
+  自动改走 `setState_PrimitiveLock` + `done()` 写路径(`pcb.track.lock` 验证过
+  的模式)重试并再核对(`lockFallback:true`);(4) 按 #151 部分应用约定:画布
+  已变(部分字段落地)返回 ok + 结构化 `notApplied`,**零字段落地才报 ERROR**。
+
+### Added
+- **`pcb.component.lock` — 批量组件锁定/解锁(#174)**:输入 `primitiveIds[]` +
+  `locked`,走专用 `setState_PrimitiveLock` + `done()` 写路径,写后新鲜回读逐件
+  核对;结果 `applied`/`alreadyInState`/`notApplied`/`missing` + `verified`。
+  幂等(已在目标状态的只计数不重写);全部未落地时报 ERROR 而非假成功。CLI:
+  `easyeda pcb lock --ids id1,id2 [--unlock]` / `easyeda pcb lock --all --unlock`
+  (整板批量释放,--all 由 CLI 读活板 component 列表展开)。
+
 ## [1.0.1] - 2026-08-18
 
 连接器侧一条修复(见下);CLI 侧同批落地:artifact 目录递归嵌套归一、

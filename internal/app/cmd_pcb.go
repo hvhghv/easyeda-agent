@@ -570,6 +570,7 @@ rotate first ('--patch {"rotation":…}'), then --center in a second call.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda pcb modify --id <pid> --patch '{"x":1000,"y":2000}'   # x/y = ANCHOR
   easyeda pcb modify --id <pid> --patch '{"rotation":90,"layer":"BOTTOM"}'
+  easyeda pcb modify --id <pid> --patch '{"locked":false}'      # verified via readback (#174); batches → 'pcb lock'
   easyeda pcb modify --id <pid> --center --x 1500 --y 2200      # x/y = desired bbox CENTER`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if id == "" {
@@ -612,6 +613,69 @@ rotate first ('--patch {"rotation":…}'), then --center in a second call.`,
 		c.Flags().BoolVar(&center, "center", false, "interpret --x/--y as the desired BBOX CENTER (converted to anchor via the live bbox)")
 		c.Flags().Float64Var(&centerX, "x", 0, "desired bbox-center x (mil; with --center)")
 		c.Flags().Float64Var(&centerY, "y", 0, "desired bbox-center y (mil; with --center)")
+		pcb.AddCommand(c)
+	}
+
+	// ── lock ──────────────────────────────────────────────────────────────
+	// pcb.component.lock (#174) — batch component lock/unlock with a verified
+	// write path. `pcb modify --patch '{"locked":…}'` used to fake-succeed
+	// (the platform ignored the unknown key); this action writes via
+	// setState_PrimitiveLock + done() and re-reads before claiming success.
+	{
+		var idsRaw string
+		var all, unlock bool
+		c := &cobra.Command{
+			Use:   "lock",
+			Short: "Lock/unlock PCB components (batch, readback-verified)",
+			Long: `Set the primitiveLock flag on placed components. Unlike the old
+'pcb modify --patch {"locked":…}' path — which the platform could silently
+drop while still reporting success (#174) — this writes through the dedicated
+lock setter and verifies every component against a fresh readback: the result
+lists applied / alreadyInState / notApplied / missing ids, and a write that
+did not stick can never report ok.
+
+Scope EXACTLY ONE of:
+  --ids   lock/unlock these component primitiveIds (from 'easyeda pcb list')
+  --all   every component on the active PCB (idempotent — components already
+          in the desired state are counted, not re-written)
+
+For copper routing (tracks/vias/fills) use 'pcb track-lock' instead.`,
+			Args: cobra.NoArgs,
+			Example: `  easyeda pcb lock --ids id1,id2            # lock two components
+  easyeda pcb lock --all --unlock           # release every component on the board
+  easyeda pcb lock --ids id1 --unlock       # unlock one`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if (idsRaw == "") == !all {
+					return fmt.Errorf("pass EXACTLY ONE of --ids or --all")
+				}
+				var ids []string
+				if all {
+					res, err := requestAction(cfg, "pcb.components.list", window, nil)
+					if err != nil {
+						return fmt.Errorf("--all needs the live component list but the read failed: %w", err)
+					}
+					for _, c := range parseApComps(res.Result) {
+						if c.id != "" {
+							ids = append(ids, c.id)
+						}
+					}
+					if len(ids) == 0 {
+						return fmt.Errorf("the active PCB has no components to %s", map[bool]string{true: "unlock", false: "lock"}[unlock])
+					}
+				} else {
+					var err error
+					ids, err = parseIDList(idsRaw)
+					if err != nil {
+						return err
+					}
+				}
+				return dispatch(cfg, "pcb.component.lock", window,
+					map[string]any{"primitiveIds": ids, "locked": !unlock}, stdout, stderr)
+			},
+		}
+		c.Flags().StringVar(&idsRaw, "ids", "", "component primitiveIds — CSV: id1,id2")
+		c.Flags().BoolVar(&all, "all", false, "target every component on the active PCB")
+		c.Flags().BoolVar(&unlock, "unlock", false, "clear the lock instead of setting it")
 		pcb.AddCommand(c)
 	}
 

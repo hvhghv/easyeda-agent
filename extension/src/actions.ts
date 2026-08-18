@@ -7711,16 +7711,147 @@ const pcbSnapshot: Handler = async (payload) => {
 	};
 };
 
+// ─── pcb.component.modify patch contract (issue #174) ────────────────────
+// The REAL field the platform reads for lock state is `primitiveLock` — but
+// our own readback (serializePcbComponent / `pcb list`) reports it as `locked`,
+// so callers naturally write `{"locked":false}` … which the platform silently
+// IGNORES as an unknown key and still returns a component object (= fake
+// success: 22/22 "ok" unlocks that survived a reload as locked). Two defenses:
+// alias-normalize the natural spellings onto the real key, and REJECT any key
+// outside the documented modify() contract instead of letting it no-op.
+
+/** patch key → the serializePcbComponent field that reads it back (null = not
+ *  exposed by the serializer, so the write cannot be verified). */
+export const PCB_COMPONENT_PATCH_READBACK: Record<string, string | null> = {
+	layer: 'layer',
+	x: 'x',
+	y: 'y',
+	rotation: 'rotation',
+	primitiveLock: 'locked',
+	addIntoBom: 'addIntoBom',
+	designator: 'designator',
+	name: 'name',
+	uniqueId: 'uniqueId',
+	manufacturerId: 'manufacturerId',
+	supplierId: 'supplierId',
+	manufacturer: null,
+	supplier: null,
+	otherProperty: null,
+};
+
+/** Natural spellings accepted for the awkward official key names. */
+export const PCB_COMPONENT_PATCH_ALIASES: Record<string, string> = {
+	locked: 'primitiveLock',
+	lock: 'primitiveLock',
+};
+
+/**
+ * Normalize a pcb.component.modify patch: map aliases onto the official keys
+ * and reject unknown keys (the platform ignores them WITHOUT erroring — the
+ * root cause of the #174 fake success).
+ */
+export function normalizePcbComponentPatch(raw: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	const unknown: Array<string> = [];
+	for (const [rawKey, value] of Object.entries(raw)) {
+		const key = PCB_COMPONENT_PATCH_ALIASES[rawKey] ?? rawKey;
+		if (!(key in PCB_COMPONENT_PATCH_READBACK)) {
+			unknown.push(rawKey);
+			continue;
+		}
+		if (key in out && out[key] !== value) {
+			throw new ActionError(
+				ErrorCodes.MISSING_PAYLOAD_FIELD,
+				`Patch sets "${key}" twice with conflicting values (an alias like "locked" maps onto "primitiveLock").`,
+			);
+		}
+		out[key] = value;
+	}
+	if (unknown.length > 0) {
+		throw new ActionError(
+			ErrorCodes.MISSING_PAYLOAD_FIELD,
+			`Unknown patch field(s): ${unknown.join(', ')}. The platform silently ignores unknown keys and still `
+			+ `reports success (#174), so they are rejected here. Valid keys: `
+			+ `${Object.keys(PCB_COMPONENT_PATCH_READBACK).join(', ')} (aliases: locked/lock → primitiveLock).`,
+		);
+	}
+	if (Object.keys(out).length === 0) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Patch object is empty — nothing to modify.');
+	}
+	return out;
+}
+
+export interface PcbPatchVerification {
+	/** patch keys the fresh readback confirms. */
+	applied: Array<string>;
+	/** patch keys the readback contradicts — the write did NOT stick. */
+	notApplied: Array<{ field: string; expected: unknown; actual: unknown }>;
+	/** patch keys the serializer cannot read back (manufacturer/supplier/otherProperty, or a non-numeric layer literal). */
+	unverified: Array<string>;
+}
+
+const normDeg = (v: number): number => ((v % 360) + 360) % 360;
+
+/**
+ * Compare a normalized patch against a FRESH readback record (#174). The
+ * object returned by modify() — and even getState_* on the object you just
+ * wrote — can echo the input, so the caller must re-pull before verifying.
+ */
+export function verifyPcbComponentPatch(
+	patch: Record<string, unknown>,
+	readback: Record<string, unknown>,
+): PcbPatchVerification {
+	const v: PcbPatchVerification = { applied: [], notApplied: [], unverified: [] };
+	for (const [field, expected] of Object.entries(patch)) {
+		const readKey = PCB_COMPONENT_PATCH_READBACK[field];
+		if (readKey === null || readKey === undefined) {
+			v.unverified.push(field);
+			continue;
+		}
+		const actual = readback[readKey];
+		let ok: boolean | null;
+		if (field === 'layer' && typeof expected !== 'number') {
+			// The CLI historically accepts layer literals like "BOTTOM"; the readback
+			// is numeric, and we have no trusted name→id table here — don't guess.
+			ok = null;
+		}
+		else if (typeof expected === 'number' && typeof actual === 'number') {
+			ok = field === 'rotation'
+				? Math.abs(normDeg(expected) - normDeg(actual)) < 1e-3
+				: Math.abs(expected - actual) < 1e-3;
+		}
+		else if (expected === null) {
+			// modify() documents null as "leave blank" — an empty readback matches.
+			ok = actual === null || actual === undefined || actual === '';
+		}
+		else {
+			ok = actual === expected;
+		}
+		if (ok === null) v.unverified.push(field);
+		else if (ok) v.applied.push(field);
+		else v.notApplied.push({ field, expected, actual });
+	}
+	return v;
+}
+
 /**
  * Lay out a component on the active PCB: move/rotate/flip-layer/lock or set
  * designator/BOM flags. Mirrors schematic.component.modify against pcb_*.
+ *
+ * #174 hardening: the patch is normalized (unknown keys hard-error instead of
+ * silently no-opping), and every write is verified against a FRESH readback.
+ * A lock write that modify() drops is retried through the
+ * setState_PrimitiveLock + done() path (the one pcb.track.lock relies on).
+ * Partial application follows the #151 convention: once the canvas changed we
+ * never throw — the result carries applied/notApplied; only a full no-op errors.
  */
-const pcbComponentModify: Handler = async (payload) => {
+export const pcbComponentModify: Handler = async (payload) => {
 	const primitiveId = requireString(payload, 'primitiveId');
-	const patch = payload.patch;
-	if (typeof patch !== 'object' || patch === null) {
+	const rawPatch = payload.patch;
+	if (typeof rawPatch !== 'object' || rawPatch === null || Array.isArray(rawPatch)) {
 		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Missing required object field "patch".');
 	}
+	const patch = normalizePcbComponentPatch(rawPatch as Record<string, unknown>);
 
 	let component;
 	try {
@@ -7735,7 +7866,162 @@ const pcbComponentModify: Handler = async (payload) => {
 	if (!component) {
 		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to modify PCB component "${primitiveId}".`);
 	}
-	return { result: { component: serializePcbComponent(component) } };
+
+	// Fresh re-pull — the returned object can echo the input (#174).
+	const freshRead = async (): Promise<Record<string, unknown> | null> => {
+		try {
+			const c = await eda.pcb_PrimitiveComponent.get(primitiveId);
+			return c ? serializePcbComponent(c) : null;
+		}
+		catch { return null; }
+	};
+	let readback = await freshRead();
+	let verification = readback ? verifyPcbComponentPatch(patch, readback) : null;
+
+	// Known fake-success path: modify() drops the lock write. Fall back to the
+	// setState + done() write path (done() is what commits pending state, #134).
+	let lockFallback = false;
+	if (verification?.notApplied.some(f => f.field === 'primitiveLock')) {
+		lockFallback = true;
+		try {
+			const c = await eda.pcb_PrimitiveComponent.get(primitiveId);
+			if (c) {
+				c.setState_PrimitiveLock(patch.primitiveLock === true);
+				await c.done();
+			}
+		}
+		catch { /* the re-verify below reports the outcome */ }
+		readback = (await freshRead()) ?? readback;
+		verification = readback ? verifyPcbComponentPatch(patch, readback) : verification;
+	}
+
+	if (verification && verification.applied.length === 0 && verification.notApplied.length > 0) {
+		// NOTHING stuck — the canvas is unchanged, so a hard error is safe (#151).
+		const detail = verification.notApplied
+			.map(f => `${f.field}: wrote ${JSON.stringify(f.expected)}, read back ${JSON.stringify(f.actual)}`)
+			.join('; ');
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			`modify reported success but the readback shows no patched field was applied (${detail}). `
+			+ `The platform accepts and drops such writes without erroring (#174).`,
+		);
+	}
+
+	const result: Record<string, unknown> = {
+		component: readback ?? serializePcbComponent(component),
+		verified: verification !== null && verification.notApplied.length === 0,
+	};
+	if (verification) {
+		result.applied = verification.applied;
+		if (verification.notApplied.length > 0) result.notApplied = verification.notApplied;
+		if (verification.unverified.length > 0) result.unverified = verification.unverified;
+	}
+	if (lockFallback) result.lockFallback = true;
+	return { result };
+};
+
+/** Pure classifier for the lock readback (unit-testable without the eda runtime). */
+export function classifyLockReadback(
+	written: Array<string>,
+	freshLockById: Map<string, boolean>,
+	locked: boolean,
+): { applied: Array<string>; notApplied: Array<string> } {
+	const applied: Array<string> = [];
+	const notApplied: Array<string> = [];
+	for (const id of written) {
+		if (freshLockById.get(id) === locked) applied.push(id);
+		else notApplied.push(id);
+	}
+	return { applied, notApplied };
+}
+
+/**
+ * Batch lock/unlock PCB components (issue #174). Dedicated write path via
+ * setState_PrimitiveLock + done() — the pattern pcb.track.lock proved out —
+ * followed by a fresh readback so a dropped write can never report success.
+ * Partial application follows #151: some-applied returns ok with a structured
+ * notApplied list; a full no-op (nothing applied, nothing already in state)
+ * throws.
+ */
+export const pcbComponentLock: Handler = async (payload) => {
+	const locked = optionalBoolean(payload, 'locked') ?? true;
+	const rawIds = payload.primitiveIds;
+	let ids: Array<string>;
+	if (typeof rawIds === 'string') ids = [rawIds];
+	else if (Array.isArray(rawIds) && rawIds.every(id => typeof id === 'string') && rawIds.length > 0) {
+		ids = [...new Set(rawIds as Array<string>)];
+	}
+	else {
+		throw new ActionError(
+			ErrorCodes.MISSING_PAYLOAD_FIELD,
+			'Missing required field "primitiveIds" (string or non-empty string[]).',
+		);
+	}
+
+	let comps: Array<PcbComponent>;
+	try {
+		comps = await eda.pcb_PrimitiveComponent.get(ids);
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to read the components to lock/unlock.');
+	}
+	const byId = new Map((comps ?? []).map(c => [c.getState_PrimitiveId(), c]));
+	const missing = ids.filter(id => !byId.has(id));
+	if (byId.size === 0) {
+		throw new ActionError(
+			ErrorCodes.INVALID_STATE,
+			`None of the ${ids.length} primitiveId(s) exist on the active PCB — pull fresh ids via pcb.components.list.`,
+		);
+	}
+
+	const alreadyInState: Array<string> = [];
+	const written: Array<string> = [];
+	const writeFailed: Array<string> = [];
+	for (const [id, c] of byId) {
+		try {
+			if (c.getState_PrimitiveLock() === locked) {
+				alreadyInState.push(id);
+				continue;
+			}
+			c.setState_PrimitiveLock(locked);
+			await c.done(); // pending state does not hit the canvas without done() (#134)
+			written.push(id);
+		}
+		catch {
+			writeFailed.push(id);
+		}
+	}
+
+	// Fresh readback — never trust the object we just wrote through (#174).
+	const freshLockById = new Map<string, boolean>();
+	if (written.length > 0) {
+		let fresh: Array<PcbComponent> = [];
+		try { fresh = await eda.pcb_PrimitiveComponent.get(written); }
+		catch { fresh = []; }
+		for (const c of fresh ?? []) freshLockById.set(c.getState_PrimitiveId(), c.getState_PrimitiveLock());
+	}
+	const { applied, notApplied } = classifyLockReadback(written, freshLockById, locked);
+	notApplied.push(...writeFailed);
+
+	if (applied.length === 0 && alreadyInState.length === 0 && notApplied.length > 0) {
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			`The ${locked ? 'lock' : 'unlock'} write did not stick on any of the ${notApplied.length} component(s) `
+			+ `(readback still reports locked=${!locked}). Nothing changed on the canvas.`,
+		);
+	}
+
+	return {
+		result: {
+			locked,
+			requested: ids.length,
+			applied,
+			alreadyInState,
+			notApplied,
+			missing,
+			verified: notApplied.length === 0,
+		},
+	};
 };
 
 /**
@@ -9754,6 +10040,7 @@ const HANDLERS: Record<string, Handler> = {
 	'pcb.add_component': pcbAddComponent,
 	'pcb.component.attrs_backfill': pcbComponentAttrsBackfill,
 	'pcb.component.modify': pcbComponentModify,
+	'pcb.component.lock': pcbComponentLock,
 	'pcb.component.delete': pcbComponentDelete,
 	'pcb.page.clear': pcbPageClear,
 	'pcb.align': pcbAlign,

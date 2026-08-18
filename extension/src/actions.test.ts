@@ -1325,3 +1325,227 @@ test('disconnect: wire-id locator stays targeted (single wire) and still verifie
 		delete (globalThis as any).eda;
 	}
 });
+
+// ─── pcb.component.modify / pcb.component.lock (issue #174) ──────────────
+// The platform silently ignores unknown modify() keys and can drop lock
+// writes while still returning a component object (fake success). These
+// tests pin the three defenses: patch normalization (aliases + unknown-key
+// rejection), fresh-readback verification, and the setState+done() fallback.
+
+import {
+	classifyLockReadback,
+	normalizePcbComponentPatch,
+	pcbComponentLock,
+	pcbComponentModify,
+	verifyPcbComponentPatch,
+} from './actions';
+
+test('pcb modify patch: locked/lock aliases normalize onto primitiveLock', () => {
+	assert.deepEqual(normalizePcbComponentPatch({ locked: false }), { primitiveLock: false });
+	assert.deepEqual(normalizePcbComponentPatch({ lock: true }), { primitiveLock: true });
+	// Official keys pass through untouched.
+	assert.deepEqual(
+		normalizePcbComponentPatch({ x: 100, rotation: 90, primitiveLock: true }),
+		{ x: 100, rotation: 90, primitiveLock: true },
+	);
+});
+
+test('pcb modify patch: unknown keys hard-error instead of silently no-opping', () => {
+	assert.throws(() => normalizePcbComponentPatch({ loked: false }), (err: any) => {
+		assert.equal(err.code, 'MISSING_PAYLOAD_FIELD');
+		assert.match(err.message, /loked/);
+		assert.match(err.message, /primitiveLock/); // the error teaches the real contract
+		return true;
+	});
+	assert.throws(() => normalizePcbComponentPatch({}), /empty/);
+	// Conflicting alias + official key is ambiguous — refuse.
+	assert.throws(() => normalizePcbComponentPatch({ locked: false, primitiveLock: true }), /conflicting/);
+	// Same value through both spellings is fine.
+	assert.deepEqual(normalizePcbComponentPatch({ locked: true, primitiveLock: true }), { primitiveLock: true });
+});
+
+test('pcb modify verify: classifies applied / notApplied / unverified from a fresh readback', () => {
+	const readback = {
+		primitiveId: 'p1', designator: 'H3', name: 'M3', layer: 1,
+		x: 500, y: 250, rotation: 90, locked: true, addIntoBom: true,
+		manufacturerId: 'X', supplierId: 'C1',
+	};
+	const v = verifyPcbComponentPatch(
+		{ x: 500, rotation: 450, primitiveLock: false, manufacturer: 'ACME', layer: 'BOTTOM' },
+		readback,
+	);
+	assert.deepEqual(v.applied.sort(), ['rotation', 'x']); // 450 ≡ 90 (mod 360)
+	assert.deepEqual(v.notApplied, [{ field: 'primitiveLock', expected: false, actual: true }]);
+	// manufacturer is not exposed by the serializer; a string layer literal has no trusted name→id table.
+	assert.deepEqual(v.unverified.sort(), ['layer', 'manufacturer']);
+	// null means "leave blank" — an empty readback matches.
+	const v2 = verifyPcbComponentPatch({ name: null }, { ...readback, name: '' });
+	assert.deepEqual(v2.applied, ['name']);
+});
+
+test('classifyLockReadback trusts only the fresh store state', () => {
+	const fresh = new Map<string, boolean>([['a', false], ['b', true]]);
+	assert.deepEqual(classifyLockReadback(['a', 'b', 'c'], fresh, false), {
+		applied: ['a'],
+		notApplied: ['b', 'c'], // 'b' still locked, 'c' vanished from the readback
+	});
+});
+
+/**
+ * Stub of eda.pcb_PrimitiveComponent with an authoritative store. Mock
+ * primitives echo staged writes on their own getters (the real platform's
+ * echo-input trap) while `get()` always reflects the committed store.
+ */
+function installPcbLockStub(opts: {
+	comps: Array<{ id: string; locked: boolean; x?: number }>;
+	dropModifyLock?: boolean;
+	dropSetStateLock?: boolean;
+}) {
+	const store = new Map(opts.comps.map(c => [c.id, {
+		primitiveId: c.id, uniqueId: `uq-${c.id}`, designator: `H-${c.id}`, name: 'M3',
+		layer: 1, x: c.x ?? 0, y: 0, rotation: 0, locked: c.locked, addIntoBom: true,
+		manufacturerId: '', supplierId: '',
+	}]));
+	const mock = (rec: any) => {
+		const staged = { ...rec };
+		return {
+			getState_PrimitiveId: () => staged.primitiveId,
+			getState_UniqueId: () => staged.uniqueId,
+			getState_Designator: () => staged.designator,
+			getState_Name: () => staged.name,
+			getState_Layer: () => staged.layer,
+			getState_X: () => staged.x,
+			getState_Y: () => staged.y,
+			getState_Rotation: () => staged.rotation,
+			getState_PrimitiveLock: () => staged.locked,
+			getState_AddIntoBom: () => staged.addIntoBom,
+			getState_ManufacturerId: () => staged.manufacturerId,
+			getState_SupplierId: () => staged.supplierId,
+			setState_PrimitiveLock: (v: boolean) => { staged.locked = v; },
+			done: async () => {
+				const committed = store.get(staged.primitiveId);
+				if (committed && !opts.dropSetStateLock) committed.locked = staged.locked;
+				return undefined;
+			},
+		};
+	};
+	(globalThis as any).eda = {
+		pcb_PrimitiveComponent: {
+			get: async (ids: string | Array<string>) => {
+				if (typeof ids === 'string') {
+					const rec = store.get(ids);
+					return rec ? mock(rec) : undefined;
+				}
+				return ids.filter(id => store.has(id)).map(id => mock(store.get(id)));
+			},
+			modify: async (id: string, patch: Record<string, unknown>) => {
+				const rec = store.get(id);
+				if (!rec) return undefined;
+				for (const [k, v] of Object.entries(patch)) {
+					if (k === 'primitiveLock') {
+						if (!opts.dropModifyLock) rec.locked = v as boolean;
+					}
+					else if (k in rec) (rec as any)[k] = v;
+				}
+				// Echo-input trap: the RETURNED object reflects the request, not the store.
+				return mock({ ...rec, locked: 'primitiveLock' in patch ? patch.primitiveLock : rec.locked });
+			},
+		},
+	};
+	return store;
+}
+
+test('pcb modify: dropped lock write falls back to setState+done and verifies (#174)', async () => {
+	const store = installPcbLockStub({ comps: [{ id: 'p1', locked: true }], dropModifyLock: true });
+	try {
+		const res: any = await pcbComponentModify({ primitiveId: 'p1', patch: { locked: false } });
+		assert.equal(res.result.verified, true);
+		assert.equal(res.result.lockFallback, true, 'must have taken the setState+done path');
+		assert.deepEqual(res.result.applied, ['primitiveLock']);
+		assert.equal(res.result.component.locked, false);
+		assert.equal(store.get('p1')!.locked, false, 'the store (survives reload) is unlocked');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('pcb modify: full no-op (both lock paths dropped) is an ERROR, not ok:true (#174)', async () => {
+	installPcbLockStub({ comps: [{ id: 'p1', locked: true }], dropModifyLock: true, dropSetStateLock: true });
+	try {
+		await assert.rejects(
+			() => pcbComponentModify({ primitiveId: 'p1', patch: { locked: false } }),
+			(err: any) => {
+				assert.equal(err.code, 'EDA_CALL_FAILED');
+				assert.match(err.message, /no patched field was applied/);
+				return true;
+			},
+		);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('pcb modify: partial application returns ok with structured notApplied (#151)', async () => {
+	installPcbLockStub({ comps: [{ id: 'p1', locked: true, x: 100 }], dropModifyLock: true, dropSetStateLock: true });
+	try {
+		const res: any = await pcbComponentModify({ primitiveId: 'p1', patch: { x: 500, locked: false } });
+		assert.equal(res.result.verified, false);
+		assert.deepEqual(res.result.applied, ['x']); // the canvas DID change — never throw
+		assert.equal(res.result.notApplied.length, 1);
+		assert.equal(res.result.notApplied[0].field, 'primitiveLock');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('pcb lock: batch unlock applies, verifies via fresh readback, reports missing ids', async () => {
+	const store = installPcbLockStub({ comps: [
+		{ id: 'a', locked: true }, { id: 'b', locked: true }, { id: 'c', locked: false },
+	] });
+	try {
+		const res: any = await pcbComponentLock({ primitiveIds: ['a', 'b', 'c', 'ghost'], locked: false });
+		assert.deepEqual(res.result.applied.sort(), ['a', 'b']);
+		assert.deepEqual(res.result.alreadyInState, ['c']);
+		assert.deepEqual(res.result.missing, ['ghost']);
+		assert.deepEqual(res.result.notApplied, []);
+		assert.equal(res.result.verified, true);
+		assert.equal(store.get('a')!.locked, false);
+		assert.equal(store.get('b')!.locked, false);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('pcb lock: a write that does not stick is an ERROR when nothing changed (#174)', async () => {
+	installPcbLockStub({ comps: [{ id: 'a', locked: true }], dropSetStateLock: true });
+	try {
+		await assert.rejects(
+			() => pcbComponentLock({ primitiveIds: ['a'], locked: false }),
+			(err: any) => {
+				assert.equal(err.code, 'EDA_CALL_FAILED');
+				assert.match(err.message, /did not stick/);
+				return true;
+			},
+		);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('pcb lock: already-in-state components are idempotent success, not rewrites', async () => {
+	installPcbLockStub({ comps: [{ id: 'a', locked: false }] });
+	try {
+		const res: any = await pcbComponentLock({ primitiveIds: ['a'], locked: false });
+		assert.deepEqual(res.result.alreadyInState, ['a']);
+		assert.deepEqual(res.result.applied, []);
+		assert.equal(res.result.verified, true);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
