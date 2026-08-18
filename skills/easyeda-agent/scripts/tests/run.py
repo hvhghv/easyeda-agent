@@ -61,14 +61,46 @@ def check_orientation(failures):
         print(f"{GREEN}✓{RESET} orientation table: spec derives to frozenTable; cycle law holds")
 
 
+def find_actions_ts():
+    """Locate extension/src/actions.ts for the TS cross-check.
+
+    Order: $EASYEDA_AGENT_ROOT (explicit repo root, for standalone skill
+    installs / CI), then the in-monorepo relative path. Returns
+    (path_or_None, all_candidate_paths)."""
+    candidates = []
+    env_root = os.environ.get('EASYEDA_AGENT_ROOT')
+    if env_root:
+        candidates.append(os.path.join(env_root, 'extension', 'src', 'actions.ts'))
+    candidates.append(os.path.normpath(
+        os.path.join(ROOT, '..', '..', '..', 'extension', 'src', 'actions.ts')))
+    for c in candidates:
+        if os.path.exists(c):
+            return c, candidates
+    return None, candidates
+
+
 def check_ts_consistency(failures):
     """The connector (TS) hand-writes the same 4 facts the linter (Python) reads
     from orientation.json. Nothing else forces them to agree, so assert it here —
     a drift means connect_pin would WRITE a rotation the linter then flags as
     wrong (or misses). This is the cross-language half of the single-source rule."""
-    actions = os.path.normpath(os.path.join(ROOT, '..', '..', '..', 'extension', 'src', 'actions.ts'))
-    if not os.path.exists(actions):
-        print(f"{DIM}· skipped TS cross-check (actions.ts not found at {actions}){RESET}")
+    actions, candidates = find_actions_ts()
+    if actions is None:
+        if os.environ.get('EASYEDA_AGENT_ROOT'):
+            # An explicit opt-in that points nowhere is a failure, not a skip —
+            # otherwise a typo'd path silently disables the drift guard.
+            failures.append(
+                f"ts: EASYEDA_AGENT_ROOT is set but actions.ts not found at {candidates[0]} "
+                f"(point it at the easyeda-agent repo root)")
+            return
+        print(f"{DIM}· SKIPPED TS cross-check: extension/src/actions.ts not found "
+              f"(standalone skill install — no monorepo checkout){RESET}")
+        for c in candidates:
+            print(f"{DIM}    looked in: {c}{RESET}")
+        print(f"{DIM}    This guard catches Python-linter vs TS connect_pin orientation-table "
+              f"drift; without it that drift goes undetected here.{RESET}")
+        print(f"{DIM}    To enable: run inside the easyeda-agent repo, or set "
+              f"EASYEDA_AGENT_ROOT=/path/to/easyeda-agent{RESET}")
         return
     src = open(actions).read()
     spec = orient.load_spec()

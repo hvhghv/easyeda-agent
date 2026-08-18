@@ -43,8 +43,9 @@ Tuple sort — each tier breaks ties of the one above:
 5. **Cheapest** unit price at the build qty — final tiebreaker.
 
 ```
-parts-select.py "100nF 0402 X7R" --qty 100        # → recommends C1525 (BASIC, 22M stock)
+parts-select.py "100nF 0402 X7R" --qty 100        # → offline hit in standard-parts.json (default; zero network)
 parts-select.py "10uF 0805" --json                 # → C440198 ; machine-readable for the agent
+parts-select.py "esd array usb" --online           # explicit opt-in: JLC catalog compare, then converge via `easyeda lib by-lcsc`
 ```
 
 ## Integration — closes the standardization loop
