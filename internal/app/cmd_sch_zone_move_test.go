@@ -12,44 +12,7 @@ import (
 	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
-// ── findZoneMoveClaim ───────────────────────────────────────────────────────
-
-func TestFindZoneMoveClaim(t *testing.T) {
-	zones := map[string]*schZoneClaim{
-		"POWER": {Zone: "left-top", Parts: []string{"U2", "C1"}},
-		"USB":   {Zone: "right-top", Parts: []string{"J1"}},
-	}
-	name, claim, err := findZoneMoveClaim(zones, "POWER")
-	if err != nil || name != "POWER" || claim == nil {
-		t.Fatalf("exact match: name=%q claim=%v err=%v", name, claim, err)
-	}
-	// 大小写不敏感唯一匹配
-	name, _, err = findZoneMoveClaim(zones, "power")
-	if err != nil || name != "POWER" {
-		t.Fatalf("case-insensitive: name=%q err=%v", name, err)
-	}
-	// 不存在 → 报错并列出全部区名
-	_, _, err = findZoneMoveClaim(zones, "RF")
-	if err == nil || !strings.Contains(err.Error(), "POWER") || !strings.Contains(err.Error(), "USB") {
-		t.Fatalf("missing-zone error should list zones, got: %v", err)
-	}
-	// 空 ref
-	if _, _, err := findZoneMoveClaim(zones, "  "); err == nil {
-		t.Fatal("empty ref should error")
-	}
-	// 大小写歧义 → 报错点名候选
-	ambi := map[string]*schZoneClaim{
-		"power": {Zone: "left-top", Parts: []string{"U9"}},
-		"POWER": {Zone: "left-top", Parts: []string{"U2"}},
-	}
-	if _, _, err := findZoneMoveClaim(ambi, "Power"); err == nil || !strings.Contains(err.Error(), "power") {
-		t.Fatalf("ambiguous fold should error naming candidates, got: %v", err)
-	}
-	// 歧义时精确名仍可用
-	if name, _, err := findZoneMoveClaim(ambi, "POWER"); err != nil || name != "POWER" {
-		t.Fatalf("exact match must win over fold ambiguity: name=%q err=%v", name, err)
-	}
-}
+// --zone 解析已统一走 resolveLayoutZone,用例移植到 sch_layout_objects_test.go。
 
 // ── partitionZoneMoveUnits:组去重 / 散件 / 跨区组 ──────────────────────────
 

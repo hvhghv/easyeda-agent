@@ -1539,11 +1539,17 @@ func runSchGroupTidy(cfg *appConfig, window, groupRef, pattern string, spacing f
 	if spacing <= 0 {
 		return fmt.Errorf("--spacing 必须 > 0(单位 = 原理图 native 坐标,默认 %g)", tidyDefaultSpacing)
 	}
-	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
+	pinned, win, docUUID, _, st, _, err := loadSchGroupsContext(cfg, window)
 	if err != nil {
 		return err
 	}
-	g, err := findSchGroup(groups, groupRef)
+	// --group 走统一注册表解析(ADR-0004 Decision 3):组 id / 组名 / 子组末段
+	// 都认;命中模块认领时报类型不适配并指路 `sch zone tidy`。
+	obj, err := resolveLayoutObject(layoutObjectTableFromState(st, docUUID), groupRef)
+	if err != nil {
+		return err
+	}
+	g, err := requireLayoutGroup(obj, "sch group tidy")
 	if err != nil {
 		return err
 	}

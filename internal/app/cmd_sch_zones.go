@@ -331,7 +331,7 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 	var asJSON bool
 	c := &cobra.Command{
 		Use:   "status",
-		Short: "列出已记下的分区认领(活体违规判据已随 zone-violation 一并废弃)",
+		Short: "本页布局对象注册表(模块认领+块组+子组,--zone/--group 的统一命名空间)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pinnedCfg, win, docUUID, err := pinZonePage(cfg, *window)
 			if err != nil {
@@ -341,40 +341,70 @@ func newSchZonesStatusCmd(cfg *appConfig, window *string, stdout io.Writer) *cob
 			if err != nil {
 				return err
 			}
+			st, serr := loadPcbStageState(project)
+			if serr != nil {
+				return serr
+			}
+			// 统一注册表(ADR-0004 Decision 3):所有吃 --zone/--group 的命令认的
+			// 就是这张表 —— 不必再靠报错来发现本命令认哪套命名。
+			table := layoutObjectTableFromState(st, docUUID)
 			if asJSON {
-				st, serr := loadPcbStageState(project)
-				if serr != nil {
-					return serr
+				type layoutObjectJSON struct {
+					Name    string   `json:"name"`
+					Source  string   `json:"source"`
+					Aliases []string `json:"aliases,omitempty"`
+					Parts   []string `json:"parts"`
+				}
+				objs := make([]layoutObjectJSON, 0, len(table))
+				for _, o := range table {
+					objs = append(objs, layoutObjectJSON{
+						Name: o.Name, Source: string(o.Source),
+						Aliases: o.Aliases, Parts: o.zoneClaim().Parts,
+					})
 				}
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(map[string]any{
 					"project": project, "documentUuid": docUUID, "schZones": zones,
 					"schZonesByPage": st.SchZonesByPage, "legacySchZones": st.SchZones,
+					"layoutObjects": objs,
 				})
 			}
-			if len(zones) == 0 {
-				fmt.Fprintf(stdout, "no schematic zone claims for %q on page %s — `sch zones set --spec <s0-spec.json>`\n", project, docUUID)
+			if len(table) == 0 {
+				fmt.Fprintf(stdout, "工程 %q 页 %s:%s\n", project, docUUID, layoutObjectsEmptyHint)
 				return nil
 			}
-			fmt.Fprintf(stdout, "schematic zone claims — project %q, page %s\n", project, docUUID)
+			fmt.Fprintf(stdout, "布局对象注册表 — project %q, page %s(--zone/--group 通用)\n", project, docUUID)
+			for _, o := range table {
+				alias := ""
+				if len(o.Aliases) > 0 {
+					alias = "  alias: " + strings.Join(o.Aliases, ",")
+				}
+				parts := o.zoneClaim().Parts
+				fmt.Fprintf(stdout, "  %-42s %-14s %d part(s): %s%s\n",
+					o.Name, "("+o.Source+")", len(parts), strings.Join(parts, ","), alias)
+			}
+			// 认领独有的格位信息(autolayout 落位目标)另列一段。
 			var names []string
 			for n := range zones {
 				names = append(names, n)
 			}
 			sort.Strings(names)
-			for _, n := range names {
-				zc := zones[n]
-				page := "-"
-				if zc.Page != "" {
-					page = zc.Page
+			if len(names) > 0 {
+				fmt.Fprintln(stdout, "认领格位(`sch autolayout --engine template` 的落位目标):")
+				for _, n := range names {
+					zc := zones[n]
+					page := "-"
+					if zc.Page != "" {
+						page = zc.Page
+					}
+					fmt.Fprintf(stdout, "  %-12s %-13s page=%s\n", n, zc.Zone, page)
 				}
-				fmt.Fprintf(stdout, "  %-12s %-13s page=%-16s %d part(s): %s\n", n, zc.Zone, page, len(zc.Parts), strings.Join(zc.Parts, ","))
 			}
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&asJSON, "json", false, "emit claims as JSON")
+	c.Flags().BoolVar(&asJSON, "json", false, "emit the registry + claims as JSON")
 	return c
 }
 

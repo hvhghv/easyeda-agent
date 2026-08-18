@@ -393,41 +393,8 @@ func buildZoneMoveTextJS(t zoneMoveText, dx, dy float64) string {
 	return b.String()
 }
 
-// findZoneMoveClaim 按名字解析 --zone(纯函数):先精确匹配,再唯一的大小写不敏感
-// 匹配;找不到时列出本页全部区名。
-func findZoneMoveClaim(zones map[string]*schZoneClaim, ref string) (string, *schZoneClaim, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", nil, fmt.Errorf("--zone is required(功能区名 = `sch zones` 的模块名,`sch zones status` 查看)")
-	}
-	var names []string
-	for n := range zones {
-		if zones[n] != nil {
-			names = append(names, n)
-		}
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		if n == ref {
-			return n, zones[n], nil
-		}
-	}
-	var folded []string
-	for _, n := range names {
-		if strings.EqualFold(n, ref) {
-			folded = append(folded, n)
-		}
-	}
-	switch len(folded) {
-	case 1:
-		return folded[0], zones[folded[0]], nil
-	case 0:
-		return "", nil, fmt.Errorf("功能区 %q 不存在 — 本页已认领的区:%s(`sch zones status` 查看,`sch zones set` 认领)",
-			ref, strings.Join(names, ", "))
-	default:
-		return "", nil, fmt.Errorf("功能区名 %q 大小写歧义(%s)— 用精确名字", ref, strings.Join(folded, ", "))
-	}
-}
+// --zone 的解析已统一走 resolveLayoutZone(sch_layout_objects.go):模块认领 /
+// 块组 / 子组同一张注册表,精确名 > 大小写折叠 > 唯一前缀。
 
 // ── 纯函数 + settle:move 后重画前的几何稳定判定(评审 F2 / 铁则2)────────────
 
@@ -513,14 +480,16 @@ func runSchZoneMove(cfg *appConfig, window, zoneRef string, dx, dy, textPad floa
 	if err != nil {
 		return err
 	}
-	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
+	// 统一注册表解析(ADR-0004 Decision 3):模块认领 / 块组 / 子组同一张表,
+	// 解析失败的报错自带本页全量可用名 + 来源。
+	zoneObj, _, project, err := resolveLayoutZone(pinned, win, docUUID, zoneRef)
 	if err != nil {
 		return err
 	}
-	if len(zones) == 0 {
-		return fmt.Errorf("工程 %q 本页(%s)没有功能模块 — 块驱动的页用 `sch block-apply` 自动归组;手工页 `sch group create` 或 `sch zones set`", project, docUUID)
-	}
-	zoneName, claim, err := findZoneMoveClaim(zones, zoneRef)
+	zoneName, claim := zoneObj.zoneName(), zoneObj.zoneClaim()
+	// zones(区名 → 成员)仍走 loadSchZoneModules 的单入口口径:它只用于
+	// claimOf(跨区组报错时点名成员归属),不参与 --zone 解析。
+	zones, _, err := loadSchZoneModules(pinned, win, docUUID)
 	if err != nil {
 		return err
 	}
@@ -860,7 +829,7 @@ sch layout-lint + sch bridge-check。`,
 			return runSchZoneMove(cfg, *window, zoneRef, dx, dy, textPad, force, dryRun, redraw, stdout, stderr)
 		},
 	}
-	c.Flags().StringVar(&zoneRef, "zone", "", "功能区名(= `sch zones` 的模块名,`sch zones status` 查看;必填)")
+	c.Flags().StringVar(&zoneRef, "zone", "", "布局对象名(必填;模块认领/块组/子组统一命名空间,`sch zones status` 看全表)")
 	c.Flags().Float64Var(&dx, "dx", 0, "X 平移(schematic 单位)")
 	c.Flags().Float64Var(&dy, "dy", 0, "Y 平移(schematic 单位,y-UP:正值向上)")
 	c.Flags().BoolVar(&redraw, "redraw-frame", true, "move 后自动重画分区框(zone-plan 校验通过才画;false 跳过并提示)")

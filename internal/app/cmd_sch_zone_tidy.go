@@ -716,36 +716,8 @@ func zoneTidyContentBand(boxes []layoutBBox, pad float64) (layoutBBox, bool) {
 	return layoutBBox{MinX: u.MinX - pad, MinY: u.MinY - pad, MaxX: u.MaxX + pad, MaxY: u.MaxY + pad}, true
 }
 
-// findZoneTidyClaim 解析 --zone:先精确名,再大小写不敏感唯一名;找不到时列出
-// 可用区名。
-func findZoneTidyClaim(zones map[string]*schZoneClaim, ref string) (string, *schZoneClaim, error) {
-	if len(zones) == 0 {
-		return "", nil, fmt.Errorf("no functional modules on this page — 块驱动的页用 `sch block-apply` 自动归组;手工页 `sch group create` / `sch zones set`")
-	}
-	if zc := zones[ref]; zc != nil {
-		return ref, zc, nil
-	}
-	var hits []string
-	for n := range zones {
-		if strings.EqualFold(n, ref) {
-			hits = append(hits, n)
-		}
-	}
-	sort.Strings(hits)
-	switch len(hits) {
-	case 1:
-		return hits[0], zones[hits[0]], nil
-	case 0:
-		var names []string
-		for n := range zones {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		return "", nil, fmt.Errorf("zone %q not found on this page — available: %s", ref, strings.Join(names, ", "))
-	default:
-		return "", nil, fmt.Errorf("zone %q is ambiguous (%s) — use the exact name", ref, strings.Join(hits, ", "))
-	}
-}
+// --zone 的解析已统一走 resolveLayoutZone(sch_layout_objects.go):模块认领 /
+// 块组 / 子组同一张注册表,报错自带全量可用名 + 来源。
 
 // ── live 计算(读几何 → 出 plan;不 mutate) ────────────────────────────────
 
@@ -775,14 +747,11 @@ type zoneTidyReport struct {
 // zoneTidyGroupRefs(--deep 用):区内持久化组的 id 列表(确定性升序)。散件没有
 // 组内布局可做,跳过;跨区组由 zoneTidyUnits 的既有校验拒绝。
 func zoneTidyGroupRefs(pinned *appConfig, win, docUUID, zoneRef string) ([]string, error) {
-	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
+	zoneObj, _, project, err := resolveLayoutZone(pinned, win, docUUID, zoneRef)
 	if err != nil {
 		return nil, err
 	}
-	_, claim, err := findZoneTidyClaim(zones, zoneRef)
-	if err != nil {
-		return nil, err
-	}
+	claim := zoneObj.zoneClaim()
 	st, err := loadPcbStageState(project)
 	if err != nil {
 		return nil, err
@@ -806,14 +775,11 @@ func zoneTidyGroupRefs(pinned *appConfig, win, docUUID, zoneRef string) ([]strin
 // 第三个返回值 = 计划期标记的双认领桩线/旗 id 集,--apply 侧用它做差集过滤,
 // 保证执行与计划的「原地不动」承诺一致。
 func computeZoneTidy(pinned *appConfig, win, docUUID, zoneRef string, hGap, vGap float64, stderr io.Writer) (*zoneTidyReport, map[string]zoneTidyUnit, map[string]bool, error) {
-	zones, project, err := loadSchZoneModules(pinned, win, docUUID)
+	zoneObj, _, project, err := resolveLayoutZone(pinned, win, docUUID, zoneRef)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	zoneName, claim, err := findZoneTidyClaim(zones, zoneRef)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	zoneName, claim := zoneObj.zoneName(), zoneObj.zoneClaim()
 	st, err := loadPcbStageState(project)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1431,7 +1397,7 @@ band 优先取 zone-plan 对应分区 rect(独占分区,扣掉顶部 title band)
 			return applyZoneTidy(pinned, win, docUUID, rep, unitByRef, sharedIDs, stdout, stderr)
 		},
 	}
-	c.Flags().StringVar(&zone, "zone", "", "functional zone name (a `sch zones` claim / module name; required)")
+	c.Flags().StringVar(&zone, "zone", "", "布局对象名(必填;模块认领/块组/子组统一命名空间,`sch zones status` 看全表)")
 	c.Flags().Float64Var(&hGap, "h-gap", zoneTidyHGapDefault, "min horizontal gap between group bboxes, native units (117 = 两个相向水平 netport 标签实测最小距)")
 	c.Flags().Float64Var(&vGap, "v-gap", zoneTidyVGapDefault, "min vertical gap between group bboxes, native units")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "compute and report only (this is already the default; explicit flag for scripts)")

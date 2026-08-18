@@ -129,79 +129,47 @@ default is: one short note per module, parked just below/beside its zone frame.
 	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP) — 省略即自动落点")
 	c.Flags().Float64Var(&fontSize, "font-size", schNoteDefaultFontSize, "font size")
 	c.Flags().StringVar(&color, "color", schNoteDefaultColor, "text color")
-	c.Flags().StringVar(&zoneRef, "zone", "", "register this note as part of a functional zone (`sch zones` claim name) — the partition frame will enclose it and `sch zone move` always carries it")
+	c.Flags().StringVar(&zoneRef, "zone", "", "把说明登记到一个布局对象(模块认领/块组/子组统一命名空间,`sch zones status` 看全表)—— 分区框会围住它,`sch zone move` 无条件带走它")
 	_ = c.MarkFlagRequired("text")
 	return c
 }
 
-// registerSchZoneNote 把新建说明的 primitiveId 记到它所属的功能模块名下(幂等)。
+// registerSchZoneNote 把新建说明的 primitiveId 记到它所属的布局对象名下(幂等)。
 //
-// **写回要分叉,读不用**:读走 loadSchZoneModules(虚拟组优先),但写必须落到数据
-// 真正的家 —— 命中虚拟组就写 Group.NoteIDs,否则写 zone 认领。schGroupModules
-// 现场构造出来的 claim 是投影,往它上面写会随函数返回一起蒸发,而块驱动的页
-// 认领表本来就是空的,那样等于说明永远登记不上。
+// **解析统一,写回分叉**:--zone 走统一注册表解析(resolveLayoutObject,模块认领 /
+// 块组 / 子组同一张表,子组末段与组 id 都是别名),但写必须落到数据真正的家 ——
+// 命中虚拟组就写 Group.NoteIDs,命中认领就写 claim.NoteIDs(zoneClaim 对认领
+// 直通存储指针,对组是投影 —— 往投影上写会随返回值一起蒸发,所以组走 o.Group)。
 func registerSchZoneNote(cfg *appConfig, window, docUUID, zoneRef, textID string) error {
-	pinned, win, ctxDoc, project, st, groups, gerr := loadSchGroupsContext(cfg, window)
-	if gerr == nil && ctxDoc == docUUID {
-		if g := findSchGroupByZoneName(groups, zoneRef); g != nil {
-			for _, id := range g.NoteIDs {
-				if id == textID {
-					return nil // 幂等
-				}
-			}
-			g.NoteIDs = append(g.NoteIDs, textID)
-			return saveSchGroups(st, docUUID, groups)
-		}
-	}
-	_ = pinned
-	_ = win
-	// 回落到 zone 认领(手工搭的页)。
-	zones, proj, err := loadSchZoneClaimsForPage(cfg, window, docUUID)
+	project, err := resolveStageProject(cfg, window)
 	if err != nil {
 		return err
 	}
-	if project == "" {
-		project = proj
+	st, err := loadPcbStageState(project)
+	if err != nil {
+		return err
 	}
-	var claim *schZoneClaim
-	for name, zc := range zones {
-		if strings.EqualFold(name, zoneRef) || (zc != nil && strings.EqualFold(zc.Zone, zoneRef)) {
-			claim = zc
-			break
+	claims := st.SchZonesForPage(docUUID)
+	groups := st.GroupsForPage(docUUID)
+	obj, err := resolveLayoutObject(buildLayoutObjectTable(claims, groups), zoneRef)
+	if err != nil {
+		return err
+	}
+	if obj.Group != nil {
+		for _, id := range obj.Group.NoteIDs {
+			if id == textID {
+				return nil // 幂等
+			}
 		}
+		obj.Group.NoteIDs = append(obj.Group.NoteIDs, textID)
+		return saveSchGroups(st, docUUID, groups)
 	}
-	if claim == nil {
-		return fmt.Errorf("本页没有名为 %q 的功能模块 —— `sch group list` 看虚拟组,`sch zones status` 看认领", zoneRef)
-	}
-	for _, id := range claim.NoteIDs {
+	for _, id := range obj.Claim.NoteIDs {
 		if id == textID {
 			return nil
 		}
 	}
-	claim.NoteIDs = append(claim.NoteIDs, textID)
-	stc, err := loadPcbStageState(project)
-	if err != nil {
-		return err
-	}
-	stc.SetSchZonesForPage(docUUID, zones)
-	return savePcbStageState(stc)
-}
-
-// findSchGroupByZoneName 按**区名**找虚拟组:组名可能带块实例前缀
-// (`ch340c_usb_serial(U3)/J_USB`),而用户写的是末段 `J_USB` —— 与
-// schGroupModules 的取名口径保持一致,否则读得到的区名写不回去。
-func findSchGroupByZoneName(groups []*schGroup, zoneRef string) *schGroup {
-	for _, g := range groups {
-		if g == nil {
-			continue
-		}
-		name := g.Name
-		if i := strings.LastIndex(name, "/"); i >= 0 && i+1 < len(name) {
-			name = name[i+1:]
-		}
-		if strings.EqualFold(name, zoneRef) || strings.EqualFold(g.Name, zoneRef) || strings.EqualFold(g.ID, zoneRef) {
-			return g
-		}
-	}
-	return nil
+	obj.Claim.NoteIDs = append(obj.Claim.NoteIDs, textID)
+	st.SetSchZonesForPage(docUUID, claims)
+	return savePcbStageState(st)
 }

@@ -14,28 +14,25 @@ import (
 // zone-move / zone-relayout / layout-score / note --zone 上全报「没有 zone 认领」。
 // 真机实测:P3 页想用 `sch sheet tidy` 重排,直接被这句话挡住。
 
-func TestFindSchGroupByZoneName_StripsBlockInstancePrefix(t *testing.T) {
+func TestLayoutRegistry_ReportedZoneNamesResolveBack(t *testing.T) {
+	// 「读得到的区名要写得回去」:schGroupModules 展示的末段区名、报告里的全名与
+	// 组 id,三种写法都必须能被统一解析器解析回同一个组(note --zone 的写回口径)。
 	groups := []*schGroup{
 		{ID: "g1", Name: "ch340c_usb_serial(U3)/J_USB", Members: []string{"J1", "R3"}},
 		{ID: "g2", Name: "esp32_autodownload(Q)", Members: []string{"Q1", "Q2"}},
 	}
-	// 用户写的是末段区名 —— 与 schGroupModules 展示出来的名字一致。
-	if g := findSchGroupByZoneName(groups, "J_USB"); g == nil || g.ID != "g1" {
-		t.Errorf("末段区名该命中 g1,得到 %+v", g)
-	}
-	// 全名与组 id 也认(报告里出现过的每种写法都该能写回去)。
-	if g := findSchGroupByZoneName(groups, "ch340c_usb_serial(U3)/J_USB"); g == nil || g.ID != "g1" {
-		t.Error("全名该命中 g1")
-	}
-	if g := findSchGroupByZoneName(groups, "g2"); g == nil || g.ID != "g2" {
-		t.Error("组 id 该命中 g2")
+	table := buildLayoutObjectTable(nil, groups)
+	for _, ref := range []string{"J_USB", "ch340c_usb_serial(U3)/J_USB", "g1"} {
+		if o, err := resolveLayoutObject(table, ref); err != nil || o.Group == nil || o.Group.ID != "g1" {
+			t.Errorf("写法 %q 该命中 g1:%+v %v", ref, o, err)
+		}
 	}
 	// 无前缀的组名按原样匹配。
-	if g := findSchGroupByZoneName(groups, "esp32_autodownload(Q)"); g == nil || g.ID != "g2" {
-		t.Error("无 / 前缀的组名该原样命中")
+	if o, err := resolveLayoutObject(table, "esp32_autodownload(Q)"); err != nil || o.Group == nil || o.Group.ID != "g2" {
+		t.Errorf("无 / 前缀的组名该原样命中:%v", err)
 	}
-	if g := findSchGroupByZoneName(groups, "NOPE"); g != nil {
-		t.Errorf("不存在的区名该给 nil,得到 %+v", g)
+	if _, err := resolveLayoutObject(table, "NOPE"); err == nil {
+		t.Error("不存在的区名该报错")
 	}
 }
 

@@ -376,26 +376,7 @@ func TestZoneTidyAnchorRef(t *testing.T) {
 	}
 }
 
-func TestFindZoneTidyClaim(t *testing.T) {
-	zones := map[string]*schZoneClaim{
-		"POWER": {Zone: "left-top", Parts: []string{"U3"}},
-		"MCU":   {Zone: "center", Parts: []string{"U1"}},
-	}
-	if name, zc, err := findZoneTidyClaim(zones, "POWER"); err != nil || name != "POWER" || zc == nil {
-		t.Fatalf("exact match failed: %v %q", err, name)
-	}
-	if name, _, err := findZoneTidyClaim(zones, "power"); err != nil || name != "POWER" {
-		t.Fatalf("case-insensitive match failed: %v %q", err, name)
-	}
-	_, _, err := findZoneTidyClaim(zones, "NOPE")
-	if err == nil || !strings.Contains(err.Error(), "MCU") || !strings.Contains(err.Error(), "POWER") {
-		t.Fatalf("missing zone should list available names: %v", err)
-	}
-	_, _, err = findZoneTidyClaim(map[string]*schZoneClaim{}, "POWER")
-	if err == nil || !strings.Contains(err.Error(), "sch zones set") {
-		t.Fatalf("empty claims should point at `sch zones set`: %v", err)
-	}
-}
+// --zone 解析已统一走 resolveLayoutZone,用例移植到 sch_layout_objects_test.go。
 
 // ── 双认领图元:计划期 dedup 与执行期差集过滤一致 ──────────────────────────
 

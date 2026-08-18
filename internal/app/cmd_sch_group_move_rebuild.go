@@ -37,15 +37,22 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 func groupsMoveRebuild(cfg *appConfig, window string, groupRefs []string, dx, dy float64,
 	stdout, stderr io.Writer) error {
 
-	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
+	pinned, win, docUUID, _, st, _, err := loadSchGroupsContext(cfg, window)
 	if err != nil {
 		return err
 	}
+	// --group/--groups 走统一注册表解析(ADR-0004 Decision 3):组 id / 组名 /
+	// 子组末段都认;命中模块认领时报类型不适配并指路 `sch zone move`。
+	table := layoutObjectTableFromState(st, docUUID)
 	memberSet := map[string]bool{}
 	var picked []*schGroup
 	seen := map[string]bool{}
 	for _, ref := range groupRefs {
-		g, ferr := findSchGroup(groups, ref)
+		obj, ferr := resolveLayoutObject(table, ref)
+		if ferr != nil {
+			return ferr
+		}
+		g, ferr := requireLayoutGroup(obj, "sch group-move")
 		if ferr != nil {
 			return ferr
 		}

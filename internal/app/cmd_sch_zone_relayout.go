@@ -172,13 +172,16 @@ func runSchZoneRelayout(cfg *appConfig, window, zoneName string, apply bool, std
 	if err != nil {
 		return err
 	}
-	zones, _, err := loadSchZoneModules(pinned, win, docUUID)
+	// 统一注册表解析(ADR-0004 Decision 3):模块认领 / 块组 / 子组同一张表,
+	// 解析失败的报错自带本页全量可用名 + 来源。
+	zoneObj, _, _, err := resolveLayoutZone(pinned, win, docUUID, zoneName)
 	if err != nil {
 		return err
 	}
-	claim := zones[zoneName]
-	if claim == nil || len(claim.Parts) == 0 {
-		return fmt.Errorf("zone %q 无成员件(块页看虚拟组 `sch group list`,手工页 `sch zones set`)", zoneName)
+	claim := zoneObj.zoneClaim()
+	zoneName = zoneObj.zoneName() // 分区计划/band 的取名口径(子组=末段)
+	if len(claim.Parts) == 0 {
+		return fmt.Errorf("布局对象 %s 无成员件(块页看虚拟组 `sch group list`,手工页 `sch zones set`)", zoneObj.describe())
 	}
 
 	comps, extras, wires, err := tidyReadScene(pinned, win, docUUID)
@@ -488,7 +491,7 @@ func newSchZoneRelayoutCommand(cfg *appConfig, window *string, stdout, stderr io
 			return runSchZoneRelayout(cfg, *window, zone, apply, stdout, stderr)
 		},
 	}
-	c.Flags().StringVar(&zone, "zone", "", "功能区名(zones claim)")
+	c.Flags().StringVar(&zone, "zone", "", "布局对象名(模块认领/块组/子组统一命名空间,`sch zones status` 看全表)")
 	c.Flags().BoolVar(&apply, "apply", false, "执行(默认 dry-run)")
 	return c
 }
