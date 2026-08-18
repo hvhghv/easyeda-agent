@@ -30,6 +30,11 @@ const noteGap = 16.0
 // noteAnchorStep 是候选锚点的扫描步长(落在 5 格连接网格上)。
 const noteAnchorStep = 20.0
 
+// noteCorridorTiers 是区外走廊(正下方/正上方/左右侧)每个方向扫描的档数:
+// 每档沿远离区框的方向退一个 noteAnchorStep。此前「区正下方」只有单个候选点,
+// 一撞就整个跌进整页扫描,说明被甩到页角(真机症状)。
+const noteCorridorTiers = 5
+
 // wrapNoteContent 把一段可能含 \n 的说明按 maxWidth 折行。**必须先按 \n 拆行再
 // 逐行 wrap**:此前把整段当一行传给 wrapNoteLines,宽度累计跨过换行符继续加,
 // 于是「首行完整、第二行开头 3~4 字就被折断」(2026-08-18 P2 LED 说明真机定案:
@@ -90,13 +95,22 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 		}
 		return true
 	}
+	// try 先把候选吸到网格再判碰:**判定坐标必须 = 落地坐标**。吸附后再判,才不会
+	// 出现「按原始候选算不撞、按吸附后的落点画出来擦上」的半格假阴性。
+	try := func(bx, by float64) (float64, float64, bool) {
+		sx, sy := snapNote(bx), snapNote(by)
+		if free(sx, sy) {
+			return sx, sy, true
+		}
+		return 0, 0, false
+	}
 
 	var cands [][2]float64
 	// **说明带优先**:分区框底部留出来的那条带就是给它的(区名在顶、说明在底,
 	// 都在框内)。带里放不下才退到下面那串兜底候选 —— 那些会把说明挤出框外。
 	if noteBand != nil {
-		if y := noteBand.MinY + h + noteGap; free(noteBand.MinX+noteGap, y) {
-			return snapNote(noteBand.MinX + noteGap), snapNote(y), true
+		if sx, sy, hit := try(noteBand.MinX+noteGap, noteBand.MinY+h+noteGap); hit {
+			return sx, sy, true
 		}
 	}
 	if zoneRect != nil {
@@ -113,22 +127,82 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 			[2]float64{z.MaxX + noteGap, z.MaxY - noteGap},
 			[2]float64{z.MinX - w - noteGap, z.MaxY - noteGap},
 		)
+		// ⑤ 区外走廊多档扫描:框内(和上面那几个单点)全满时,先沿「正下方 → 正上方
+		//   → 右侧 → 左侧」四条走廊逐档找位置,而不是直接跌进整页扫描把说明甩到页角
+		//   —— 走廊里的落点仍然「贴着自己的区」,读图时一眼能对上。
+		cands = append(cands, noteCorridorCandidates(z, w, h)...)
 		for _, c := range cands {
-			if free(c[0], c[1]) {
-				return snapNote(c[0]), snapNote(c[1]), true
+			if sx, sy, hit := try(c[0], c[1]); hit {
+				return sx, sy, true
 			}
 		}
 	}
-	// 整页扫描:从图纸下方往上、从左往右 —— 左下角通常是图签之外最大的连续空白,
-	// 也是工程图放总说明的传统位置。
+	// 整页扫描(最后的兜底)。无区时保持传统:从图纸下方往上、从左往右 —— 左下角
+	// 通常是图签之外最大的连续空白,也是工程图放总说明的传统位置。**有区时按离区
+	// 中心的距离升序试**:说明属于它那个区,兜底也该落在尽量近的地方,而不是按扫描
+	// 序落到图纸左下角(真机症状:框内无空位 → 说明跑到页角)。
+	var pageCands [][2]float64
 	for by := sheet.MinY + h + noteGap; by <= sheet.MaxY-noteGap; by += noteAnchorStep {
 		for bx := sheet.MinX + noteGap; bx <= sheet.MaxX-w-noteGap; bx += noteAnchorStep {
-			if free(bx, by) {
-				return snapNote(bx), snapNote(by), true
-			}
+			pageCands = append(pageCands, [2]float64{bx, by})
+		}
+	}
+	if zoneRect != nil {
+		cx := (zoneRect.MinX + zoneRect.MaxX) / 2
+		cy := (zoneRect.MinY + zoneRect.MaxY) / 2
+		dist2 := func(c [2]float64) float64 {
+			// 候选 bbox 中心到区中心的平方距离(锚点=左上角,文字向下排行)。
+			dx := (c[0] + w/2) - cx
+			dy := (c[1] - h/2) - cy
+			return dx*dx + dy*dy
+		}
+		sort.SliceStable(pageCands, func(i, j int) bool { return dist2(pageCands[i]) < dist2(pageCands[j]) })
+	}
+	for _, c := range pageCands {
+		if sx, sy, hit := try(c[0], c[1]); hit {
+			return sx, sy, true
 		}
 	}
 	return 0, 0, false
+}
+
+// noteCorridorCandidates 生成区框四周走廊的多档候选锚点,按「正下方 → 正上方 →
+// 右侧 → 左侧」的优先序;每个方向 noteCorridorTiers 档,逐档远离区框一个
+// noteAnchorStep,同档内沿走廊按离区起点近的方向步进。锚点=bbox 左上角(y-UP,
+// 文字向下排行),越界/压图元由调用方的 free() 统一裁决。
+func noteCorridorCandidates(z layoutBBox, w, h float64) [][2]float64 {
+	var out [][2]float64
+	// 走廊横向扫到「说明右沿不超出区右沿」为止;区比说明还窄时只试左对齐一列。
+	xEnd := math.Max(z.MinX+noteGap, z.MaxX-w)
+	// 正下方走廊:说明整体在区下沿之下(bbox 顶 = 锚点 y)。
+	for k := 0; k < noteCorridorTiers; k++ {
+		y := z.MinY - noteGap - float64(k)*noteAnchorStep
+		for x := z.MinX + noteGap; x <= xEnd+acOverlapEps; x += noteAnchorStep {
+			out = append(out, [2]float64{x, y})
+		}
+	}
+	// 正上方走廊:说明整体在区上沿之上(bbox 底 = y-h ≥ z.MaxY+noteGap)。
+	for k := 0; k < noteCorridorTiers; k++ {
+		y := z.MaxY + noteGap + h + float64(k)*noteAnchorStep
+		for x := z.MinX + noteGap; x <= xEnd+acOverlapEps; x += noteAnchorStep {
+			out = append(out, [2]float64{x, y})
+		}
+	}
+	// 右侧走廊:从区上沿往下扫(与 ③ 的右侧单点同一读图习惯)。
+	for k := 0; k < noteCorridorTiers; k++ {
+		x := z.MaxX + noteGap + float64(k)*noteAnchorStep
+		for y := z.MaxY - noteGap; y >= z.MinY+h-acOverlapEps; y -= noteAnchorStep {
+			out = append(out, [2]float64{x, y})
+		}
+	}
+	// 左侧走廊。
+	for k := 0; k < noteCorridorTiers; k++ {
+		x := z.MinX - w - noteGap - float64(k)*noteAnchorStep
+		for y := z.MaxY - noteGap; y >= z.MinY+h-acOverlapEps; y -= noteAnchorStep {
+			out = append(out, [2]float64{x, y})
+		}
+	}
+	return out
 }
 
 // snapNote 把锚点吸到 5 格网格(与连接网格同口径,避免半格漂移)。

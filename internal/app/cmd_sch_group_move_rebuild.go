@@ -112,12 +112,23 @@ func groupMoveRebuild(cfg *appConfig, window, groupRef string, dx, dy float64,
 	}
 
 	// 4. 平移器件本体。此刻它们身上没有任何导线,modify 不会触发任何合并。
-	for _, m := range movable {
-		if _, err := requestAutolayoutAction(cfg, "schematic.component.modify", win,
-			map[string]any{"primitiveId": m.ID, "patch": map[string]any{"x": m.X + dx, "y": m.Y + dy}},
-			docUUID, "group-move 平移"); err != nil {
-			return fmt.Errorf("平移 %s:%w(已清扫旧桩线,请用 `sch autoconnect` 手工重连或重放这一块)", m.Designator, err)
-		}
+	//    **任一件失败都不能裸退**:第 3 步已把全组桩线/旗清扫干净,直接 return 会把
+	//    组里十几个引脚全悬空地留在画布上(真机:J1+R4+R5 组桩线全清、器件没挪)。
+	//    手里的 conns 是移动前采集的重连依据 —— 失败时立即用它对**全部**成员重连
+	//    (挪成的在新位置、没挪成的在原位,autoconnect 都按当前几何重新解析引脚坐标,
+	//    两类都能连回),恢复后再带着结果返回错误。
+	if err := groupMoveTranslateWithRecovery(movable, dx, dy, conns,
+		func(m groupRebuildMember, nx, ny float64) error {
+			_, merr := requestAutolayoutAction(cfg, "schematic.component.modify", win,
+				map[string]any{"primitiveId": m.ID, "patch": map[string]any{"x": nx, "y": ny}},
+				docUUID, "group-move 平移")
+			return merr
+		},
+		func(cs []acConnSpec) (succeeded, failed []string, rerr error) {
+			rep, rerr := runAutoconnectOpts(pinned, win, cs, defaultAutoconnectRules(), acRunOpts{}, stderr, stderr)
+			return rep.Succeeded, rep.Failed, rerr
+		}, stderr); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "  平移:%d 件 Δ=(%.0f,%.0f)\n", len(movable), dx, dy)
 
@@ -154,6 +165,55 @@ type groupRebuildMember struct {
 	ID         string
 	Designator string
 	X, Y       float64
+}
+
+// groupMoveTranslateWithRecovery 逐件平移;任一件 modify 失败时**先恢复再报错**:
+// 此刻全组桩线/旗已被第 3 步清扫,弃用手里的连接表裸退会让每个成员引脚都悬空。
+// 恢复段对全部 conns 跑重连(reconnect 注入,生产路径是 runAutoconnectOpts),
+// 错误里注明「已自动重连,几成几败」;恢复本身失败则如实列出仍断的 pin。
+func groupMoveTranslateWithRecovery(movable []groupRebuildMember, dx, dy float64, conns []acConnSpec,
+	modify func(m groupRebuildMember, nx, ny float64) error,
+	reconnect func([]acConnSpec) (succeeded, failed []string, err error),
+	stderr io.Writer) error {
+
+	for i, m := range movable {
+		err := modify(m, m.X+dx, m.Y+dy)
+		if err == nil {
+			continue
+		}
+		return fmt.Errorf("平移 %s(第 %d/%d 件)失败:%w;%s",
+			m.Designator, i+1, len(movable), err, groupMoveRecoverConnections(conns, reconnect, stderr))
+	}
+	return nil
+}
+
+// groupMoveRecoverConnections 是平移中止后的恢复段:按移动前采集的连接表重连全部
+// 成员引脚 —— 已挪成的在新位置、没挪成的在原位,autoconnect 都按**当前几何**重新
+// 解析引脚坐标,所以两类都能连回。返回一句可拼进错误的结果摘要。
+func groupMoveRecoverConnections(conns []acConnSpec,
+	reconnect func([]acConnSpec) (succeeded, failed []string, err error),
+	stderr io.Writer) string {
+
+	if len(conns) == 0 {
+		return "组内没有已连引脚,无需恢复"
+	}
+	fmt.Fprintf(stderr, "warn: 平移中止 —— 旧桩线已清扫,立即按移动前的连接表重连 %d 个引脚\n", len(conns))
+	succeeded, failed, err := reconnect(conns)
+	if err != nil && len(succeeded)+len(failed) == 0 {
+		// 恢复重连没跑起来(读场景就失败了):一个都没连回,如实列出全部仍断的 pin。
+		refs := make([]string, 0, len(conns))
+		for _, c := range conns {
+			refs = append(refs, c.PinRef)
+		}
+		return fmt.Sprintf("恢复重连本身失败(%v),以下引脚仍断开,需 `sch autoconnect` 手工重连:%s",
+			err, strings.Join(refs, " "))
+	}
+	if len(failed) > 0 {
+		return fmt.Sprintf("已自动重连:%d 成 %d 败;仍断开的引脚:%s(用 `sch autoconnect` 补连)",
+			len(succeeded), len(failed), strings.Join(failed, " "))
+	}
+	return fmt.Sprintf("已自动重连:%d/%d 全部恢复(器件停在中止时的位置,电气未断)",
+		len(succeeded), len(conns))
 }
 
 // groupRebuildConnSpecs 采集「每个成员引脚现在连着哪条网」,输出重连规格。

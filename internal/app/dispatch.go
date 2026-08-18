@@ -49,10 +49,12 @@ type appConfig struct {
 	// forceUnsafe escalates forceReason past a fully-unconfirmed mechanical
 	// skeleton (issue #132) — set only by --force-unsafe.
 	forceUnsafe bool
-	// doc, when set (--doc <uuid|name>), PINS every mutating action to that
-	// document: the daemon-choke-point guard (ensureActiveDoc) switches to it and
-	// confirms via LIVE document.current BEFORE the edit dispatches, and refuses
-	// rather than land the edit on whatever page happens to be foreground. This
+	// doc, when set (--doc <uuid|name>), PINS every action — mutating AND read —
+	// to that document: the daemon-choke-point guard (ensureActiveDoc) switches
+	// to it and confirms via LIVE document.current BEFORE the action dispatches,
+	// and refuses rather than run it on whatever page happens to be foreground
+	// (a read that silently returned the foreground page's data was page drift
+	// in read form). This
 	// is the mechanism that removes the doc-switch race — a long op (autoLayout)
 	// can no longer scatter the wrong page because the foreground drifted.
 	doc string
@@ -511,6 +513,19 @@ func actionMutates(action string) bool {
 var docGuardExempt = map[string]bool{
 	"document.current": true, "document.open": true, "schematic.page.open": true,
 	"schematic.pages.list": true, "pcb.documents.list": true,
+	// Daemon-local; touches no document, so pinning a page for it is meaningless.
+	"system.health": true,
+}
+
+// docGuardApplies reports whether the --doc guard must run before dispatching
+// action. It gates EVERY action when --doc is set — mutations so the edit can
+// never land on a drifted foreground page, and reads because accepting --doc
+// while silently returning the FOREGROUND page's data is the same page-drift
+// bug in read form (reads used to skip the guard entirely). Only the guard's
+// own navigation/read tools (docGuardExempt) are excluded, or ensureActiveDoc
+// would recurse through itself.
+func docGuardApplies(doc, action string) bool {
+	return doc != "" && !docGuardExempt[action]
 }
 
 // ensureActiveDoc makes cfg.doc the active document before a mutating action.
@@ -545,12 +560,78 @@ func ensureActiveDoc(cfg *appConfig, window string) error {
 	return fmt.Errorf("--doc %q: could not confirm it is the active page after retries — refusing to run a mutating action on the wrong page", cfg.doc)
 }
 
+// artifactOutputDir resolves the outputDir sent with every action request (the
+// directory the daemon roots its .easyeda/artifacts tree under). Thin os.Getwd
+// wrapper around the pure, unit-tested resolveOutputDir.
+func artifactOutputDir() (string, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	return resolveOutputDir(cwd, dirHasProjectMarker), true
+}
+
+// resolveOutputDir is the pure core: strip any .easyeda/artifacts nesting from
+// cwd (a cwd INSIDE the artifact tree must not seed another level), then anchor
+// to the nearest enclosing project root (isRoot marker walk-up); when no marker
+// is found, fall back to the stripped cwd.
+func resolveOutputDir(cwd string, isRoot func(string) bool) string {
+	dir := stripArtifactNesting(cwd)
+	for d := dir; ; {
+		if isRoot(d) {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
+	}
+	return dir
+}
+
+// dirHasProjectMarker reports whether dir looks like a project root (.git or
+// go.mod present) — the anchor for artifactOutputDir.
+func dirHasProjectMarker(dir string) bool {
+	for _, marker := range []string{".git", "go.mod"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// stripArtifactNesting truncates a path to just BEFORE its first
+// ".easyeda/artifacts" segment pair, so that Join(dir, ".easyeda", "artifacts")
+// is idempotent however deeply the input had already nested. A path without the
+// pair is returned cleaned but otherwise unchanged. The daemon applies the same
+// normalization defensively (internal/daemon dispatch.go) — keep both in sync.
+func stripArtifactNesting(p string) string {
+	clean := filepath.Clean(p)
+	sep := string(filepath.Separator)
+	segs := strings.Split(clean, sep)
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == ".easyeda" && segs[i+1] == "artifacts" {
+			trimmed := strings.Join(segs[:i], sep)
+			if trimmed == "" {
+				if filepath.IsAbs(clean) {
+					return sep
+				}
+				return "."
+			}
+			return trimmed
+		}
+	}
+	return clean
+}
+
 // postAction is the shared HTTP core: find a live daemon, POST the typed action,
 // and return the raw response body.
 func postAction(cfg *appConfig, action, window string, payload any, timeout time.Duration) ([]byte, error) {
-	// --doc guard: pin a mutating action to the requested page first. Skipped for
-	// the guard's own navigation actions (docGuardExempt) so it never recurses.
-	if cfg.doc != "" && actionMutates(action) && !docGuardExempt[action] {
+	// --doc guard: pin the action (mutating OR read — see docGuardApplies) to
+	// the requested page first. Skipped for the guard's own navigation actions
+	// (docGuardExempt) so it never recurses.
+	if docGuardApplies(cfg.doc, action) {
 		if err := ensureActiveDoc(cfg, window); err != nil {
 			return nil, err
 		}
@@ -593,11 +674,13 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 			body["forceUnsafe"] = true
 		}
 	}
-	// Tell the daemon where to drop artifacts: this CLI's working directory. The
-	// daemon writes them under <cwd>/.easyeda/artifacts so screenshots/exports
-	// land in the user's project, not the daemon's cwd. Best-effort.
-	if cwd, err := os.Getwd(); err == nil {
-		body["outputDir"] = cwd
+	// Tell the daemon where to drop artifacts. Anchored to the project root
+	// (nearest .git/go.mod ancestor), falling back to cwd — and NEVER a path
+	// inside an existing .easyeda/artifacts tree: sending a raw cwd that had
+	// drifted into the artifact dir made the daemon Join another
+	// .easyeda/artifacts under it, recursively nesting the tree. Best-effort.
+	if dir, ok := artifactOutputDir(); ok {
+		body["outputDir"] = dir
 	}
 	if payload != nil {
 		body["payload"] = payload

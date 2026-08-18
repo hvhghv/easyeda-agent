@@ -1250,7 +1250,41 @@ pull fresh ids before any follow-up mutation on it.`,
 				if cmd.Flags().Changed("rotation") {
 					payload["rotation"] = rotation
 				}
-				return dispatch(cfg, "schematic.power.connect_pin", window, payload, stdout, stderr)
+				// connect_pin's worst-case connector path is ~21.25s (measured;
+				// see acConnectPinTimeout in cmd_sch_autoconnect_run.go) — the
+				// 20s dispatch default made slow-but-successful connects report
+				// failure, so bare `sch connect` uses the same budget the
+				// autoconnect path already does.
+				dispErr := dispatchTimed(cfg, "schematic.power.connect_pin", window, payload, acConnectPinTimeout, stdout, stderr)
+				if dispErr == nil {
+					return nil
+				}
+				// Slow-landed recheck: a timeout/DISPATCH_FAILED after the write
+				// actually applied is a FAKE failure, and a blind retry then
+				// creates a duplicate flag+stub. When the target pin is known,
+				// one light read settles it: pin already on the target net →
+				// report success instead.
+				if pinRef == "" {
+					return dispErr
+				}
+				desig, pinNum, ok := splitPinRef(pinRef)
+				if !ok {
+					return dispErr
+				}
+				res, rerr := requestActionTimed(cfg, "schematic.read", window,
+					map[string]any{"includeCheck": false}, acConnectPinTimeout)
+				if rerr != nil || res == nil || !connectLanded(res.Result, desig, pinNum, net) {
+					return dispErr
+				}
+				fmt.Fprintf(stderr, "⚠ connect_pin 报超时/派发失败,但回读确认 %s 已在网络 %s 上 —— slow-landed,按成功处理(不要重试,会造重复旗)。\n", pinRef, net)
+				return json.NewEncoder(stdout).Encode(map[string]any{
+					"ok": true,
+					"result": map[string]any{
+						"slowLanded": true,
+						"pin":        pinRef,
+						"net":        net,
+					},
+				})
 			},
 		}
 		c.Flags().StringVar(&pinRef, "pin", "", "target pin as DESIGNATOR:PIN, e.g. U1:5 (resolved to coordinates; mutually exclusive with --x/--y)")
@@ -1295,7 +1329,12 @@ pull fresh ids before any follow-up mutation on it.`,
 				if len(payload) == 0 {
 					return fmt.Errorf("provide --pin U1:5, or --flag-id / --wire-id")
 				}
-				return dispatch(cfg, "schematic.pin.disconnect", window, payload, stdout, stderr)
+				res, err := dispatchCapture(cfg, "schematic.pin.disconnect", window, payload, stdout)
+				if err != nil {
+					return err
+				}
+				warnDisconnectPartial(res, stderr)
+				return nil
 			},
 		}
 		c.Flags().StringVar(&pin, "pin", "", "target pin as DESIGNATOR:PIN (e.g. U1:5)")
@@ -1872,6 +1911,41 @@ the selection). Without --ids it exports the whole active page.`,
 	return sch
 }
 
+// warnDisconnectPartial makes a partial `schematic.pin.disconnect` unmissable.
+//
+// The platform delete can silently keep a stub wire (merged/collinear trees are
+// the usual offenders) while returning true, so the connector now re-reads and
+// reports survivors as result.partial + result.survivedIds/notApplied instead
+// of lying disconnected:true. Rendering that as a plain success at the CLI
+// layer would preserve the original defect — the pin is likely STILL connected.
+// Follows the partial-application convention (#151): the action stays ok=true
+// (the canvas did change for whatever really got deleted), the CLI surfaces a
+// loud stderr warning so no caller mistakes it for a clean disconnect.
+func warnDisconnectPartial(res *actionResult, stderr io.Writer) {
+	if res == nil || res.Result == nil {
+		return
+	}
+	if disconnected, ok := res.Result["disconnected"].(bool); ok && disconnected {
+		return
+	}
+	partial, _ := res.Result["partial"].(bool)
+	if !partial {
+		return
+	}
+	var survived []string
+	if raw, ok := res.Result["survivedIds"].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				survived = append(survived, s)
+			}
+		}
+	}
+	fmt.Fprintf(stderr, "⚠ disconnect 未完全生效:%d 个图元删除后仍存活(%s)— 该 pin 很可能仍然连着。\n",
+		len(survived), strings.Join(survived, ", "))
+	fmt.Fprintln(stderr, "  先用 sch nets / netlist 对账确认,再重试 disconnect 或用 sch prim-delete 显式删除存活 id;")
+	fmt.Fprintln(stderr, "  合并导线树上的桩线是常见诱因(平台 delete 静默 no-op 仍返 true)。")
+}
+
 // failOnSurvivingPrimitives turns a verified-partial `schematic.primitives.delete`
 // into a non-zero exit (issue #164).
 //
@@ -1894,4 +1968,49 @@ func failOnSurvivingPrimitives(res *actionResult, stderr io.Writer) error {
 	fmt.Fprintln(stderr, "  Re-read (sch text-list / sch check) before assuming anything was removed;")
 	fmt.Fprintln(stderr, "  if they persist across a `doc reload`, delete them in the EasyEDA UI (issue #164).")
 	return errActionFailed
+}
+
+// splitPinRef parses a "DESIGNATOR:PIN" reference (e.g. "U1:5") into its parts.
+func splitPinRef(ref string) (designator, pin string, ok bool) {
+	parts := strings.SplitN(ref, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// connectLanded reports whether a schematic.read result already shows the pin
+// as a member of net — the post-failure recheck that separates a slow-landed
+// connect_pin (write applied, response lost to the timeout) from a real
+// failure. Net names must match exactly (they are canonical; +3V3 vs 3V3 are
+// DIFFERENT nets and must not be conflated); the member key ("U1.5") matches
+// case-insensitively, mirroring readLiveNets' designator normalization.
+func connectLanded(result map[string]any, designator, pin, net string) bool {
+	if result == nil {
+		return false
+	}
+	nets, ok := result["nets"].([]any)
+	if !ok {
+		return false
+	}
+	want := designator + "." + pin
+	for _, n := range nets {
+		m, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := m["net"].(string); name != net {
+			continue
+		}
+		members, ok := m["pins"].([]any)
+		if !ok {
+			continue
+		}
+		for _, p := range members {
+			if s, ok := p.(string); ok && strings.EqualFold(s, want) {
+				return true
+			}
+		}
+	}
+	return false
 }

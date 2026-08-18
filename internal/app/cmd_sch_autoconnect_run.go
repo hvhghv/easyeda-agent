@@ -92,6 +92,10 @@ type acConnResult struct {
 	Retried bool   `json:"retried,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Warning 是「连上了,但落点带痕」的现场提示:选中候选 score 超过软阈值,或
+	// reasons 里含碰撞类惩罚。此前唯一的门是 score≥1e9 硬拒,软惩罚累加成千分照样
+	// 静默入选(真机:score=1737 的 down/78 长桩扎进邻组标签区,报告只显示落选项)。
+	Warning string `json:"warning,omitempty"`
 	// State is the idempotency decision (issue #50): "new" (planned/connected),
 	// "already-connected" (skipped), or "conflict" (blocked, or replaced under
 	// --replace). CurrentNet is the pin's pre-existing net when known.
@@ -347,9 +351,31 @@ func offPageHint(ref string, comp acComponent) string {
 	return fmt.Sprintf("%s — switch to that page first with `easyeda doc switch <page>` (see `easyeda doc ls`). Note: --all-pages only widens candidate scoring, it does NOT build wires across pages.", base)
 }
 
+// acRunOpts 汇集一次 autoconnect 运行的开关位。加新开关时在这里加字段,而不是
+// 继续拉长 runAutoconnect 的布尔参数列(旧签名保留给既有调用方)。
+type acRunOpts struct {
+	AllPages bool
+	DryRun   bool
+	Replace  bool
+	JSON     bool
+	// Strict:选中候选「落点带痕」(见 selectedCandidateWarning)时直接失败不落地,
+	// 而不是打 WARN 后照连。
+	Strict bool
+}
+
 // runAutoconnect is the command core: build the scene once, then plan → (dispatch)
 // each connection sequentially, staggering later labels off earlier placements.
+// 兼容旧签名的入口;需要报告(成败清单)或 --strict 的调用方用 runAutoconnectOpts。
 func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules autoconnectRules, allPages, dryRun, replace, asJSON bool, stdout, stderr io.Writer) error {
+	_, err := runAutoconnectOpts(cfg, window, conns, rules,
+		acRunOpts{AllPages: allPages, DryRun: dryRun, Replace: replace, JSON: asJSON}, stdout, stderr)
+	return err
+}
+
+// runAutoconnectOpts 是真正的运行核心,返回整份报告(Succeeded/Failed 清单),
+// 让调用方(如 group-move 的失败恢复段)拿到结构化的成败,而不是解析错误文案。
+func runAutoconnectOpts(cfg *appConfig, window string, conns []acConnSpec, rules autoconnectRules, opts acRunOpts, stdout, stderr io.Writer) (acReport, error) {
+	allPages, dryRun, replace, asJSON := opts.AllPages, opts.DryRun, opts.Replace, opts.JSON
 	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{
 		"includeBBox": true,
 		"includePins": true,
@@ -363,7 +389,7 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 		"tagPages": allPages,
 	})
 	if err != nil {
-		return err
+		return acReport{}, err
 	}
 	// 同侧 lane 台账:器件+方向 → 该侧已用的最大 offset。逐 pin 贪心在相邻脚上
 	// 必然失败(见 applyLaneStagger),必须记住同一侧已经落到哪儿了。
@@ -498,6 +524,15 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 			continue
 		}
 
+		// Soft-taint gate:硬拒(1e9)之下还有一整片「入选只因别人更糟」的区间 ——
+		// 软惩罚累加成千分照样静默入选(真机:score=1737 的长桩扎进邻组标签区)。
+		// 默认打 WARN 照连;--strict 时直接失败不落地。
+		if !applySelectionGate(&cr, selected, opts.Strict) {
+			report.OK = false
+			report.Connections = append(report.Connections, cr)
+			continue
+		}
+
 		if !dryRun {
 			payload := map[string]any{
 				"pinX":      pin.X,
@@ -562,15 +597,73 @@ func runAutoconnect(cfg *appConfig, window string, conns []acConnSpec, rules aut
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
-			return err
+			return report, err
 		}
 	} else {
 		renderAutoconnectReport(report, dryRun, stdout)
 	}
 	if !report.OK {
-		return fmt.Errorf("autoconnect: %d connection(s) failed", countFailed(report))
+		return report, fmt.Errorf("autoconnect: %d connection(s) failed", countFailed(report))
 	}
-	return nil
+	return report, nil
+}
+
+// acScoreWarnThreshold 是「选中候选也要打 WARN」的软阈值。依据成本表
+// (cmd_sch_autoconnect.go):一个干净落点的 score 只由 bonus(最多 -30)+ 长度成本
+// (extended 上限 ~240×0.1=24)构成,落在约 -30~90 区间;而任何软惩罚起步就是
+// 100(costFanoutChannel)、150(costFoldedPort)、1000(costFlagCollision)、
+// 10000(costPartOverlap)…… 100 正好卡在两个区间的分界上:score 超过它,选中项
+// 必然吃了至少一条软惩罚 —— 它能入选只是因为其它候选更糟。
+const acScoreWarnThreshold = 100.0
+
+// acCollisionClassReasons 摘出选中候选身上的碰撞类惩罚(压旗/压件/穿件/背面引出)。
+// 这类痕迹即使总分没过阈值也值得点名 —— 它们是画布上肉眼可见的破坏。
+func acCollisionClassReasons(c acCandidate) []string {
+	var out []string
+	for _, r := range c.Reasons {
+		switch r.Cost {
+		case costFlagCollision, costPartOverlap, costThroughPart, costOppositeSide:
+			out = append(out, r.Desc)
+		}
+	}
+	return out
+}
+
+// selectedCandidateWarning 判定选中候选是否「带痕」,带则返回一句人话告警;
+// 干净返回 ""。纯函数,单测直接喂 acCandidate。
+func selectedCandidateWarning(c acCandidate) string {
+	coll := acCollisionClassReasons(c)
+	if c.Score <= acScoreWarnThreshold && len(coll) == 0 {
+		return ""
+	}
+	reasons := coll
+	if len(reasons) == 0 { // 分超了但没有碰撞类:列出全部正成本项
+		for _, r := range c.Reasons {
+			if r.Cost > 0 {
+				reasons = append(reasons, r.Desc)
+			}
+		}
+	}
+	desc := strings.Join(reasons, "; ")
+	if desc == "" {
+		desc = "总成本异常偏高"
+	}
+	return fmt.Sprintf("落点带痕(score=%.0f):%s —— 建议挪件腾位后重连", c.Score, desc)
+}
+
+// applySelectionGate 把带痕判定落到连接结果上,返回是否继续落地:
+// 默认档在结果上记 Warning 照连;strict 档写 Error 拒绝落地。
+func applySelectionGate(cr *acConnResult, selected acCandidate, strict bool) bool {
+	warn := selectedCandidateWarning(selected)
+	if warn == "" {
+		return true
+	}
+	if strict {
+		cr.Error = "--strict:" + warn + "(未落地)"
+		return false
+	}
+	cr.Warning = warn
+	return true
 }
 
 // summarizeRejected returns the best-scoring candidate of each direction OTHER
@@ -744,6 +837,9 @@ func renderAutoconnectReport(r acReport, dryRun bool, w io.Writer) {
 		}
 		fmt.Fprintf(w, "  ✓ %s → %s [%s]: %s offset=%.0f end=(%.2f,%.2f) score=%.2f%s\n",
 			id, c.Net, c.Kind, s.Direction, s.Offset, s.EndPoint.X, s.EndPoint.Y, s.Score, tag)
+		if c.Warning != "" {
+			fmt.Fprintf(w, "      ⚠ WARN %s\n", c.Warning)
+		}
 		if !dryRun {
 			fmt.Fprintf(w, "      wire=%s flag=%s\n", c.WirePrimitiveID, c.FlagPrimitiveID)
 		}
@@ -761,7 +857,7 @@ func newAutoconnectCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 		avoidTitleBlock, avoidFanout bool
 		offsetMin, offsetMax, step   float64
 		allPages, dryRun, asJSON     bool
-		replace                      bool
+		replace, strict              bool
 	)
 	c := &cobra.Command{
 		Use:   "autoconnect",
@@ -846,7 +942,10 @@ unless you pass --replace, which deletes the old flag+wire and reconnects.`,
 				conns = append(conns, cs)
 			}
 
-			return runAutoconnect(cfg, *window, conns, rules, allPages, dryRun, replace, asJSON, stdout, stderr)
+			_, err := runAutoconnectOpts(cfg, *window, conns, rules,
+				acRunOpts{AllPages: allPages, DryRun: dryRun, Replace: replace, JSON: asJSON, Strict: strict},
+				stdout, stderr)
+			return err
 		},
 	}
 	c.Flags().StringVar(&pin, "pin", "", "pin reference DESIGNATOR:PIN (number or name), e.g. U1:41 or U1:3V3; "+
@@ -865,6 +964,7 @@ unless you pass --replace, which deletes the old flag+wire and reconnects.`,
 	c.Flags().BoolVar(&allPages, "all-pages", false, "widen candidate SCORING to all schematic pages (avoids cross-page label conflicts); does NOT build wires across pages — mutations only land on the ACTIVE page, so `doc switch` to the target page first")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "plan and print the selection without mutating")
 	c.Flags().BoolVar(&replace, "replace", false, "when a pin is already on a DIFFERENT net, delete its old flag+wire and reconnect (without --replace such pins error out; pins already on the target net are always skipped)")
+	c.Flags().BoolVar(&strict, "strict", false, "fail (and do NOT place) any connection whose selected candidate is tainted — score above the soft threshold or collision-class penalties; without --strict such connections succeed with a WARN")
 	c.Flags().BoolVar(&asJSON, "json", false, "emit the report as JSON")
 	return c
 }

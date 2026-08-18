@@ -117,7 +117,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !knownActions[req.Action] {
-		writeJSON(w, http.StatusBadRequest, errorResponse(req.ID, "UNKNOWN_ACTION", fmt.Sprintf("unknown action: %s", req.Action), "run `easyeda actions` for the supported set"))
+		// Audit the rejection: a CLI↔daemon catalog drift (an action the CLI
+		// ships but the daemon never registered) used to leave NO trace here,
+		// so `audit-baseline` was blind to the exact failures that matter most.
+		started := time.Now().UTC()
+		errResp := errorResponse(req.ID, "UNKNOWN_ACTION", fmt.Sprintf("unknown action: %s", req.Action), "run `easyeda actions` for the supported set")
+		s.audit.Append(fromResponse(started, &req, &errResp))
+		writeJSON(w, http.StatusBadRequest, errResp)
 		return
 	}
 
@@ -286,12 +292,39 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 // (tests, raw HTTP) fall back to the configured ArtifactDir, then "artifacts".
 func (s *Server) artifactDir(outputDir string) string {
 	if outputDir != "" {
-		return filepath.Join(outputDir, ".easyeda", "artifacts")
+		return filepath.Join(stripArtifactNesting(outputDir), ".easyeda", "artifacts")
 	}
 	if s.opts.ArtifactDir != "" {
 		return s.opts.ArtifactDir
 	}
 	return "artifacts"
+}
+
+// stripArtifactNesting truncates a path to just BEFORE its first
+// ".easyeda/artifacts" segment pair, making artifactDir's Join idempotent: an
+// outputDir that already points INSIDE an artifact tree (a CLI whose cwd
+// drifted there) used to grow .easyeda/artifacts/.easyeda/artifacts/… one
+// level per call. A path without the pair is returned cleaned but otherwise
+// unchanged. The CLI applies the same normalization before sending outputDir
+// (internal/app dispatch.go) — this is the daemon-side defense for raw
+// HTTP/older clients; keep both in sync.
+func stripArtifactNesting(p string) string {
+	clean := filepath.Clean(p)
+	sep := string(filepath.Separator)
+	segs := strings.Split(clean, sep)
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == ".easyeda" && segs[i+1] == "artifacts" {
+			trimmed := strings.Join(segs[:i], sep)
+			if trimmed == "" {
+				if filepath.IsAbs(clean) {
+					return sep
+				}
+				return "."
+			}
+			return trimmed
+		}
+	}
+	return clean
 }
 
 // artifactFileName builds a sortable, findable filename: a local timestamp

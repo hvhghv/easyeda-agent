@@ -739,6 +739,17 @@ func AllActions() []ActionSpec {
 			Outputs:      []string{"ok"},
 		},
 		{
+			Name:        "board.rebind",
+			Domain:      DomainBoard,
+			Phase:       2,
+			Mutates:     true,
+			NeedsWindow: true,
+			Description: "Repair a stale/orphaned Board binding (e.g. after a rebuild-from-empty PCB left the Board pointing at a deleted schematic, crashing board.list and faking a DRC Netlist Error): deletes the old Board (by name, else the current one) and re-creates it bound to the given schematic (+ PCB), restoring the original name and rolling back on failure. A schematic can belong to only ONE Board — pass force to move one already bound elsewhere.",
+			Inputs:      []string{"schematicUuid", "pcbUuid optional", "name optional (default: current board)", "force optional"},
+			Outputs:     []string{"boardName", "schematicUuid", "pcbUuid", "replaced (old binding or null)"},
+			VerifyWith:  []string{"board.list"},
+		},
+		{
 			Name:        "pcb.component.attrs_backfill",
 			Domain:      DomainPcb,
 			Phase:       2,
