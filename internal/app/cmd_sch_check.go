@@ -106,6 +106,8 @@ type checkSummary struct {
 	// the check, not by remembering the rule (which is unreliable — it was skipped
 	// twice in one session before this existed).
 	MissingPartitions int `json:"missingPartitions"`
+	// 「放对没有」判据(新 2):--zone 登记的说明,其渲染 bbox 不在该区分区框内。
+	NoteOutsideZones int `json:"noteOutsideZones"`
 	// Same-tree redundant markers (anchors differ so duplicate-net-marker misses).
 	RedundantNetMarkers int `json:"redundantNetMarkers"`
 	// Readability rule: netports standing vertical (rotation 90/270) render their
@@ -237,8 +239,8 @@ func checkLevelTag(level string) string {
 
 func renderCheckReport(rep checkReport, w io.Writer) {
 	s := rep.Summary
-	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s), %d missing-deliverable(partition/note/titleblock), %d folded-net-label(s), %d redundant-net-marker(s), %d reversed-net-flag(s)\n",
-		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps, s.MissingPartitions, s.FoldedNetLabels, s.RedundantNetMarkers, s.ReversedNetFlags)
+	fmt.Fprintf(w, "sch check: %d finding(s) — %d floating pin(s)/%d comp, %d geom-net mismatch(es), %d net-marker mismatch(es), %d multi-net wire(s), %d wire-crossing(s), %d wire-over-pin(s), %d zero-length wire(s), %d dangling wire(s), %d duplicate-net-marker(s), %d titleblock-overlap(s), %d marker-overlap(s), %d missing-deliverable(partition/note/titleblock), %d note-outside-zone(s), %d folded-net-label(s), %d redundant-net-marker(s), %d reversed-net-flag(s)\n",
+		s.Total, s.FloatingPins, s.ComponentsWithFloating, s.GeomNetMismatches, s.NetMarkerMismatches, s.MultiNetWires, s.WireCrossings, s.WireOverPins, s.ZeroLengthWires, s.DanglingWires, s.DuplicateNetMarkers, s.TitleblockOverlaps, s.MarkerOverlaps, s.MissingPartitions, s.NoteOutsideZones, s.FoldedNetLabels, s.RedundantNetMarkers, s.ReversedNetFlags)
 
 	for _, f := range rep.Findings {
 		tag := checkLevelTag(f.Level)
@@ -319,6 +321,9 @@ func renderCheckReport(rep checkReport, w io.Writer) {
 	}
 	if s.MissingPartitions > 0 {
 		fmt.Fprintln(w, "→ missing-partition: 多器件页没画功能分区框/电路说明(铁律#15) — `sch zones set`→`sch zone-draw`(整纸版式 --mode partition)画区框,每模块 `sch note` 加 1~3 行说明")
+	}
+	if s.NoteOutsideZones > 0 {
+		fmt.Fprintln(w, "→ note-outside-zone: 登记的说明飘在自己分区框外 — 按明细 `sch prim-delete` 旧说明后重跑 `sch note --zone <区>`(自动落点落说明带,带高已按多行说明预留),再 `sch zone-draw --mode partition` 重画框")
 	}
 	if s.RedundantNetMarkers > 0 {
 		fmt.Fprintln(w, "→ redundant-net-marker: 同一线树上同网标志重复(修补残留)— 按 suggestDeleteIds `sch prim-delete` 清冗余(保留一个)")

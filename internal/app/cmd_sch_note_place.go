@@ -110,9 +110,15 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 	var cands [][2]float64
 	// **说明带优先**:分区框底部留出来的那条带就是给它的(区名在顶、说明在底,
 	// 都在框内)。带里放不下才退到下面那串兜底候选 —— 那些会把说明挤出框外。
+	// 沿带横向逐档扫(此前只有 MinX 单点):第二条说明不再因为第一条占着带左端
+	// 就整个跌出框外,而是在同一条带里并排右移。
 	if noteBand != nil {
-		if sx, sy, hit := try(noteBand.MinX+noteGap, noteBand.MinY+h+noteGap); hit {
-			return sx, sy, true
+		by := noteBand.MinY + h + noteGap
+		xEnd := math.Max(noteBand.MinX+noteGap, noteBand.MaxX-w-noteGap)
+		for bx := noteBand.MinX + noteGap; bx <= xEnd+acOverlapEps; bx += noteAnchorStep {
+			if sx, sy, hit := try(bx, by); hit {
+				return sx, sy, true
+			}
 		}
 	}
 	if zoneRect != nil {
@@ -239,6 +245,24 @@ func collectNoteObstacles(comps []layoutComp, texts []zoneMoveText) []layoutBBox
 	return out
 }
 
+// extendZoneBandForNote 预扩说明带(纯函数,新 1):分区计划是在这条说明**登记
+// 之前**算的,带高还不包含它;若说明高度装不进现有带(requiredNoteBand(h) > 带高),
+// 就按「登记之后 zone-plan 会重算出的几何」把框底下探、带同步加高 —— 公式与
+// planPartitions 完全同一把尺(requiredNoteBand),因此落点与随后重画的框精确
+// 对上:先放说明、再 zone-draw,说明恰在新带内;重复跑 zone-plan 收敛稳定。
+// 器件区不动(只向外扩);扩出去撞图签/纸边的候选仍由 free() 统一否决。
+func extendZoneBandForNote(zoneRect, noteBand layoutBBox, h float64) (layoutBBox, layoutBBox) {
+	need := requiredNoteBand(h)
+	cur := noteBand.MaxY - noteBand.MinY
+	if need <= cur {
+		return zoneRect, noteBand
+	}
+	zoneRect.MinY -= need - cur
+	noteBand.MinY = zoneRect.MinY
+	noteBand.MaxY = noteBand.MinY + need
+	return zoneRect, noteBand
+}
+
 // matchNotePartition 在分区计划里找 zoneName 归属的分区(纯函数)。
 //
 // 命中:返回该区的框与说明带,以及**其它所有分区的矩形**(根因 B:回退链的每
@@ -349,6 +373,10 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 					*content = wrapped
 					w, h = noteSizeOf(*content, fontSize)
 				}
+				// 预扩说明带(新 1):计划算于登记之前,还不知道这条说明的高度;
+				// 按登记后 zone-plan 会重算出的几何预扩,落点才与重画的框对上。
+				zr, nb := extendZoneBandForNote(*zoneRect, *noteBand, h)
+				zoneRect, noteBand = &zr, &nb
 			} else {
 				warns = append(warns, fmt.Sprintf("区 %q(解析为 %q)不在本页分区计划里,说明改为整页避让落点", zoneRef, zoneName))
 			}

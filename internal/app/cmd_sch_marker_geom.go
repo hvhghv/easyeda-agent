@@ -513,6 +513,9 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 		if tf := titleBlockFinding(cfg, window, stderr); tf != nil {
 			geo = append(geo, *tf)
 		}
+		// 「放对没有」判据:登记说明必须在自己的分区框内(新 2)。单页作用域
+		// (text.list 只见激活页,登记与分区计划也按 docUUID 钉页)。
+		geo = append(geo, noteOutsideZoneFindings(cfg, window, stderr)...)
 	}
 
 	if len(geo) == 0 {
@@ -527,6 +530,8 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 			rep.Summary.TitleblockOverlaps++
 		case "marker-overlap":
 			rep.Summary.MarkerOverlaps++
+		case "note-outside-zone":
+			rep.Summary.NoteOutsideZones++
 		case "missing-partition", "missing-note", "missing-titleblock":
 			// 交付三件套(区框/说明/图签)共用一个聚合计数槽 —— 汇总行必须写成
 			// missing-deliverable 而不是 missing-partition:2026-08-17 真机上一条
@@ -784,6 +789,106 @@ func partitionFindingFor(parts, frameRects, labelTexts, textCount int) []*checkF
 			Count:   parts,
 			Message: fmt.Sprintf("%d 个器件的页没有电路说明(区名标签不算)— 每模块 1~3 行 `sch note`:作用 + 关键参数 + 设计要点;交付前必须有", parts),
 		})
+	}
+	return out
+}
+
+// ── note-outside-zone(登记说明不在自己分区框内)────────────────────────────
+//
+// 交付三件套的三条判据(missing-partition/note/titleblock)都是**存在性**判据:
+// 说明「有没有」,不判「放对没有」。REPORT-esp32mini-round2 新 2:P2 两条说明
+// 飘在框外,`sch check` 一句没提 —— 用户先于工具发现。本规则补上归属判据:
+// 每条 `--zone` 登记过的说明,其渲染 bbox 必须被该区分区框包含。
+//
+// 框的口径:zone-plan 的规划框 —— `sch zone-draw --mode partition` 画的就是这个
+// plan(平台无矩形枚举接口,画布实框只有我们的 id 记账、读不回几何),规划框与
+// 实框同源。登记信息与 `sch note --zone` 的注册同源(loadSchZoneModules 投影的
+// claim.NoteIDs),不另造一套。
+//
+// noteOutsideZoneFindings 是 I/O 外壳:读登记 → 有登记说明才算 plan + text.list。
+// best-effort:任何读取失败只写 stderr / 静默跳过,绝不掩盖电气判据。
+func noteOutsideZoneFindings(cfg *appConfig, window string, stderr io.Writer) []checkFinding {
+	_, _, docUUID, _, _, _, err := loadSchGroupsContext(cfg, window)
+	if err != nil {
+		return nil
+	}
+	zones, _, err := loadSchZoneModules(cfg, window, docUUID)
+	if err != nil || len(zones) == 0 {
+		return nil // 没有模块登记的页无从谈「说明归属」——正常,不是降级
+	}
+	registered := false
+	for _, zc := range zones {
+		if zc != nil && len(zc.NoteIDs) > 0 {
+			registered = true
+			break
+		}
+	}
+	if !registered {
+		return nil // 没登记过说明就没有判定对象(missing-note 管「没有」)
+	}
+	plan, _, err := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts())
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: note-outside-zone skipped — zone-plan failed: %v\n", err)
+		return nil
+	}
+	res, err := requestAutolayoutAction(cfg, "schematic.text.list", window, map[string]any{}, docUUID, "read notes for containment check")
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: note-outside-zone skipped — text.list failed: %v\n", err)
+		return nil
+	}
+	return noteOutsideZoneFindingsFor(plan.Partitions, zones, parseZoneMoveTexts(res.Result))
+}
+
+// noteOutsideZoneFindingsFor 是纯核(离线单测):逐区逐条登记说明判包含。
+// 不误伤的边界:未登记 zone 的自由文本从不判;区不在分区计划里(件不在本页/
+// 没有框)跳过;登记指向已删文本(stale)跳过 —— 与 fold 的口径一致。
+func noteOutsideZoneFindingsFor(parts []partitionRect, zones map[string]*schZoneClaim, texts []zoneMoveText) []checkFinding {
+	byID := map[string]zoneMoveText{}
+	for _, t := range texts {
+		byID[t.ID] = t
+	}
+	var names []string
+	for n := range zones {
+		names = append(names, n)
+	}
+	sort.Strings(names) // 确定性输出
+	var out []checkFinding
+	for _, name := range names {
+		zc := zones[name]
+		if zc == nil || len(zc.NoteIDs) == 0 {
+			continue
+		}
+		var frame *layoutBBox
+		for i := range parts {
+			if strInSlice(parts[i].Modules, name) {
+				frame = &parts[i].BBox
+				break
+			}
+		}
+		if frame == nil {
+			continue // 区不在本页分区计划里:没有框可归属(missing-partition 另管)
+		}
+		for _, nid := range zc.NoteIDs {
+			t, ok := byID[nid]
+			if !ok {
+				continue // stale 登记(说明已删)
+			}
+			nb := schNoteBBoxEstimate(t)
+			if bboxContains(*frame, nb) {
+				continue
+			}
+			b := nb
+			out = append(out, checkFinding{
+				Type:        "note-outside-zone",
+				Level:       "warn",
+				PrimitiveId: t.ID,
+				Count:       1,
+				At:          &checkPoint{X: t.X, Y: t.Y},
+				BBox:        &b,
+				Message: fmt.Sprintf("区 %q 的说明 %s @(%.0f,%.0f) 在分区框 (%.0f,%.0f)..(%.0f,%.0f) 外 — 修法:`sch prim-delete --ids %s` 后重跑 `sch note --zone %s`(自动落点落说明带),或显式 --x/--y 放回框内",
+					name, t.ID, t.X, t.Y, frame.MinX, frame.MinY, frame.MaxX, frame.MaxY, t.ID, name),
+			})
+		}
 	}
 	return out
 }
