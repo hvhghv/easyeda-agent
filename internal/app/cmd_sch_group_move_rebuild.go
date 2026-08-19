@@ -101,6 +101,11 @@ func groupsMoveRebuild(cfg *appConfig, window string, groupRefs []string, dx, dy
 	//     是有边界的排布器,而手工 group-move 过去完全不查 —— 实测 Δ=(40,60) 就把
 	//     整个组推出图纸,layout-lint 报 5 out-of-sheet 而命令一声不吭。
 	//     收拢而不是拒绝:调用方要的是「挪一挪」,把它按到可用区里仍然满足这个意图。
+	//     但收拢必须**可见且有底线**(#151 部分应用约定,2026-08 esp32Mini round2
+	//     实录:--dy -110 被钳成 -2 仍报「✓ 平移 0 件」退出 0):钳位 = stderr WARN +
+	//     requested/applied 双份输出;钳到接近 0 = 位移意图已丢失,**动画布之前**
+	//     直接拒绝执行。
+	clampRep := groupMoveClampReport{RequestedDX: dx, RequestedDY: dy, AppliedDX: dx, AppliedDY: dy}
 	if box, ok := groupOccupancy(comps, wires, memberSet); ok {
 		if sheet := sheetBBoxOf(comps); sheet != nil {
 			// 收拢用**整页可用区**,图签 keepout 单独按相交判(见 clampDeltaAvoidingKeepout)。
@@ -117,11 +122,23 @@ func groupsMoveRebuild(cfg *appConfig, window string, groupRefs []string, dx, dy
 				ko = nil // 猜出来的图签框不拿来收拢(与 arrangeBoundsOf 同口径)
 			}
 			ndx, ndy := clampDeltaAvoidingKeepout(box, dx, dy, bounds, ko)
-			if ndx != dx || ndy != dy {
-				fmt.Fprintf(stderr, "note: Δ=(%.0f,%.0f) 会让组出图纸可用区,已收拢到 Δ=(%.0f,%.0f)\n", dx, dy, ndx, ndy)
+			clampRep = evalGroupMoveClamp(dx, dy, ndx, ndy)
+			if clampRep.Clamped {
+				for _, a := range clampRep.Axes {
+					fmt.Fprintf(stderr, "⚠ 钳位:%s\n", a)
+				}
+				fmt.Fprintf(stderr, "⚠ 钳位:requestedΔ=(%.0f,%.0f) → appliedΔ=(%.0f,%.0f)\n",
+					clampRep.RequestedDX, clampRep.RequestedDY, clampRep.AppliedDX, clampRep.AppliedDY)
 				dx, dy = ndx, ndy
 			}
 		}
+	}
+	// 钳到接近 0 = 请求的位移没实现,**在任何 mutation 之前**拒绝(不是先挪 2 个
+	// 单位再说没执行)。非零退出,报错给出路。
+	if clampRep.Refused {
+		return fmt.Errorf("group-move 未执行:requestedΔ=(%.0f,%.0f) 被钳到 appliedΔ=(%.0f,%.0f),接近 0(%s)—— 目标位移撞图纸边,画布未改动;可先挪走挡路对象(先移让路的组/区:`sch group-move`、`sch zone move`)或减小位移",
+			clampRep.RequestedDX, clampRep.RequestedDY, clampRep.AppliedDX, clampRep.AppliedDY,
+			strings.Join(clampRep.Axes, ";"))
 	}
 	if dx == 0 && dy == 0 {
 		fmt.Fprintln(stdout, "✓ 组已在可用区内且无需移动(零位移,未改动画布)")
@@ -140,9 +157,85 @@ func groupsMoveRebuild(cfg *appConfig, window string, groupRefs []string, dx, dy
 	if kerr != nil {
 		return kerr
 	}
-	fmt.Fprintf(stdout, "✓ 组 %s 平移 %d 件 Δ=(%.0f,%.0f);内核对账绿(网表逐引脚一致,无新增 bridge)\n",
-		groupLabel, len(rep.Moved), dx, dy)
+	for _, line := range groupMoveResultLines(groupLabel, len(rep.Moved), clampRep) {
+		fmt.Fprintln(stdout, line)
+	}
 	return nil
+}
+
+// ── 钳位的结构化决策与收尾输出(#151:部分应用必须可见)──────────────────────
+
+// groupMoveClampNearZero*:appliedΔ 在某条被请求的轴上同时满足
+// |applied| < |requested|·10% 且 |applied| ≤ 5(一个 anchor 网格)时,位移的
+// 「意图」已经丢失 —— 视为未执行,拒绝动画布。
+const (
+	groupMoveClampNearZeroFrac = 0.1
+	groupMoveClampNearZeroAbs  = 5.0
+)
+
+// groupMoveClampReport 是钳位决策的结构化结论。RequestedΔ ≠ AppliedΔ 时
+// Clamped=true;Refused=true = 任一被请求的轴被钳到接近 0,调用方必须在任何
+// mutation 之前拒绝执行。Axes 是逐轴的人类可读描述(撞哪个边、被钳掉多少)。
+type groupMoveClampReport struct {
+	RequestedDX, RequestedDY float64
+	AppliedDX, AppliedDY     float64
+	Clamped                  bool
+	Refused                  bool
+	Axes                     []string
+}
+
+// evalGroupMoveClamp 比对请求位移与收拢后位移(纯函数)。撞边归因用请求方向的
+// 符号:clampNoFlip 保证收拢绝不反号,所以 x 正=右沿/负=左沿,y 正=上沿/负=下沿
+// (y-UP;向下还可能是图签 keepout 拦的,一并说明)。未被请求的轴(req=0)收拢
+// 恒等于 0(clampNoFlip 语义),不参与判定。
+func evalGroupMoveClamp(reqDX, reqDY, appDX, appDY float64) groupMoveClampReport {
+	rep := groupMoveClampReport{RequestedDX: reqDX, RequestedDY: reqDY, AppliedDX: appDX, AppliedDY: appDY}
+	axis := func(name string, req, app float64, negEdge, posEdge string) {
+		if app == req {
+			return
+		}
+		rep.Clamped = true
+		edge := posEdge
+		if req < 0 {
+			edge = negEdge
+		}
+		rep.Axes = append(rep.Axes, fmt.Sprintf("%s 轴撞%s:请求 %.0f 只走得了 %.0f(被钳掉 %.0f)",
+			name, edge, req, app, req-app))
+		if math.Abs(app) < math.Abs(req)*groupMoveClampNearZeroFrac && math.Abs(app) <= groupMoveClampNearZeroAbs {
+			rep.Refused = true
+		}
+	}
+	axis("x", reqDX, appDX, "图纸左沿", "图纸右沿")
+	axis("y", reqDY, appDY, "图纸下沿(或图签 keepout)", "图纸上沿")
+	return rep
+}
+
+// groupMoveResultLines 组装 group-move 的收尾 stdout 输出(纯函数,可单测):
+//   - 足额位移 → 与历史输出逐字节一致的单行绿勾(现有调用方依赖它);
+//   - 被钳位仍执行 → 先给一行机器可读的 partial JSON(requestedDelta vs
+//     appliedDelta),绿勾行同时印两个 Δ;
+//   - 0 件被移动(非 dry-run)→ 明确的 no-op 提示,不打绿勾(位移经 snap 5
+//     网格后全员原地时会出现)。
+func groupMoveResultLines(groupLabel string, moved int, r groupMoveClampReport) []string {
+	var lines []string
+	if r.Clamped {
+		lines = append(lines, fmt.Sprintf(
+			`partial: {"requestedDelta":{"dx":%g,"dy":%g},"appliedDelta":{"dx":%g,"dy":%g}}`,
+			r.RequestedDX, r.RequestedDY, r.AppliedDX, r.AppliedDY))
+	}
+	if moved == 0 {
+		return append(lines, fmt.Sprintf(
+			"⚠ no-op:组 %s 0 件被移动(位移经 snap 5 网格后全员原地)— 画布未改变;加大 --dx/--dy 或核对组成员(`sch group list`)",
+			groupLabel))
+	}
+	if !r.Clamped {
+		return append(lines, fmt.Sprintf(
+			"✓ 组 %s 平移 %d 件 Δ=(%.0f,%.0f);内核对账绿(网表逐引脚一致,无新增 bridge)",
+			groupLabel, moved, r.AppliedDX, r.AppliedDY))
+	}
+	return append(lines, fmt.Sprintf(
+		"✓ 组 %s 平移 %d 件 appliedΔ=(%.0f,%.0f)(requestedΔ=(%.0f,%.0f) 被钳位,详见 stderr);内核对账绿(网表逐引脚一致,无新增 bridge)",
+		groupLabel, moved, r.AppliedDX, r.AppliedDY, r.RequestedDX, r.RequestedDY))
 }
 
 // groupRebuildMember 是一个待平移的成员。
