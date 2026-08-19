@@ -235,18 +235,25 @@ func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
 			z.Name, z.Mode, z.RawW, z.RawH, z.FrameW, z.FrameH)
 	}
 	if !out.Arrange.OK {
-		fmt.Fprintf(w, "phase B 落位:blocked —— %s 无处可放,回退链已试尽:%s\n",
-			out.Arrange.Blocked, out.Arrange.Tried)
+		how := "回退链 + 多层货架已试尽"
+		if out.Arrange.Exhausted {
+			how = "搜索预算耗尽(未证明无解,但本域界内没搜到)"
+		}
+		fmt.Fprintf(w, "phase B 落位:blocked —— %s 无处可放,%s:%s\n",
+			out.Arrange.Blocked, how, out.Arrange.Tried)
 		fmt.Fprintf(w, "verdict: blocked(出路:进一步收敛该区,或 `sch page-new` 拆页 —— A4-only,不建议换纸)\n")
 		return
 	}
-	fmt.Fprintf(w, "phase B 落位(边归属 → 回退链 → 货架扫描)\n")
+	fmt.Fprintf(w, "phase B 落位(边归属 → 回退链 → 多层货架装箱 + 回溯)\n")
 	for _, p := range out.Arrange.Placed {
 		fb := ""
 		if p.Edge != p.Chain[0] {
 			fb = fmt.Sprintf("(回退,首选 %s)", p.Chain[0])
 		}
-		fmt.Fprintf(w, "  %-8s %s%-14s steps %-4d 框 [%.0f,%.0f → %.0f,%.0f]\n",
+		if p.Shelf > 0 {
+			fb += fmt.Sprintf("(第%d层货架)", p.Shelf+1)
+		}
+		fmt.Fprintf(w, "  %-8s %s%-18s steps %-4d 框 [%.0f,%.0f → %.0f,%.0f]\n",
 			p.Name, p.Edge, fb, p.Steps, p.Rect.MinX, p.Rect.MinY, p.Rect.MaxX, p.Rect.MaxY)
 	}
 	if out.Validation != nil {
@@ -263,13 +270,14 @@ func newSchZoneArrangeCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 	var margin, gutter, titleBand float64
 	c := &cobra.Command{
 		Use:   "zone-arrange",
-		Short: "Two-phase deterministic zone layout plan: intra-zone compaction (R1-R5) + edge-affinity shelf placement (A4-only, no mutation)",
+		Short: "Two-phase deterministic zone layout plan: intra-zone compaction (R1-R5) + edge-affinity multi-shelf packing (A4-only, no mutation)",
 		Long: `Plan the whole-page functional-zone layout deterministically — same input, ONE output:
 
   phase A  区内收敛:卫星无源件竖放平行跟随锚件(R1-R5;GND 下/电源上是推论不是查表)
-  phase B  区间求解:边归属(质心回退+回退链)→ 货架扫描(只沿边轴,5 格律)
+  phase B  区间求解:边归属(质心回退+回退链)→ 每条边可开多层货架(第二列/第二行)
+           → 放不下就回溯换上一个区的候选(确定性 DFS,5 格律,无随机)
   验证     复用 zone-plan 的 validatePartitions(同一把尺)
-  输出     三态:pass / blocked(报出是谁、回退链每条边距离)—— 永不「大概摆一下」
+  输出     三态:pass / blocked(报出是谁、每条边卡在谁身上)—— 永不「大概摆一下」
 
 A4-only:装不下的出路是收敛或 ` + "`sch page-new`" + ` 拆页,不建议换纸。
 默认 dry-run 纯规划零改动;--apply 走 ADR-0004 move 内核落地(页级 sweep →
