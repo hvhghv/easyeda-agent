@@ -605,6 +605,7 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `easyeda doc ls` 聚合了 `schematic.pages.list` + `pcb.documents.list` + `document.current`,一条命令看全貌;`--json` 给机器读。
 - `easyeda doc switch` 按名字解析 → `document.open` → `document.current` 回读确认。**同名页(多个 P1)会报歧义并列出 uuid,改传 uuid**。跨类型也行(PCB ↔ 原理图)。
 - **多窗口时必须 `--project`(或 `--window`)**:`doc ls`/`doc switch` 不带目标时,只有「恰好一个窗口」才能自动命中;两个及以上窗口会报 `no EasyEDA connector is available`。同理,某窗口连接器正在重连(churn)的瞬间也可能瞬时报这个,重试即可。
+- **`doc reload` 后必须先 `doc switch <uuid>` 重钉 context 再写(2026-08-19 真机实锤)**:reload(saved→closed→reopened)后 exec_js 的 JS context 仍挂在**已关闭的旧 tab**上,紧接的写(`prim-delete`/create/modify)会打进旧文档——**静默 no-op 但回执照样 ok**(同 4 个 id 逐个删、回执全 ok、复检原样;插一条 `doc switch` 后同样命令立即生效)。这是「exec_js context 不跟切页走」的 reload 变体,`--doc` guard 拦不住(guard 核对的是 daemon 视角的 document.current,名义上已是新 tab)。同病还有**读侧 stale**:mutation 后 `bridge-check`/`clusters`/`check` 可能读到旧几何——orphan-tree 判据在 mutation 后不 reload 就跑,会把刚建的合法桩线误判成孤儿树**引导误删**(真机踩过:删掉了 C7:1 刚补的连接)。口诀:**写完要判,先 reload;reload 完要写,先 switch**。
 
 底层 action(需要细控时再用):
 

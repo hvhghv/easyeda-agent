@@ -272,7 +272,8 @@ func newSchZoneArrangeCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
   输出     三态:pass / blocked(报出是谁、回退链每条边距离)—— 永不「大概摆一下」
 
 A4-only:装不下的出路是收敛或 ` + "`sch page-new`" + ` 拆页,不建议换纸。
-纯规划零改动;落地执行(--apply)未接入 —— 要先补齐 ADR-0003 执行断言。`,
+默认 dry-run 纯规划零改动;--apply 走 ADR-0004 move 内核落地(页级 sweep →
+落位重连 → 电气对账,失败自动恢复,救不回的 pin 以 REF→期望网清单退出)。`,
 		Example: `  easyeda sch zone-arrange --project ceshi --doc P3_USB_DEBUG --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// ADR-0004 Decision 4(dry-run 纯计算铁律)在此**有意不接**
