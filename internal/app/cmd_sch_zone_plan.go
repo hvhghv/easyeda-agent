@@ -687,11 +687,15 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	if len(modules) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no module bboxes resolved — the claimed parts aren't on this page (place them / `doc switch`)")
 	}
-	// 功能区对象模型:登记的说明 note(claim.NoteIDs)是区的内置对象——把它们的
-	// 估算 bbox fold 进对应模块的画框口径(CoreBBox 不动:说明是注释,不参与
-	// 图签/区名带的硬校验)。text 无 bbox API,按内容行数×字号估算;读取失败仅
-	// 降级警告(说明不该阻断画框)。
-	foldZoneNotesIntoModules(cfg, window, docUUID, zones, modules)
+	// **已登记的说明 note 不参与分区框的内容 bbox(根因 C,2026-08-19 真机定案)**:
+	// 说明带(NoteBBox)是从内容 bbox 推出的框内预留(框底 26 单位);落进带里的
+	// note 若再被 fold 回内容 bbox,框每重画一次就向下长一截 ≈ pad+带高(实测
+	// D_ESD 框 minY 554→501),新的说明带随框下移,原来带内的说明又"不在带里"了,
+	// 且被拉炸的区 bbox 会与邻框交叠 → partitionOverlap=1 → zone-draw 拒绝重画的
+	// 死锁。「note 计入内容 bbox」与「带由内容 bbox 推导」同时成立时这个自增长
+	// 反馈环必然存在 —— 因此这里**按登记记录机械排除**:说明的家是构造出来的
+	// 说明带(`sch note --zone` 的自动落点优先落带),不反哺框几何。
+	// (`sch sheet tidy` 的排布口径仍 fold —— 那是搬动时给说明留地方,不推导带。)
 	plan := planPartitions(*sheet, keepout, modules, opts)
 	plan.LabelScopeDegraded = degraded
 	plan.SheetAssumed = sheetAssumed
@@ -707,8 +711,14 @@ func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {
 	return noteAnchorBBox(t.X, t.Y, w, h)
 }
 
-// foldZoneNotesIntoModules 把每个区登记的 note bbox 并进该区模块的 BBox(画框
-// 口径)。best-effort:text.list 失败只警告。
+// foldZoneNotesIntoModules 把每个区登记的 note bbox 并进该区模块的 BBox。
+// best-effort:text.list 失败只警告。
+//
+// **只许排布类消费者用(目前仅 `sch sheet tidy`)—— 分区框/说明带的推导路径
+// (computePartitionPlan)禁止调用**:说明带由内容 bbox 推出,note 再 fold 回
+// 内容 bbox 就是「框每重画一次向下长一截」的自增长反馈环(根因 C,见
+// computePartitionPlan 内的注释)。sheet tidy 只拿折叠后的体积做整页装箱,
+// 不反哺框几何,fold 在那里是「搬动时给说明留地方」,语义安全。
 func foldZoneNotesIntoModules(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim, modules []partitionModule) {
 	needed := false
 	for _, zc := range zones {

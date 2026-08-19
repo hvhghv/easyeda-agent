@@ -16,8 +16,10 @@ import (
 // 在此之前 `sch note` 的 --x/--y 是**必填**:落点全靠调用方(人或 agent)拿
 // `sch list --include-bbox` 自己估,于是三条说明齐刷刷压在器件和网标上——不是
 // 因为缺少碰撞判据(zone-plan 早有 boxesOverlap / LabelCollisions,note 的尺寸
-// 估算 schNoteBBoxEstimate 也早就存在,还会被 foldZoneNotesIntoModules 折进
-// 画框口径),而是因为**文字只被动地"被框住",从没主动参与避让求解**。
+// 估算 schNoteBBoxEstimate 也早就存在),而是因为**文字只被动地"被框住",从没
+// 主动参与避让求解**。(注:登记的说明曾被 foldZoneNotesIntoModules 折进分区框
+// 口径 —— 那正是「说明带自增长反馈环」的根因 C,2026-08-19 已从 zone-plan 路径
+// 移除;说明的家是构造出来的说明带,不反哺框几何。)
 //
 // 本文件补上那一步:note 和器件、marker、已有文字、标题栏 keep-out 一起进同一
 // 张碰撞表,自动求一个不压任何东西的锚点。尺寸估算复用 schNoteBBoxEstimate ——
@@ -237,40 +239,87 @@ func collectNoteObstacles(comps []layoutComp, texts []zoneMoveText) []layoutBBox
 	return out
 }
 
+// matchNotePartition 在分区计划里找 zoneName 归属的分区(纯函数)。
+//
+// 命中:返回该区的框与说明带,以及**其它所有分区的矩形**(根因 B:回退链的每
+// 一档都必须把邻区的框当硬障碍,否则求解器会把"邻区框内的空白"当可用空间,
+// 说明落进别人的框、把本区 bbox 拉炸、partitionOverlap=1 死锁)。
+// 未命中:matched=false,且返回**全部**分区矩形 —— 落不进任何区的说明只能整页
+// 避让,但绝不许落进任何分区框里。
+func matchNotePartition(parts []partitionRect, zoneName string) (zoneRect, noteBand *layoutBBox, others []layoutBBox, matched bool) {
+	idx := -1
+	for i, p := range parts {
+		if strInSlice(p.Modules, zoneName) {
+			idx = i
+			break
+		}
+	}
+	for i, p := range parts {
+		if i != idx {
+			others = append(others, p.BBox)
+		}
+	}
+	if idx < 0 {
+		return nil, nil, others, false
+	}
+	r := parts[idx].BBox
+	nb := parts[idx].NoteBBox
+	return &r, &nb, others, true
+}
+
 // placeSchNote 是自动落点的 I/O 外壳:拉一次页面几何(图元 + 已有文字 + 图纸 +
 // 图签 keep-out + 该区的分区矩形),求锚点写回 *x/*y。
 //
 //   - auto=true(调用方没给 --x/--y):求解失败 = 硬错误。宁可不画,也不把说明
 //     糊在电路上——那正是这次要根治的症状。
 //   - auto=false(调用方显式给了坐标):坐标一字不改,但仍做一次碰撞回读,压到
-//     东西就返回一句警告(第二个返回值),让人知道自己压了什么。
+//     东西就往 warns 里加一句警告,让人知道自己压了什么。
+//
+// 返回值:warns 是**必须**转给用户 stderr 的降级/未命中警告(绝不静默——根因 A
+// 的最坏形态就是"匹配不到 → 整页兜底 → 还报登记成功");zoneMatched 表示
+// --zone 是否在本页分区计划里命中了一个分区(命中才有说明带可落)。
 //
 // 几何读取失败一律降级为「照给定坐标画」并给出提示:说明是注释,不该因为读不到
 // 布局就阻断。
-func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *string, fontSize float64, auto bool, x, y *float64) (warn string, err error) {
+func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *string, fontSize float64, auto bool, x, y *float64) (warns []string, zoneMatched bool, err error) {
 	w, h := noteSizeOf(*content, fontSize)
+
+	// 根因 A:--zone 先过统一注册表解析(ADR-0004 Decision 3,resolveLayoutObject)
+	// —— 注册表全名 `ch340c_usb_serial(C4)/U`、末段短名 `U`、组 id、唯一前缀命中的
+	// 都是同一个条目,zoneName() 投影出的短名正是分区计划 Modules 里的名字。
+	// 解析失败在**创建任何图元之前**硬报错(报错自带本页全部可用名)——此前拿
+	// 原始引用与 plan 短名做精确串匹配,传全名静默落空、跌进整页兜底,命令还照样
+	// 报 "registered to zone" 成功(2026-08-19 真机 E2E 定案)。
+	zoneName := ""
+	if zoneRef != "" {
+		obj, _, _, rerr := resolveLayoutZone(cfg, window, docUUID, zoneRef)
+		if rerr != nil {
+			return nil, false, rerr
+		}
+		zoneName = obj.zoneName()
+	}
 
 	res, rerr := requestAutolayoutAction(cfg, "schematic.components.list", window,
 		map[string]any{"includeBBox": true}, docUUID, "read layout for note placement")
 	if rerr != nil {
 		if auto {
-			return "", fmt.Errorf("自动落点需要页面几何,但 components.list 失败:%w(可显式给 --x/--y 绕过)", rerr)
+			return nil, false, fmt.Errorf("自动落点需要页面几何,但 components.list 失败:%w(可显式给 --x/--y 绕过)", rerr)
 		}
-		return "note 落点未做碰撞校验(读取页面几何失败)", nil
+		return []string{"note 落点未做碰撞校验(读取页面几何失败)"}, false, nil
 	}
 	comps, perr := parseLayoutComps(res.Result)
 	if perr != nil {
 		if auto {
-			return "", fmt.Errorf("自动落点需要页面几何,但解析失败:%w(可显式给 --x/--y 绕过)", perr)
+			return nil, false, fmt.Errorf("自动落点需要页面几何,但解析失败:%w(可显式给 --x/--y 绕过)", perr)
 		}
-		return "note 落点未做碰撞校验(页面几何解析失败)", nil
+		return []string{"note 落点未做碰撞校验(页面几何解析失败)"}, false, nil
 	}
 	sheet := sheetBBoxOf(comps)
 	if sheet == nil {
 		if auto {
-			return "", fmt.Errorf("自动落点需要图纸边框(sheet)bbox,本页读不到——请显式给 --x/--y")
+			return nil, false, fmt.Errorf("自动落点需要图纸边框(sheet)bbox,本页读不到——请显式给 --x/--y")
 		}
-		return "note 落点未做碰撞校验(读不到图纸 bbox)", nil
+		return []string{"note 落点未做碰撞校验(读不到图纸 bbox)"}, false, nil
 	}
 	keepout, _ := titleBlockKeepout(sheet)
 
@@ -282,25 +331,30 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 	obstacles := collectNoteObstacles(comps, texts)
 
 	// 目标区的矩形:优先用 zone-plan 给该区算出的分区框(说明就该待在自己区里),
-	// 拿不到就退化成整页扫描。**文字比框宽时先折行** —— 否则说明带塞不下,落点会
-	// 一路退到整页扫描、跑到框外面去(实测 D_ESD 框宽 96,一行说明 200,落到了 x=50)。
-	// 折行口径与区框里的电路说明一致(wrapNoteLines),不新造一套。
+	// 拿不到就退化成整页扫描——但**绝不静默**:未命中/计划不可用都要出警告。
+	// **文字比框宽时先折行** —— 否则说明带塞不下,落点会一路退到整页扫描、跑到
+	// 框外面去(实测 D_ESD 框宽 96,一行说明 200,落到了 x=50)。折行口径与区框里
+	// 的电路说明一致(wrapNoteLines),不新造一套。
+	//
+	// solverObstacles = 页面图元障碍 + 分区框障碍(根因 B)。分区框只喂给自动
+	// 求解器 —— 显式 --x/--y 落在自己区框内是完全合法的,不该被框障碍误警。
 	var zoneRect, noteBand *layoutBBox
-	if zoneRef != "" {
+	solverObstacles := obstacles
+	if zoneName != "" {
 		if plan, _, zerr := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts()); zerr == nil {
-			for _, p := range plan.Partitions {
-				if strInSlice(p.Modules, zoneRef) {
-					r := p.BBox
-					zoneRect = &r
-					nb := p.NoteBBox
-					noteBand = &nb
-					if wrapped := wrapNoteContent(*content, r.MaxX-r.MinX-2*noteGap); wrapped != *content {
-						*content = wrapped
-						w, h = noteSizeOf(*content, fontSize)
-					}
-					break
+			var otherRects []layoutBBox
+			zoneRect, noteBand, otherRects, zoneMatched = matchNotePartition(plan.Partitions, zoneName)
+			if zoneMatched {
+				if wrapped := wrapNoteContent(*content, zoneRect.MaxX-zoneRect.MinX-2*noteGap); wrapped != *content {
+					*content = wrapped
+					w, h = noteSizeOf(*content, fontSize)
 				}
+			} else {
+				warns = append(warns, fmt.Sprintf("区 %q(解析为 %q)不在本页分区计划里,说明改为整页避让落点", zoneRef, zoneName))
 			}
+			solverObstacles = append(append([]layoutBBox(nil), obstacles...), otherRects...)
+		} else {
+			warns = append(warns, fmt.Sprintf("本页分区计划不可用(%v),区 %q 的说明改为整页避让落点", zerr, zoneRef))
 		}
 	}
 
@@ -308,18 +362,19 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 		b := noteAnchorBBox(*x, *y, w, h)
 		for _, ob := range obstacles {
 			if boxesGapOverlap(b, ob, 0) {
-				return fmt.Sprintf("说明在 (%g,%g) 压住了已有图元(重叠区 x[%.0f,%.0f] y[%.0f,%.0f]) —— 去掉 --x/--y 可让它自动避让",
+				warns = append(warns, fmt.Sprintf("说明在 (%g,%g) 压住了已有图元(重叠区 x[%.0f,%.0f] y[%.0f,%.0f]) —— 去掉 --x/--y 可让它自动避让",
 					*x, *y, math.Max(b.MinX, ob.MinX), math.Min(b.MaxX, ob.MaxX),
-					math.Max(b.MinY, ob.MinY), math.Min(b.MaxY, ob.MaxY)), nil
+					math.Max(b.MinY, ob.MinY), math.Min(b.MaxY, ob.MaxY)))
+				break
 			}
 		}
-		return "", nil
+		return warns, zoneMatched, nil
 	}
 
-	nx, ny, ok := planNoteAnchor(w, h, obstacles, zoneRect, noteBand, *sheet, keepout)
+	nx, ny, ok := planNoteAnchor(w, h, solverObstacles, zoneRect, noteBand, *sheet, keepout)
 	if !ok {
-		return "", fmt.Errorf("这一页找不到能放下这条说明(%.0f×%.0f)且不压任何图元的空位 —— 缩短文字/减小 --font-size,或腾出版面后重试", w, h)
+		return warns, zoneMatched, fmt.Errorf("这一页找不到能放下这条说明(%.0f×%.0f)且不压任何图元的空位 —— 缩短文字/减小 --font-size,或腾出版面后重试", w, h)
 	}
 	*x, *y = nx, ny
-	return "", nil
+	return warns, zoneMatched, nil
 }

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -37,6 +38,13 @@ const schNoteDefaultColor = "#5A5A5A"
 // buildSchNoteJS renders the exec_js that creates one text primitive and
 // returns its id. Pure (unit-testable). The create signature mirrors
 // zone-draw's labels: (x, y, content, rotation, color, fontFamily, fontSize).
+//
+// 文本一律经 json.Marshal 进 JS 字符串字面量 —— `~`、`+/-`、引号、换行、`%`、
+// 反引号全都安全(TestBuildSchNoteJSEscapesSpecialText 钉死)。2026-08-19 E2E
+// 报的「含 ~ / +/- 的说明让 exec_js 挂掉」经审计日志定案为**误诊**:失败载荷
+// 的 JS 完全合法且正常执行,是 eda.sch_PrimitiveText.create 偶发返回 undefined
+// (同一段文本重试即成功;与 zone-draw 注释里「平台偶发吞创建请求」同一病),
+// 修法是下面 RunE 里的 settle+重试,不是转义。
 func buildSchNoteJS(x, y float64, text, color string, fontSize float64) string {
 	content, _ := json.Marshal(text)
 	colorJS, _ := json.Marshal(color)
@@ -54,6 +62,7 @@ func buildSchNoteJS(x, y float64, text, color string, fontSize float64) string {
 func newSchNoteCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var text, color, zoneRef string
 	var x, y, fontSize float64
+	var asJSON bool
 	c := &cobra.Command{
 		Use:   "note",
 		Short: "Place a circuit-description text note (电路说明) on the schematic sheet",
@@ -94,12 +103,23 @@ default is: one short note per module, parked just below/beside its zone frame.
 			// 参与碰撞求解(用户纠偏 2026-08-13)。给了坐标就一字不改地照放,
 			// 但仍然回读一次碰撞并在压到东西时明确警告 —— 不静默画上去。
 			auto := !cmd.Flags().Changed("x") && !cmd.Flags().Changed("y")
-			if hit, aerr := placeSchNote(pinnedCfg, win, docUUID, zoneRef, &content, fontSize, auto, &x, &y); aerr != nil {
+			warns, zoneMatched, aerr := placeSchNote(pinnedCfg, win, docUUID, zoneRef, &content, fontSize, auto, &x, &y)
+			if aerr != nil {
 				return aerr
-			} else if hit != "" {
-				fmt.Fprintf(stderr, "warning: %s\n", hit)
 			}
-			v, err := execAutolayoutZoneJS(pinnedCfg, win, docUUID, "create schematic note", buildSchNoteJS(x, y, content, color, fontSize))
+			for _, wmsg := range warns {
+				fmt.Fprintf(stderr, "warning: %s\n", wmsg)
+			}
+			// 平台偶发吞创建请求:eda.sch_PrimitiveText.create 偶发返回 undefined
+			// (2026-08-19 审计日志定案:同一段文本、连接器活跃、1~5ms 即败,重试
+			// 即成 —— 与 zone-draw 画框同一病同一修法)。失败时半成品不会留在画布
+			// 上(tx undefined = 没建出来;tid 缺失时 JS 已自删),重发等价于第一次。
+			js := buildSchNoteJS(x, y, content, color, fontSize)
+			v, err := execAutolayoutZoneJS(pinnedCfg, win, docUUID, "create schematic note", js)
+			if err != nil {
+				time.Sleep(settleDelay)
+				v, err = execAutolayoutZoneJS(pinnedCfg, win, docUUID, "create schematic note (retry)", js)
+			}
 			if err != nil {
 				return err
 			}
@@ -111,17 +131,37 @@ default is: one short note per module, parked just below/beside its zone frame.
 				return err
 			}
 			// --zone:把说明登记为功能区的内置对象(Zone = 外框+标题+说明+组+散件,
-			// 用户定义的对象模型)。登记后:分区框把它 fold 进画框口径、zone move
-			// 无条件带走(不再依赖"锚点恰好在框内"的几何猜)。
+			// 用户定义的对象模型)。登记后 zone move 无条件带走(不再依赖"锚点恰好
+			// 在框内"的几何猜)。注意:登记的说明**不再**反哺分区框的内容 bbox
+			// (根因 C 的自增长反馈环已断)——它的家是分区框内的说明带。
+			emit := func(registered bool) error {
+				if asJSON {
+					out := map[string]any{"textId": tid, "x": x, "y": y, "page": docUUID, "saved": true}
+					if zoneRef != "" {
+						out["zone"] = zoneRef
+						out["registered"] = registered
+						// zoneMatched = 该区是否在本页分区计划里命中(命中才有
+						// 说明带可落;false = 已按整页避让兜底,见 stderr warning)。
+						out["zoneMatched"] = zoneMatched
+					}
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					return enc.Encode(out)
+				}
+				if zoneRef != "" {
+					fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g), registered to zone %q (zoneMatched=%v); schematic saved\n", tid, x, y, zoneRef, zoneMatched)
+					return nil
+				}
+				fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g) on page %s; schematic saved\n", tid, x, y, docUUID)
+				return nil
+			}
 			if zoneRef != "" {
 				if rerr := registerSchZoneNote(pinnedCfg, win, docUUID, zoneRef, tid); rerr != nil {
 					return fmt.Errorf("note %s 已创建并保存,但登记到区 %q 失败:%w(可重跑 `sch note` 前先 prim-delete,或忽略登记)", tid, zoneRef, rerr)
 				}
-				fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g), registered to zone %q; schematic saved\n", tid, x, y, zoneRef)
-				return nil
+				return emit(true)
 			}
-			fmt.Fprintf(stdout, "note created (primitiveId %s) at (%g, %g) on page %s; schematic saved\n", tid, x, y, docUUID)
-			return nil
+			return emit(false)
 		},
 	}
 	c.Flags().StringVar(&text, "text", "", "note content; a literal \\n becomes a line break (required)")
@@ -129,7 +169,8 @@ default is: one short note per module, parked just below/beside its zone frame.
 	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP) — 省略即自动落点")
 	c.Flags().Float64Var(&fontSize, "font-size", schNoteDefaultFontSize, "font size")
 	c.Flags().StringVar(&color, "color", schNoteDefaultColor, "text color")
-	c.Flags().StringVar(&zoneRef, "zone", "", "把说明登记到一个布局对象(模块认领/块组/子组统一命名空间,`sch zones status` 看全表)—— 分区框会围住它,`sch zone move` 无条件带走它")
+	c.Flags().StringVar(&zoneRef, "zone", "", "把说明登记到一个布局对象(模块认领/块组/子组统一命名空间,全名/末段短名/组 id/唯一前缀均可,`sch zones status` 看全表)—— 自动落点优先落进该区分区框内的说明带,`sch zone move` 无条件带走它")
+	c.Flags().BoolVar(&asJSON, "json", false, "以 JSON 输出结果(textId/x/y/zoneMatched 等)")
 	_ = c.MarkFlagRequired("text")
 	return c
 }
