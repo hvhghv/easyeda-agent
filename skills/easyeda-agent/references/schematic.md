@@ -431,7 +431,7 @@ easyeda sch autolayout --spec p1-layout.json --dry-run
 
 # pin one page, move parts, read back complete geometry, then save
 # safety gate: zero wires/buses/net markers + proven bbox/pins
-easyeda sch autolayout --spec p1-layout.json --doc P1_MCU_USB_STORAGE --apply
+easyeda sch autolayout --spec p1-layout.json --doc MCU_USB_STORAGE --apply
 
 # structured report
 easyeda sch autolayout --spec p1-layout.json --json
@@ -486,7 +486,7 @@ Spec JSON (`--spec`):
 
 ```json
 {
-  "page": "P1_MCU_USB_STORAGE", "sheet": "A4",
+  "page": "MCU_USB_STORAGE", "sheet": "A4",
   "modules": [
     {"name":"USB_HUB","zone":"left-top","core":"U10","parts":["J2","U10","X1","C30","R15"]},
     {"name":"MCU","zone":"center","core":"U1","parts":["U1","C18","C19","R6"]},

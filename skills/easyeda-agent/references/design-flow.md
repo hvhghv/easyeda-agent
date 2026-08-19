@@ -84,15 +84,15 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 
     {
       "modules": [
-        {"name": "POWER",   "kind": "POWER", "parts": ["U2","L1","C1","C2","F1"], "page": "P2_POWER", "zone": "left"},
-        {"name": "MCU",     "kind": "MCU",   "parts": ["U1","C18","C19","R6"],    "page": "P1_MCU_USB", "zone": "center"},
-        {"name": "USB_HUB", "kind": "USB",   "parts": ["J2","U10","X1","C30","R15"], "page": "P1_MCU_USB", "zone": "left-top"},
-        {"name": "ANT",     "kind": "ANT",   "parts": ["ANT1"], "page": "P1_MCU_USB", "zone": "right"}
+        {"name": "POWER",   "kind": "POWER", "parts": ["U2","L1","C1","C2","F1"], "page": "POWER", "zone": "left"},
+        {"name": "MCU",     "kind": "MCU",   "parts": ["U1","C18","C19","R6"],    "page": "MCU_USB", "zone": "center"},
+        {"name": "USB_HUB", "kind": "USB",   "parts": ["J2","U10","X1","C30","R15"], "page": "MCU_USB", "zone": "left-top"},
+        {"name": "ANT",     "kind": "ANT",   "parts": ["ANT1"], "page": "MCU_USB", "zone": "right"}
       ],
       "flow": ["POWER", "MCU", "USB", "ANT"],
       "flowAxis": "auto",
       "pages": [
-        {"name": "P1_MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB","ANT"]}
+        {"name": "MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB","ANT"]}
       ],
       "stackup": {
         "layers": 4,
@@ -142,7 +142,7 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 ### S1 — 图纸 / 分页(先图纸,再分页!)
 - **做什么**:确认当前页有图纸,默认 A4;再按模块/功能把设计**先分到几页**(电源一页、主控一页、接口一页…),别全堆一页。
 - **怎么做**:`easyeda sch pages`(或 `doc ls`)读页结构 → `easyeda doc switch` 切目标页 → `easyeda sch sheet-geometry --json` 读 sheet/title-block。无 sheet 或 provenance 为 none 时停止,不要开始 place。
-- **页面对齐模块计划(用户点名·必做)**:分页不是照单全收用户现有的页——**要主动把现有分页 reconcile 到模块计划**:①页名无意义(`P1`/`P2`/`Schematic1`/`page1`)或与模块不符 → `easyeda sch page-rename --page <uuid> --name <功能名>`(如 `P1_POWER`/`P2_MCU_ESP32`/`P3_IO`),命名风格跟参考板 `P1_POWER_PATH` 一致;②模块比页多 / 复杂模块要独立 → `easyeda sch page-new` 补页;③**多余空页 → `easyeda sch page-delete --page <uuid>` 删掉**(先确认该页无器件,`sch pages` + 逐页 `list` 核实;page-delete 无 undo,属破坏性,删前 inspect)。单页小板:把唯一那页也 `page-rename` 成有意义的名(别留 `Schematic1`),不必强行分多页。目标:**页集合 = 模块计划**,一页一功能域,跨页同名 `net_port` 接续。
+- **页面对齐模块计划(用户点名·必做)**:分页不是照单全收用户现有的页——**要主动把现有分页 reconcile 到模块计划**:①页名无意义(`P1`/`P2`/`Schematic1`/`page1`)或与模块不符 → `easyeda sch page-rename --page <uuid> --name <功能名>`(如 `POWER`/`MCU_ESP32`/`USB_DEBUG`)。⚠**页名只写功能域,禁止把 `P1`/`P2` 序号编进页名**(用户裁定):页签顺序由平台维护、且会变——删页重建时新页排到**末尾**,名字里的序号当场与实际页签顺序脱节(ceshi 实测踩到:页签位置 2 是 `P3_USB_DL`、位置 3 是 `P2_MCU_IO`,读图人先信哪个都不对)。顺序是页签的职责,名字只负责说清"这页是什么";②模块比页多 / 复杂模块要独立 → `easyeda sch page-new` 补页;③**多余空页 → `easyeda sch page-delete --page <uuid>` 删掉**(先确认该页无器件,`sch pages` + 逐页 `list` 核实;page-delete 无 undo,属破坏性,删前 inspect)。单页小板:把唯一那页也 `page-rename` 成有意义的名(别留 `Schematic1`),不必强行分多页。目标:**页集合 = 模块计划**,一页一功能域,跨页同名 `net_port` 接续。
 - **💾 过门条件**:页集合与模块计划一致(该改名的已改、该补的已补、多余空页已删);每个目标页都有可读图纸(A4 默认)和明确职责;每页模块预计能落在可用区内,标题栏 keep-out 明确 → `easyeda sch save`。若用户要求逐步确认,保存/继续前停住。
 
 ### S2 — 模块编组
