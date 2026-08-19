@@ -6,6 +6,23 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-08-19
+
+### Added
+- Native symbol, footprint, and device authoring actions with save/readback verification.
+- Typed PCB manufacturing exports for complete manufacture packages, Gerber, pick-and-place,
+  and IPC-2581C through the official EasyEDA APIs.
+- Schematic typed graphics/wire actions and reconstructed A4/title-block handling used by
+  native redraw playbooks.
+
+### Fixed
+- CLI commands now hold a per-window transaction lease for their full lifetime, preventing a
+  second process from switching the active document between a `--doc` guard and its action.
+- PCB layout lint separates blocking pad-outside findings from body overhang, and evaluates
+  concave/irregular boards against the real outline polygon instead of only its bounding box.
+- Playbook preflight validates run commands and flags before execution, migrates legacy JSON
+  `--ids` arrays with a clear CSV diagnostic, and journals structured command/action failures.
+
 ## [1.0.2] - 2026-08-19
 
 ADR-0004「挪动收敛为单一安全 move 内核」首批随版(源自 issue #181 两份 E2E

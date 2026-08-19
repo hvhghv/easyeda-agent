@@ -88,6 +88,9 @@ func TestAnalyzePcbLayout_ProtrudingConnector(t *testing.T) {
 	if !rep.OK || len(rep.OutsideOutline) != 0 {
 		t.Errorf("protruding connector (pads inside): ok=%v outside=%d, want true/0", rep.OK, len(rep.OutsideOutline))
 	}
+	if len(rep.BodyOutsideOutline) != 1 {
+		t.Errorf("protruding connector body must remain visible as a policy finding, got %d", len(rep.BodyOutsideOutline))
+	}
 
 	// Same body, but now a pad actually falls off the board (x=-5) → real error.
 	padsOff := []pcbLPad{
@@ -97,5 +100,42 @@ func TestAnalyzePcbLayout_ProtrudingConnector(t *testing.T) {
 	rep2 := analyzePcbLayout(protrude, padsOff, outline, 6)
 	if rep2.OK || len(rep2.OutsideOutline) != 1 {
 		t.Errorf("pad off-board: ok=%v outside=%d, want false/1", rep2.OK, len(rep2.OutsideOutline))
+	}
+}
+
+func TestApplyPolygonContainmentCatchesConcaveOutlineAndBodyOverhang(t *testing.T) {
+	// L-shaped outline: its bbox is 0..100 in both axes, but the upper-right
+	// quadrant is outside the actual board polygon.
+	ring := []pcbOutlinePoint{{0, 0}, {100, 0}, {100, 40}, {40, 40}, {40, 100}, {0, 100}}
+	comps := []pcbLComp{
+		{Designator: "U1", BBox: bb(20, 20, 60, 60)},
+		{Designator: "J1", BBox: bb(80, 10, 110, 30)},
+	}
+	pads := []pcbLPad{
+		// U1 pad is in the valid lower-left area, but its body crosses the notch.
+		{Designator: "U1", Number: "1", X: 30, Y: 30},
+		// J1 has an actually off-board pad.
+		{Designator: "J1", Number: "1", X: 105, Y: 20},
+	}
+	rep := analyzePcbLayout(comps, pads, bb(0, 0, 100, 100), 6)
+	applyPolygonContainment(&rep, comps, pads, ring)
+	if len(rep.BodyOutsideOutline) != 2 {
+		t.Fatalf("body polygon findings=%d, want U1 and J1", len(rep.BodyOutsideOutline))
+	}
+	if len(rep.OutsideOutline) != 1 || rep.OutsideOutline[0].A != "J1" {
+		t.Fatalf("hard off-board findings=%+v, want J1 only", rep.OutsideOutline)
+	}
+	if rep.OK {
+		t.Fatal("an off-board pad must keep the report blocking")
+	}
+}
+
+func TestEvalLayoutGateCanRequireBodiesInside(t *testing.T) {
+	rep := pcbLayoutReport{Score: 100, BodyOutsideOutline: []pcbLFinding{{A: "U1"}}}
+	if got := evalLayoutGate(rep, pcbLayoutGateOpts{minScore: 60, maxCrossings: 8}); !got.Pass {
+		t.Fatalf("approved edge overhang should be non-blocking by default: %+v", got)
+	}
+	if got := evalLayoutGate(rep, pcbLayoutGateOpts{minScore: 60, maxCrossings: 8, failBodyOutside: true}); got.Pass {
+		t.Fatal("--fail-body-outside must make body overhang fail the gate")
 	}
 }

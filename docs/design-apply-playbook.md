@@ -23,6 +23,8 @@ easyeda audit export --playbook > replay.json   # ★ 从真实会话的审计�
 ```jsonc
 {
   "version": 1,                       // 必填,格式版本
+  "cliSchemaVersion": 1,              // 新文件必填;旧文件可省略(按 legacy v1 处理)
+  "minConnectorVersion": "1.0.9",    // 记录生成时要求;环境自检时核对 health
   "meta": {
     "name": "esp32-mini-pcb",         // 必填,journal/报告里的标识
     "description": "P0-P10 全流程",    // 可选
@@ -90,6 +92,18 @@ easyeda audit export --playbook > replay.json   # ★ 从真实会话的审计�
 {"idx":3,"id":"place-u1","status":"ok","ms":1240,"captured":{"U1":"be7f…"},"digest":"…"}
 ```
 
+失败行除人读 `error` 外还写 `errorDetail`:
+
+```json
+{"idx":7,"id":"route","status":"fail","error":"run \"pcb track\" exited 1",
+ "errorDetail":{"kind":"run","command":"pcb track","exitCode":1,
+ "stdout":"…","stderr":"…","actionErrorCode":"EDA_CALL_FAILED",
+ "documentUuid":"…","windowId":"…"}}
+```
+
+排错使用结构化字段,不要截取 stdout 最后一行。action 步对应保留
+`kind/action/actionErrorCode/documentUuid/windowId`。
+
 - `--resume`:跳过 journal 中 `ok` 的步骤,**captured 变量从 journal 恢复**(否则后步引用断链);
 - playbook 内容变更(sha 不匹配)→ 拒绝 resume,提示 `--from` 手动定位;
 - 退出码:0 全过;1 有步骤失败;2 格式/预检错误。执行中每步打印
@@ -130,7 +144,14 @@ easyeda apply sch.playbook.json                       # 按 meta.project=ceshi �
 easyeda apply sch.playbook.json --project demo2       # 同一份打到另一工程
 easyeda apply sch.playbook.json --var LIB=其他库uuid   # 参数化复写
 easyeda apply pcb.playbook.json --resume              # 断点续跑
+easyeda apply pcb.playbook.json --force "理由"         # 整册放行软工作流缺口,逐请求审计
+easyeda apply pcb.playbook.json --force-unsafe "理由"  # 整册显式放行全部工作流门,逐请求审计
 ```
+
+`--force` / `--force-unsafe` 与 `pcb route-short` 的分级语义一致,只影响本次
+`apply` 进程。它们通过 daemon 请求信封传递,每个受门控的 mutation 都会写入
+workflow 审计历史;两者互斥。不要把字段塞进 action `payload`——门禁读取的是
+请求信封,不是连接器 action 参数。
 
 ### 错误处理(定稿——步骤间息息相关,默认从严)
 
@@ -163,6 +184,8 @@ easyeda apply pcb.playbook.json --resume              # 断点续跑
    语言"的本质区别。
 2. **双层寻址**:`action:`(typed action,daemon 校验 payload)+ `run:`(Cobra 子命令
    层)。缺一不可——复合工具都在 CLI 层。
+   preflight 会在第一步执行前复用真实 Cobra schema 校验 command/args/flags/required/
+   mutually-exclusive groups。旧 `--ids` JSON array 会直接给 CSV migration,不再跑到半程才失败。
 3. **变量捕获是复现的命门**:primitiveId/坐标每次会话都变(load-bearing gotcha:
    pull fresh pids before mutating),`capture` + `${}` 替换让同一份文件跨会话可复现。
 4. **journal 即状态**(`<file>.journal.jsonl`,每步一行 id/status/耗时/结果摘要):

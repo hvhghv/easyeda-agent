@@ -1,5 +1,7 @@
 {
  "version": 1,
+ "cliSchemaVersion": 1,
+ "minConnectorVersion": "1.0.9",
  "meta": {
   "name": "esp32-mini-schematic",
   "description": "esp32MiniRequire 原理图从零全流程(19 器件 + 13 网络);先切到目标空白页(meta.doc),换页名用 --window/编辑本文件",

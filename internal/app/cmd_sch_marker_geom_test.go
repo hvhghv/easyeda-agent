@@ -98,6 +98,43 @@ func TestTitleblockOverlap_NoKeepoutIsNoop(t *testing.T) {
 	}
 }
 
+func TestTitleBlockFindingUsesReconstructedSheetMetadata(t *testing.T) {
+	comps := []layoutComp{{
+		ComponentType: "sheet",
+		Name:          "RGB Outputs",
+		OtherProperty: map[string]any{
+			"Drawed": "Codex automation", "Description": "Four RGB wings",
+		},
+	}}
+	data := map[string]any{}
+	for key, want := range map[string]string{
+		"Name": "RGB Outputs", "Drawed": "Codex automation", "Description": "Four RGB wings",
+	} {
+		if got := titleBlockValue(data, comps, nil, key); got != want {
+			t.Fatalf("%s=%q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestTitleBlockTextFallbackRequiresTitleBlockGeometry(t *testing.T) {
+	result := map[string]any{"texts": []any{
+		map[string]any{"content": "Name: Power and USB", "x": 500.0, "y": 180.0},
+		map[string]any{"content": "Drawed: Codex automation", "x": 500.0, "y": 150.0},
+		map[string]any{"content": "Description: safe", "x": 100.0, "y": 500.0},
+	}}
+	box := &layoutBBox{MinX: 468, MinY: 0, MaxX: 1170, MaxY: 198}
+	got := titleBlockTextValues(result, box)
+	if got["Name"] != "Power and USB" || got["Drawed"] != "Codex automation" {
+		t.Fatalf("in-titleblock values not recognized: %v", got)
+	}
+	if got["Description"] != "" {
+		t.Fatalf("out-of-titleblock text must not satisfy the gate: %v", got)
+	}
+	if count := schTextCountOutside(result, box); count != 1 {
+		t.Fatalf("titleblock text must not count as circuit notes: %d", count)
+	}
+}
+
 // Issue #172: a hit against an ESTIMATED keep-out (source=fallback-ratio — non-A4
 // sheet or unmatched aspect) downgrades to info and says the geometry is a guess;
 // only the confirmed A4-calibrated source keeps warn.

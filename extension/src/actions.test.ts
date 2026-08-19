@@ -1700,3 +1700,241 @@ test('pcb lock: already-in-state components are idempotent success, not rewrites
 		delete (globalThis as any).eda;
 	}
 });
+
+function installLibraryEnumGlobals(): void {
+	(globalThis as any).EDMT_EditorDocumentType = {
+		HOME: 0, BLANK: 1, SCHEMATIC_PAGE: 2, PCB: 3, SYMBOL_COMPONENT: 4, FOOTPRINT: 5, PANEL: 6,
+	};
+	(globalThis as any).ELIB_LibraryType = { SYMBOL: '2', FOOTPRINT: '4', DEVICE: '3' };
+	(globalThis as any).ELIB_SymbolType = { COMPONENT: 2 };
+	(globalThis as any).ESCH_PrimitivePinType = {
+		IN: 'IN', OUT: 'OUT', BI: 'BI', PASSIVE: 'Passive', POWER: 'Power', GROUND: 'Ground', HIZ: 'HIZ', UNDEFINED: 'Undefined',
+	};
+	(globalThis as any).ESCH_PrimitivePinShape = { NONE: 'None', INVERTED: 'Inverted', CLOCK: 'Clock', INVERTED_CLOCK: 'Inverted Clock' };
+	(globalThis as any).ESCH_PrimitiveLineType = { SOLID: 0 };
+	(globalThis as any).ESCH_PrimitiveFillStyle = { NONE: 'None' };
+	(globalThis as any).ESCH_PrimitiveTextAlignMode = { CENTER: 5 };
+	(globalThis as any).EPCB_LayerId = { TOP: 1, TOP_SILKSCREEN: 3 };
+	(globalThis as any).EPCB_PrimitivePadShapeType = { ELLIPSE: 'ELLIPSE', OBLONG: 'OVAL', RECTANGLE: 'RECT' };
+	(globalThis as any).EPCB_PrimitivePadHoleType = { ROUND: 'ROUND', SLOT: 'SLOT' };
+	(globalThis as any).EPCB_PrimitivePadType = { NORMAL: 0 };
+}
+
+function removeLibraryEnumGlobals(): void {
+	for (const key of [
+		'EDMT_EditorDocumentType', 'ELIB_LibraryType', 'ELIB_SymbolType',
+		'ESCH_PrimitivePinType', 'ESCH_PrimitivePinShape', 'ESCH_PrimitiveLineType',
+		'ESCH_PrimitiveFillStyle', 'ESCH_PrimitiveTextAlignMode', 'EPCB_LayerId',
+		'EPCB_PrimitivePadShapeType', 'EPCB_PrimitivePadHoleType', 'EPCB_PrimitivePadType',
+	]) delete (globalThis as any)[key];
+}
+
+test('library.symbol.create authors native pins, saves, verifies, and restores the originating tab', async () => {
+	installLibraryEnumGlobals();
+	let current = { uuid: 'page-1', tabId: 'page-tab', documentType: 2 };
+	const pins: Array<any> = [];
+	let restored = false;
+	(globalThis as any).eda = {
+		lib_LibrariesList: { getPersonalLibraryUuid: async () => 'personal-lib', getProjectLibraryUuid: async () => 'project-lib' },
+		lib_Symbol: {
+			create: async () => 'sym-1',
+			openInEditor: async () => { current = { uuid: 'sym-1', tabId: 'sym-tab', documentType: 4 }; return 'sym-tab'; },
+			get: async () => ({ uuid: 'sym-1', libraryUuid: '', name: 'test_symbol' }),
+			delete: async () => true,
+		},
+		dmt_SelectControl: { getCurrentDocumentInfo: async () => current },
+		dmt_EditorControl: {
+			closeDocument: async () => true,
+			activateDocument: async () => { restored = true; current = { uuid: 'page-1', tabId: 'page-tab', documentType: 2 }; return true; },
+			openDocument: async () => 'page-tab',
+		},
+		sch_PrimitivePin: {
+			create: async (...args: Array<any>) => { const pin = { args }; pins.push(pin); return pin; },
+			getAll: async () => pins,
+		},
+		sch_PrimitiveRectangle: { create: async () => ({}) },
+		sch_PrimitiveCircle: { create: async () => ({}) },
+		sch_PrimitivePolygon: { create: async () => ({}) },
+		sch_PrimitiveText: { create: async () => ({}) },
+		sch_Document: { save: async () => true },
+	};
+	try {
+		const res: any = await runAction('library.symbol.create', {
+			name: 'TEST_SYMBOL',
+			pins: [{ number: '1', name: 'IN', x: -40, y: 0, rotation: 0, type: 'input' }],
+			rectangles: [{ x: -20, y: 20, width: 40, height: 40 }],
+		});
+		assert.equal(res.result.symbolUuid, 'sym-1');
+		assert.equal(res.result.libraryUuid, 'personal-lib');
+		assert.equal(res.result.counts.pins, 1);
+		assert.equal(res.result.saved, true);
+		assert.equal(res.result.verified, true);
+		assert.equal(restored, true);
+	}
+	finally {
+		delete (globalThis as any).eda;
+		removeLibraryEnumGlobals();
+	}
+});
+
+test('library.info reports every active library class without mutation', async () => {
+	installLibraryEnumGlobals();
+	(globalThis as any).eda = {
+		lib_LibrariesList: {
+			getSystemLibraryUuid: async () => 'system-lib',
+			getPersonalLibraryUuid: async () => 'personal-lib',
+			getProjectLibraryUuid: async () => 'project-lib',
+			getFavoriteLibraryUuid: async () => 'favorite-lib',
+			getAllLibrariesList: async () => [{ uuid: 'external-lib', name: 'External' }],
+		},
+	};
+	try {
+		const res: any = await runAction('library.info', {});
+		assert.equal(res.result.systemLibraryUuid, 'system-lib');
+		assert.equal(res.result.personalLibraryUuid, 'personal-lib');
+		assert.equal(res.result.projectLibraryUuid, 'project-lib');
+		assert.equal(res.result.favoriteLibraryUuid, 'favorite-lib');
+		assert.equal(res.result.libraries[0].uuid, 'external-lib');
+	}
+	finally {
+		delete (globalThis as any).eda;
+		removeLibraryEnumGlobals();
+	}
+});
+
+test('PCB manufacturing exports use official typed APIs and return artifacts', async () => {
+	const calls: Array<{ method: string; args: Array<unknown> }> = [];
+	const makeFile = (name: string) => new File([`payload:${name}`], name);
+	(globalThis as any).eda = {
+		pcb_ManufactureData: {
+			getManufactureData: async (...args: Array<unknown>) => {
+				calls.push({ method: 'manufacture', args }); return makeFile('manufacture.zip');
+			},
+			getGerberFile: async (...args: Array<unknown>) => {
+				calls.push({ method: 'gerber', args }); return makeFile(String(args[0]));
+			},
+			getPickAndPlaceFile: async (...args: Array<unknown>) => {
+				calls.push({ method: 'pick-place', args }); return makeFile(String(args[0]));
+			},
+			getIpc2581CFile: async (...args: Array<unknown>) => {
+				calls.push({ method: 'ipc2581', args }); return makeFile(String(args[0]));
+			},
+		},
+	};
+	try {
+		const cases = [
+			['pcb.export.manufacture', {}, 'pcb_manufacture'],
+			['pcb.export.gerber', { fileName: 'fab.zip', colorSilkscreen: true }, 'pcb_gerber'],
+			['pcb.export.pick_place', { fileName: 'pnp.xlsx', fileType: 'xlsx' }, 'pcb_pick_place'],
+			['pcb.export.ipc2581', { fileName: 'board.2581', fileType: '2581', oemNumber: 'Device' }, 'pcb_ipc2581'],
+		] as const;
+		for (const [action, payload, kind] of cases) {
+			const res: any = await runAction(action, payload);
+			assert.equal(res.artifacts.length, 1);
+			assert.equal(res.artifacts[0].kind, kind);
+			assert.ok(res.artifacts[0].inlineBase64.length > 0);
+			assert.ok(res.result.size > 0);
+		}
+		assert.deepEqual(calls.map(c => c.method), ['manufacture', 'gerber', 'pick-place', 'ipc2581']);
+		assert.deepEqual(calls[1].args, ['fab.zip', true]);
+		assert.deepEqual(calls[2].args, ['pnp.xlsx', 'xlsx']);
+		assert.equal(calls[3].args[0], 'board.2581');
+		assert.equal(calls[3].args[1], '2581');
+		assert.equal(calls[3].args[3], 'Device');
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('PCB manufacturing export validation rejects unsupported formats locally', async () => {
+	(globalThis as any).eda = { pcb_ManufactureData: {} };
+	try {
+		await assert.rejects(
+			runAction('pcb.export.pick_place', { fileType: 'txt' }),
+			/fileType must be "csv" or "xlsx"/,
+		);
+		await assert.rejects(
+			runAction('pcb.export.ipc2581', { fileType: 'zip' }),
+			/fileType must be "xml", "cvg", or "2581"/,
+		);
+	}
+	finally {
+		delete (globalThis as any).eda;
+	}
+});
+
+test('library.footprint.create authors native pads and verifies pad count', async () => {
+	installLibraryEnumGlobals();
+	let current = { uuid: 'page-1', tabId: 'page-tab', documentType: 2 };
+	const pads: Array<any> = [];
+	const lines: Array<any> = [];
+	(globalThis as any).eda = {
+		lib_LibrariesList: { getPersonalLibraryUuid: async () => 'personal-lib', getProjectLibraryUuid: async () => 'project-lib' },
+		lib_Footprint: {
+			create: async () => 'fp-1',
+			openInEditor: async () => { current = { uuid: 'fp-1', tabId: 'fp-tab', documentType: 5 }; return 'fp-tab'; },
+			get: async () => ({ uuid: 'fp-1', libraryUuid: '', name: 'test_fp' }),
+			delete: async () => true,
+		},
+		dmt_SelectControl: { getCurrentDocumentInfo: async () => current },
+		dmt_EditorControl: {
+			closeDocument: async () => true,
+			activateDocument: async () => { current = { uuid: 'page-1', tabId: 'page-tab', documentType: 2 }; return true; },
+			openDocument: async () => 'page-tab',
+		},
+		pcb_PrimitivePad: {
+			create: async (...args: Array<any>) => { const pad = { args }; pads.push(pad); return pad; },
+			getAll: async () => pads,
+		},
+		pcb_PrimitiveLine: { create: async (...args: Array<any>) => { const line = { args }; lines.push(line); return line; } },
+		pcb_Document: { save: async () => true },
+	};
+	try {
+		const res: any = await runAction('library.footprint.create', {
+			name: 'TEST_FP',
+			pads: [{ number: '1', x: 0, y: 0, shape: 'rect', width: 40, height: 20 }],
+			lines: [{ startX: -30, startY: -20, endX: 30, endY: -20 }],
+		});
+		assert.equal(res.result.footprintUuid, 'fp-1');
+		assert.equal(res.result.counts.pads, 1);
+		assert.equal(res.result.counts.lines, 1);
+		assert.equal(res.result.verified, true);
+		assert.equal(lines.length, 1);
+	}
+	finally {
+		delete (globalThis as any).eda;
+		removeLibraryEnumGlobals();
+	}
+});
+
+test('library.device.create verifies the native symbol and footprint association', async () => {
+	installLibraryEnumGlobals();
+	(globalThis as any).eda = {
+		lib_LibrariesList: { getPersonalLibraryUuid: async () => 'personal-lib', getProjectLibraryUuid: async () => 'project-lib' },
+		lib_Device: {
+			create: async () => 'dev-1',
+			get: async () => ({
+				uuid: 'dev-1', libraryUuid: null, name: 'test_device',
+				association: {
+					symbol: { uuid: 'sym-1', libraryUuid: null },
+					footprint: { uuid: 'fp-1', libraryUuid: null },
+				},
+			}),
+			delete: async () => true,
+		},
+	};
+	try {
+		const res: any = await runAction('library.device.create', {
+			name: 'TEST_DEVICE', designator: 'U?',
+			symbol: { uuid: 'sym-1', libraryUuid: 'personal-lib' },
+			footprint: { uuid: 'fp-1', libraryUuid: 'personal-lib' },
+		});
+		assert.equal(res.result.deviceUuid, 'dev-1');
+		assert.equal(res.result.verified, true);
+	}
+	finally {
+		delete (globalThis as any).eda;
+		removeLibraryEnumGlobals();
+	}
+});

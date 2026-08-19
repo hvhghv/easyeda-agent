@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -41,7 +42,9 @@ type layoutPin struct {
 type layoutComp struct {
 	ID            string
 	Designator    string
+	Name          string
 	ComponentType string // "part" | "sheet" | "netflag" | "netport" | … (from the connector)
+	OtherProperty map[string]any
 	// Net is the marker's net name (netflag/netport/netlabel carry it). Used by the
 	// duplicate-net-marker rule to avoid merging two same-anchor markers of DIFFERENT
 	// nets. See issue #146.
@@ -706,8 +709,26 @@ func parseLayoutComps(result map[string]any) ([]layoutComp, error) {
 		c := layoutComp{
 			ID:            asString(m["primitiveId"]),
 			Designator:    asString(m["designator"]),
+			Name:          asString(m["name"]),
 			ComponentType: asString(m["componentType"]),
 			Net:           asString(m["net"]),
+		}
+		if props, ok := m["otherProperty"].(map[string]any); ok {
+			c.OtherProperty = props
+		}
+		// Reconstructed A4 sheets can be returned by EasyEDA as a plain `part`
+		// even though the record is the drawing frame/title block. Recognize the
+		// stable device identity and restore its semantic type so it is not counted
+		// as an electrical component or included in placement overlap checks.
+		syntheticSheet := false
+		if c.ComponentType == schLayoutPartType {
+			component, _ := m["component"].(map[string]any)
+			device, _ := m["device"].(map[string]any)
+			syntheticSheet = strings.EqualFold(asString(component["uuid"]), "Drawing-Symbol_A4") ||
+				strings.EqualFold(asString(device["uuid"]), "Drawing-Symbol_A4")
+			if syntheticSheet {
+				c.ComponentType = "sheet"
+			}
 		}
 		x, xOK := finiteFloat(m["x"])
 		y, yOK := finiteFloat(m["y"])
@@ -738,6 +759,21 @@ func parseLayoutComps(result map[string]any) ([]layoutComp, error) {
 				} else {
 					c.BBox = &layoutBBox{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}
 				}
+			}
+		}
+		// The same reconstructed-sheet form can expose the symbol anchor bbox
+		// (-10..10) instead of the page extent. Its native title-block properties
+		// carry the authoritative dimensions; reconstruct the sheet bbox in the
+		// same y-up coordinate space used by all schematic geometry checks.
+		if syntheticSheet && c.OtherProperty != nil {
+			w, wok := finiteSheetDimension(c.OtherProperty["Width"])
+			h, hok := finiteSheetDimension(c.OtherProperty["Height"])
+			if wok && hok && w > 0 && h > 0 {
+				x, y := 0.0, 0.0
+				if c.AnchorAvailable {
+					x, y = c.X, c.Y
+				}
+				c.BBox = &layoutBBox{MinX: x, MinY: y, MaxX: x + w, MaxY: y + h}
 			}
 		}
 
@@ -795,6 +831,18 @@ func parseLayoutComps(result map[string]any) ([]layoutComp, error) {
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func finiteSheetDimension(v any) (float64, bool) {
+	if f, ok := finiteFloat(v); ok {
+		return f, true
+	}
+	s, ok := v.(string)
+	if !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
 }
 
 func asString(v any) string {

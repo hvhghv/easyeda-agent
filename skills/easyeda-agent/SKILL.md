@@ -1,6 +1,6 @@
 ---
 name: easyeda-agent
-description: "Community EasyEDA Agent automation skill for EasyEDA Pro schematic and PCB work through the local easyeda-agent CLI/daemon/connector. Use when designing a board from scratch; inspecting, cleaning up, or safely refactoring an existing wired schematic; arranging multi-page functional modules; drawing page-scoped module frames and text labels; preserving and reconciling pin-to-net topology; placing/wiring real LCSC/JLC library parts; syncing schematic changes into PCB; laying out PCB components; running EasyEDA DRC/check/bridge-check/layout-lint; exporting BOM/netlists/artifacts; querying the embedded circuit-block library (`easyeda blocks ls/show/search`); or applying the bundled EasyEDA design workflows and conventions. 覆盖嘉立创EDA专业版原理图/PCB、混乱原理图整理、多页功能分区、框选文字标注、布线、铺铜、板框与机械门禁。适用于嘉立创EDA(JLC EDA / JLCEDA / LCEDA / EasyEDA Pro)与立创商城(LCSC)元件的电路板设计自动化。"
+description: "Community EasyEDA Agent automation skill for EasyEDA Pro schematic and PCB work through the local easyeda-agent CLI/daemon/connector. Use when designing or natively reconstructing a board; inspecting, cleaning up, or safely refactoring an existing wired schematic; arranging multi-page functional modules; authoring native symbols/footprints/devices; preserving and reconciling pin-to-net topology; placing/wiring real LCSC/JLC library parts; syncing schematic changes into PCB; laying out PCB components; running EasyEDA DRC/check/bridge-check/layout-lint; checking board-outline containment; exporting BOM/netlists/Gerber/pick-and-place/IPC-2581/manufacturing artifacts; querying the embedded circuit-block library (`easyeda blocks ls/show/search`); or applying the bundled EasyEDA design workflows and conventions. 覆盖嘉立创EDA专业版原理图/PCB、KiCad等源设计的原生重绘、混乱原理图整理、多页功能分区、布线、铺铜、真实板框越界检查与制造文件导出。适用于嘉立创EDA(JLC EDA / JLCEDA / LCEDA / EasyEDA Pro)与立创商城(LCSC)元件的电路板设计自动化。"
 ---
 
 # EasyEDA Agent
@@ -32,7 +32,7 @@ EasyEDA tooling.
 3. **mutate 前先 inspect** — 放/移/连/同步/存之前先读 doc/页/器件/引脚/板层/网络/规则,别盲改;破坏性操作(clear/delete/bulk import)先确认。
 4. **无图纸不摆放/布线** — 找不到 sheet 立即停,让用户建/批准 A4(默认 A4)。→ design-flow S1
 5. **PCB mutation(rip-up/route/delete/via/track)后先 `easyeda doc reload` 再读/判/DRC** — 否则 list/DRC 读 stale;同网 Connection Error 暴增多是 pour 连通性 stale(先 `pour-rebuild`),不是真断。daemon 会在 stale 风险读操作时返回 `staleRisk` 警告(CLI 打到 stderr,机械兜底),但别等警告——mutation 后主动 reload。→ pcb.md
-6. **判对错只看 `list/check/drc/layout-lint/layout-score`,不看截图** — 截图会 stale/blank;data 有内容但截图空 = 窗口没渲染(切前台),不是设计错。(`layout-score` 是**诊断视角不是门**——门只有 `layout-lint --gate` 一个;且它的 `skipped` 维是「没测」不是「满分」。)`pcb drc/check` 这类重画布计算**需 PCB 在前台**,超时=切前台**单发一次、绝不循环重试**(重发被 `ACTION_BUSY` 拒)。**录制/演示模式例外**:截图变交付物 → design-flow 录制/演示模式。
+6. **数据门与视觉验收并存,但不能互相替代** — `layout-lint/layout-score` 是**布线前**的布局与可布性指标;板上已有大量走线后,其 ratsnest/crossing 分数不是成品质量分。布线后改用 `pcb drc`+未连接数+`pcb report`+`pcb check`;截图只审外观、朝向和机械观感,不能证明网络正确。截图会 stale/blank;data 有内容但截图空通常是窗口没渲染。`pcb drc/check` 这类重画布计算需 PCB 在前台,超时=切前台单发一次,绝不循环重试。→ design-flow P6/P10
 7. **每过一个阶段门显式 `save`(sch/PCB)** — place/wire/modify 只改内存,autosave 只兜底;整板每 ~10 件 save 一次。→ design-flow S 段 💾
 8. **手工连任何已知外围前先查块库 `easyeda blocks`**(离线,无需 daemon/窗口)— `blocks ls` 看全量,照抄验证过的块只重绑端口。**查不到 → 起草 `block-gap` issue;块用出问题(脚名不符/拓扑错/停产)→ 起草 `block-bug` issue 带证据 —— 都必须经用户确认后才 `gh issue create`,绝不自动上报**。→ ② 块地图速查 · standard-blocks-contributing.md §七
 9. **netflag 必须经真 wire 连、离 pin 非零距** — 重叠坐标 EasyEDA 不认作连接;禁零长 wire;多脚同名 pin 要全连(如多 GND、AMS1117 双 VOUT)。→ schematic.md
@@ -42,6 +42,8 @@ EasyEDA tooling.
 13. **电气 clearance ≠ 手焊可达性** — P2 先持久化装配档案:`pcb stage set-assembly --profile hand-solder`(默认/下限40mil;大焊盘烙铁通道60mil);`layout-lint --gate` 有任何 tight pair 即失败,任何器件四面被围、无一侧 ≥60mil 烙铁通道(no-access)也失败;未过门不得确认布局。→ design-flow P2/P6 · issue #99
 14. **阶段门禁是机械强制的,不靠记忆** — 布线(`route-short`/`autoroute`,以及底层 `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`)未过 `outline_confirmed`+`pre_route_passed` 一律被拒,**daemon 在 /action 派发层也拦**(raw 调用绕不过);确认与**文档指纹**绑定——GUI 拖动 / `exec_js` 等门外改动会被下一个 gate 自动失效回退。**布完必查也是门**:布线后必须过 `post_route_checked`(`workflow advance` 自动跑 pcb check,ERROR/power-not-poured/width-under-spec 必须清零才放行丝印/交付;任何布线类 mutation 自动失效此门重新关上)。任意阶段切入 / 恢复会话:先 `easyeda workflow status --reconcile` 校准,再 `easyeda workflow advance` 按流程继续;**force 分级(#132)**:`--force <理由>` 只放行**软缺口**(如 pre_route_passed 未重跑)——机械骨架全未确认(placement_confirmed 与 outline_confirmed 双缺,或 state 不可知)时会被拒;真要在零确认板上布线用 `--force-unsafe <理由>`。两者都仅本次执行有效且入审计(连被拒的 --force 尝试也记 force-refused)。→ design-flow P6/P7 · issue #97/#132
 15. **原理图必须分页分区 + 每模块电路说明——默认必做,不是可选,「最小/单页」不是省略的借口** — 只要 ≥2 个功能模块:①**先理分页**:`sch pages` 看现状,页名无意义(P1/P2/Schematic1)或与模块不匹配就 `page-rename` 成功能名(如 `P1_POWER`/`P2_MCU`),**用户已有分页不满足计划就改名 / `page-new` 补 / `page-delete` 删多余空页**——分页要对齐模块计划,不是照单全收;模块多/页挤才分多页,小板单页也行。②**每页画分区框**:`sch zones set`(认领模块→件)→ `sch zone-draw`(虚线框+区名;整纸版式用 `--mode partition` 按真实 bbox 切、给图签留缺口)——**单页小板也要画区框**。③**每模块配 1~3 行 `sch note` 电路说明**(作用+关键参数)。⚠**手工 `block-apply`/`sch place` 路径不会自动画框**(只有 `sch autolayout --apply` 自动画),必须显式补 ②③,否则等于没分区。摆放**没画区框+没写说明 = 布局未完成**,别当成品交付。**机械兜底(别靠记忆)**:`sch check` 有 `missing-partition` 检查项——多器件页(parts≥6)若 `sch text.list`==0(既没区名框也没说明)就报 WARN,`sch gate --strict` 会因此 FAIL 挡下未分区的板;看到它就补 ②③ 再交付。→ 铁律扫完看 ② 档位默认「原理图组织」行 · design-flow S1–S3
+16. **同一 EasyEDA 窗口的命令必须串行** — 禁止并行执行两个会访问同一窗口的 `easyeda` 命令,尤其是不同 `--doc` 的跨页/跨 PCB 操作;否则前台文档会在 guard 与 action 之间被切走。新版 daemon 为每个顶层 CLI 命令持有窗口事务租约并在命令结束释放,但 Skill 仍不得主动制造同窗口竞争。只访问本地 KiCad/JSON/图片等、不调用 EDA 窗口的分析才可并行。→ environment-setup.md / actions.md
+17. **板框验收分 pad/body/courtyard,按真实 polygon 判断** — `pcb layout-lint` 的 `off-board` 是 pad 越界硬错,`body-outside` 是本体/包络 overhang 警告;异形板不能只看 outline bbox。普通器件和 RF 模组必须 0 body overhang;边缘连接器只有在 S0 明确方向和最大伸出量时可审阅放行,严检用 `--fail-body-outside`。当前 courtyard 没有独立 typed gate,需结合 footprint 数据和最终 snapshot 审阅,不得把 pad 在板内等同于器件完全在板内。→ pcb.md / design-flow P3/P10
 
 ## ② 流程停点 + 档位默认 + 块地图速查
 
@@ -55,7 +57,7 @@ EasyEDA tooling.
 |---|---|---|
 | ① S0 方案书 | 进 S1 前 | 架构/叠层/地策略/接口取向每条摊选项+坑+推荐让用户拍板;**必须落成磁盘文件**才算过门,不能停在对话里 |
 | ② sch→PCB 前 | 原理图完成 | 逐页 **`easyeda sch gate --strict --doc <page>` 出 `verdict=pass`**(一条命令跑完 layout-lint→check→bridge-check→drc 四关,顺序与阻塞判据固定在代码里,别自己拼)+ pin→net 黄金表对齐(gate 判不了「接对没有」,只判「接得合不合法」);**`verdict=blocked` 是检查器没跑成,不是板子有问题——先修 health/doc 再重跑,别去改电路**;DRC 聚合 WARN 必须审阅并报告；**多页/多模块板还需确认分区框+区名标注已画**(`sch zones status` 看认领、`sch zone-draw` 补画——手工摆放路径不会像 `autolayout --apply` 那样自动画,容易漏)**+每模块电路说明已放**(`sch note` 放、`sch text-list` 核——分区框只命名,说明才让人读懂) → design-flow S5 |
-| ③ 发板/交付前 | 导出制造 | 交付摘要说清偏差(降级决策/遗留 WARN) |
+| ③ 发板/交付前 | 导出制造 | save→reload 后确认 DRC total=0、DFM errors=0,逐条报告 WARN;再用 `pcb export-manufacture/gerber/pick-place/ipc2581 --out …` 导出并记录 hash。不得从脏画布直接出投板包 |
 | P2 摆放前 | 布局起手 | 先问单/双面布局 + 焊接工艺;立即用 `pcb stage set-assembly` 落盘,手焊默认 `min-gap=40mil`/大焊盘通道 `60mil` |
 | P2 边缘接口件 | 端子/USB/SD/排针/按键/IPEX | 朝向 + 边序 = 装配体验,agent 猜不了,**必须用户确认**;先 `blocks show` 读块 placement 摊给用户 |
 | P2 分档落状态 | 每档摆完确认后 | **`pcb stage confirm-tier <1-4> --parts …` 逐档落盘**(#125 机械化):档1孔→档2边缘件→档3主芯片+RF→档4卫星(缺省=其余);跳档被拒、动某档件只作废该档及其后;四档未齐 `confirm-layout` 拒绝封章 |
@@ -77,7 +79,7 @@ EasyEDA tooling.
 | `pour-fit --replace` | **true(会清跨层同网 pour)** | 顶/底 GND pour 要显式 `--replace=false` |
 | 线宽档(net-class) | 按角色:信号=live默认 / 支线(3V3/1V8)10 / 主干(+5V)15 / 大电流(VBUS/VIN)20mil | `pcb net-classes` 查当前表;`route-short` 自动按角色给宽;偏细电源线被 `pcb check` **width-under-spec** 逮(§7.8) |
 | 电源走铺铜 | **2层 `power-pour` / 4层 `power-planes`** | 电源走铜面不走细线(#1 DRC 源);别拿细线穿焊盘阵布电源,裸电源网被 `pcb check` **power-not-poured** 逮 |
-| 布局质量档 | **门=`layout-lint --gate`(唯一);质量表=`pcb layout-score --spec <s0>`(诊断,不落确认)** | 只有一个门,别跑成两个。layout-score 九维各 0-100+逐器件归因;**默认不设 `--min-score`**(只有 blocking=短路/重叠/出板框才非零退出),要当门用才显式给(建议 75=good 档下沿)。带 `--spec` 才解锁 flow-order 与 internal 连接器判定,否则这两维 **skipped(「没测」≠「满分」)** → design-flow P6。原理图侧对应 **`sch layout-score`**(五维:标签折叠/标签反向/外围贴核心/长链挤压/版面整洁)——同样诊断视角,**每条归因带填好真实位号坐标的 fix 命令,照抄执行即可修**;门仍是 `sch layout-lint`+`sch check` |
+| 布局质量档 | **pre-route 门=`layout-lint --gate`;质量表=`pcb layout-score --spec <s0>`** | 只在 P6 布线前使用。`off-board`(pad)永远阻塞;`body-outside` 默认警告,普通件/RF 严检加 `--fail-body-outside`。布线后不再引用 ratsnest 分数作成品结论,改报 DRC/未连接/route report/DFM。带 `--spec` 才解锁 flow-order 与 internal 判定;`skipped` 是没测,不是满分 → design-flow P6/P10 |
 
 ### P7 交自动布线前必做两步(常被遗忘,已实测踩坑)
 
@@ -116,6 +118,7 @@ EasyEDA tooling.
 5. **改层数 / `outline-fit` 在铺铜布线之前** → design-flow P8
 6. **PLANE 先铺 SIGNAL 再翻;PLANE 翻好后禁打异网 via**(官方缺陷 #32 不挖 anti-pad、`pour-rebuild` 不补救;换层先删 via 走外层,`pcb check via-crosses-plane` 会标出)→ design-flow P8
 7. **布完必过 post-route check 门再进丝印/交付**(`workflow advance` 跑 pcb check,ERROR/power-not-poured/width-under-spec 清零才过;WARN 挂着不处理曾致 5V 细线违规漏到人工评审才被抓)→ 铁律 14
+8. **制造导出只能在 fresh gate 后执行**:save→`doc reload`→DRC total=0→DFM errors=0→审阅 WARN→导出→hash;任一 mutation 后整段重跑。→ design-flow P10
 
 ## What To Read(加载触发索引 —— load-more)
 
@@ -173,12 +176,15 @@ and artifact paths. If a gate cannot pass, stop at the failing data, explain the
 repair step, and do not claim the design is complete. 录制/演示模式下,额外列出每张阶段图并
 标注 **native EasyEDA 截图** 或 **data-rendered 图**,显式报告任何 stale/替换帧。
 
-**PCB 交付摘要额外必报布局质量(#167)**——只报一个综合分等于什么都没说:
+**PCB 交付摘要额外必报布局质量(#167)**——仅限 pre-route 阶段引用 layout-score;只报一个综合分等于什么都没说:
 ① **逐维分**(九维各自 0-100 + 加权综合 + verdict);② **每个弱维「是哪几个器件拉低了它」**
 (`pcb layout-score --all` 的归因,`penalty` 就是「先动谁」的排序);③ **`N skipped` 及其原因**
 ——skipped 是「没测」不是「满分」,不写出来就是把 7 维体检报成全面体检;
 ④ `blocking[]`(短路/重叠/出板框)必须是 0,非 0 就停在失败数据别宣称完成。
 `degraded` 维(compact / rf 恒为 degraded)要连同降级理由一起报,别把近似当实测。
+post-route/发板摘要改报 DRC total、未连接数、DFM errors、逐条 WARN、pad/body 越界、
+视觉审阅结果及制造文件路径+SHA-256;`pcb check passed:false` 若仅由 WARN 导致,必须写
+"制造硬错为 0,仍有 N 条工程警告",不能写成全绿,也不能把 WARN 冒充制造错误。
 
 **收尾回流(块库共建)**:若本板含**手工搭建且已跑通 `sch check` + DRC=0 / 网表逐网核实**的标准外围(库里没有的),
 按 `references/standard-blocks-contributing.md` 顺手回流一个块(署名 + `validated` = 本次证据)——验证刚过正是入库时机,

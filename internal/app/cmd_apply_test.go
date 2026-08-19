@@ -2,11 +2,21 @@ package app
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestApplyCommandRegistersWorkflowOverrideFlags(t *testing.T) {
+	cmd := newApplyCmd(&appConfig{}, io.Discard, io.Discard)
+	for _, name := range []string{"force", "force-unsafe"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Fatalf("apply command is missing --%s", name)
+		}
+	}
+}
 
 func mustPlaybook(t *testing.T, src string) (*playbook, []byte) {
 	t.Helper()
@@ -76,6 +86,77 @@ func TestPreflightAcceptsCapturedVarsInLaterSteps(t *testing.T) {
 	// ${U1} in step 2 is defined by step 1's capture — must NOT error
 	if errs := preflight(pb, pb.Vars); len(errs) != 0 {
 		t.Fatalf("capture-defined var flagged: %v", errs)
+	}
+}
+
+func TestPreflightValidatesRunCommandsAndFlags(t *testing.T) {
+	pb, _ := mustPlaybook(t, `{
+	  "version": 1, "cliSchemaVersion": 1, "meta": { "name": "schema-drift" },
+	  "steps": [
+	    { "id": "missing-command", "run": "pcb definitely-not-a-command" },
+	    { "id": "missing-flag", "run": "pcb drc", "flags": { "definitely-not-a-flag": true } },
+	    { "id": "legacy-ids", "run": "pcb delete", "flags": { "ids": ["a", "b"] } },
+	    { "id": "bad-verify", "notify": "x", "verify": { "run": "pcb not-real" } }
+	  ]}`)
+	joined := strings.Join(preflight(pb, pb.Vars), "\n")
+	for _, want := range []string{
+		"unknown run command", "has no --definitely-not-a-flag flag",
+		"--ids no longer accepts a JSON array", "bad-verify verify",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("preflight missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestPreflightAcceptsCurrentCSVIdsForm(t *testing.T) {
+	pb, _ := mustPlaybook(t, `{
+	  "version": 1, "cliSchemaVersion": 1, "meta": { "name": "current" },
+	  "steps": [
+	    { "id": "delete", "run": "pcb delete", "flags": { "ids": "a,b" } }
+	  ]}`)
+	if errs := preflight(pb, pb.Vars); len(errs) != 0 {
+		t.Fatalf("current CSV --ids form was rejected: %v", errs)
+	}
+}
+
+func TestPreflightAcceptsCapturedNumericFlag(t *testing.T) {
+	pb, _ := mustPlaybook(t, `{
+	  "version": 1, "cliSchemaVersion": 1, "meta": { "name": "captured-number" },
+	  "steps": [
+	    { "id": "capture", "action": "document.current", "capture": { "X": "$.x" } },
+	    { "id": "zoom", "run": "view zoom", "flags": { "x": "${X}" } }
+	  ]}`)
+	if errs := preflight(pb, pb.Vars); len(errs) != 0 {
+		t.Fatalf("captured numeric flag rejected during static preflight: %v", errs)
+	}
+}
+
+func TestRunSubcommandFailureKeepsStructuredOutput(t *testing.T) {
+	r := &applyRunner{cfg: &appConfig{}, stdout: io.Discard, stderr: io.Discard, quiet: true}
+	_, err := r.runSubcommand("version", map[string]any{"not-a-real-flag": true}, nil)
+	if err == nil {
+		t.Fatal("invalid nested command unexpectedly succeeded")
+	}
+	detail := executionErrorDetail(err)
+	if detail == nil || detail.ExitCode == nil || *detail.ExitCode != 1 {
+		t.Fatalf("missing structured exit code: %#v (%v)", detail, err)
+	}
+	if detail.Command != "version" || !strings.Contains(detail.Stderr, "not-a-real-flag") {
+		t.Fatalf("structured command output missing: %#v", detail)
+	}
+}
+
+func TestPopulateRunFailureContext(t *testing.T) {
+	detail := journalErrorDetail{Stdout: `{
+	  "ok": false,
+	  "windowId": "window-1",
+	  "context": {"documentUuid": "doc-1"},
+	  "error": {"code": "EDA_CALL_FAILED", "message": "failed"}
+	}`}
+	populateRunFailureContext(&detail)
+	if detail.WindowID != "window-1" || detail.DocumentUUID != "doc-1" || detail.ActionErrorCode != "EDA_CALL_FAILED" {
+		t.Fatalf("failure context not extracted: %#v", detail)
 	}
 }
 

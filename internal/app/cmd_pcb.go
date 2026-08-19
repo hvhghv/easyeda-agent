@@ -2036,6 +2036,64 @@ external router (Freerouting) would route under the antenna. The result reports
 		c.Flags().BoolVar(&noKeepout, "raw", false, "raw EasyEDA export — do NOT inject keep-out regions")
 		pcb.AddCommand(c)
 	}
+	addFileExport := func(use, short, action, defaultName string, addPayload func(*cobra.Command, map[string]any)) *cobra.Command {
+		var fileName, out string
+		c := &cobra.Command{
+			Use:   use,
+			Short: short,
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				payload := map[string]any{}
+				if fileName != "" {
+					payload["fileName"] = fileName
+				}
+				if addPayload != nil {
+					addPayload(cmd, payload)
+				}
+				if out == "" {
+					return dispatch(cfg, action, window, payload, stdout, stderr)
+				}
+				res, err := requestActionTimed(cfg, action, window, payload, 2*time.Minute)
+				if err != nil {
+					return err
+				}
+				return saveFirstArtifact(res, out, stderr)
+			},
+		}
+		c.Flags().StringVar(&fileName, "name", "", "exported file name inside the artifact (default "+defaultName+")")
+		c.Flags().StringVar(&out, "out", "", "also copy the exported artifact to this path")
+		pcb.AddCommand(c)
+		return c
+	}
+	addFileExport("export-manufacture", "Export the complete PCB manufacturing package", "pcb.export.manufacture", "manufacture.zip", nil)
+	{
+		var colorSilkscreen bool
+		c := addFileExport("export-gerber", "Export Gerber fabrication data", "pcb.export.gerber", "gerber.zip",
+			func(cmd *cobra.Command, payload map[string]any) {
+				if cmd.Flags().Changed("color-silkscreen") {
+					payload["colorSilkscreen"] = colorSilkscreen
+				}
+			})
+		c.Flags().BoolVar(&colorSilkscreen, "color-silkscreen", false, "include color silkscreen data when supported")
+	}
+	{
+		var fileType string
+		c := addFileExport("export-pick-place", "Export pick-and-place coordinates", "pcb.export.pick_place", "pick-and-place.csv",
+			func(_ *cobra.Command, payload map[string]any) { payload["fileType"] = fileType })
+		c.Flags().StringVar(&fileType, "type", "csv", "csv | xlsx")
+	}
+	{
+		var fileType, oemNumber string
+		c := addFileExport("export-ipc2581", "Export IPC-2581C manufacturing data", "pcb.export.ipc2581", "design.2581",
+			func(_ *cobra.Command, payload map[string]any) {
+				payload["fileType"] = fileType
+				if oemNumber != "" {
+					payload["oemNumber"] = oemNumber
+				}
+			})
+		c.Flags().StringVar(&fileType, "type", "2581", "xml | cvg | 2581")
+		c.Flags().StringVar(&oemNumber, "oem-number", "", "Device | Manufacturer Part | Supplier Part | Comment")
+	}
 	{
 		var format string
 		c := &cobra.Command{
@@ -3200,7 +3258,7 @@ Inspect / remove with 'pcb fill list --layer 12' / 'pcb fill delete'; save after
 	// non-zero on overlap/off-board so it can gate the flow. Core in pcb_layoutlint.go.
 	{
 		var minGap float64
-		var asJSON, gate bool
+		var asJSON, gate, failBodyOutside bool
 		var minScore, maxCrossings int
 		c := &cobra.Command{
 			Use:   "layout-lint",
@@ -3211,15 +3269,20 @@ BEFORE routing (or after auto-place) to catch a bad layout early.
 Pulls every footprint's rendered bbox + pads (pcb.components.list) and computes:
 
   • overlap          — two footprint bboxes intersect                → ERROR (score 0)
-  • off-board        — a footprint extends outside the board outline → ERROR
+  • pad off-board    — pad extent/probe outside the real outline polygon → ERROR
+  • body-outside     — body/courtyard bbox extends outside polygon       → WARN
+                       (--fail-body-outside promotes it to gate failure;
+                        use an explicit S0 overhang policy for edge connectors)
   • tight spacing    — bbox gap below project assembly profile/min-gap → WARN
   • ratsnest         — per signal-net minimum spanning tree (power/GND
                        excluded — they're poured, not routed)
   • crossings        — cross-net ratline segments that geometrically
                        cross → the single-layer routability killer   → WARN
 
-Yields a 0-100 routability score + verdict (easy/moderate/hard/very-hard). Fewer
-crossings + shorter ratsnest = more routable. Without --gate, --min-gap defaults
+Yields a PRE-ROUTE 0-100 routability score + verdict (easy/moderate/hard/very-hard).
+Do not use ratsnest/crossing score as a finished-board quality metric after routing;
+use DRC, unrouted count, pcb report, and pcb check. Fewer crossings + shorter ratsnest
+= more routable. Without --gate, --min-gap defaults
 to the board electrical clearance. With --gate, the persisted assembly profile
 is mandatory; hand-solder floors the gap at 40mil and ANY tight pair fails the
 gate (issue #99). Exits non-zero on overlap/off-board or a failed gate.`,
@@ -3230,6 +3293,7 @@ gate (issue #99). Exits non-zero on overlap/off-board or a failed gate.`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				return runPcbLayoutLint(cfg, window, minGap, asJSON, pcbLayoutGateOpts{
 					gate: gate, project: cfg.project, minScore: minScore, maxCrossings: maxCrossings,
+					failBodyOutside: failBodyOutside,
 				}, stdout, stderr)
 			},
 		}
@@ -3238,6 +3302,7 @@ gate (issue #99). Exits non-zero on overlap/off-board or a failed gate.`,
 		c.Flags().BoolVar(&gate, "gate", false, "apply assembly+routability gate; requires `pcb stage set-assembly`; on pass confirms pre_route_passed (#97/#99)")
 		c.Flags().IntVar(&minScore, "min-score", 60, "minimum routability score for --gate to pass")
 		c.Flags().IntVar(&maxCrossings, "max-crossings", 8, "maximum cross-net ratline crossings for --gate to pass (-1 = unlimited)")
+		c.Flags().BoolVar(&failBodyOutside, "fail-body-outside", false, "treat body/courtyard overhang as a gate failure (pads outside are always errors)")
 		pcb.AddCommand(c)
 	}
 

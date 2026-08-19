@@ -514,7 +514,7 @@ var docGuardExempt = map[string]bool{
 	"document.current": true, "document.open": true, "schematic.page.open": true,
 	"schematic.pages.list": true, "pcb.documents.list": true,
 	// Daemon-local; touches no document, so pinning a page for it is meaningless.
-	"system.health": true,
+	"system.health": true, "system.transaction.release": true,
 }
 
 // docGuardApplies reports whether the --doc guard must run before dispatching
@@ -694,7 +694,7 @@ func stripArtifactNesting(p string) string {
 		if segs[i] == ".easyeda" && segs[i+1] == "artifacts" {
 			trimmed := strings.Join(segs[:i], sep)
 			if trimmed == "" {
-				if filepath.IsAbs(clean) {
+				if filepath.IsAbs(clean) || strings.HasPrefix(clean, sep) {
 					return sep
 				}
 				return "."
@@ -744,6 +744,9 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 	// Identify this client process for audit attribution and the daemon's
 	// concurrent-writer advisory (issue #108).
 	body["clientId"] = cliClientID()
+	if transactionID := currentCLITransactionID(); transactionID != "" {
+		body["transactionId"] = transactionID
+	}
 	// Send the round-trip budget: the daemon shortens its connector wait to
 	// (budget - grace) so it answers with a structured DISPATCH_FAILED *before*
 	// this HTTP client times out — instead of both sides hanging to their own
@@ -797,6 +800,7 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 	if closeErr != nil {
 		return nil, fmt.Errorf("close response: %w", closeErr)
 	}
+	trackCLITransactionTarget(cfg.host, scan.Found.Port, respBody)
 	// Surface a daemon stale-read advisory here — the one choke point all
 	// dispatch paths (dispatch/dispatchCapture/requestAction) share — so every
 	// command warns without per-command wiring. stderr keeps stdout clean.

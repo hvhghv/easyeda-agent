@@ -46,8 +46,13 @@ type Request struct {
 	// the audit log cannot say WHO replayed a stale plan. The CLI fills it once
 	// per process as "<hostname>:<pid>[:<EASYEDA_CLIENT_LABEL>]". Optional —
 	// raw HTTP callers that omit it simply stay unattributed.
-	ClientID string         `json:"clientId,omitempty"`
-	Payload  map[string]any `json:"payload,omitempty"`
+	ClientID string `json:"clientId,omitempty"`
+	// TransactionID groups every connector action issued by one CLI command.
+	// The daemon holds a per-window lease for this id until the command sends
+	// system.transaction.release, preventing another command from switching the
+	// foreground document between a --doc guard and its protected read/write.
+	TransactionID string         `json:"transactionId,omitempty"`
+	Payload       map[string]any `json:"payload,omitempty"`
 }
 
 type Response struct {

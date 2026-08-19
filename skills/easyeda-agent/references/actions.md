@@ -26,6 +26,11 @@ easyeda apply steps.json --yes              # 放行确认门控(delete/clear/ri
 - **错误纪律**:失败即终止;只读步骤自动重试 2 次;**变更类步骤超时不自动重试**
   (mutation 可能已生效——先读回校验再 `--resume`);变更步骤可带 `verify:` 读回块自证。
 - journal 头带 playbook sha,文件改动会拒绝 `--resume`(改用 `--from`)。
+- 新 playbook 写 `"cliSchemaVersion":1` 和 `"minConnectorVersion":"1.0.9"`。
+  `--dry-run` 会在执行前用真实 Cobra 命令树校验 `run` 命令、位置参数、必需 flag、
+  flag 类型和互斥组;旧 `"ids":["a","b"]` 会直接给出改成 `"ids":"a,b"` 的迁移提示。
+- 失败 journal 同时保留人读 `error` 和结构化 `errorDetail`:`kind/exitCode/stdout/stderr/
+  action/actionErrorCode/documentUuid/windowId`。排错读取这些字段,不要从最后一个 `}` 猜原因。
 - **dry-run 纯计算铁律(ADR-0004)**:所有 `--dry-run` **机械保证零 mutation** ——
   dry-run 模式下派发层直接拒绝任何 Mutates 动作,预览绝不落件;可以放心把
   dry-run 当纯只读预演用。
@@ -40,6 +45,9 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 ## Navigation
 
 - `system.health` — daemon + connector 可用性，已连接窗口列表
+- 每个顶层 CLI 调用自动携带 `transactionId`;daemon 对目标 window 持有命令级租约,
+  直到内部 `system.transaction.release`。因此一次 `--doc` guard 后的多 action 不会被
+  另一进程插入切页。不同窗口可独立运行;同一窗口仍按 Skill 规则串行,不要主动压测竞争。
 - `project.current` — 当前工程 uuid / name / teamUuid
 - `document.current` — 当前激活文档 uuid / tabId / documentType
 - `document.open` — 按 UUID 打开任意文档（原理图或 PCB）
@@ -100,6 +108,12 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 ## Library
 
 - `schematic.library.search` — 自由文本搜索立创/EasyEDA 器件库，返回 libraryUuid + uuid。当 `query` 为纯 LCSC C 号（`^C\d+$`）时自动切换为精确模式，仅保留 `lcsc`/`supplierId` 严格相等的条目；无精确命中则报错。传 `allowFuzzy`（CLI `--allow-fuzzy`）可保留原模糊排序结果
+- `library.symbol.create` / `library.footprint.create` / `library.device.create` — 在个人库或
+  工程库中原生创建符号、封装并绑定为器件;每步保存后回读 pin/pad 数和绑定关系。
+  用于“不导入 PCB、在嘉立创原生重绘”的自定义库路径。坐标转换后必须按
+  pin/pad number→net 黄金表审计非对称引脚,不能只看 anchor/rotation。
+- `library.symbol.get` / `library.footprint.get` / `library.device.get` — 回读原生库对象,
+  是 create 后的验证面;方向审计至少抽查 1 脚、末脚和一个非中心 pad。
 
 ## Verify & Export
 
@@ -109,6 +123,16 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 - `schematic.read` — 一次读取 components、pin→net、nets、floating pins 与 check；新设计对照 spec，既有原理图重构前后对照黄金 pin→net/NC 集合。components 每条含 **`primitiveId`（改动句柄：select/modify/delete/replace/rebind 都吃它，16 位 hex）**；⚠️ `uniqueId`（`gge…`）是 sch↔PCB 关联键**不是** primitiveId，喂给按 id 的 mutation 必 notFound（真机事故：read 曾漏输出 primitiveId，agent 抓了 uniqueId 全部落空）。CLI: `easyeda sch read [--page <page>]`。
 - `schematic.export.netlist` — 导出网表为 artifact。底层必须走官方推荐的 `eda.sch_ManufactureData.getNetlistFile(fileName, netlistType)` 并读取返回的 `File`;不要使用已废弃的 `eda.sch_Netlist.getNetlist()`。官方文档标注 `getNetlist()` obsolete 且建议替代为 `getNetlistFile()`,并且 upstream issue [easyeda/pro-api-sdk#30](https://github.com/easyeda/pro-api-sdk/issues/30) 已复现它在含悬空引脚的原理图上可能无限卡死。CLI: `easyeda sch netlist`
 - `schematic.export.bom` — 导出 BOM（csv 或 xlsx）为 artifact。CLI `easyeda bom export --type csv` **默认在导出后就地补全 LCSC C 号**（按 Manufacturer Part 关联 `standard-parts.json`，把 `Supplier Part` 从 `<MPN>.1` 改写为可下单的 C 号）；`--enrich=false` 关闭，xlsx 不补全（二进制）。补全是 best-effort（缺 python3/脚本只告警、导出仍成功）。脚本自动解析顺序：`--script` > `$EASYEDA_SKILLS_DIR/easyeda-agent/scripts/bom-enrich.py` > 二进制/工作目录向上找 `skills/` > PATH；安装版二进制在 `/usr/local/bin` 时设 `EASYEDA_SKILLS_DIR` 最稳。
+- `pcb.export.manufacture` — 官方 `getManufactureData()` 一键制造包。CLI:
+  `easyeda pcb export-manufacture --out release/manufacture.zip`。
+- `pcb.export.gerber` — 官方 `getGerberFile()` Gerber ZIP。CLI:
+  `easyeda pcb export-gerber --out release/gerber.zip [--color-silkscreen]`。
+- `pcb.export.pick_place` — 官方 `getPickAndPlaceFile()` 坐标文件。CLI:
+  `easyeda pcb export-pick-place --type csv --out release/pick-place.csv`(`xlsx` 可选)。
+- `pcb.export.ipc2581` — 官方 `getIpc2581CFile()`。CLI:
+  `easyeda pcb export-ipc2581 --type 2581 --out release/design.2581`(`xml|cvg|2581`)。
+  这些 action 只负责 typed 导出,不替代门禁。固定顺序:PCB save→`doc reload`→DRC
+  total=0→`pcb check` errors=0并审阅 WARN→导出→SHA-256;mutation 后必须重跑整段。
 
 ## PCB 基础上下文（非穷举）
 

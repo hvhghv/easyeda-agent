@@ -20,7 +20,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -567,6 +566,29 @@ func buildPartitionDrawJS(plan partitionPlan, fontSize float64, color string) st
 	return b.String()
 }
 
+// buildPartitionGraphicsPayload maps a validated partition plan onto the typed
+// annotation action. Schematic rectangles are anchored at their visual
+// top-left, so y is MaxY and height extends toward -y.
+func buildPartitionGraphicsPayload(plan partitionPlan, fontSize float64, color string) map[string]any {
+	rectangles := make([]map[string]any, 0, len(plan.Partitions))
+	texts := make([]map[string]any, 0, len(plan.Partitions))
+	for _, p := range plan.Partitions {
+		w, h := p.BBox.MaxX-p.BBox.MinX, p.BBox.MaxY-p.BBox.MinY
+		if w <= 0 || h <= 0 {
+			continue
+		}
+		rectangles = append(rectangles, map[string]any{
+			"x": p.BBox.MinX, "y": p.BBox.MaxY, "width": w, "height": h,
+			"color": color, "lineWidth": 1, "lineType": 1,
+		})
+		texts = append(texts, map[string]any{
+			"x": p.TitleBBox.MinX + 4, "y": p.TitleBBox.MaxY - fontSize,
+			"content": strings.Join(p.Modules, " / "), "color": color, "fontSize": fontSize,
+		})
+	}
+	return map[string]any{"rectangles": rectangles, "texts": texts}
+}
+
 // newSchZonePlanCmd builds `sch zone-plan` — compute + print the partition plan
 // (no mutation). --json emits the full plan + validation.
 func newSchZonePlanCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
@@ -788,12 +810,25 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	if err != nil {
 		return err
 	}
-	exec := func(phase, code string) (map[string]any, error) {
-		return execAutolayoutZoneJS(pinnedCfg, win, docUUID, phase, code)
+	clearRecorded := func(phase string) (bool, error) {
+		prev, source := recordedZoneFrames(st, docUUID)
+		if prev == nil {
+			return false, nil
+		}
+		ids := append(append([]string(nil), prev.Rects...), prev.Texts...)
+		if len(ids) > 0 {
+			if _, err := requestAutolayoutAction(pinnedCfg, "schematic.graphics.delete", win,
+				map[string]any{"ids": ids}, docUUID, phase); err != nil {
+				return false, err
+			}
+		}
+		removeRecordedZoneFrames(st, docUUID, source)
+		fmt.Fprintf(stderr, "cleared %d previous zone-frame primitive(s) on page %s\n", len(ids), docUUID)
+		return true, nil
 	}
 
 	if clear {
-		hadPrevious, cerr := clearPriorZoneFrames(st, docUUID, exec, stderr)
+		hadPrevious, cerr := clearRecorded("clear previous partition frames")
 		if cerr != nil {
 			return cerr
 		}
@@ -822,37 +857,41 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	if fontSize <= 0 {
 		fontSize = defaultPartitionZoneFontSize
 	}
-	if _, err := clearPriorZoneFrames(st, docUUID, exec, stderr); err != nil {
+	if _, err := clearRecorded("clear previous partition frames"); err != nil {
 		return err
 	}
-	// **清了旧框之后,画失败就是净损失** —— 实拍:`cleared 8 previous zone-frame
-	// primitive(s)` 紧接着 `text create returned undefined for D_ESD`,页面从「有框」
-	// 变成「无框」,而命令只报了那句平台错误,没说页面现在处于什么状态。
-	//
-	// 重试是安全的:buildPartitionDrawJS 的 catch 会删掉本次创建的每一个 id
-	// (半成品不会留在画布上),所以重发等价于第一次 —— 与 connect_pin 的重试判据
-	// 同一条原则:**能证明干净才重试**。实测同一页重试一次即成功。
-	js := buildPartitionDrawJS(plan, fontSize, color)
-	v, err := exec("draw partition frames", js)
+	res, err := requestAutolayoutAction(pinnedCfg, "schematic.graphics.create", win,
+		buildPartitionGraphicsPayload(plan, fontSize, color), docUUID, "draw partition frames")
 	if err != nil {
-		time.Sleep(settleDelay)
-		v, err = exec("draw partition frames (retry)", js)
-	}
-	if err != nil {
-		// 两次都失败:**必须说清页面现在是什么状态**。旧框已删、新框没画成 ——
-		// 不明说的话,调用方会以为「只是这条命令没成功」而继续往下走,直到
-		// 交付前才发现分区框不见了。
 		return fmt.Errorf("%w —— 注意:旧的分区框已被清除、新的没画成,**本页现在没有分区框**;"+
-			"重跑 `sch zone-draw --mode partition` 即可(平台偶发吞创建请求,重试通常就成)", err)
+			"先 inspect 当前页再重跑 `sch zone-draw`", err)
+	}
+	v := map[string]any{
+		"ok":    true,
+		"rects": asStringSlice(res.Result["rectangles"]),
+		"texts": asStringSlice(res.Result["texts"]),
 	}
 	frames, verr := validateZoneDrawResult(v, len(plan.Partitions))
 	if verr != nil {
-		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames, verr)
+		ids := append(append([]string(nil), frames.Rects...), frames.Texts...)
+		if len(ids) > 0 {
+			if _, cerr := requestAutolayoutAction(pinnedCfg, "schematic.graphics.delete", win,
+				map[string]any{"ids": ids}, docUUID, "clean up incomplete partition frames"); cerr != nil {
+				setRecordedZoneFrames(st, docUUID, "partition", frames)
+				_ = savePcbStageState(st)
+				return fmt.Errorf("%v; typed cleanup failed: %w; recovery ids retained", verr, cerr)
+			}
+		}
+		return verr
 	}
 	setRecordedZoneFrames(st, docUUID, "partition", frames)
 	if err := savePcbStageState(st); err != nil {
-		return compensateZoneDraw(pinnedCfg, win, docUUID, st, "partition", exec, frames,
-			fmt.Errorf("persist partition-frame ids: %w", err))
+		ids := append(append([]string(nil), frames.Rects...), frames.Texts...)
+		if _, cerr := requestAutolayoutAction(pinnedCfg, "schematic.graphics.delete", win,
+			map[string]any{"ids": ids}, docUUID, "roll back untracked partition frames"); cerr != nil {
+			return fmt.Errorf("persist partition-frame ids: %v; rollback failed: %w", err, cerr)
+		}
+		return fmt.Errorf("persist partition-frame ids: %w", err)
 	}
 	if err := saveZoneDocument(pinnedCfg, win, docUUID, "save partition zone frames"); err != nil {
 		return err

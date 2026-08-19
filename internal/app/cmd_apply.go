@@ -80,11 +80,13 @@ type playbookStep struct {
 }
 
 type playbook struct {
-	Version  int               `json:"version"`
-	Meta     playbookMeta      `json:"meta"`
-	Defaults stepPolicy        `json:"defaults"`
-	Vars     map[string]string `json:"vars,omitempty"`
-	Steps    []playbookStep    `json:"steps"`
+	Version             int               `json:"version"`
+	CLISchemaVersion    int               `json:"cliSchemaVersion,omitempty"`
+	MinConnectorVersion string            `json:"minConnectorVersion,omitempty"`
+	Meta                playbookMeta      `json:"meta"`
+	Defaults            stepPolicy        `json:"defaults"`
+	Vars                map[string]string `json:"vars,omitempty"`
+	Steps               []playbookStep    `json:"steps"`
 }
 
 // ── journal model ───────────────────────────────────────────────────────────
@@ -97,12 +99,41 @@ type journalHeader struct {
 }
 
 type journalEntry struct {
-	Idx      int               `json:"idx"`
-	ID       string            `json:"id"`
-	Status   string            `json:"status"` // ok | ok(verified) | fail | skipped
-	Ms       int64             `json:"ms"`
-	Captured map[string]string `json:"captured,omitempty"`
-	Error    string            `json:"error,omitempty"`
+	Idx         int                 `json:"idx"`
+	ID          string              `json:"id"`
+	Status      string              `json:"status"` // ok | ok(verified) | fail | skipped
+	Ms          int64               `json:"ms"`
+	Captured    map[string]string   `json:"captured,omitempty"`
+	Error       string              `json:"error,omitempty"`
+	ErrorDetail *journalErrorDetail `json:"errorDetail,omitempty"`
+}
+
+type journalErrorDetail struct {
+	Kind            string `json:"kind"` // run | action
+	Command         string `json:"command,omitempty"`
+	ExitCode        *int   `json:"exitCode,omitempty"`
+	Stdout          string `json:"stdout,omitempty"`
+	Stderr          string `json:"stderr,omitempty"`
+	Action          string `json:"action,omitempty"`
+	ActionErrorCode string `json:"actionErrorCode,omitempty"`
+	DocumentUUID    string `json:"documentUuid,omitempty"`
+	WindowID        string `json:"windowId,omitempty"`
+}
+
+type playbookExecutionError struct {
+	message string
+	detail  journalErrorDetail
+}
+
+func (e *playbookExecutionError) Error() string { return e.message }
+
+func executionErrorDetail(err error) *journalErrorDetail {
+	var structured *playbookExecutionError
+	if !errors.As(err, &structured) {
+		return nil
+	}
+	detail := structured.detail
+	return &detail
 }
 
 // ── command ─────────────────────────────────────────────────────────────────
@@ -112,6 +143,8 @@ func newApplyCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 		dryRun, resume, yes, quiet bool
 		fromRef, toRef             string
 		journalPath, window, doc   string
+		forceReason                string
+		forceUnsafeReason          string
 		varOverrides               []string
 		stepDelay                  float64
 	)
@@ -131,6 +164,16 @@ Precedence: CLI flag > playbook file > built-in default.`,
 			pb, raw, err := loadPlaybook(args[0])
 			if err != nil {
 				return err
+			}
+			if forceReason != "" && forceUnsafeReason != "" {
+				return fmt.Errorf("--force and --force-unsafe are mutually exclusive")
+			}
+			if forceUnsafeReason != "" {
+				cfg.forceReason = forceUnsafeReason
+				cfg.forceUnsafe = true
+			} else if forceReason != "" {
+				cfg.forceReason = forceReason
+				cfg.forceUnsafe = false
 			}
 
 			// precedence: CLI flag > file
@@ -198,6 +241,8 @@ Precedence: CLI flag > playbook file > built-in default.`,
 	cmd.Flags().StringVar(&journalPath, "journal", "", "journal path (default <playbook>.journal.jsonl)")
 	cmd.Flags().StringVar(&window, "window", "", "EasyEDA window ID (overrides meta.window)")
 	cmd.Flags().StringVar(&doc, "doc", "", "target document to switch to first (overrides meta.doc)")
+	cmd.Flags().StringVar(&forceReason, "force", "", "bypass soft workflow gate gaps for every mutating action in this playbook; reason is audited per request")
+	cmd.Flags().StringVar(&forceUnsafeReason, "force-unsafe", "", "bypass all workflow gates for every mutating action in this playbook; reason is audited per request")
 	cmd.Flags().StringArrayVar(&varOverrides, "var", nil, "override/add a playbook var: KEY=VALUE (repeatable)")
 	cmd.Flags().Float64Var(&stepDelay, "step-delay", 0, "pause N seconds between steps (demo / recording pacing)")
 	return cmd
@@ -280,6 +325,9 @@ func preflight(pb *playbook, vars map[string]string) []string {
 	if pb.Version != 1 {
 		errs = append(errs, fmt.Sprintf("unsupported version %d (want 1)", pb.Version))
 	}
+	if pb.CLISchemaVersion < 0 || pb.CLISchemaVersion > 1 {
+		errs = append(errs, fmt.Sprintf("unsupported cliSchemaVersion %d (want 1 or omit for a legacy playbook)", pb.CLISchemaVersion))
+	}
 	if pb.Meta.Name == "" {
 		errs = append(errs, "meta.name is required")
 	}
@@ -322,6 +370,29 @@ func preflight(pb *playbook, vars map[string]string) []string {
 				errs = append(errs, fmt.Sprintf("step %s: unknown action %q", ref, s.Action))
 			}
 		}
+		if s.Run != "" {
+			if err := validateRunInvocation(s.Run, s.Flags, s.Args); err != nil {
+				errs = append(errs, fmt.Sprintf("step %s: %v", ref, err))
+			}
+		}
+		if s.Verify != nil {
+			verifyKinds := 0
+			if s.Verify.Action != "" {
+				verifyKinds++
+				if _, ok := catalog[s.Verify.Action]; !ok {
+					errs = append(errs, fmt.Sprintf("step %s verify: unknown action %q", ref, s.Verify.Action))
+				}
+			}
+			if s.Verify.Run != "" {
+				verifyKinds++
+				if err := validateRunInvocation(s.Verify.Run, s.Verify.Flags, s.Verify.Args); err != nil {
+					errs = append(errs, fmt.Sprintf("step %s verify: %v", ref, err))
+				}
+			}
+			if verifyKinds != 1 {
+				errs = append(errs, fmt.Sprintf("step %s verify: exactly one of action|run required", ref))
+			}
+		}
 		if s.OnFail != "" && s.OnFail != "stop" && s.OnFail != "continue" && s.OnFail != "prompt" {
 			errs = append(errs, fmt.Sprintf("step %s: invalid onFail %q", ref, s.OnFail))
 		}
@@ -334,6 +405,115 @@ func preflight(pb *playbook, vars map[string]string) []string {
 		}
 	}
 	return errs
+}
+
+// validateRunInvocation checks a playbook run step against the same Cobra tree
+// used at execution time. It catches command/flag schema drift before the first
+// mutating step lands. A fresh tree is used for every check because pflag parsing
+// mutates command state.
+func validateRunInvocation(run string, flags map[string]any, args []string) error {
+	runArgs := strings.Fields(strings.TrimSpace(run))
+	if len(runArgs) == 0 {
+		return errors.New("run command is empty")
+	}
+	root := newRootCmd(io.Discard, io.Discard)
+	target, remaining, err := root.Find(runArgs)
+	if err != nil {
+		return fmt.Errorf("unknown run command %q: %w", run, err)
+	}
+	if target != root && target.Run == nil && target.RunE == nil && len(remaining) > 0 {
+		return fmt.Errorf("unknown run command %q (unresolved subcommand or argument %q)", run, remaining[0])
+	}
+	if target == root || (target.Run == nil && target.RunE == nil) {
+		return fmt.Errorf("run command %q is incomplete", run)
+	}
+
+	remaining = append(remaining, args...)
+	for name, value := range flags {
+		flag := target.Flags().Lookup(name)
+		if flag == nil {
+			flag = target.InheritedFlags().Lookup(name)
+		}
+		if flag == nil {
+			return fmt.Errorf("run %q has no --%s flag", run, name)
+		}
+		isSlice := flag.Value.Type() == "stringSlice" || flag.Value.Type() == "stringArray"
+		if !isSlice {
+			if items, ok := value.([]any); ok {
+				if name == "ids" {
+					return fmt.Errorf("--ids no longer accepts a JSON array; replace %v with CSV text such as \"id1,id2\"", items)
+				}
+				return fmt.Errorf("--%s is a scalar %s flag and cannot accept a JSON array", name, flag.Value.Type())
+			}
+			if name == "ids" {
+				if text, ok := value.(string); ok && looksLikeJSONArray(text) {
+					return fmt.Errorf("--ids no longer accepts a JSON-array string; pass CSV text such as \"id1,id2\"")
+				}
+			}
+		}
+		remaining = appendPlaybookFlag(remaining, name, validationFlagValue(value, flag.Value.Type()))
+	}
+
+	target.SetOut(io.Discard)
+	target.SetErr(io.Discard)
+	if err := target.ParseFlags(remaining); err != nil {
+		return fmt.Errorf("run %q flags are invalid: %w", run, err)
+	}
+	if target.Args != nil {
+		if err := target.Args(target, target.Flags().Args()); err != nil {
+			return fmt.Errorf("run %q arguments are invalid: %w", run, err)
+		}
+	}
+	if err := target.ValidateRequiredFlags(); err != nil {
+		return fmt.Errorf("run %q: %w", run, err)
+	}
+	if err := target.ValidateFlagGroups(); err != nil {
+		return fmt.Errorf("run %q: %w", run, err)
+	}
+	return nil
+}
+
+func appendPlaybookFlag(argv []string, name string, value any) []string {
+	switch typed := value.(type) {
+	case bool:
+		return append(argv, fmt.Sprintf("--%s=%v", name, typed))
+	case []any:
+		for _, item := range typed {
+			argv = append(argv, fmt.Sprintf("--%s=%v", name, item))
+		}
+		return argv
+	default:
+		return append(argv, fmt.Sprintf("--%s=%v", name, typed))
+	}
+}
+
+// validationFlagValue substitutes a type-compatible sentinel for a value that
+// will only exist after an earlier capture. Runtime still receives the real
+// substituted value; this only lets static schema validation check the flag.
+func validationFlagValue(value any, flagType string) any {
+	text, ok := value.(string)
+	if !ok || len(varRefs(text)) == 0 {
+		return value
+	}
+	switch flagType {
+	case "bool":
+		return false
+	case "duration":
+		return "0s"
+	case "string", "stringSlice", "stringArray":
+		return "captured-value"
+	default:
+		return "0"
+	}
+}
+
+func looksLikeJSONArray(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "[") {
+		return false
+	}
+	var values []any
+	return json.Unmarshal([]byte(trimmed), &values) == nil
 }
 
 // unresolvedVars walks every string in the step's inputs and reports ${names}
@@ -861,7 +1041,10 @@ func (r *applyRunner) execute() error {
 		}
 
 		// failure path
-		r.writeJournal(journalEntry{Idx: i + 1, ID: ref, Status: "fail", Ms: ms, Error: execErr.Error()})
+		r.writeJournal(journalEntry{
+			Idx: i + 1, ID: ref, Status: "fail", Ms: ms,
+			Error: execErr.Error(), ErrorDetail: executionErrorDetail(execErr),
+		})
 		_, _, contOnErr := r.policy(s)
 		onFail := s.OnFail
 		if onFail == "" {
@@ -984,12 +1167,20 @@ func (r *applyRunner) executeOnce(s *playbookStep, timeout time.Duration) (any, 
 func (r *applyRunner) runAction(action string, payload map[string]any, timeout time.Duration) (any, error) {
 	respBody, err := postAction(r.cfg, action, r.window, payload, timeout)
 	if err != nil {
-		return nil, err
+		return nil, &playbookExecutionError{
+			message: fmt.Sprintf("%s: %v", action, err),
+			detail:  journalErrorDetail{Kind: "action", Action: action},
+		}
 	}
 	var parsed struct {
-		OK     bool           `json:"ok"`
-		Result map[string]any `json:"result"`
-		Error  *struct {
+		OK       bool           `json:"ok"`
+		WindowID string         `json:"windowId"`
+		Result   map[string]any `json:"result"`
+		Context  *struct {
+			DocumentUUID string `json:"documentUuid"`
+		} `json:"context"`
+		Error *struct {
+			Code    string `json:"code"`
 			Message string `json:"message"`
 			Detail  string `json:"detail"`
 		} `json:"error"`
@@ -999,13 +1190,18 @@ func (r *applyRunner) runAction(action string, payload map[string]any, timeout t
 	}
 	if !parsed.OK {
 		msg := "ok=false"
+		detail := journalErrorDetail{Kind: "action", Action: action, WindowID: parsed.WindowID}
+		if parsed.Context != nil {
+			detail.DocumentUUID = parsed.Context.DocumentUUID
+		}
 		if parsed.Error != nil {
+			detail.ActionErrorCode = parsed.Error.Code
 			msg = parsed.Error.Message
 			if parsed.Error.Detail != "" {
 				msg += " — " + parsed.Error.Detail
 			}
 		}
-		return nil, fmt.Errorf("%s: %s", action, msg)
+		return nil, &playbookExecutionError{message: fmt.Sprintf("%s: %s", action, msg), detail: detail}
 	}
 	// Partial-application convention (#151): a mutating action may return
 	// ok:true (so the daemon autosaves the applied subset) while flagging
@@ -1036,16 +1232,7 @@ func (r *applyRunner) runSubcommand(run string, flags map[string]any, args []str
 	argv := strings.Fields(run)
 	argv = append(argv, args...)
 	for k, v := range flags {
-		switch t := v.(type) {
-		case bool:
-			argv = append(argv, fmt.Sprintf("--%s=%v", k, t))
-		case []any: // repeatable flag (e.g. region create --rule a --rule b)
-			for _, item := range t {
-				argv = append(argv, "--"+k, fmt.Sprintf("%v", item))
-			}
-		default:
-			argv = append(argv, "--"+k, fmt.Sprintf("%v", t))
-		}
+		argv = appendPlaybookFlag(argv, k, v)
 	}
 	// thread routing globals through
 	if r.cfg.project != "" {
@@ -1067,13 +1254,54 @@ func (r *applyRunner) runSubcommand(run string, flags map[string]any, args []str
 		}
 	}
 	if code != 0 {
-		msg := strings.TrimSpace(errBuf.String())
-		if msg == "" {
-			msg = strings.TrimSpace(lastLine(out.String()))
+		failure := journalErrorDetail{
+			Kind: "run", Command: run, ExitCode: &code,
+			Stdout: out.String(), Stderr: errBuf.String(),
 		}
-		return nil, fmt.Errorf("run %q exited %d: %s", run, code, msg)
+		populateRunFailureContext(&failure)
+		msg := summarizeRunFailure(failure)
+		return nil, &playbookExecutionError{
+			message: fmt.Sprintf("run %q exited %d: %s", run, code, msg),
+			detail:  failure,
+		}
 	}
 	return parseTrailingJSON(out.String()), nil
+}
+
+func populateRunFailureContext(failure *journalErrorDetail) {
+	raw := parseTrailingJSONRaw(failure.Stdout)
+	envelope, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if window, ok := envelope["windowId"].(string); ok {
+		failure.WindowID = window
+	}
+	if context, ok := envelope["context"].(map[string]any); ok {
+		if documentUUID, ok := context["documentUuid"].(string); ok {
+			failure.DocumentUUID = documentUUID
+		}
+	}
+	if actionErr, ok := envelope["error"].(map[string]any); ok {
+		if code, ok := actionErr["code"].(string); ok {
+			failure.ActionErrorCode = code
+		}
+	}
+}
+
+func summarizeRunFailure(failure journalErrorDetail) string {
+	detail := strings.TrimSpace(failure.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(failure.Stdout)
+	}
+	if detail == "" {
+		return "no stdout or stderr"
+	}
+	const maxSummary = 4096
+	if len(detail) > maxSummary {
+		return detail[:maxSummary] + "... (full output is in journal errorDetail)"
+	}
+	return detail
 }
 
 // supportsWindowFlag: `--window` is a per-command flag (not persistent); only
@@ -1088,21 +1316,17 @@ func supportsWindowFlag(run string) bool {
 	return true
 }
 
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) == 0 {
-		return ""
-	}
-	return lines[len(lines)-1]
-}
-
 // parseTrailingJSON best-effort extracts the last top-level JSON object from
 // mixed CLI output. Returns nil when none parses.
 func parseTrailingJSON(out string) any {
+	return normalizeResult(parseTrailingJSONRaw(out))
+}
+
+func parseTrailingJSONRaw(out string) any {
 	trimmed := strings.TrimSpace(out)
 	var v any
 	if err := json.Unmarshal([]byte(trimmed), &v); err == nil {
-		return normalizeResult(v)
+		return v
 	}
 	// scan for the last balanced {...} block
 	depth, end := 0, -1
@@ -1117,7 +1341,7 @@ func parseTrailingJSON(out string) any {
 			depth--
 			if depth == 0 && end >= 0 {
 				if err := json.Unmarshal([]byte(trimmed[i:end+1]), &v); err == nil {
-					return normalizeResult(v)
+					return v
 				}
 				end = -1
 			}

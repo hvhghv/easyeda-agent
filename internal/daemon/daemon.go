@@ -61,6 +61,10 @@ type Server struct {
 	// (concurrentwrites.go, issue #108).
 	concurrentWrites *concurrentGuard
 
+	// windowTransactions serializes complete CLI commands per EasyEDA window,
+	// including their multi-action --doc guard sequences.
+	windowTransactions *windowTransactionGuard
+
 	// inflight tracks non-reentrant actions currently forwarded, keyed
 	// "<action>|<windowId>" — see acquireExclusive / nonReentrant.
 	inflight sync.Map
@@ -91,11 +95,12 @@ func (s *Server) logf(format string, args ...any) {
 // New builds a Server. It does not bind a port until Run is called.
 func New(opts Options) *Server {
 	s := &Server{
-		opts:             opts,
-		hub:              newHub(),
-		audit:            newAuditWriter(opts.AuditDir),
-		staleReads:       newStaleGuard(),
-		concurrentWrites: newConcurrentGuard(),
+		opts:               opts,
+		hub:                newHub(),
+		audit:              newAuditWriter(opts.AuditDir),
+		staleReads:         newStaleGuard(),
+		concurrentWrites:   newConcurrentGuard(),
+		windowTransactions: newWindowTransactionGuard(),
 	}
 	if opts.AutosaveDebounce > 0 {
 		s.autosave = newAutosaver(opts.AutosaveDebounce, s.dispatchSave)

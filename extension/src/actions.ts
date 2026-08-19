@@ -376,6 +376,473 @@ const documentCurrent: Handler = async () => {
 	};
 };
 
+// ─── Native library authoring ───────────────────────────────────────
+
+type LibraryTarget = 'personal' | 'project';
+
+interface LibraryDocumentOrigin {
+	tabId?: string;
+	documentUuid?: string;
+}
+
+const libraryInfo: Handler = async () => {
+	try {
+		const [systemLibraryUuid, personalLibraryUuid, projectLibraryUuid, favoriteLibraryUuid, libraries] = await Promise.all([
+			eda.lib_LibrariesList.getSystemLibraryUuid(),
+			eda.lib_LibrariesList.getPersonalLibraryUuid(),
+			eda.lib_LibrariesList.getProjectLibraryUuid(),
+			eda.lib_LibrariesList.getFavoriteLibraryUuid(),
+			eda.lib_LibrariesList.getAllLibrariesList(),
+		]);
+		return {
+			result: {
+				systemLibraryUuid: systemLibraryUuid ?? null,
+				personalLibraryUuid: personalLibraryUuid ?? null,
+				projectLibraryUuid: projectLibraryUuid ?? null,
+				favoriteLibraryUuid: favoriteLibraryUuid ?? null,
+				libraries: libraries ?? [],
+			},
+		};
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to read EasyEDA library context.');
+	}
+};
+
+const librarySymbolGet: Handler = async (payload) => {
+	const uuid = requireString(payload, 'uuid');
+	const libraryUuid = requireString(payload, 'libraryUuid');
+	try {
+		return { result: { item: (await eda.lib_Symbol.get(uuid, libraryUuid)) ?? null } };
+	}
+	catch (err) {
+		throw edaError(err, `Failed to read symbol "${uuid}".`);
+	}
+};
+
+const libraryFootprintGet: Handler = async (payload) => {
+	const uuid = requireString(payload, 'uuid');
+	const libraryUuid = requireString(payload, 'libraryUuid');
+	try {
+		return { result: { item: (await eda.lib_Footprint.get(uuid, libraryUuid)) ?? null } };
+	}
+	catch (err) {
+		throw edaError(err, `Failed to read footprint "${uuid}".`);
+	}
+};
+
+const libraryDeviceGet: Handler = async (payload) => {
+	const uuid = requireString(payload, 'uuid');
+	const libraryUuid = requireString(payload, 'libraryUuid');
+	try {
+		return { result: { item: (await eda.lib_Device.get(uuid, libraryUuid)) ?? null } };
+	}
+	catch (err) {
+		throw edaError(err, `Failed to read device "${uuid}".`);
+	}
+};
+
+function optionalRecord(payload: Payload, key: string): Record<string, unknown> | undefined {
+	const value = payload[key];
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== 'object' || Array.isArray(value)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Field "${key}" must be an object.`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function recordArray(payload: Payload, key: string, required = false): Array<Record<string, unknown>> {
+	const value = payload[key];
+	if (value === undefined || value === null) {
+		if (required) throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Missing required array field "${key}".`);
+		return [];
+	}
+	if (!Array.isArray(value) || !value.every(item => item && typeof item === 'object' && !Array.isArray(item))) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Field "${key}" must be an array of objects.`);
+	}
+	return value as Array<Record<string, unknown>>;
+}
+
+function stringField(record: Record<string, unknown>, key: string, fallback?: string): string {
+	const value = record[key];
+	if (value === undefined && fallback !== undefined) return fallback;
+	if (typeof value !== 'string' || !value.trim()) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Missing required string field "${key}".`);
+	}
+	return value;
+}
+
+function numberField(record: Record<string, unknown>, key: string, fallback?: number): number {
+	const value = record[key];
+	if (value === undefined && fallback !== undefined) return fallback;
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Missing required finite number field "${key}".`);
+	}
+	return value;
+}
+
+function sameLibraryName(actual: unknown, expected: string): boolean {
+	return typeof actual === 'string' && actual.localeCompare(expected, undefined, { sensitivity: 'accent' }) === 0;
+}
+
+function sameLibraryUuid(actual: unknown, expected: string): boolean {
+	return actual === null || actual === undefined || (typeof actual === 'string' && (actual === expected || actual === ''));
+}
+
+async function resolveWritableLibrary(payload: Payload): Promise<{ libraryUuid: string; target: LibraryTarget | 'explicit' }> {
+	const explicit = optionalString(payload, 'libraryUuid');
+	if (explicit) return { libraryUuid: explicit, target: 'explicit' };
+
+	const rawTarget = optionalString(payload, 'target') ?? 'personal';
+	if (rawTarget !== 'personal' && rawTarget !== 'project') {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Field "target" must be "personal" or "project".');
+	}
+	const target = rawTarget as LibraryTarget;
+	let libraryUuid: string | undefined;
+	try {
+		libraryUuid = target === 'personal'
+			? await eda.lib_LibrariesList.getPersonalLibraryUuid()
+			: await eda.lib_LibrariesList.getProjectLibraryUuid();
+		if (!libraryUuid && target === 'personal') {
+			libraryUuid = await eda.lib_LibrariesList.getProjectLibraryUuid();
+		}
+	}
+	catch (err) {
+		throw edaError(err, `Failed to resolve the ${target} library.`);
+	}
+	if (!libraryUuid) {
+		throw new ActionError(ErrorCodes.INVALID_STATE, `No writable ${target} or project library is available in the current workspace.`);
+	}
+	return { libraryUuid, target };
+}
+
+async function currentLibraryOrigin(): Promise<LibraryDocumentOrigin> {
+	try {
+		const doc = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+		return { tabId: doc?.tabId, documentUuid: doc?.uuid };
+	}
+	catch {
+		return {};
+	}
+}
+
+async function waitForLibraryDocument(uuid: string, expectedType: 'symbol' | 'footprint'): Promise<void> {
+	const deadline = Date.now() + 12000;
+	while (Date.now() < deadline) {
+		try {
+			const doc = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+			if (doc?.uuid === uuid && documentTypeLabel(doc.documentType) === expectedType) {
+				await new Promise(resolve => setTimeout(resolve, 250));
+				return;
+			}
+		}
+		catch { /* wait for the editor to settle */ }
+		await new Promise(resolve => setTimeout(resolve, 100));
+	}
+	throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Timed out waiting for ${expectedType} editor "${uuid}".`);
+}
+
+async function closeLibraryAndRestore(libraryTabId: string | undefined, origin: LibraryDocumentOrigin): Promise<void> {
+	if (libraryTabId) {
+		try { await eda.dmt_EditorControl.closeDocument(libraryTabId); } catch { /* best-effort */ }
+	}
+	if (origin.tabId) {
+		try {
+			if (await eda.dmt_EditorControl.activateDocument(origin.tabId)) return;
+		}
+		catch { /* fall back to opening by document uuid */ }
+	}
+	if (origin.documentUuid) {
+		try { await eda.dmt_EditorControl.openDocument(origin.documentUuid); } catch { /* best-effort */ }
+	}
+}
+
+function pinType(value: unknown): ESCH_PrimitivePinType {
+	const normalized = String(value ?? 'Passive').toLowerCase().replace(/[ _-]+/g, '');
+	const map: Record<string, ESCH_PrimitivePinType> = {
+		in: ESCH_PrimitivePinType.IN,
+		input: ESCH_PrimitivePinType.IN,
+		out: ESCH_PrimitivePinType.OUT,
+		output: ESCH_PrimitivePinType.OUT,
+		bi: ESCH_PrimitivePinType.BI,
+		bidirectional: ESCH_PrimitivePinType.BI,
+		passive: ESCH_PrimitivePinType.PASSIVE,
+		power: ESCH_PrimitivePinType.POWER,
+		powerin: ESCH_PrimitivePinType.POWER,
+		powerout: ESCH_PrimitivePinType.POWER,
+		ground: ESCH_PrimitivePinType.GROUND,
+		hiz: ESCH_PrimitivePinType.HIZ,
+		undefined: ESCH_PrimitivePinType.UNDEFINED,
+	};
+	const resolved = map[normalized];
+	if (!resolved) throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Unsupported pin type "${String(value)}".`);
+	return resolved;
+}
+
+function pinShape(value: unknown): ESCH_PrimitivePinShape {
+	const normalized = String(value ?? 'None').toLowerCase().replace(/[ _-]+/g, '');
+	const map: Record<string, ESCH_PrimitivePinShape> = {
+		none: ESCH_PrimitivePinShape.NONE,
+		inverted: ESCH_PrimitivePinShape.INVERTED,
+		clock: ESCH_PrimitivePinShape.CLOCK,
+		invertedclock: ESCH_PrimitivePinShape.INVERTED_CLOCK,
+	};
+	const resolved = map[normalized];
+	if (!resolved) throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Unsupported pin shape "${String(value)}".`);
+	return resolved;
+}
+
+const librarySymbolCreate: Handler = async (payload) => {
+	const name = requireString(payload, 'name');
+	const description = optionalString(payload, 'description');
+	const pins = recordArray(payload, 'pins', true);
+	const rectangles = recordArray(payload, 'rectangles');
+	const circles = recordArray(payload, 'circles');
+	const polygons = recordArray(payload, 'polygons');
+	const texts = recordArray(payload, 'texts');
+	if (!pins.length) throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'A symbol must contain at least one pin.');
+	const { libraryUuid, target } = await resolveWritableLibrary(payload);
+	const origin = await currentLibraryOrigin();
+	let symbolUuid: string | undefined;
+	let libraryTabId: string | undefined;
+	let saved = false;
+	try {
+		symbolUuid = await eda.lib_Symbol.create(libraryUuid, name, undefined, ELIB_SymbolType.COMPONENT, description);
+		if (!symbolUuid) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `EasyEDA did not create symbol "${name}".`);
+		libraryTabId = await eda.lib_Symbol.openInEditor(symbolUuid, libraryUuid);
+		if (!libraryTabId) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to open new symbol "${name}" in the symbol editor.`);
+		await waitForLibraryDocument(symbolUuid, 'symbol');
+
+		for (const p of pins) {
+			const created = await eda.sch_PrimitivePin.create(
+				numberField(p, 'x'), numberField(p, 'y'), stringField(p, 'number'),
+				typeof p.name === 'string' ? p.name : '', numberField(p, 'rotation', 0), numberField(p, 'length', 20),
+				null, pinShape(p.shape), pinType(p.type),
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to create symbol pin ${String(p.number)}.`);
+		}
+		for (const r of rectangles) {
+			const created = await eda.sch_PrimitiveRectangle.create(
+				numberField(r, 'x'), numberField(r, 'y'), numberField(r, 'width'), numberField(r, 'height'),
+				numberField(r, 'cornerRadius', 0), numberField(r, 'rotation', 0),
+				typeof r.color === 'string' ? r.color : null, typeof r.fillColor === 'string' ? r.fillColor : 'none',
+				numberField(r, 'lineWidth', 1), ESCH_PrimitiveLineType.SOLID, ESCH_PrimitiveFillStyle.NONE,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create a symbol rectangle.');
+		}
+		for (const c of circles) {
+			const created = await eda.sch_PrimitiveCircle.create(
+				numberField(c, 'x'), numberField(c, 'y'), numberField(c, 'radius'),
+				typeof c.color === 'string' ? c.color : null, typeof c.fillColor === 'string' ? c.fillColor : 'none',
+				numberField(c, 'lineWidth', 1), ESCH_PrimitiveLineType.SOLID, ESCH_PrimitiveFillStyle.NONE,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create a symbol circle.');
+		}
+		for (const p of polygons) {
+			const line = p.line;
+			if (!Array.isArray(line) || line.length < 4 || !line.every(v => typeof v === 'number' && Number.isFinite(v))) {
+				throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Symbol polygon.line must be an array of at least four finite numbers.');
+			}
+			const created = await eda.sch_PrimitivePolygon.create(
+				line as Array<number>, typeof p.color === 'string' ? p.color : null,
+				typeof p.fillColor === 'string' ? p.fillColor : 'none', numberField(p, 'lineWidth', 1), ESCH_PrimitiveLineType.SOLID,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create a symbol polygon.');
+		}
+		for (const t of texts) {
+			const created = await eda.sch_PrimitiveText.create(
+				numberField(t, 'x'), numberField(t, 'y'), stringField(t, 'content'), numberField(t, 'rotation', 0),
+				typeof t.color === 'string' ? t.color : null, typeof t.fontName === 'string' ? t.fontName : null,
+				numberField(t, 'fontSize', 8), Boolean(t.bold), Boolean(t.italic), Boolean(t.underline),
+				ESCH_PrimitiveTextAlignMode.CENTER,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create symbol text.');
+		}
+
+		const actualPins = await eda.sch_PrimitivePin.getAll();
+		if ((actualPins ?? []).length !== pins.length) {
+			throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Symbol pin verification failed: expected ${pins.length}, read back ${(actualPins ?? []).length}.`);
+		}
+		saved = await eda.sch_Document.save();
+		if (!saved) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `EasyEDA failed to save symbol "${name}".`);
+		const item = await eda.lib_Symbol.get(symbolUuid, libraryUuid);
+		const verified = item?.uuid === symbolUuid && sameLibraryUuid(item.libraryUuid, libraryUuid) && sameLibraryName(item.name, name);
+		if (!verified) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Symbol "${name}" could not be verified after save.`);
+		return {
+			result: {
+				libraryUuid, target, symbolUuid, name, saved, verified,
+				counts: { pins: pins.length, rectangles: rectangles.length, circles: circles.length, polygons: polygons.length, texts: texts.length },
+			},
+		};
+	}
+	catch (err) {
+		if (symbolUuid && !saved) {
+			try { await eda.lib_Symbol.delete(symbolUuid, libraryUuid); } catch { /* best-effort rollback */ }
+		}
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, `Failed to create native symbol "${name}".`);
+	}
+	finally {
+		await closeLibraryAndRestore(libraryTabId, origin);
+	}
+};
+
+function padShapeSpec(pad: Record<string, unknown>): TPCB_PrimitivePadShape {
+	const width = numberField(pad, 'width');
+	const height = numberField(pad, 'height');
+	switch (String(pad.shape ?? 'rect').toLowerCase()) {
+		case 'ellipse':
+		case 'circle':
+			return [EPCB_PrimitivePadShapeType.ELLIPSE, width, height];
+		case 'oval':
+		case 'oblong':
+			return [EPCB_PrimitivePadShapeType.OBLONG, width, height];
+		case 'rect':
+		case 'rectangle':
+			return [EPCB_PrimitivePadShapeType.RECTANGLE, width, height, numberField(pad, 'cornerRadius', 0)];
+		default:
+			throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Unsupported pad shape "${String(pad.shape)}".`);
+	}
+}
+
+function padHoleSpec(pad: Record<string, unknown>): TPCB_PrimitivePadHole | null {
+	const hole = optionalRecord(pad, 'hole');
+	if (!hole) return null;
+	const diameter = numberField(hole, 'diameter');
+	const type = String(hole.type ?? 'round').toLowerCase();
+	if (type === 'round') return [EPCB_PrimitivePadHoleType.ROUND, diameter];
+	if (type === 'slot') return [EPCB_PrimitivePadHoleType.SLOT, diameter, numberField(hole, 'length')];
+	throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Unsupported pad hole type "${String(hole.type)}".`);
+}
+
+const libraryFootprintCreate: Handler = async (payload) => {
+	const name = requireString(payload, 'name');
+	const description = optionalString(payload, 'description');
+	const pads = recordArray(payload, 'pads', true);
+	const lines = recordArray(payload, 'lines');
+	if (!pads.length) throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'A footprint must contain at least one pad.');
+	const { libraryUuid, target } = await resolveWritableLibrary(payload);
+	const origin = await currentLibraryOrigin();
+	let footprintUuid: string | undefined;
+	let libraryTabId: string | undefined;
+	let saved = false;
+	try {
+		footprintUuid = await eda.lib_Footprint.create(libraryUuid, name, undefined, description);
+		if (!footprintUuid) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `EasyEDA did not create footprint "${name}".`);
+		libraryTabId = await eda.lib_Footprint.openInEditor(footprintUuid, libraryUuid);
+		if (!libraryTabId) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to open new footprint "${name}" in the footprint editor.`);
+		await waitForLibraryDocument(footprintUuid, 'footprint');
+
+		for (const p of pads) {
+			const hole = padHoleSpec(p);
+			const created = await eda.pcb_PrimitivePad.create(
+				numberField(p, 'layer', EPCB_LayerId.TOP) as TPCB_LayersOfPad,
+				stringField(p, 'number'), numberField(p, 'x'), numberField(p, 'y'), numberField(p, 'rotation', 0),
+				padShapeSpec(p), '', hole, numberField(p, 'holeOffsetX', 0), numberField(p, 'holeOffsetY', 0),
+				numberField(p, 'holeRotation', 0),
+				typeof p.metallization === 'boolean' ? p.metallization : Boolean(hole),
+				numberField(p, 'padType', EPCB_PrimitivePadType.NORMAL) as EPCB_PrimitivePadType,
+				undefined, null, null, false,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to create footprint pad ${String(p.number)}.`);
+		}
+		for (const line of lines) {
+			const created = await eda.pcb_PrimitiveLine.create(
+				'', numberField(line, 'layer', EPCB_LayerId.TOP_SILKSCREEN) as TPCB_LayersOfLine,
+				numberField(line, 'startX'), numberField(line, 'startY'), numberField(line, 'endX'), numberField(line, 'endY'),
+				numberField(line, 'lineWidth', 5), false,
+			);
+			if (!created) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create footprint line artwork.');
+		}
+
+		const actualPads = await eda.pcb_PrimitivePad.getAll();
+		if ((actualPads ?? []).length !== pads.length) {
+			throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Footprint pad verification failed: expected ${pads.length}, read back ${(actualPads ?? []).length}.`);
+		}
+		saved = await eda.pcb_Document.save();
+		if (!saved) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `EasyEDA failed to save footprint "${name}".`);
+		const item = await eda.lib_Footprint.get(footprintUuid, libraryUuid);
+		const verified = item?.uuid === footprintUuid && sameLibraryUuid(item.libraryUuid, libraryUuid) && sameLibraryName(item.name, name);
+		if (!verified) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Footprint "${name}" could not be verified after save.`);
+		return {
+			result: { libraryUuid, target, footprintUuid, name, saved, verified, counts: { pads: pads.length, lines: lines.length } },
+		};
+	}
+	catch (err) {
+		if (footprintUuid && !saved) {
+			try { await eda.lib_Footprint.delete(footprintUuid, libraryUuid); } catch { /* best-effort rollback */ }
+		}
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, `Failed to create native footprint "${name}".`);
+	}
+	finally {
+		await closeLibraryAndRestore(libraryTabId, origin);
+	}
+};
+
+function libraryRef(record: Record<string, unknown>, field: string): { uuid: string; libraryUuid: string } {
+	const value = record[field];
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `Missing required object field "${field}".`);
+	}
+	const ref = value as Record<string, unknown>;
+	return { uuid: stringField(ref, 'uuid'), libraryUuid: stringField(ref, 'libraryUuid') };
+}
+
+const libraryDeviceCreate: Handler = async (payload) => {
+	const name = requireString(payload, 'name');
+	const description = optionalString(payload, 'description');
+	const symbol = libraryRef(payload, 'symbol');
+	const footprintValue = optionalRecord(payload, 'footprint');
+	const footprint = footprintValue
+		? { uuid: stringField(footprintValue, 'uuid'), libraryUuid: stringField(footprintValue, 'libraryUuid') }
+		: undefined;
+	const { libraryUuid, target } = await resolveWritableLibrary(payload);
+	const otherProperty = optionalRecord(payload, 'otherProperty') as ILIB_DeviceExtendPropertyItem['otherProperty'] | undefined;
+	const property: ILIB_DeviceExtendPropertyItem = {
+		name,
+		designator: optionalString(payload, 'designator') ?? 'U?',
+		addIntoBom: optionalBoolean(payload, 'addIntoBom') ?? true,
+		addIntoPcb: optionalBoolean(payload, 'addIntoPcb') ?? Boolean(footprint),
+		manufacturer: optionalString(payload, 'manufacturer'),
+		manufacturerId: optionalString(payload, 'manufacturerId'),
+		supplier: optionalString(payload, 'supplier'),
+		supplierId: optionalString(payload, 'supplierId'),
+		otherProperty,
+	};
+	let deviceUuid: string | undefined;
+	try {
+		deviceUuid = await eda.lib_Device.create(
+			libraryUuid, name, undefined, { symbol, ...(footprint ? { footprint } : {}) }, description, property,
+		);
+		if (!deviceUuid) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `EasyEDA did not create device "${name}".`);
+		const device = await eda.lib_Device.get(deviceUuid, libraryUuid);
+		const verified = Boolean(
+			device
+			&& device.uuid === deviceUuid
+			&& sameLibraryUuid(device.libraryUuid, libraryUuid)
+			&& sameLibraryName(device.name, name)
+			&& device.association?.symbol?.uuid === symbol.uuid
+			&& sameLibraryUuid(device.association?.symbol?.libraryUuid, symbol.libraryUuid)
+			&& (!footprint || (device.association?.footprint?.uuid === footprint.uuid && sameLibraryUuid(device.association?.footprint?.libraryUuid, footprint.libraryUuid))),
+		);
+		if (!verified) {
+			throw new ActionError(
+				ErrorCodes.EDA_CALL_FAILED,
+				`Device "${name}" association could not be verified after create. Actual: ${JSON.stringify(device ?? null)}`,
+			);
+		}
+		return { result: { libraryUuid, target, deviceUuid, name, verified, device } };
+	}
+	catch (err) {
+		if (deviceUuid) {
+			try { await eda.lib_Device.delete(deviceUuid, libraryUuid); } catch { /* best-effort rollback */ }
+		}
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, `Failed to create native device "${name}".`);
+	}
+};
+
 // ─── Schematic pages ─────────────────────────────────────────────────
 
 const schematicPagesList: Handler = async () => {
@@ -986,6 +1453,33 @@ async function backfillSupplierId(
 	};
 }
 
+// Any library-backed placement can block on the editor's "device has an update"
+// dialog. Keep the project-embedded revision by choosing the exact "Place"
+// button; "Update and place" may change symbol geometry or pin topology.
+const armOutdatedDevicePlacementClicker = async (): Promise<() => number> => {
+	const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as {
+		new (body: string): () => Promise<() => number>;
+	};
+	const arm = new AsyncFunction(`
+		let clicks = 0;
+		if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') {
+			return () => clicks;
+		}
+		const tryClick = () => {
+			const modals = Array.from(document.querySelectorAll('.arco-modal, [role="dialog"], [class*=modal]'))
+				.filter(e => e.offsetParent !== null && /发现这个器件有更新/.test(e.innerText || ''));
+			const btn = modals.flatMap(m => Array.from(m.querySelectorAll('button')))
+				.find(b => (b.innerText || '').replace(/\\s+/g, '') === '放置' && b.offsetParent !== null);
+			if (btn) { btn.click(); clicks++; }
+		};
+		tryClick();
+		const obs = new MutationObserver(tryClick);
+		obs.observe(document.body, { childList: true, subtree: true, attributes: true });
+		return () => { obs.disconnect(); return clicks; };
+	`);
+	return arm();
+};
+
 export const schematicComponentPlace: Handler = async (payload) => {
 	const libraryUuid = requireString(payload, 'libraryUuid');
 	const uuid = requireString(payload, 'uuid');
@@ -999,6 +1493,8 @@ export const schematicComponentPlace: Handler = async (payload) => {
 	const designator = optionalString(payload, 'designator');
 
 	let component;
+	let outdatedDialogClicks = 0;
+	const stopOutdatedDeviceClicker = await armOutdatedDevicePlacementClicker();
 	try {
 		component = await eda.sch_PrimitiveComponent.create(
 			{ libraryUuid, uuid },
@@ -1013,6 +1509,9 @@ export const schematicComponentPlace: Handler = async (payload) => {
 	}
 	catch (err) {
 		throw edaError(err, 'Failed to place component.');
+	}
+	finally {
+		outdatedDialogClicks = stopOutdatedDeviceClicker();
 	}
 	if (!component) {
 		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Component placement returned no primitive.');
@@ -1049,6 +1548,7 @@ export const schematicComponentPlace: Handler = async (payload) => {
 		result: {
 			primitiveId: component.getState_PrimitiveId(),
 			component: serializeComponent(component),
+			...(outdatedDialogClicks ? { outdatedDialogClicks } : {}),
 			...(backfill.backfilled ? { supplierIdBackfilled: backfill.backfilled } : {}),
 		},
 		...(backfill.warning ? { warnings: [backfill.warning] } : {}),
@@ -2211,6 +2711,7 @@ const schematicNetflagCreate: Handler = async (payload) => {
 	const mirror = optionalBoolean(payload, 'mirror');
 
 	let component;
+	const stopOutdatedMarkerClicker = await armOutdatedDevicePlacementClicker();
 	try {
 		if (kind in NET_FLAG_KINDS) {
 			const net = requireString(payload, 'net');
@@ -2249,6 +2750,9 @@ const schematicNetflagCreate: Handler = async (payload) => {
 			throw err;
 		}
 		throw edaError(err, 'Failed to create net flag.');
+	}
+	finally {
+		stopOutdatedMarkerClicker();
 	}
 	if (!component) {
 		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Failed to create net flag of kind "${kind}".`);
@@ -4399,6 +4903,110 @@ const schematicTextList: Handler = async () => {
 	return { result: { count: items.length, scope: 'activePage', texts: items } };
 };
 
+/**
+ * Typed wire enumeration for rigid schematic moves.  components.list exposes
+ * flattened segments for collision scoring, but intentionally drops the owning
+ * primitive id; callers that must move a wire need the id and the original
+ * polyline together.
+ */
+const schematicWireList: Handler = async () => {
+	let rawWires;
+	try { rawWires = await eda.sch_PrimitiveWire.getAll(); }
+	catch (err) { throw edaError(err, 'Failed to list schematic wire primitives.'); }
+	const wires: Array<Record<string, unknown>> = [];
+	for (const wire of Array.isArray(rawWires) ? rawWires : []) {
+		try {
+			const rawLine = wire.getState_Line();
+			const line: Array<number> = Array.isArray(rawLine?.[0])
+				? (rawLine as unknown as Array<Array<number>>).flatMap(point => [point[0], point[1]])
+				: Array.isArray(rawLine) ? rawLine as Array<number> : [];
+			const primitiveId = String(wire.getState_PrimitiveId?.() ?? '');
+			if (!primitiveId || line.length < 4 || !line.every(Number.isFinite)) continue;
+			wires.push({
+				primitiveId,
+				line,
+				net: String(wire.getState_Net?.() ?? ''),
+			});
+		}
+		catch { /* an unreadable wire is not safe to move */ }
+	}
+	return { result: { count: wires.length, scope: 'activePage', wires } };
+};
+
+const schematicGraphicsCreate: Handler = async (payload) => {
+	const rectangles = recordArray(payload, 'rectangles');
+	const texts = recordArray(payload, 'texts');
+	if (!rectangles.length && !texts.length) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'At least one rectangle or text is required.');
+	}
+	const created: Array<any> = [];
+	const rectangleIds: Array<string> = [];
+	const textIds: Array<string> = [];
+	try {
+		for (const r of rectangles) {
+			const primitive = await eda.sch_PrimitiveRectangle.create(
+				numberField(r, 'x'), numberField(r, 'y'), numberField(r, 'width'), numberField(r, 'height'),
+				numberField(r, 'cornerRadius', 0), numberField(r, 'rotation', 0),
+				typeof r.color === 'string' ? r.color : null, typeof r.fillColor === 'string' ? r.fillColor : null,
+				numberField(r, 'lineWidth', 1), numberField(r, 'lineType', ESCH_PrimitiveLineType.SOLID) as ESCH_PrimitiveLineType,
+				ESCH_PrimitiveFillStyle.NONE,
+			);
+			if (!primitive) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create schematic rectangle.');
+			created.push(primitive);
+			rectangleIds.push(primitive.getState_PrimitiveId());
+		}
+		for (const t of texts) {
+			const primitive = await eda.sch_PrimitiveText.create(
+				numberField(t, 'x'), numberField(t, 'y'), stringField(t, 'content'), numberField(t, 'rotation', 0),
+				typeof t.color === 'string' ? t.color : null, typeof t.fontName === 'string' ? t.fontName : null,
+				numberField(t, 'fontSize', 10), Boolean(t.bold), Boolean(t.italic), Boolean(t.underline),
+				ESCH_PrimitiveTextAlignMode.LEFT_TOP,
+			);
+			if (!primitive) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to create schematic text.');
+			created.push(primitive);
+			textIds.push(primitive.getState_PrimitiveId());
+		}
+		const [liveRectangles, liveTexts] = await Promise.all([
+			eda.sch_PrimitiveRectangle.getAllPrimitiveId(), eda.sch_PrimitiveText.getAllPrimitiveId(),
+		]);
+		const live = new Set([...(liveRectangles ?? []), ...(liveTexts ?? [])]);
+		const missing = [...rectangleIds, ...textIds].filter(id => !id || !live.has(id));
+		if (missing.length) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Schematic graphics verification failed; missing ids: ${missing.join(', ')}`);
+		const saved = await eda.sch_Document.save();
+		if (!saved) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to save schematic graphics.');
+		return { result: { ok: true, rectangles: rectangleIds, texts: textIds, saved, verified: true } };
+	}
+	catch (err) {
+		try { if (created.length) await eda.sch_PrimitiveObject.delete(created); } catch { /* best-effort rollback */ }
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, 'Failed to create schematic graphics.');
+	}
+};
+
+const schematicGraphicsDelete: Handler = async (payload) => {
+	const raw = payload.ids;
+	if (!Array.isArray(raw) || !raw.length || !raw.every(id => typeof id === 'string' && id.length > 0)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Field "ids" must be a non-empty string array.');
+	}
+	const ids = [...new Set(raw as Array<string>)];
+	try {
+		const deleted = await eda.sch_PrimitiveObject.delete(ids);
+		const [liveRectangles, liveTexts] = await Promise.all([
+			eda.sch_PrimitiveRectangle.getAllPrimitiveId(), eda.sch_PrimitiveText.getAllPrimitiveId(),
+		]);
+		const live = new Set([...(liveRectangles ?? []), ...(liveTexts ?? [])]);
+		const survived = ids.filter(id => live.has(id));
+		if (survived.length) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `Schematic graphics delete verification failed; survived: ${survived.join(', ')}`);
+		const saved = await eda.sch_Document.save();
+		if (!saved) throw new ActionError(ErrorCodes.EDA_CALL_FAILED, 'Failed to save schematic graphics deletion.');
+		return { result: { ok: true, requested: ids.length, deleted: deleted ? ids.length : 0, survived, saved, verified: true } };
+	}
+	catch (err) {
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, 'Failed to delete schematic graphics.');
+	}
+};
+
 // ─── Replace: swap a placed component's DEVICE(器件标准化「使用推荐器件」)───
 
 /** Pin identity snapshot used for the before/after diff of a device replace. */
@@ -5046,7 +5654,17 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 	// rotation negation (see detectRotationNegation). Verify rendered orientation if
 	// in doubt — the negation is connector-build-dependent.
 	const rotation = optionalNumber(payload, 'rotation') ?? rotationFor(kind, direction);
-	const applied = await appliedRotation(rotation);
+	// A caller that already calibrated this editor instance may provide the
+	// stored-rotation behavior explicitly. This skips the one-time off-canvas
+	// probe, whose own create() can be dropped by the platform before any target
+	// mutation starts. Omit the hint to retain automatic detection.
+	const rotationNegationHint = payload.rotationNegates;
+	if (rotationNegationHint !== undefined && typeof rotationNegationHint !== 'boolean') {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'Field "rotationNegates" must be a boolean when provided.');
+	}
+	const applied = typeof rotationNegationHint === 'boolean'
+		? rotationNegationHint ? (((360 - rotation) % 360) + 360) % 360 : rotation
+		: await appliedRotation(rotation);
 
 	// `--direction` is the VISUAL outward direction. The schematic canvas is
 	// y-UP (+y renders upward), so 'up' increases y and 'down' decreases it.
@@ -5136,6 +5754,7 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 		catch { /* best-effort — bridge-check's orphan-stub rule is the backstop */ }
 	};
 	let flag;
+	const stopOutdatedMarkerClicker = await armOutdatedDevicePlacementClicker();
 	try {
 		if (kind in NET_FLAG_KINDS) {
 			// Promise.resolve() collapses the API's overloaded union-of-promises
@@ -5164,6 +5783,9 @@ const schematicPowerConnectPin: Handler = async (payload) => {
 		await rollbackWire();
 		if (err instanceof ActionError) throw err;
 		throw edaError(err, 'Failed to create netflag/netport at wire end (stub wire rolled back).');
+	}
+	finally {
+		stopOutdatedMarkerClicker();
 	}
 	if (!flag) {
 		await rollbackWire();
@@ -7811,6 +8433,100 @@ const pcbExportDsn: Handler = async (payload) => {
 	return { result: { artifactId: artifact.id, fileName: file.name || fileName, size: outFile.size, keepouts }, artifacts: [artifact] };
 };
 
+async function pcbExportArtifact(
+	file: File | undefined,
+	kind: string,
+	fallbackName: string,
+	fallbackMime: string,
+	exportLabel: string,
+): Promise<ActionResult> {
+	if (!file) {
+		throw new ActionError(
+			ErrorCodes.EDA_CALL_FAILED,
+			`${exportLabel} export returned no file - save/reload the PCB and confirm it is non-empty.`,
+		);
+	}
+	const fileName = file.name || fallbackName;
+	const artifact = await blobToArtifact(file, kind, fileName, fallbackMime);
+	return {
+		result: { artifactId: artifact.id, fileName, size: file.size },
+		artifacts: [artifact],
+	};
+}
+
+/** Export EasyEDA's complete manufacturing-data package. Read-only. */
+export const pcbExportManufacture: Handler = async () => {
+	let file: File | undefined;
+	try {
+		file = await eda.pcb_ManufactureData.getManufactureData();
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to export the PCB manufacturing package.');
+	}
+	return pcbExportArtifact(file, 'pcb_manufacture', 'manufacture.zip', 'application/zip', 'Manufacturing package');
+};
+
+/** Export Gerber fabrication data through the official PCB manufacture API. */
+export const pcbExportGerber: Handler = async (payload) => {
+	const fileName = optionalString(payload, 'fileName') ?? 'gerber.zip';
+	const colorSilkscreen = optionalBoolean(payload, 'colorSilkscreen');
+	let file: File | undefined;
+	try {
+		file = await eda.pcb_ManufactureData.getGerberFile(fileName, colorSilkscreen);
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to export Gerber fabrication data.');
+	}
+	return pcbExportArtifact(file, 'pcb_gerber', fileName, 'application/zip', 'Gerber');
+};
+
+/** Export placement coordinates through the official PCB manufacture API. */
+export const pcbExportPickPlace: Handler = async (payload) => {
+	const fileType = (optionalString(payload, 'fileType') ?? 'csv').toLowerCase();
+	if (fileType !== 'csv' && fileType !== 'xlsx') {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'fileType must be "csv" or "xlsx".');
+	}
+	const fileName = optionalString(payload, 'fileName') ?? `pick-and-place.${fileType}`;
+	let file: File | undefined;
+	try {
+		file = await eda.pcb_ManufactureData.getPickAndPlaceFile(fileName, fileType as 'csv' | 'xlsx');
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to export pick-and-place coordinates.');
+	}
+	const mime = fileType === 'csv'
+		? 'text/csv'
+		: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+	return pcbExportArtifact(file, 'pcb_pick_place', fileName, mime, 'Pick-and-place');
+};
+
+/** Export IPC-2581C manufacturing data through the official PCB API. */
+export const pcbExportIpc2581: Handler = async (payload) => {
+	const fileType = (optionalString(payload, 'fileType') ?? '2581').toLowerCase();
+	if (!['xml', 'cvg', '2581'].includes(fileType)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, 'fileType must be "xml", "cvg", or "2581".');
+	}
+	const fileName = optionalString(payload, 'fileName') ?? `design.${fileType}`;
+	const oemNumber = optionalString(payload, 'oemNumber');
+	const allowedOem = ['Device', 'Manufacturer Part', 'Supplier Part', 'Comment'];
+	if (oemNumber && !allowedOem.includes(oemNumber)) {
+		throw new ActionError(ErrorCodes.MISSING_PAYLOAD_FIELD, `oemNumber must be one of: ${allowedOem.join(', ')}.`);
+	}
+	let file: File | undefined;
+	try {
+		file = await eda.pcb_ManufactureData.getIpc2581CFile(
+			fileName,
+			fileType as 'xml' | 'cvg' | '2581',
+			undefined,
+			oemNumber as 'Device' | 'Manufacturer Part' | 'Supplier Part' | 'Comment' | undefined,
+		);
+	}
+	catch (err) {
+		throw edaError(err, 'Failed to export IPC-2581C manufacturing data.');
+	}
+	return pcbExportArtifact(file, 'pcb_ipc2581', fileName, 'application/xml', 'IPC-2581C');
+};
+
 /**
  * Import a routed-result file from the autorouter. `format: 'ses'` (Specctra
  * Session, default) or `'json'` (EasyEDA autoroute JSON). The file arrives as
@@ -10182,6 +10898,13 @@ const HANDLERS: Record<string, Handler> = {
 	'project.current': projectCurrent,
 	'document.current': documentCurrent,
 	'document.open': documentOpen,
+	'library.info': libraryInfo,
+	'library.symbol.get': librarySymbolGet,
+	'library.footprint.get': libraryFootprintGet,
+	'library.device.get': libraryDeviceGet,
+	'library.symbol.create': librarySymbolCreate,
+	'library.footprint.create': libraryFootprintCreate,
+	'library.device.create': libraryDeviceCreate,
 	'view.fit': viewFit,
 	'view.fit_selection': viewFitSelection,
 	'view.zoom': viewZoom,
@@ -10222,6 +10945,9 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.component.replace': schematicComponentReplace,
 	'schematic.component.resolve_lcsc': schematicComponentResolveLcsc,
 	'schematic.text.list': schematicTextList,
+	'schematic.wires.list': schematicWireList,
+	'schematic.graphics.create': schematicGraphicsCreate,
+	'schematic.graphics.delete': schematicGraphicsDelete,
 	'pcb.documents.list': pcbDocumentsList,
 	'pcb.components.list': pcbComponentsList,
 	'pcb.layers.list': pcbLayersList,
@@ -10284,6 +11010,10 @@ const HANDLERS: Record<string, Handler> = {
 	'pcb.fill.delete': pcbFillDelete,
 	'pcb.save': pcbSave,
 	'pcb.export.dsn': pcbExportDsn,
+	'pcb.export.manufacture': pcbExportManufacture,
+	'pcb.export.gerber': pcbExportGerber,
+	'pcb.export.pick_place': pcbExportPickPlace,
+	'pcb.export.ipc2581': pcbExportIpc2581,
 	'pcb.import_autoroute': pcbImportAutoroute,
 	'pcb.snapshot': pcbSnapshot,
 	'pcb.outline.set': pcbOutlineSet,

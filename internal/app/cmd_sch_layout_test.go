@@ -199,6 +199,31 @@ func TestParseLayoutCompsRejectsCountMismatch(t *testing.T) {
 	}
 }
 
+func TestParseLayoutCompsRecognizesReconstructedA4Sheet(t *testing.T) {
+	result := map[string]any{"components": []any{
+		map[string]any{
+			"primitiveId": "sheet-1", "componentType": "part", "name": "RGB Outputs",
+			"x": 0, "y": 0,
+			"component": map[string]any{"uuid": "Drawing-Symbol_A4"},
+			"bbox":      map[string]any{"minX": -10, "minY": -10, "maxX": 10, "maxY": 10},
+			"otherProperty": map[string]any{
+				"Width": "1170", "Height": "825", "Drawed": "Codex automation",
+			},
+		},
+	}, "count": 1}
+	comps, err := parseLayoutComps(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := comps[0]
+	if got.ComponentType != "sheet" || got.BBox == nil || *got.BBox != (layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}) {
+		t.Fatalf("reconstructed sheet was not normalized: %+v", got)
+	}
+	if got.Name != "RGB Outputs" || asString(got.OtherProperty["Drawed"]) != "Codex automation" {
+		t.Fatalf("sheet title metadata was not retained: %+v", got)
+	}
+}
+
 func TestLayoutStrictRejectsFlattenedOrNonPartGeometry(t *testing.T) {
 	cfg := &appConfig{}
 	if err := runLayoutLint(cfg, "", 2.54, 0, true, false, false, true, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--all-pages") {

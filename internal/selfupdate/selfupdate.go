@@ -56,9 +56,13 @@ type SkillTarget struct {
 
 // skillDir returns the skill dir for a client under $HOME, or "" if unknown.
 func skillDir(client string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
 	}
 	switch client {
 	case "claude":

@@ -130,7 +130,11 @@ type pcbLayoutReport struct {
 	MinGapMil      float64       `json:"minGapMil"`
 	Overlaps       []pcbLFinding `json:"overlaps"`
 	OutsideOutline []pcbLFinding `json:"outsideOutline"`
-	TightPairs     []pcbLFinding `json:"tightSpacing"`
+	// BodyOutsideOutline is deliberately separate from pad-level off-board:
+	// edge connectors may overhang intentionally, while an RF module or normal
+	// footprint doing the same still needs an explicit policy decision.
+	BodyOutsideOutline []pcbLFinding `json:"bodyOutsideOutline,omitempty"`
+	TightPairs         []pcbLFinding `json:"tightSpacing"`
 	// AltFitStacks 是同网集堆叠对：两件焊盘数相同、非空网名多重集完全一致且
 	// 本体相交/贴住 —— 官方板的装配选项惯例（同位放两个 fit 选项只焊一个）或
 	// 刻意并联。同网集意味着**不可能**造成跨网短路，装配上也是有意为之，所以
@@ -538,7 +542,7 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 		return rep.Shorts[i].B < rep.Shorts[j].B
 	})
 
-	// 2. Outside board outline. A part is off-board only when one of its PADS lands
+	// 2. Outside board outline. A part is hard off-board only when one of its PADS lands
 	//    outside the outline — a connector whose body/courtyard protrudes past the
 	//    edge (Type-C, card slot, screw terminal) with every pad inside is an
 	//    INTENTIONAL edge-mount (the mating face overhangs on purpose), not a
@@ -554,6 +558,10 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 						outside = true
 						break
 					}
+				}
+				if c.BBox.MinX < outline.MinX || c.BBox.MinY < outline.MinY ||
+					c.BBox.MaxX > outline.MaxX || c.BBox.MaxY > outline.MaxY {
+					rep.BodyOutsideOutline = append(rep.BodyOutsideOutline, pcbLFinding{Type: "body-outside-outline", A: c.Designator})
 				}
 			} else {
 				outside = c.BBox.MinX < outline.MinX || c.BBox.MinY < outline.MinY ||
@@ -648,11 +656,115 @@ func analyzePcbLayout(comps []pcbLComp, pads []pcbLPad, outline *layoutBBox, min
 		rep.Verdict = "very-hard"
 	}
 
-	rep.Summary = fmt.Sprintf("score %d/100 (%s): %d comps%s, %d short, %d overlap, %d off-board, %d tight; %d signal nets, ratsnest %.0fmil, %d crossings",
+	rep.Summary = fmt.Sprintf("score %d/100 (%s): %d comps%s, %d short, %d overlap, %d off-board, %d body-overhang, %d tight; %d signal nets, ratsnest %.0fmil, %d crossings",
 		rep.Score, rep.Verdict, rep.ComponentCount, sidesSuffix(rep.Sides), len(rep.Shorts),
-		len(rep.Overlaps), len(rep.OutsideOutline),
+		len(rep.Overlaps), len(rep.OutsideOutline), len(rep.BodyOutsideOutline),
 		len(rep.TightPairs), rep.SignalNets, rep.RatsnestLenMil, rep.CrossingCount)
 	return rep
+}
+
+type pcbOutlinePoint struct{ X, Y float64 }
+
+func pointOnOutlineSegment(p, a, b pcbOutlinePoint) bool {
+	const eps = 1e-6
+	cross := (p.X-a.X)*(b.Y-a.Y) - (p.Y-a.Y)*(b.X-a.X)
+	if math.Abs(cross) > eps {
+		return false
+	}
+	return p.X >= math.Min(a.X, b.X)-eps && p.X <= math.Max(a.X, b.X)+eps &&
+		p.Y >= math.Min(a.Y, b.Y)-eps && p.Y <= math.Max(a.Y, b.Y)+eps
+}
+
+// pointInPcbOutline is boundary-inclusive ray casting over the real board ring.
+func pointInPcbOutline(p pcbOutlinePoint, ring []pcbOutlinePoint) bool {
+	if len(ring) < 3 {
+		return false
+	}
+	inside := false
+	for i, j := 0, len(ring)-1; i < len(ring); j, i = i, i+1 {
+		a, b := ring[j], ring[i]
+		if pointOnOutlineSegment(p, a, b) {
+			return true
+		}
+		if (a.Y > p.Y) != (b.Y > p.Y) && p.X < (b.X-a.X)*(p.Y-a.Y)/(b.Y-a.Y)+a.X {
+			inside = !inside
+		}
+	}
+	return inside
+}
+
+func bboxInsidePcbOutline(b layoutBBox, ring []pcbOutlinePoint) bool {
+	// Corners alone miss a concave notch crossing the middle of an edge. Probe
+	// corners, edge midpoints, and center; this is deterministic and catches the
+	// practical concave-board failure without pretending the bbox is the outline.
+	mx, my := (b.MinX+b.MaxX)/2, (b.MinY+b.MaxY)/2
+	probes := []pcbOutlinePoint{
+		{b.MinX, b.MinY}, {b.MaxX, b.MinY}, {b.MaxX, b.MaxY}, {b.MinX, b.MaxY},
+		{mx, b.MinY}, {b.MaxX, my}, {mx, b.MaxY}, {b.MinX, my}, {mx, my},
+	}
+	for _, p := range probes {
+		if !pointInPcbOutline(p, ring) {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePcbOutlineRing(v any) []pcbOutlinePoint {
+	raw, _ := v.([]any)
+	ring := make([]pcbOutlinePoint, 0, len(raw))
+	for _, item := range raw {
+		pair, ok := item.([]any)
+		if !ok || len(pair) < 2 {
+			continue
+		}
+		x, xOK := asFloatOK(pair[0])
+		y, yOK := asFloatOK(pair[1])
+		if xOK && yOK {
+			ring = append(ring, pcbOutlinePoint{X: x, Y: y})
+		}
+	}
+	return ring
+}
+
+// applyPolygonContainment replaces bbox-only enclosure findings with checks
+// against the real outline ring returned by pcb.outline.get.
+func applyPolygonContainment(rep *pcbLayoutReport, comps []pcbLComp, pads []pcbLPad, ring []pcbOutlinePoint) {
+	if rep == nil || len(ring) < 3 {
+		return
+	}
+	rep.OutsideOutline = nil
+	rep.BodyOutsideOutline = nil
+	padsByRef := map[string][]pcbLPad{}
+	for _, p := range pads {
+		padsByRef[p.Designator] = append(padsByRef[p.Designator], p)
+	}
+	for _, c := range comps {
+		if c.BBox == nil {
+			continue
+		}
+		cps := padsByRef[c.Designator]
+		if len(cps) == 0 {
+			if !bboxInsidePcbOutline(*c.BBox, ring) {
+				rep.OutsideOutline = append(rep.OutsideOutline, pcbLFinding{Type: "outside-outline", A: c.Designator})
+			}
+			continue
+		}
+		padOutside := false
+		for _, p := range cps {
+			if !pointInPcbOutline(pcbOutlinePoint{X: p.X, Y: p.Y}, ring) {
+				padOutside = true
+				break
+			}
+		}
+		if padOutside {
+			rep.OutsideOutline = append(rep.OutsideOutline, pcbLFinding{Type: "outside-outline", A: c.Designator})
+		}
+		if !bboxInsidePcbOutline(*c.BBox, ring) {
+			rep.BodyOutsideOutline = append(rep.BodyOutsideOutline, pcbLFinding{Type: "body-outside-outline", A: c.Designator})
+		}
+	}
+	rep.OK = len(rep.Overlaps) == 0 && len(rep.OutsideOutline) == 0 && len(rep.Shorts) == 0
 }
 
 // sidesSuffix spells out the per-side split on a double-sided board (" [top 90
@@ -761,10 +873,11 @@ func segCross(e, f ratLink) (x, y float64, ok bool) {
 // the project's pre_route_passed stage is confirmed and a gate summary is
 // persisted for the route commands to consult.
 type pcbLayoutGateOpts struct {
-	gate         bool
-	project      string
-	minScore     int
-	maxCrossings int
+	gate            bool
+	project         string
+	minScore        int
+	maxCrossings    int
+	failBodyOutside bool
 }
 
 func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON bool, gate pcbLayoutGateOpts, stdout, stderr io.Writer) error {
@@ -839,6 +952,7 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 
 	// Board outline bbox (best-effort; nil → skip the off-board check).
 	var outline *layoutBBox
+	var outlineRing []pcbOutlinePoint
 	if ores, oerr := requestAction(cfg, "pcb.outline.get", window, nil); oerr == nil && ores != nil {
 		if bb, ok := mnav(ores.Result, "bbox").(map[string]any); ok {
 			minX, ok1 := asFloatOK(bb["minX"])
@@ -849,6 +963,7 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 				outline = &layoutBBox{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}
 			}
 		}
+		outlineRing = parsePcbOutlineRing(mnav(ores.Result, "points"))
 	}
 
 	// Default min-gap = the board's track-to-pad clearance (live rule) if not set.
@@ -857,6 +972,11 @@ func runPcbLayoutLint(cfg *appConfig, window string, minGapMil float64, asJSON b
 	}
 
 	rep := analyzePcbLayout(comps, pads, outline, minGapMil)
+	applyPolygonContainment(&rep, comps, pads, outlineRing)
+	rep.Summary = fmt.Sprintf("score %d/100 (%s): %d comps%s, %d short, %d overlap, %d off-board, %d body-overhang, %d tight; %d signal nets, ratsnest %.0fmil, %d crossings",
+		rep.Score, rep.Verdict, rep.ComponentCount, sidesSuffix(rep.Sides), len(rep.Shorts),
+		len(rep.Overlaps), len(rep.OutsideOutline), len(rep.BodyOutsideOutline),
+		len(rep.TightPairs), rep.SignalNets, rep.RatsnestLenMil, rep.CrossingCount)
 
 	// Hand-solder iron-access check (issue #99): with a hand-solder profile the
 	// gate also requires every component to keep at least one clear entry side.
@@ -931,6 +1051,9 @@ func evalLayoutGate(rep pcbLayoutReport, opt pcbLayoutGateOpts) routeGateVerdict
 	if len(rep.OutsideOutline) > 0 {
 		v.Reasons = append(v.Reasons, fmt.Sprintf("%d off-board", len(rep.OutsideOutline)))
 	}
+	if opt.failBodyOutside && len(rep.BodyOutsideOutline) > 0 {
+		v.Reasons = append(v.Reasons, fmt.Sprintf("%d body-overhang", len(rep.BodyOutsideOutline)))
+	}
 	if len(rep.TightPairs) > 0 {
 		v.Reasons = append(v.Reasons, fmt.Sprintf("%d tight pair(s) below %.1fmil assembly gap", len(rep.TightPairs), rep.MinGapMil))
 	}
@@ -991,6 +1114,9 @@ func renderPcbLayoutReport(rep pcbLayoutReport, w io.Writer) {
 	}
 	for _, o := range rep.OutsideOutline {
 		fmt.Fprintf(w, "  ERROR off-board  %s extends outside the board outline\n", o.A)
+	}
+	for _, o := range rep.BodyOutsideOutline {
+		fmt.Fprintf(w, "  WARN  body-outside %s body/courtyard extends outside the board outline (approve edge overhang or use --fail-body-outside)\n", o.A)
 	}
 	for _, c := range rep.Crossings {
 		fmt.Fprintf(w, "  WARN  crossing   %s × %s @ (%.0f, %.0f)\n", c.NetA, c.NetB, c.X, c.Y)

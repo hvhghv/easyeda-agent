@@ -510,7 +510,7 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 			geo = append(geo, *pf)
 		}
 		// 图签是交付件:标题/设计者/板名空着,打印出来就是一张没人认领的图。
-		if tf := titleBlockFinding(cfg, window, stderr); tf != nil {
+		if tf := titleBlockFinding(cfg, window, comps, stderr); tf != nil {
 			geo = append(geo, *tf)
 		}
 	}
@@ -673,7 +673,8 @@ func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr 
 		return nil
 	}
 	rects, labels := schZoneFrameCounts(cfg, window)
-	return partitionFindingFor(parts, rects, labels, schTextCount(res.Result))
+	titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
+	return partitionFindingFor(parts, rects, labels, schTextCountOutside(res.Result, titleBlock))
 }
 
 // schZoneFrameCounts 读**工具自己的绘制记账**:平台不提供矩形枚举接口,画过的区框
@@ -695,7 +696,7 @@ func schZoneFrameCounts(cfg *appConfig, window string) (rects, labels int) {
 // titleBlockFinding 判图签有没有填。**这是交付件不是装饰**:图纸标题、设计者、板名
 // 空着或还停在平台默认值(`Board1`),打印出来就是一张没人认领的图。
 // 平台把图签字段放在 sheet 上而不是自由文本里,所以 partitionFinding 那条判据看不见它。
-func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFinding {
+func titleBlockFinding(cfg *appConfig, window string, comps []layoutComp, stderr io.Writer) *checkFinding {
 	res, err := requestAction(cfg, "schematic.titleblock.get", window, map[string]any{})
 	if err != nil {
 		fmt.Fprintf(stderr, "sch check: titleblock-check skipped — titleblock.get failed: %v\n", err)
@@ -705,14 +706,15 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 	if data == nil {
 		return nil
 	}
-	shown, _ := res.Result["showTitleBlock"].(bool)
-	valueOf := func(k string) string {
-		m, _ := data[k].(map[string]any)
-		if m == nil {
-			return ""
-		}
-		return strings.TrimSpace(asString(m["value"]))
+	textValues := map[string]string{}
+	if texts, textErr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); textErr == nil {
+		titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
+		textValues = titleBlockTextValues(texts.Result, titleBlock)
+	} else {
+		fmt.Fprintf(stderr, "sch check: titleblock free-text fallback skipped — text.list failed: %v\n", textErr)
 	}
+	shown, _ := res.Result["showTitleBlock"].(bool)
+	valueOf := func(k string) string { return titleBlockValue(data, comps, textValues, k) }
 	var missing []string
 	// 只判**可写**的必填项。`@` 开头的是系统派生项(@Board Name / @Project Name /
 	// @Page No…),来自工程与板子对象,平台按「无法识别的明细项将被忽略」静默丢弃 ——
@@ -739,6 +741,83 @@ func titleBlockFinding(cfg *appConfig, window string, stderr io.Writer) *checkFi
 		Count:   len(missing),
 		Message: fmt.Sprintf("图签未填:%s — 交付图必须能认领(`sch titleblock --data '{\"Name\":\"…\",\"Drawed\":\"…\"}'`)", strings.Join(missing, "、")),
 	}
+}
+
+// titleBlockValue reads the official page data first, then falls back to the
+// reconstructed sheet component form used by native Drawing-Symbol_A4 pages.
+func titleBlockValue(data map[string]any, comps []layoutComp, textValues map[string]string, key string) string {
+	m, _ := data[key].(map[string]any)
+	if m != nil {
+		if value := strings.TrimSpace(asString(m["value"])); value != "" {
+			return value
+		}
+	}
+	// A natively reconstructed Drawing-Symbol_A4 may expose an empty
+	// titleBlockData map while carrying the same fields on the sheet component.
+	// This is a read-only compatibility fallback; it avoids the unsafe
+	// titleblock.modify path and judges what is actually rendered on the page.
+	for _, c := range comps {
+		if c.ComponentType != "sheet" {
+			continue
+		}
+		if value := strings.TrimSpace(asString(c.OtherProperty[key])); value != "" {
+			return value
+		}
+		if key == "Name" {
+			name := strings.TrimSpace(c.Name)
+			if name != "" && !strings.EqualFold(name, "Drawing-Symbol_A4") {
+				return name
+			}
+		}
+	}
+	if value := strings.TrimSpace(textValues[key]); value != "" {
+		return value
+	}
+	return ""
+}
+
+// titleBlockTextValues accepts a safe typed-graphics fallback only when the
+// annotation anchor is physically inside the derived title-block bbox.
+func titleBlockTextValues(result map[string]any, titleBlock *layoutBBox) map[string]string {
+	out := map[string]string{}
+	if titleBlock == nil {
+		return out
+	}
+	raw, _ := result["texts"].([]any)
+	for _, item := range raw {
+		m, _ := item.(map[string]any)
+		x, xOK := finiteFloat(m["x"])
+		y, yOK := finiteFloat(m["y"])
+		if !xOK || !yOK || x < titleBlock.MinX || x > titleBlock.MaxX || y < titleBlock.MinY || y > titleBlock.MaxY {
+			continue
+		}
+		content := strings.TrimSpace(asString(m["content"]))
+		for _, key := range []string{"Name", "Drawed", "Description"} {
+			prefix := key + ":"
+			if strings.HasPrefix(content, prefix) {
+				out[key] = strings.TrimSpace(strings.TrimPrefix(content, prefix))
+			}
+		}
+	}
+	return out
+}
+
+func schTextCountOutside(result map[string]any, excluded *layoutBBox) int {
+	raw, _ := result["texts"].([]any)
+	if excluded == nil {
+		return len(raw)
+	}
+	count := 0
+	for _, item := range raw {
+		m, _ := item.(map[string]any)
+		x, xOK := finiteFloat(m["x"])
+		y, yOK := finiteFloat(m["y"])
+		if xOK && yOK && x >= excluded.MinX && x <= excluded.MaxX && y >= excluded.MinY && y <= excluded.MaxY {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // partitionFindingFor is the pure decision (split out for testing).

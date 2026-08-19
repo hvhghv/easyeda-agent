@@ -1,5 +1,7 @@
 {
  "version": 1,
+ "cliSchemaVersion": 1,
+ "minConnectorVersion": "1.0.9",
  "meta": {
   "name": "esp32-mini-pcb",
   "description": "esp32MiniRequire 四层板从零全流程(放置→板框/M3/天线→铜→铺铜/内电层→丝印→门禁);uniqueId 用 --var UID_U1=… 对齐 sch read 读到的值(fresh 工程默认 gge1..gge19)",

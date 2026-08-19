@@ -15,6 +15,8 @@ import (
 // Run is the main entry point called by main.go.
 // It returns 0 on success, 1 on any error.
 func Run(args []string, stdout, stderr io.Writer) int {
+	finishTransaction := beginCLITransaction()
+	defer finishTransaction()
 	root := newRootCmd(stdout, stderr)
 	root.SetArgs(args)
 	root.SetOut(stdout)

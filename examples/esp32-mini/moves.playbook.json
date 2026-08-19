@@ -1,5 +1,7 @@
 {
   "version": 1,
+  "cliSchemaVersion": 1,
+  "minConnectorVersion": "1.0.9",
   "meta": {
     "name": "esp32-mini-moves",
     "description": "exported from audit 2026-07-03 (1920 rows → 27 steps, 0 capture(s), 23 raw id(s) need review)",

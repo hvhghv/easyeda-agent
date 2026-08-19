@@ -213,11 +213,51 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	req.CreatedAt = time.Now().UTC()
 	req.WindowID = target.id()
 
+	// A CLI command releases the lease it accumulated across its guard/read/write
+	// sequence through this daemon-local action. Resolve the target window above,
+	// but never forward the release to the connector.
+	if req.Action == "system.transaction.release" {
+		started := time.Now().UTC()
+		released := s.windowTransactions.end(req.WindowID, req.TransactionID)
+		resp := protocol.Response{
+			Envelope: protocol.Envelope{
+				ID: req.ID, Type: protocol.TypeResponse, Version: req.Version,
+				WindowID: req.WindowID, CreatedAt: time.Now().UTC(),
+			},
+			OK:     true,
+			Result: map[string]any{"released": released, "windowId": req.WindowID},
+		}
+		s.audit.Append(fromResponse(started, &req, &resp))
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout(&req))
+	defer cancel()
+	transactionOwner := req.TransactionID
+	transactional := transactionOwner != ""
+	if transactionOwner == "" {
+		// Raw and older callers still serialize while one action is in flight,
+		// but do not retain a lease between unrelated requests.
+		transactionOwner = req.ID
+	}
+	releaseAction, txErr := s.windowTransactions.acquire(ctx, req.WindowID, transactionOwner, transactional)
+	if txErr != nil {
+		started := time.Now().UTC()
+		errResp := errorResponse(req.ID, "WINDOW_BUSY", "another command owns this EasyEDA window", txErr.Error())
+		errResp.WindowID = req.WindowID
+		s.audit.Append(fromResponse(started, &req, &errResp))
+		writeJSON(w, http.StatusConflict, errResp)
+		return
+	}
+	defer releaseAction()
+
 	// Workflow stage gate (issue #97): routing actions refuse until the
 	// project's persisted stage state authorizes them — enforced HERE, at the
 	// choke point, so a raw /action caller can't bypass the CLI's gates.
 	if errResp := s.checkStageGate(&req); errResp != nil {
 		started := time.Now().UTC()
+		errResp.WindowID = req.WindowID
 		s.audit.Append(fromResponse(started, &req, errResp))
 		writeJSON(w, http.StatusForbidden, *errResp)
 		return
@@ -232,6 +272,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			errResp := errorResponse(req.ID, "ACTION_BUSY",
 				fmt.Sprintf("%s is already running on this window", req.Action),
 				"wait for the in-flight check to settle; if it never does, EasyEDA is in the background — bring the window to the FOREGROUND and run once (do not retry in a loop)")
+			errResp.WindowID = req.WindowID
 			s.audit.Append(fromResponse(started, &req, &errResp))
 			writeJSON(w, http.StatusConflict, errResp)
 			return
@@ -239,13 +280,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		defer release()
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout(&req))
-	defer cancel()
-
 	started := time.Now().UTC()
 	resp, err := target.dispatch(ctx, req)
 	if err != nil {
 		errResp := errorResponse(req.ID, "DISPATCH_FAILED", "connector did not respond", err.Error())
+		errResp.WindowID = req.WindowID
 		s.audit.Append(fromResponse(started, &req, &errResp))
 		writeJSON(w, http.StatusGatewayTimeout, errResp)
 		return
@@ -258,6 +297,9 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	if resp.Type == "" {
 		resp.Type = protocol.TypeResponse
 	}
+	// Make the resolved, live target observable to the CLI transaction tracker;
+	// connector responses historically omitted the envelope windowId.
+	resp.WindowID = req.WindowID
 	// Surface the stale-id re-route on the successful response: the call worked,
 	// but the caller's windowId is dead and its NEXT call should use the new one
 	// (or --project). Silently succeeding would leave it holding a dead id.
@@ -316,7 +358,7 @@ func stripArtifactNesting(p string) string {
 		if segs[i] == ".easyeda" && segs[i+1] == "artifacts" {
 			trimmed := strings.Join(segs[:i], sep)
 			if trimmed == "" {
-				if filepath.IsAbs(clean) {
+				if filepath.IsAbs(clean) || strings.HasPrefix(clean, sep) {
 					return sep
 				}
 				return "."

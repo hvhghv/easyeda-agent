@@ -632,38 +632,24 @@ func loadSchGroupsContext(cfg *appConfig, window string) (pinned *appConfig, win
 // schGroupFlagTypes are the marker component types that ride along with a stub.
 var schGroupFlagTypes = map[string]bool{"netflag": true, "netport": true, "netlabel": true}
 
-// fetchSchWirePolylines pulls every wire's {primitiveId, polyline} via the
-// debug.exec_js hatch: the typed components.list `wires` payload flattens to
-// segments WITHOUT primitiveIds, and group-move must name the wire primitives
-// it moves. Read-only; same hatch precedent as autolayout-official/zone-draw.
+// fetchSchWirePolylines pulls every wire's {primitiveId, polyline} through the
+// typed wire inventory. components.list intentionally flattens wires into
+// anonymous segments for collision scoring, while group-move must retain the
+// owning primitive ids.
 func fetchSchWirePolylines(cfg *appConfig, window, docUUID string) ([]schGroupWire, error) {
-	const code = `
-const wires = await eda.sch_PrimitiveWire.getAll() ?? [];
-const out = [];
-for (const w of wires) {
-	let id = '', line = null;
-	try { id = String(w.getState_PrimitiveId?.() ?? ''); } catch {}
-	try { const l = w.getState_Line?.(); if (Array.isArray(l)) line = l; } catch {}
-	if (id && Array.isArray(line) && line.length >= 4) out.push({ id, line });
-}
-return { wires: out };`
-	res, err := requestAutolayoutActionTimed(cfg, "debug.exec_js", window,
-		map[string]any{"code": code}, 30*time.Second, docUUID, "read wire polylines")
+	res, err := requestAutolayoutActionTimed(cfg, "schematic.wires.list", window,
+		map[string]any{}, 30*time.Second, docUUID, "read wire polylines")
 	if err != nil {
 		return nil, err
 	}
-	value, _ := res.Result["value"].(map[string]any)
-	if value == nil {
-		return nil, fmt.Errorf("wire read returned no value (result: %v)", res.Result)
-	}
-	raw, _ := value["wires"].([]any)
+	raw, _ := res.Result["wires"].([]any)
 	out := make([]schGroupWire, 0, len(raw))
 	for _, item := range raw {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		id := asString(m["id"])
+		id := asString(m["primitiveId"])
 		lineRaw, _ := m["line"].([]any)
 		if id == "" || len(lineRaw) < 4 {
 			continue
