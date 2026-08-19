@@ -443,9 +443,13 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	_ = sweepSet // 名单守卫已在 zaaBuildExec 落判;清扫本体归内核(同一份成员集)
 
 	// 执行只准调内核(ADR-0004):快照 → 页级一次深度清扫(删证回读)→ 逐件
-	// 落位(snap5;转竖件双候选实测消解 + pin 中点对中)→ 重连(计划端子显式
+	// 落位(snap5;转竖件双候选实测消解 + pin 中点对中)→ 合并早检(删桩线触发
+	// 的共线合并吞第三方 pin,在新桩线落地前修回)→ 重连(计划端子显式
 	// connect_pin,梯次桩长原样执行)→ 对账(网表逐 pin + bridge 增量),任一步
-	// 失败自动进入恢复段。此前散在这里的 sweep/exec/回滚逻辑全部由内核承接。
+	// 失败自动进入**全页**恢复段(esp32Mini P2 实锤:GND 树上 9 个第三方地脚被
+	// 灌进 +3V3,只救移动集合=抓到了但救不回;修不动时 kerr 自带结构化清单
+	// REF→期望网,可直接喂 `sch connect`,报告从「页面已毁」降级为「N 个 pin
+	// 待手工恢复」)。此前散在这里的 sweep/exec/回滚逻辑全部由内核承接。
 	termByPin := map[string]zaaTermExec{}
 	items := make([]moveItem, 0, len(execs))
 	for _, m := range execs {

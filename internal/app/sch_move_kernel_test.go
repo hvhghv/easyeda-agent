@@ -37,7 +37,7 @@ type fakeMoveOps struct {
 	modifyErrOn       map[string]error // primitiveID → 注入的 modify 错误
 	modifyLandsAnyway bool             // 注入错误时写仍落地(超时假失败)
 
-	autoconnectFn func(conns []acConnSpec) ([]string, []string, error)
+	autoconnectFn func(conns []acConnSpec, replace bool) ([]string, []string, error)
 	connectErr    error
 	docErr        error // resolveDoc 注入:目标页不可解析(工程被重建)
 
@@ -144,14 +144,15 @@ func (f *fakeMoveOps) connectPin(pinX, pinY float64, t moveConnTerm) error {
 	return f.connectErr
 }
 
-func (f *fakeMoveOps) autoconnect(conns []acConnSpec) ([]string, []string, error) {
+func (f *fakeMoveOps) autoconnect(conns []acConnSpec, replace bool) ([]string, []string, error) {
 	refs := make([]string, 0, len(conns))
 	for _, c := range conns {
 		refs = append(refs, c.PinRef)
 	}
-	f.record("autoconnect %s", strings.Join(refs, ","))
+	// 末尾追加 replace 标记:既能用前缀断言引脚集合,也能断言恢复段走 replace。
+	f.record("autoconnect %s replace=%v", strings.Join(refs, ","), replace)
 	if f.autoconnectFn != nil {
-		return f.autoconnectFn(conns)
+		return f.autoconnectFn(conns, replace)
 	}
 	return refs, nil, nil
 }
@@ -207,6 +208,22 @@ func kernelFixture() *fakeMoveOps {
 
 func kernelTestOpts() moveKernelOpts {
 	return moveKernelOpts{Label: "test", RetryDelay: 1}
+}
+
+// kernelFixtureWithNeighbor 在标准场景上给第三方件 U9 接一根自己的 GND 树
+// (w9+f9,几何上远离 R1 的树 —— 不构成共享树,深度清扫不会碰它)。
+// GND 网横跨两棵树:{R1.2, U9.1}。这正是 esp32Mini P2 的最小复刻:移动 R1
+// 删桩线时,共线合并吞掉的是 GND 树上**别人**的脚。
+func kernelFixtureWithNeighbor() *fakeMoveOps {
+	f := kernelFixture()
+	f.comps = append(f.comps, layoutComp{ID: "f9", ComponentType: "netflag", Net: "GND", X: 495, Y: 470, AnchorAvailable: true})
+	f.wires = append(f.wires, schGroupWire{ID: "w9", Points: []float64{495, 500, 495, 470}})
+	f.alive["w9"], f.alive["f9"] = true, true
+	f.netSeq = []map[string]map[string]bool{{
+		"5V":  {"R1.1": true},
+		"GND": {"R1.2": true, "U9.1": true},
+	}}
+	return f
 }
 
 // ── 成功路径 + snap 网格 ────────────────────────────────────────────────────
@@ -324,7 +341,7 @@ func TestMoveKernel_NewBridgeFailsReconcileAndRecovers(t *testing.T) {
 func TestMoveKernel_HardMoveFailureRunsRecovery(t *testing.T) {
 	f := kernelFixture()
 	f.modifyErrOn["pid-r1"] = errors.New("connector rejected")
-	f.autoconnectFn = func(conns []acConnSpec) ([]string, []string, error) {
+	f.autoconnectFn = func(conns []acConnSpec, replace bool) ([]string, []string, error) {
 		return []string{"R1:1"}, []string{"R1:2"}, fmt.Errorf("1 connection(s) failed")
 	}
 	rep, err := schMoveKernelWith(f, []moveItem{
@@ -336,11 +353,12 @@ func TestMoveKernel_HardMoveFailureRunsRecovery(t *testing.T) {
 	if len(rep.Recovered) != 1 || rep.Recovered[0] != "R1:1" {
 		t.Fatalf("Recovered 应为 [R1:1],got %v", rep.Recovered)
 	}
-	if len(rep.StillBroken) != 1 || rep.StillBroken[0] != "R1:2" {
-		t.Fatalf("StillBroken 应为 [R1:2],got %v", rep.StillBroken)
+	// 仍断 pin 必须带期望网名(REF→期望网,可直接喂 `sch connect`)。
+	if len(rep.StillBroken) != 1 || rep.StillBroken[0] != "R1:2→GND" {
+		t.Fatalf("StillBroken 应为 [R1:2→GND],got %v", rep.StillBroken)
 	}
-	if !strings.Contains(err.Error(), "R1:2") {
-		t.Fatalf("错误必须点名仍断的 pin:%v", err)
+	if !strings.Contains(err.Error(), "R1:2→GND") {
+		t.Fatalf("错误必须点名仍断的 pin 及期望网:%v", err)
 	}
 }
 
@@ -350,7 +368,9 @@ func TestMoveKernel_ReconcileHealsAfterRecovery(t *testing.T) {
 	f := kernelFixture()
 	degraded := map[string]map[string]bool{"5V": {"R1.1": true}} // GND 网丢了
 	full := f.netSeq[0]
-	f.netSeq = []map[string]map[string]bool{full, degraded, full}
+	// 读序:快照(full)→ 合并早检(full,干净)→ 对账首轮(degraded,红)→
+	// 恢复段补连 → 对账复查(full,绿)。
+	f.netSeq = []map[string]map[string]bool{full, full, degraded, full}
 	rep, err := schMoveKernelWith(f, []moveItem{
 		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
 	}, kernelTestOpts())
@@ -434,6 +454,141 @@ func TestMoveKernel_EmptyPageContradictionFailsClosed(t *testing.T) {
 	}
 	if len(rep.Recovered) != 0 || len(rep.StillBroken) != 0 {
 		t.Fatalf("不许输出虚假的恢复/断开清单:%+v", rep)
+	}
+}
+
+// ── 平台病 4:删桩线触发共线合并吞第三方网(esp32Mini P2 P0 缺陷注入)─────────
+//
+// 真机实录:`zone-arrange --apply` 在 P2 页删证后,相邻共线导线自动合并把
+// GND 树上 9 个**非移动件**的地脚灌进 +3V3、GND 整网消失;第 5 步对账(断言②)
+// 抓到了,但旧恢复段只重连「被移动件」的涉及 pin —— 第三方 pin 无人来救,
+// 页面只能删页重建。以下三个注入分别钉住:合并早检(3.5 步就发现并修)、
+// 恢复段全页扩权(对账红时第三方 pin 也按快照重连)、修不动时结构化列全
+// (报告从「页面已毁」降级为「N 个 pin 待手工恢复」)。
+
+// 3.5 合并早检:删证吞掉 U9.1(灌进 +3V3),必须在新桩线落地(第 4 步)之前
+// 用 replace 重连修回,而不是拖到第 5 步对账。
+func TestMoveKernel_MergeSwallowsThirdPartyPin_EarlyDetectAndRepair(t *testing.T) {
+	f := kernelFixtureWithNeighbor()
+	healthy := f.netSeq[0]
+	corrupt := map[string]map[string]bool{"+3V3": {"U9.1": true}} // GND 整网消失,U9.1 被灌进 +3V3
+	// 读序:快照(healthy)→ 合并早检(corrupt)→ 对账(healthy:早检修复后一致)。
+	f.netSeq = []map[string]map[string]bool{healthy, corrupt, healthy}
+	rep, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
+	}, kernelTestOpts())
+	if err != nil {
+		t.Fatalf("早检修复后应成功:%v", err)
+	}
+	idxRepair, idxRest := -1, -1
+	for i, l := range f.log {
+		if strings.HasPrefix(l, "autoconnect U9:1") {
+			idxRepair = i
+			if !strings.Contains(l, "replace=true") {
+				t.Fatalf("早检修复必须走 replace(灌错网要先拆再连):%s", l)
+			}
+		}
+		if strings.HasPrefix(l, "autoconnect R1:1,R1:2") {
+			idxRest = i
+		}
+	}
+	if idxRepair < 0 {
+		t.Fatalf("合并早检必须按快照重连第三方 pin U9:1,log=%v", f.log)
+	}
+	if idxRest < 0 || idxRepair > idxRest {
+		t.Fatalf("早检修复必须发生在重连步(新桩线落地)之前:repair@%d rest@%d,log=%v", idxRepair, idxRest, f.log)
+	}
+	joined := strings.Join(rep.Notes, ";")
+	if !strings.Contains(joined, "合并早检") {
+		t.Fatalf("必须留痕归因(合并早检),notes=%v", rep.Notes)
+	}
+}
+
+// 恢复段全页扩权:合并的后果到第 5 步对账才暴露时,恢复段必须把**第三方**
+// 偏离 pin(U9:1)也按快照网名重连(replace),复查绿才算恢复成功。
+func TestMoveKernel_ThirdPartyDamageRecoveredAtReconcile(t *testing.T) {
+	f := kernelFixtureWithNeighbor()
+	healthy := f.netSeq[0]
+	corrupt := map[string]map[string]bool{"+3V3": {"U9.1": true}}
+	// 读序:快照 → 早检(干净)→ 对账首轮(corrupt,红)→ 恢复 → 复查(healthy,绿)。
+	f.netSeq = []map[string]map[string]bool{healthy, healthy, corrupt, healthy}
+	rep, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
+	}, kernelTestOpts())
+	if err != nil {
+		t.Fatalf("恢复段全页补连后复查绿应算成功:%v", err)
+	}
+	repaired := false
+	for _, l := range f.log {
+		if strings.HasPrefix(l, "autoconnect ") && strings.Contains(l, "U9:1") && strings.Contains(l, "replace=true") {
+			repaired = true
+		}
+	}
+	if !repaired {
+		t.Fatalf("恢复段必须对第三方 pin U9:1 走 replace 重连(只救移动集合=抓到了但救不回),log=%v", f.log)
+	}
+	found := false
+	for _, r := range rep.Recovered {
+		if r == "U9:1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Recovered 必须含第三方 pin U9:1,got %v", rep.Recovered)
+	}
+	if len(rep.Notes) == 0 {
+		t.Fatal("对账首轮红必须留痕(note)")
+	}
+}
+
+// 恢复不动(网表持续腐坏)→ 不许谎报成功,仍偏离 pin 连同期望网名结构化列全
+// (REF→期望网,可直接喂 `sch connect`)—— 报告从「页面已毁」降级为
+// 「N 个 pin 待手工恢复,清单如下」。
+func TestMoveKernel_ThirdPartyUnrecoverableStructuredList(t *testing.T) {
+	f := kernelFixtureWithNeighbor()
+	healthy := f.netSeq[0]
+	corrupt := map[string]map[string]bool{"+3V3": {"U9.1": true}}
+	// 对账起持续腐坏(粘住):恢复两轮都修不动。
+	f.netSeq = []map[string]map[string]bool{healthy, healthy, corrupt}
+	rep, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 200, Y: 100},
+	}, kernelTestOpts())
+	if err == nil {
+		t.Fatal("网表持续与快照不符必须失败(判据是电气不是坐标)")
+	}
+	wantBroken := map[string]bool{"R1:1→5V": true, "R1:2→GND": true, "U9:1→GND": true}
+	got := map[string]bool{}
+	for _, s := range rep.StillBroken {
+		got[s] = true
+	}
+	for w := range wantBroken {
+		if !got[w] {
+			t.Fatalf("StillBroken 必须结构化列全(含第三方,REF→期望网),缺 %s,got %v", w, rep.StillBroken)
+		}
+	}
+	if !strings.Contains(err.Error(), "U9:1→GND") || !strings.Contains(err.Error(), "待手工恢复") {
+		t.Fatalf("错误必须给出可执行清单(REF→期望网 + 待手工恢复):%v", err)
+	}
+	if !strings.Contains(err.Error(), "sch connect") {
+		t.Fatalf("错误必须指路 `sch connect`:%v", err)
+	}
+}
+
+// deficit 解析:快照浮空却被灌进网的 pin 只能手工拆(不自动 disconnect ——
+// 拆共享树会连累树上无辜 pin),必须落进 manual 清单并指路 `sch disconnect`。
+func TestMovePinDeficits_SpuriousGainListedManualOnly(t *testing.T) {
+	before := map[string]map[string]bool{"GND": {"R1.2": true}}
+	after := map[string]map[string]bool{"GND": {"R1.2": true}, "+3V3": {"U9.1": true}}
+	defs := moveKernelPinDeficits(before, after)
+	if len(defs) != 1 || defs[0].Ref != "U9:1" || defs[0].WantNet != "" || defs[0].GotNet != "+3V3" {
+		t.Fatalf("应只有 U9:1 的 spurious-gain deficit,got %+v", defs)
+	}
+	specs, manual := moveKernelDeficitSpecs(defs)
+	if len(specs) != 0 || len(manual) != 1 {
+		t.Fatalf("快照浮空的 pin 不许自动重连,只进 manual:specs=%v manual=%v", specs, manual)
+	}
+	if s := manual[0].String(); !strings.Contains(s, "sch disconnect") || !strings.Contains(s, "U9:1") {
+		t.Fatalf("manual 清单必须指路 sch disconnect:%s", s)
 	}
 }
 
