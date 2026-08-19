@@ -247,8 +247,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// outcome feeds the rolling per-window health; whitelisted idempotent
 	// actions get one light-read-gated retry; everything else passes failures
 	// through (annotated with a degraded advisory below — never blind-resent).
+	// The outcome carries the EFFECT verdict, not just the return code: a
+	// response that re-read the canvas and reported survivors/notApplied counts
+	// as a failed write however green its ok flag is (通道 A).
 	hooks := adaptiveHooks{
-		observe: func(action string, ok bool) { s.writeHealth.observe(req.WindowID, action, ok) },
+		observe: func(o outcome) { s.writeHealth.observe(req.WindowID, o) },
 		auditFirst: func(firstResp *protocol.Response, firstErr error) {
 			first := firstResp
 			if first == nil {
@@ -295,10 +298,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// a window another client wrote to recently, annotate the response with a
 	// non-blocking concurrentWriter field. See concurrentwrites.go.
 	s.concurrentWrites.observe(&req, resp)
-	// Degraded-connector advisory (REPORT round2 新 3): a FAILED response on a
-	// window whose rolling health is degraded carries a structured hint —
+	// Degraded-connector advisory (REPORT round2 新 3): a FAILED response — or an
+	// ok response the connector's own re-read proves did not fully land (假成功)
+	// — on a window whose rolling health is degraded carries a structured hint;
 	// mutating actions get the fake-failure-law advice (verify by light read
-	// before resending); nothing is retried here. See writehealth.go.
+	// before resending). Nothing is retried here. See writehealth.go.
 	s.writeHealth.annotateDegraded(&req, resp)
 	s.audit.Append(fromResponse(started, &req, resp))
 	// After a successful content-changing action, arm a debounced autosave so the

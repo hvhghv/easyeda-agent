@@ -189,6 +189,20 @@ extensionUuid 在 `extension/extension.json`。IndexedDB 结构非官方稳定 A
   先 pour-rebuild 再判断。
 - **后台窗口 DRC 永不完成**:见 `pcb.md` DRC 条目——切前台单发,daemon 已防
   重入(`ACTION_BUSY`)。
+- **判连接器健不健康,看 `easyeda health` 的 `writeHealth`——但要按新口径读**
+  (2026-08-19 修订)。它统计的是**写的效果**,不是调用的返回码:
+  - `failureRate` 里已经含「返回 ok 但回读证明没落地」的那一类(`fakeSuccesses`);
+    首版只数返回码,那场端到端里全程 0.05/绿灯,而画布上大面积的写没生效。
+  - `fakeFailures` 是反向那一类(报失败但其实已落地)——**不**计入失败率,
+    因为处置动作相反:看到它就绝不能重发(重发造重复旗)。
+  - `verified` = 有回读证据的样本数。**`verified` 低 + `failureRate` 绿 = 没人核对过**,
+    不能读成"一切正常"。
+  - `degradedActions[]` / `actions{}` 是逐 action 分桶:某条路(如 `connect_pin`
+    一批 40% 失败)在混合流量里不会再被均值稀释,会被直接点名。
+  `degraded:true` 时的正确动作:插一次轻读 + 短暂 settle;**写**失败先轻读复核
+  「是不是其实已经落地」再决定,持续不恢复就 `easyeda doc reload`。
+  daemon 只自动重发幂等导航动作(`document.open` / `schematic.page.open`),
+  内容写永不 daemon 级重发。
 - **用户说「画面没更新」**:web 编辑器前台窗口对所有编辑类型**即时重绘**
   (2026-07-07 sha 比对实测:track/挪件/丝印/pour-rebuild 全即时,tab 切回也
   即时)——画面旧只发生在桌面客户端、OS 级最小化/遮挡恢复、或铺铜 reflow 几何

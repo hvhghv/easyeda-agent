@@ -118,7 +118,10 @@ type health struct {
 	// WriteHealth is the rolling per-window forwarded-action failure window
 	// (writehealth.go): degraded=true flags a connector that is failing under
 	// load (REPORT round2 新 3 — clients should insert light reads and verify
-	// before any retry of a write). Omitted while no action has been forwarded.
+	// before any retry of a write). Rates are EFFECT-level — a call that
+	// returned ok but was proven not to have landed counts as a failure — and
+	// per-action buckets (actions / degradedActions) keep one broken road from
+	// being averaged away. Omitted while no action has been forwarded.
 	WriteHealth map[string]WindowWriteHealth `json:"writeHealth,omitempty"`
 }
 
@@ -146,6 +149,12 @@ func (s *Server) routes(port int) *http.ServeMux {
 	})
 	mux.HandleFunc("/eda", s.handleConnect)
 	mux.HandleFunc("/action", s.handleAction)
+	// /writeverify is 通道 B of the write-health metric (writehealth.go): a
+	// command that VERIFIED a write by reading the canvas back posts its verdict
+	// here. Not a typed action on purpose — the verdict arrives after (and often
+	// covers many of) the calls it judges, and keeping it daemon-local means the
+	// connector never needs a rebuild for it.
+	mux.HandleFunc("/writeverify", s.handleWriteVerify)
 	return mux
 }
 

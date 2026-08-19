@@ -198,6 +198,14 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]
 			missing = append(missing, id)
 		}
 	}
+	// 落地回读的结论回传给 daemon 写健康度(通道 B):每次 place 大多返回成功,
+	// 只有这次回读知道有几件真在页面上。真机跑出过「6 件只落地 1 件」而
+	// writeHealth 全程 0.05/绿灯 —— 那是因为这个结论以前只打印在 CLI 层。
+	// 响应里挖不出这个判决,所以必须走上报通道而不是 daemon 内省。
+	reportWriteVerified(cfg, window, writeVerdict{
+		action: "schematic.component.place", source: "sch block-apply",
+		returnedOK: true, landed: len(foundIDs), notLanded: len(missing),
+	})
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		return nil, nil, fmt.Errorf("layout read-back did not contain placed primitiveId(s): %s", strings.Join(missing, ", "))

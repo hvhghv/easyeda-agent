@@ -519,6 +519,12 @@ func runPartitionDrawResilient(cfg *appConfig, window string, opts partitionOpts
 		drawn++
 		if out.Adopted {
 			adopted++
+			// 假失败回传(通道 B):daemon 把那次 exec_js 记成失败了,landed-check
+			// 证明它其实落地了。不回传 = 健康度把「连接器慢」当成「连接器坏」。
+			reportWriteVerified(pinnedCfg, win, writeVerdict{
+				action: "debug.exec_js", source: "sch zone-draw",
+				returnedOK: false, landed: 1,
+			})
 			fmt.Fprintf(stderr, "zone %q: write reported failure but the light read proved it landed — ids adopted, nothing was resent (假失败定律)\n", t.Title)
 		} else if out.Retried {
 			fmt.Fprintf(stderr, "zone %q: first attempt failed, succeeded on the settle-verified retry\n", t.Title)

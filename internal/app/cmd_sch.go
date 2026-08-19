@@ -1304,6 +1304,13 @@ pull fresh ids before any follow-up mutation on it.`,
 				if rerr != nil || res == nil || !connectLanded(res.Result, desig, pinNum, net) {
 					return dispErr
 				}
+				// 回传假失败(通道 B):daemon 把这次转发记成失败了,而回读证明写
+				// 其实落地了 —— 不回传的话,健康度会把一次「连接器慢」算成一次
+				// 「连接器坏」,degraded 在错误的方向上响。
+				reportWriteVerified(cfg, window, writeVerdict{
+					action: "schematic.power.connect_pin", source: "sch connect",
+					returnedOK: false, landed: 1,
+				})
 				fmt.Fprintf(stderr, "⚠ connect_pin 报超时/派发失败,但回读确认 %s 已在网络 %s 上 —— slow-landed,按成功处理(不要重试,会造重复旗)。\n", pinRef, net)
 				return json.NewEncoder(stdout).Encode(map[string]any{
 					"ok": true,
