@@ -840,6 +840,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
   easyeda sch prim-delete                 # delete the current selection`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				payload := map[string]any{}
+				var cascadePlan map[string]string // primitiveId → group-member designator
 				if idsRaw != "" {
 					ids, err := parseIDList(idsRaw)
 					if err != nil {
@@ -851,13 +852,25 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 						return err
 					}
 					payload["primitiveIds"] = ids
-					// Persistent-group awareness (best-effort, read-only): deleting
-					// a group member leaves the relation stale — say so up front.
-					warnSchGroupMemberDeletion(cfg, window, ids, stderr)
+					// 缺陷 2(P1):删器件必须级联删组注册,否则位号复用后新件被
+					// 陈旧组吃掉。先于删除解析 id→位号(删完 list 就查不到了)。
+					cascadePlan = planSchGroupMemberCascade(cfg, window, ids, stderr)
 				}
 				res, err := dispatchCapture(cfg, "schematic.primitives.delete", window, payload, stdout)
 				if err != nil {
 					return err
+				}
+				// Registry leg of the delete cascade: only designators whose delete
+				// was VERIFIED (not in result.survived) leave the group table.
+				if len(cascadePlan) > 0 {
+					survived := survivedIDSet(res.Result)
+					var gone []string
+					for id, desig := range cascadePlan {
+						if !survived[id] {
+							gone = append(gone, desig)
+						}
+					}
+					cascadeSchGroupMembership(cfg, window, gone, stderr)
 				}
 				// ADR-0004 Decision 5: when a delete response carries a cascaded
 				// cleanup block (component.delete does; renderer is generic), say so.

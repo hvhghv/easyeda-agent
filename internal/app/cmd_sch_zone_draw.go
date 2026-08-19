@@ -130,16 +130,23 @@ const cleanupCreated = async () => {
   const cleanupErrors = [];
   // Generic class first: the per-class text delete does not persist (issue #164),
   // so a rollback through it leaves the labels behind on the next reload.
-  if (genericPrim) {
-    try { const all = [...rects, ...texts]; if (all.length) await genericPrim.delete(all); }
-    catch (err) { cleanupErrors.push(String(err)); }
-  } else {
-    try { if (rects.length) await eda.sch_PrimitiveRectangle.delete(rects); } catch (err) { cleanupErrors.push(String(err)); }
-    try { if (texts.length) await eda.sch_PrimitiveText.delete(texts); } catch (err) { cleanupErrors.push(String(err)); }
-  }
+  // 逐个删 + 回读 + 幸存者重试一次(缺陷 3:批量 delete 静默 no-op 仍返 true)。
+  const delOne = async (id, cls) => {
+    try { await (genericPrim ?? cls).delete([id]); }
+    catch (err) { cleanupErrors.push(id + ': ' + String(err)); }
+  };
+  for (const id of rects) await delOne(id, eda.sch_PrimitiveRectangle);
+  for (const id of texts) await delOne(id, eda.sch_PrimitiveText);
   try {
-    const aliveRects = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
-    const aliveTexts = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
+    let aliveRects = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
+    let aliveTexts = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
+    const needRetry = rects.some(id => aliveRects.has(id)) || texts.some(id => aliveTexts.has(id));
+    if (needRetry) {
+      for (const id of rects) if (aliveRects.has(id)) await delOne(id, eda.sch_PrimitiveRectangle);
+      for (const id of texts) if (aliveTexts.has(id)) await delOne(id, eda.sch_PrimitiveText);
+      aliveRects = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
+      aliveTexts = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
+    }
     return {cleanupSurvived:[...rects.filter(id => aliveRects.has(id)), ...texts.filter(id => aliveTexts.has(id))], cleanupErrors};
   } catch (err) {
     cleanupErrors.push(String(err));
@@ -168,26 +175,39 @@ func writeZoneDrawEpilogue(b *strings.Builder) {
 // below re-reads IMMEDIATELY, it saw them gone and reported a clean sweep. Live
 // run before the fix: "cleared 6 previous zone-frame primitive(s)" while all 3
 // labels were still on the page. `sch_PrimitiveObject.delete()` persists.
+//
+// 缺陷 3(P1):**批量** delete 不可靠 —— 真机实锤本命令批量删旧框报 survived=4,
+// 而逐个删成功率 100%(平台大批量静默 no-op 仍返 true 的已知病)。删除因此改成
+// **逐个删 + 回读证实 + 幸存者重试一次**(与 Go 侧 deleteVerifiedOneByOne 同一套
+// 语义,内联在单次 exec_js 里跑,免去逐 id 的连接器往返)。判定只信回读。
 func buildZoneClearJS(f *workflow.SchZoneFrames) string {
 	rects, _ := json.Marshal(f.Rects)
 	texts, _ := json.Marshal(f.Texts)
 	return fmt.Sprintf(`const rects=%s, texts=%s;
-const rectAliveBefore = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
-const textAliveBefore = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
-const foundRects = rects.filter(id => rectAliveBefore.has(id));
-const foundTexts = texts.filter(id => textAliveBefore.has(id));
 const generic = eda.sch_PrimitiveObject && typeof eda.sch_PrimitiveObject.delete === 'function'
   ? eda.sch_PrimitiveObject : null;
-if (generic) { const all = [...foundRects, ...foundTexts]; if (all.length) await generic.delete(all); }
-else {
-  if (foundRects.length) await eda.sch_PrimitiveRectangle.delete(foundRects);
-  if (foundTexts.length) await eda.sch_PrimitiveText.delete(foundTexts);
-}
-const rectAliveAfter = new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId());
-const textAliveAfter = new Set(await eda.sch_PrimitiveText.getAllPrimitiveId());
-const survived = [...rects.filter(id => rectAliveAfter.has(id)), ...texts.filter(id => textAliveAfter.has(id))];
+const aliveSets = async () => ({
+  rect: new Set(await eda.sch_PrimitiveRectangle.getAllPrimitiveId()),
+  text: new Set(await eda.sch_PrimitiveText.getAllPrimitiveId()),
+});
+let alive = await aliveSets();
+const foundRects = rects.filter(id => alive.rect.has(id));
+const foundTexts = texts.filter(id => alive.text.has(id));
 const found = foundRects.length + foundTexts.length;
-return {ok:survived.length===0, requested:rects.length+texts.length, found, deleted:found-survived.length, survived, viaGeneric: !!generic};`, rects, texts)
+const deleteErrors = [];
+const delOne = async (id, cls) => {
+  try { await (generic ?? cls).delete([id]); }
+  catch (err) { deleteErrors.push(id + ': ' + (err instanceof Error ? err.message : String(err))); }
+};
+for (const id of foundRects) await delOne(id, eda.sch_PrimitiveRectangle);
+for (const id of foundTexts) await delOne(id, eda.sch_PrimitiveText);
+alive = await aliveSets();
+const retried = [];
+for (const id of foundRects) if (alive.rect.has(id)) { retried.push(id); await delOne(id, eda.sch_PrimitiveRectangle); }
+for (const id of foundTexts) if (alive.text.has(id)) { retried.push(id); await delOne(id, eda.sch_PrimitiveText); }
+if (retried.length) alive = await aliveSets();
+const survived = [...rects.filter(id => alive.rect.has(id)), ...texts.filter(id => alive.text.has(id))];
+return {ok:survived.length===0, requested:rects.length+texts.length, found, deleted:found-survived.length, survived, retried, deleteErrors, viaGeneric: !!generic};`, rects, texts)
 }
 
 func asStringSlice(v any) []string {

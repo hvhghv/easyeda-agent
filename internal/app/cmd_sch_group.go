@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
 	"github.com/zhoushoujianwork/easyeda-agent/internal/workflow"
 )
 
@@ -217,6 +218,38 @@ func groupsUngroup(groups []*schGroup, ref string) ([]*schGroup, *schGroup, erro
 		}
 	}
 	return out, g, nil
+}
+
+// parseGroupRolesFlag parses --roles "ROLE=R1,LED=LED1" into role→designator.
+// Role keys keep their case as typed (block JSON role names are the match key);
+// designators are upper-cased like every other member reference. Duplicate
+// roles and malformed entries are hard errors — a silently-wrong provenance
+// map would make reconcile report phantom diffs.
+func parseGroupRolesFlag(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 || strings.TrimSpace(kv[0]) == "" || strings.TrimSpace(kv[1]) == "" {
+			return nil, fmt.Errorf("--roles 条目 %q 不是 ROLE=位号 形式(例:--roles BUCK=U3,CIN=C11)", part)
+		}
+		role := strings.TrimSpace(kv[0])
+		if _, dup := out[role]; dup {
+			return nil, fmt.Errorf("--roles 里 role %q 出现了两次", role)
+		}
+		out[role] = strings.ToUpper(strings.TrimSpace(kv[1]))
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 // findPartialGroups reports every group the selection PARTIALLY covers: it
@@ -874,24 +907,26 @@ func warnSchGroupsPresent(cfg *appConfig, window, verb string, stderr io.Writer)
 		len(groups), strings.Join(ids, ", "), verb)
 }
 
-// warnSchGroupMemberDeletion warns when prim-delete is about to remove a group
-// member (the relation goes stale; `sch group list` marks it). Best-effort and
-// read-only — a failure must never block the delete.
-func warnSchGroupMemberDeletion(cfg *appConfig, window string, ids []string, stderr io.Writer) {
+// planSchGroupMemberCascade resolves, BEFORE a delete, which of the doomed
+// primitiveIds are registered group members (id → designator). It must run
+// before the delete because afterwards components.list no longer knows the
+// designator. Best-effort and read-only — a failure must never block the
+// delete (it just means the cascade can't run; `sch group list` marks stale).
+func planSchGroupMemberCascade(cfg *appConfig, window string, ids []string, stderr io.Writer) map[string]string {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	pinned, win, docUUID, _, _, groups, err := loadSchGroupsContext(cfg, window)
 	if err != nil || len(groups) == 0 {
-		return
+		return nil
 	}
 	res, err := requestAutolayoutAction(pinned, "schematic.components.list", win, nil, docUUID, "check group membership")
 	if err != nil {
-		return
+		return nil
 	}
 	comps, err := parseLayoutComps(res.Result)
 	if err != nil {
-		return
+		return nil
 	}
 	desigByID := map[string]string{}
 	for _, c := range comps {
@@ -899,16 +934,92 @@ func warnSchGroupMemberDeletion(cfg *appConfig, window string, ids []string, std
 			desigByID[c.ID] = strings.ToUpper(c.Designator)
 		}
 	}
+	plan := map[string]string{}
 	for _, id := range ids {
 		desig := desigByID[id]
 		if desig == "" {
 			continue
 		}
 		if g := groupOfMember(groups, desig); g != nil {
-			fmt.Fprintf(stderr, "⚠ %s belongs to group %s — deleting it leaves the group stale (`sch group remove --group %s --members %s`, or `sch group list` to audit)\n",
-				desig, describeSchGroup(g), g.ID, desig)
+			plan[id] = desig
+			fmt.Fprintf(stderr, "⚠ %s belongs to group %s — its registration will be removed after the delete is verified\n",
+				desig, describeSchGroup(g))
 		}
 	}
+	return plan
+}
+
+// cascadeSchGroupMembership removes just-deleted designators from the active
+// page's persistent-group registry (缺陷 2,P1:删器件不级联删组注册 —— 位号被
+// 复用时,后放的新件会被早已不存在器件的陈旧组吃掉,整个块归组失败)。The
+// registry lives Go-side (workflow.State.GroupsByPage), so the connector's
+// component.delete cascade (ADR-0004 Decision 5) can't reach it — THIS is the
+// registry leg of that cascade. Emptied groups are dropped. Fail-soft: the
+// delete already succeeded; a registry-cleanup failure must warn, never error.
+func cascadeSchGroupMembership(cfg *appConfig, window string, designators []string, stderr io.Writer) {
+	drop := map[string]bool{}
+	for _, d := range designators {
+		if d = strings.ToUpper(strings.TrimSpace(d)); d != "" {
+			drop[d] = true
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	_, _, docUUID, _, st, groups, err := loadSchGroupsContext(cfg, window)
+	if err != nil {
+		fmt.Fprintf(stderr, "warn: 组注册级联清理不可用(%v)—— 若有陈旧组用 `sch group list` 查、`sch group remove` 清\n", err)
+		return
+	}
+	next, notes := cascadeGroupsRemoveDesignators(groups, drop)
+	if notes == nil {
+		return // no group referenced any deleted designator
+	}
+	if err := saveSchGroups(st, docUUID, next); err != nil {
+		fmt.Fprintf(stderr, "warn: 组注册级联清理未能落盘(%v)—— 陈旧成员仍在,用 `sch group remove` 手工清\n", err)
+		return
+	}
+	for _, n := range notes {
+		fmt.Fprintf(stderr, "cascade ✓ %s\n", n)
+	}
+}
+
+// cascadeGroupsRemoveDesignators is the pure core of the delete cascade:
+// strip the dropped designators from every group; a group emptied by the strip
+// is deleted. notes == nil means nothing referenced a dropped designator.
+func cascadeGroupsRemoveDesignators(groups []*schGroup, drop map[string]bool) (next []*schGroup, notes []string) {
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		var kept, removed []string
+		for _, m := range g.Members {
+			if drop[m] {
+				removed = append(removed, m)
+			} else {
+				kept = append(kept, m)
+			}
+		}
+		if len(removed) == 0 {
+			next = append(next, g)
+			continue
+		}
+		if len(kept) == 0 {
+			notes = append(notes, fmt.Sprintf("组 %s 的成员已全部删除 — 组一并移除", describeSchGroup(g)))
+			continue
+		}
+		g.Members = kept
+		// Roles 指向已删位号的条目一并摘除,免得 reconcile 拿死位号去对账。
+		for r, d := range g.Roles {
+			if drop[d] {
+				delete(g.Roles, r)
+			}
+		}
+		notes = append(notes, fmt.Sprintf("组 %s 移除已删成员 %s(剩 %d 件)",
+			describeSchGroup(g), strings.Join(removed, ","), len(kept)))
+		next = append(next, g)
+	}
+	return next, notes
 }
 
 // ── cobra surface ───────────────────────────────────────────────────────────
@@ -946,14 +1057,33 @@ at most one group per page.`,
 
 	// ── create ──
 	{
-		var membersRaw, name string
+		var membersRaw, name, blockID, instance, rolesRaw string
 		c := &cobra.Command{
 			Use:   "create",
 			Short: "Create a group from member designators (CSV); id is auto-assigned (g1, g2, …)",
 			Args:  cobra.NoArgs,
+			Long: `Create a persistent virtual group from member designators.
+
+Block provenance (缺陷 4 修复): --block-id / --instance / --roles write the same
+provenance fields ` + "`sch block-apply`" + ` registers automatically, so a group whose
+registration was lost (e.g. eaten by a stale group before the delete-cascade
+fix) can be re-registered BY HAND and regain ` + "`sch reconcile`" + `'s mechanical
+netlist audit. reconcile needs BOTH --block-id and --roles (role→designator);
+--block-id alone records provenance but cannot be audited yet.`,
 			Example: `  easyeda sch group create --members R1,C5,U2
-  easyeda sch group create --members U1,C1,C2 --name mcu-core`,
+  easyeda sch group create --members U1,C1,C2 --name mcu-core
+  # 手工恢复块溯源(reconcile 需要 --block-id + --roles):
+  easyeda sch group create --members U3,C11,C12 --name "sy8089(U3)" \
+    --block-id block.sy8089_buck --instance U3 --roles BUCK=U3,CIN=C11,COUT=C12`,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				roles, rerr := parseGroupRolesFlag(rolesRaw)
+				if rerr != nil {
+					return rerr
+				}
+				blockID = strings.TrimSpace(blockID)
+				if blockID == "" && (strings.TrimSpace(instance) != "" || len(roles) > 0) {
+					return fmt.Errorf("--instance/--roles 需要与 --block-id 一起使用(它们描述的是块实例的溯源)")
+				}
 				_, _, docUUID, project, st, groups, err := loadSchGroupsContext(cfg, *window)
 				if err != nil {
 					return err
@@ -962,16 +1092,41 @@ at most one group per page.`,
 				if err != nil {
 					return err
 				}
+				if blockID != "" {
+					member := map[string]bool{}
+					for _, m := range g.Members {
+						member[m] = true
+					}
+					for r, d := range roles {
+						if !member[d] {
+							return fmt.Errorf("--roles %s=%s:位号 %s 不在 --members 里(roles 只能指向本组成员)", r, d, d)
+						}
+					}
+					g.BlockID, g.Instance, g.Roles = blockID, strings.TrimSpace(instance), roles
+					if _, ok, berr := blocks.Get(blockID); berr != nil || !ok {
+						fmt.Fprintf(stderr, "warn: 块库里没有 %q(easyeda blocks ls 查可用块)—— 溯源已记录,但 reconcile 会把该组列为「对不了账」\n", blockID)
+					}
+					if len(roles) == 0 {
+						fmt.Fprintln(stderr, "note: 只给了 --block-id 没给 --roles —— `sch reconcile` 还无法对账(它需要 role→位号映射);补上 --roles ROLE=位号,… 才能恢复机械对账")
+					}
+				}
 				if err := saveSchGroups(st, docUUID, next); err != nil {
 					return err
 				}
 				fmt.Fprintf(stdout, "✓ created group %s — %d member(s): %s (project %q, page %s)\n",
 					describeSchGroup(g), len(g.Members), strings.Join(g.Members, ","), project, docUUID)
+				if g.BlockID != "" {
+					fmt.Fprintf(stdout, "  provenance: block %s instance %q roles %d — `sch reconcile` 可对账:%t\n",
+						g.BlockID, g.Instance, len(g.Roles), len(g.Roles) > 0)
+				}
 				return nil
 			},
 		}
 		c.Flags().StringVar(&membersRaw, "members", "", "member designators — CSV: R1,C5,U2 (required)")
 		c.Flags().StringVar(&name, "name", "", "optional human-readable group name")
+		c.Flags().StringVar(&blockID, "block-id", "", "块溯源:这个组实例化自哪个块(如 block.sy8089_buck)— 让 `sch reconcile` 能机械对账")
+		c.Flags().StringVar(&instance, "instance", "", "块实例 id(同一实例的多个子群靠它合并对账;需与 --block-id 同用)")
+		c.Flags().StringVar(&rolesRaw, "roles", "", "role→位号映射 — CSV: ROLE=R1,LED=LED1(reconcile 必需;需与 --block-id 同用)")
 		_ = c.MarkFlagRequired("members")
 		group.AddCommand(c)
 	}

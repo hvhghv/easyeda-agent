@@ -132,6 +132,10 @@ func assertBlockApplyStoppedBeforeWiring(t *testing.T, calls []blockApplyTestCal
 		switch call.Action {
 		case "schematic.components.list", "schematic.component.place", "schematic.component.delete":
 			// Placement and its compensating cleanup are the only allowed writes.
+		case "document.current":
+			// Read-only page pin issued by the group-registry leg of the delete
+			// cascade (缺陷 2): a verified rollback strips the deleted designators
+			// from the persistent-group table, which needs the active page uuid.
 		default:
 			t.Fatalf("action %q ran after the layout gate; calls=%+v", call.Action, calls)
 		}
@@ -171,6 +175,9 @@ func TestRunBlockApplyOverlapStopsBeforeWiringAndRollsBack(t *testing.T) {
 			return blockApplyPlaceResponse(placeCalls, true)
 		case "schematic.component.delete":
 			return `{"ok":true,"result":{"deleted":true,"removed":2}}`
+		case "document.current":
+			// Group-registry cascade page pin; empty result → cascade fail-softs.
+			return `{"ok":true,"result":{}}`
 		default:
 			t.Errorf("unexpected action %q", call.Action)
 			return `{"ok":true,"result":{}}`
@@ -249,6 +256,9 @@ func TestRunBlockApplyReadOrParseFailureStopsBeforeWiring(t *testing.T) {
 					return blockApplyPlaceResponse(placeCalls, true)
 				case "schematic.component.delete":
 					return `{"ok":true,"result":{"deleted":true}}`
+				case "document.current":
+					// Group-registry cascade page pin; empty result → cascade fail-softs.
+					return `{"ok":true,"result":{}}`
 				default:
 					t.Errorf("unexpected action %q", call.Action)
 					return `{"ok":true,"result":{}}`
@@ -295,6 +305,9 @@ func TestRunBlockApplyPinCoincidenceStopsBeforeWiring(t *testing.T) {
 			return blockApplyPlaceResponse(placeCalls, true)
 		case "schematic.component.delete":
 			return `{"ok":true,"result":{"deleted":true}}`
+		case "document.current":
+			// Group-registry cascade page pin; empty result → cascade fail-softs.
+			return `{"ok":true,"result":{}}`
 		default:
 			t.Errorf("unexpected action %q", call.Action)
 			return `{"ok":true,"result":{}}`

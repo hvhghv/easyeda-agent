@@ -6,6 +6,24 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+连接器**零变更**;本条记录随版 CLI 侧对「删除/组注册」三缺陷(esp32Mini E2E
+交接报告 §六 缺陷 2/3/4)的修复,便于版本对照:
+
+- **删器件级联删组注册(缺陷 2,P1)**:虚拟组注册表存在 **Go 侧**
+  (`workflow.State.GroupsByPage`,`~/.easyeda-agent/workflow/<project>.json`),
+  连接器的 component.delete 级联(ADR-0004 Decision 5,只清桩线/flag)够不到它。
+  现在 `sch prim-delete` 与 block-apply 回滚在**回读证实删除成功后**同步摘除该
+  位号的成员记录(指向死位号的 role 一并摘,组删净则删组)——位号复用不再被
+  陈旧组吃掉。
+- **删除不可靠→逐个删+回读证实+重试一次(缺陷 3,P1)**:平台批量 delete 静默
+  no-op 仍返 true(真机:zone-draw 删旧框 survived=4、回滚 deleted=false,逐个删
+  100% 成功)。Go 侧新增 `deleteVerifiedOneByOne` 统一语义;block-apply 回滚改
+  逐个 `component.delete`,zone-draw 删旧框/绘制回滚的 exec_js 内联同一套
+  逐个删+重试。判定只信回读。
+- **`sch group create --block-id/--instance/--roles`(缺陷 4,P1)**:组注册损坏后
+  可手工重登块溯源(与 block-apply 自动登记同一批字段),`sch reconcile` 恢复
+  机械对账(reconcile 需要 --block-id **加** --roles ROLE=位号)。
+
 ## [1.0.2] - 2026-08-19
 
 ADR-0004「挪动收敛为单一安全 move 内核」首批随版(源自 issue #181 两份 E2E

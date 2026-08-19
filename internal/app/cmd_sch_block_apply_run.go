@@ -422,6 +422,10 @@ func bapPlacedPrimitiveID(res *actionResult) string {
 // successful place responses, then independently reads the page back. It never
 // falls back to deleting by designator: a stale/duplicate label is not a safe
 // mutation target.
+//
+// 缺陷 3(P1):批量 component.delete 不可靠(平台大批量静默 no-op 仍返 true;
+// 真机实锤 deleted=false / survived=4,而逐个删成功率 100%)。删除因此走
+// deleteVerifiedOneByOne:逐个删 + 回读证实 + 幸存者重试一次。判定只信回读。
 func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacement, uncertain []string) bapRollbackReport {
 	rep := bapRollbackReport{}
 	for _, p := range placed {
@@ -435,32 +439,62 @@ func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacemen
 	sort.Strings(rep.AttemptedPrimitiveIDs)
 	sort.Strings(rep.MissingPrimitiveIDs)
 
-	if len(rep.AttemptedPrimitiveIDs) > 0 {
-		res, err := requestAction(cfg, "schematic.component.delete", window,
-			map[string]any{"primitiveIds": rep.AttemptedPrimitiveIDs})
-		if err != nil {
-			rep.DeleteError = err.Error()
-		} else if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
-			rep.DeleteError = "schematic.component.delete reported deleted=false"
-		} else {
+	// Nothing to delete: still do the independent read-back so "Verified" keeps
+	// meaning "the page was re-read", same as before the one-by-one rewrite.
+	if len(rep.AttemptedPrimitiveIDs) == 0 {
+		if _, verr := readBlockComponentIDs(cfg, window); verr != nil {
+			rep.VerifyError = verr.Error()
+			return rep
+		}
+		rep.Verified = true
+		rep.Complete = len(rep.MissingPrimitiveIDs) == 0
+		return rep
+	}
+
+	sweep, err := deleteVerifiedOneByOne(rep.AttemptedPrimitiveIDs,
+		func(id string) error {
+			res, derr := requestAction(cfg, "schematic.component.delete", window,
+				map[string]any{"primitiveIds": []string{id}})
+			if derr != nil {
+				return derr
+			}
 			// ADR-0004 Decision 5: the connector cascades exclusive stub trees +
 			// riding flags — report the cleanup so it never looks like data loss.
 			printCascadeCleanup(res, os.Stderr)
-		}
+			if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
+				return fmt.Errorf("schematic.component.delete reported deleted=false")
+			}
+			return nil
+		},
+		func() (map[string]bool, error) { return readBlockComponentIDs(cfg, window) },
+	)
+	if len(sweep.Errors) > 0 {
+		rep.DeleteError = strings.Join(sweep.Errors, "; ")
 	}
-
-	live, err := readBlockComponentIDs(cfg, window)
 	if err != nil {
 		rep.VerifyError = err.Error()
 		return rep
 	}
 	rep.Verified = true
-	for _, id := range rep.AttemptedPrimitiveIDs {
-		if live[id] {
-			rep.SurvivedPrimitiveIDs = append(rep.SurvivedPrimitiveIDs, id)
-		}
-	}
+	rep.SurvivedPrimitiveIDs = append([]string(nil), sweep.Survived...)
 	sort.Strings(rep.SurvivedPrimitiveIDs)
+
+	// 缺陷 2(P1)的回滚支路:证实已删的器件同步摘除组注册(位号可能与某个
+	// 陈旧组撞名 —— 那条注册无论如何都已失效)。Fail-soft,绝不影响回滚判定。
+	if len(sweep.Deleted) > 0 {
+		deleted := map[string]bool{}
+		for _, id := range sweep.Deleted {
+			deleted[id] = true
+		}
+		var gone []string
+		for _, p := range placed {
+			if deleted[strings.TrimSpace(p.PrimitiveID)] && strings.TrimSpace(p.Designator) != "" {
+				gone = append(gone, p.Designator)
+			}
+		}
+		cascadeSchGroupMembership(cfg, window, gone, os.Stderr)
+	}
+
 	rep.Complete = len(rep.MissingPrimitiveIDs) == 0 && len(rep.SurvivedPrimitiveIDs) == 0
 	return rep
 }
