@@ -42,6 +42,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.logf("connector %s upgraded (origin=%q ua=%q)", remote, origin, ua)
 	defer func() {
 		s.hub.remove(c.id())
+		// A reconnected window starts with clean rolling write health (same
+		// lifetime rule as the stale-read guard: a reload IS the recovery).
+		s.writeHealth.forget(c.id())
 		ws.Close(websocket.StatusNormalClosure, "closing")
 		s.logf("connector %s closed", remote)
 	}()

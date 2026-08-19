@@ -243,9 +243,28 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	started := time.Now().UTC()
-	resp, err := target.dispatch(ctx, req)
+	// Adaptive backoff (writehealth.go, REPORT round2 新 3): every forwarded
+	// outcome feeds the rolling per-window health; whitelisted idempotent
+	// actions get one light-read-gated retry; everything else passes failures
+	// through (annotated with a degraded advisory below — never blind-resent).
+	hooks := adaptiveHooks{
+		observe: func(action string, ok bool) { s.writeHealth.observe(req.WindowID, action, ok) },
+		auditFirst: func(firstResp *protocol.Response, firstErr error) {
+			first := firstResp
+			if first == nil {
+				er := errorResponse(req.ID, "DISPATCH_FAILED", "connector did not respond", firstErr.Error())
+				first = &er
+			}
+			first.Warnings = append(first.Warnings, "superseded by daemon auto-retry (adaptive backoff)")
+			s.audit.Append(fromResponse(started, &req, first))
+			started = time.Now().UTC() // the final audit entry times the retry only
+		},
+		sleep: time.Sleep,
+	}
+	resp, err, _ := forwardWithAdaptiveRetry(ctx, req, target.dispatch, hooks)
 	if err != nil {
 		errResp := errorResponse(req.ID, "DISPATCH_FAILED", "connector did not respond", err.Error())
+		s.writeHealth.annotateDegraded(&req, &errResp)
 		s.audit.Append(fromResponse(started, &req, &errResp))
 		writeJSON(w, http.StatusGatewayTimeout, errResp)
 		return
@@ -276,6 +295,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// a window another client wrote to recently, annotate the response with a
 	// non-blocking concurrentWriter field. See concurrentwrites.go.
 	s.concurrentWrites.observe(&req, resp)
+	// Degraded-connector advisory (REPORT round2 新 3): a FAILED response on a
+	// window whose rolling health is degraded carries a structured hint —
+	// mutating actions get the fake-failure-law advice (verify by light read
+	// before resending); nothing is retried here. See writehealth.go.
+	s.writeHealth.annotateDegraded(&req, resp)
 	s.audit.Append(fromResponse(started, &req, resp))
 	// After a successful content-changing action, arm a debounced autosave so the
 	// work reaches disk without the agent having to remember to save (no-op when

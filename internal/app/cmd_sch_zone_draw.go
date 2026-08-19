@@ -447,7 +447,9 @@ Use the global --doc <page> selector for multi-page projects.`,
 			if fontSize <= 0 {
 				fontSize = defaultPartitionZoneFontSize
 			}
-			return runPartitionDraw(cfg, *window,
+			// 韧性路径(REPORT esp32mini-round2 新 3):逐区单次 exec_js +
+			// 复核后重试 + partial 语义。见 cmd_sch_zone_draw_resilient.go。
+			return runPartitionDrawResilient(cfg, *window,
 				partitionOptsFrom(margin, gutter, titleBand, 3, 2), fontSize, color, clear, stdout, stderr)
 		},
 	}
