@@ -17,6 +17,37 @@ package app
 // 输出区内局部坐标的落位(本体 + 桩线 + 端子)与收敛后的框尺寸。**重生短桩**
 // (zfStub=20)是收敛的核心:实测里横跨半页的长导线是跨组走线,不属于组内几何。
 // 落地执行(转向/挪件/重连)走 ADR-0003 舞步,归 --apply 层。
+//
+// ── 一把尺:端子几何只许问 zfTermGeom 要(2026-08-20 收敛性缺陷定案)──────────
+//
+// 真机连跑 4 轮取证:每轮 dry-run 都 `verdict: pass`、validation 四项全 0,落地
+// 后 `zone-plan` 实测**必然**重叠(2 / 1 / — / 2 处)。规划尺寸 vs 落地实测:
+// U 区 315×351 → 353×382(宽 +38、高 +31),而排布器的 gutter 只有 12 —— 误差
+// 系统性大于间距,「规划无重叠」落地必然可能重叠。这不是抖动,多跑几遍不收敛
+// (第 3 轮落位整体重排,J_USB 从 E 边跳到 N 边,那是追尾不是收敛)。
+//
+// 根因是**同一件事有三套算法**:
+//
+//	① 规划侧:phase A 首版自己拼端子盒 —— 用实测 marker 宽高、把盒子贴在桩端点上、
+//	   无源件的 netport 还画成「桩线朝下、标签朝右」。三条都与落地不符:
+//	     - 落地的 marker 本体从端点起**空出 Near**(netport/gnd 9.5、power 4.5)
+//	       才开始画,规划贴着端点画 → 每支端子少算 Near;
+//	     - 实测宽高是**旧朝向**下量的,规划换了朝向却不转置 → ±11 的错位;
+//	     - connect_pin 的桩只能沿 direction 直出,「桩朝下、标签朝右」执行侧不存在。
+//	② 落地侧:--apply 重连时未被计划端子覆盖的 pin 走 autoconnect 自由评分
+//	   (offset 18~80,外加 laneStepFor 的标准档位 min+k·lane,netport 上一档 ~89);
+//	③ 挪动侧:group-move 的重连同样走自由 autoconnect(真机:U 组 315×389 →
+//	   523×406,一次「微调」把 phase A 的收敛撤销了大半)。
+//
+// 修法是让三处**共用落地侧那条真实函数链**:
+//
+//	connect_pin(direction, offset) → endpointFor(桩端点,5 网格吸附)
+//	                               → predictedMarkerBBox(本体 ∪ 网名带)
+//
+// 规划期(zfGenPassive / zfGenMultiPin)与复算期(zfLandedGroupBBox)都只经
+// zfTermGeom 取几何;落地期由 --apply 的显式端子(zaaTermExec.Offset)与 move
+// 内核的 preserve 桩线策略保证 offset 原样执行。于是「规划框」成为「落地框」的
+// 可靠预测,zfLandedFrame + 负对照 zfStubFreeAutoconnect 把这条性质钉成机械判据。
 
 import (
 	"fmt"
@@ -24,10 +55,10 @@ import (
 )
 
 const (
-	zfStub  = 20.0 // 重生短桩长(引脚 → 旗/port 起点)
-	zfPitch = 12.0 // 多脚件同侧端子的纵向节距
-	zfPortH = 11.0 // netport 标签高(实测 10~12,取平台默认)
-	zfFlagGap = 6.0 // 本体/桩线与旗体的间隙
+	zfStub    = 20.0 // 重生短桩长(引脚 → 旗/port 起点)
+	zfPitch   = 12.0 // 多脚件同侧端子的纵向节距
+	zfPortH   = 11.0 // netport 标签高(实测 10~12,取平台默认)
+	zfFlagGap = 6.0  // 本体/桩线与旗体的间隙
 	// 组间/锚卫间距与块布局求解器同一把尺(bslPartGap=20,见 ruler_consistency_test):
 	// 首版各立 10/12,P3 真机三处浅擦全是它 —— 规划按裸 bbox 排,check 按**文字
 	// 渲染宽度**判(netport 的平台 bbox 只有裸六边形,网名画在外面),渲染外延
@@ -38,6 +69,15 @@ const (
 	// 实测 9~15)。规划器没有 pin 几何,排列时对 MultiPin 邻接的 gap 补这个量,
 	// 防两组 pin 端点在走廊里物理同点(隐式短路)。
 	zfPinReach = 15.0
+	// zfLandSlack 是「规划框 → 落地框」的余量,四周各留一格。
+	//
+	// 规划在**区内局部坐标**上算,落地在**页面绝对坐标**上算,而 connect_pin 的桩
+	// 端点按 5 网格吸附(endpointFor/acSchGrid)—— 两边网格相位不同,单边最多差一格。
+	// 判据要求「偏差超过 gutter 就如实报告」,而这一格是**结构性的、可上界的**:
+	// 与其让它去撞 gutter,不如把它算进框里,让规划框成为落地框的**上界**而不是估计。
+	// 它是框自己的属性(哪个区端子多,哪个区的余量就真的用得上),所以放在这里,
+	// 不写进全局 gutter。
+	zfLandSlack = acSchGrid
 )
 
 // zfTerm 是一个端子的类型化描述(从 schCluster 的归属 marker 折出)。
@@ -58,6 +98,10 @@ type zfGroup struct {
 }
 
 // zfPlacedTerm 是端子落位(区内局部坐标,y-UP)。
+//
+// BBox 是**导出量**:由 (PinX,PinY,Offset,Dir,Kind,Net,SpreadX) 经 zfTermGeom
+// 唯一确定。任何地方手改 BBox 而不动这几个参数,就是又造了一把尺 —— 配对测试
+// (TestZfLandedFrame_PredictionEqualsLanding)会当场炸。
 type zfPlacedTerm struct {
 	Kind string     `json:"kind"`
 	Net  string     `json:"net"`
@@ -68,6 +112,14 @@ type zfPlacedTerm struct {
 	// offset,别无自由度 —— 所以「怎么错开」只能编码在这里,不能编码在 BBox 的
 	// 横向位置里(执行侧没有那个旋钮)。
 	Offset float64 `json:"offset"`
+	// PinX/PinY 是桩线起点(区内局部)。存下来复算才可能:落地复判要按另一套
+	// 桩长重算这支端子的占地,而 BBox 本身已经把桩长烘进去了。
+	PinX float64 `json:"pinX"`
+	PinY float64 `json:"pinY"`
+	// SpreadX 是「规划期不知道 pin 的横向位置」时的不确定带半宽(MultiPin 的
+	// 上/下侧:规划器没有符号 pin 几何,旗可能落在本体任意 x)。只加在 x 上,
+	// 不参与梯次要用的纵向占地。
+	SpreadX float64 `json:"spreadX,omitempty"`
 }
 
 // zfPlacedGroup 是一个组的落位。
@@ -89,6 +141,10 @@ type zfZonePlan struct {
 	Content layoutBBox `json:"content"`
 	FrameW  float64    `json:"frameW"`
 	FrameH  float64    `json:"frameH"`
+	// Slack 是已经算进 Content 的落地余量(zfLandSlack,四周各一格)。输出里
+	// 可见 —— 「gutter 按实测偏差上界自适应放大」这件事必须让人看得见,不许
+	// 悄悄塞在常数里。
+	Slack float64 `json:"slack"`
 }
 
 // zfBBoxUnion 并集(零值安全:base 为空时直接取 b)。
@@ -102,6 +158,49 @@ func zfGrow(dst *layoutBBox, has *bool, b layoutBBox) {
 	dst.MinY = minF(dst.MinY, b.MinY)
 	dst.MaxX = maxF(dst.MaxX, b.MaxX)
 	dst.MaxY = maxF(dst.MaxY, b.MaxY)
+}
+
+// ── 一把尺:端子几何 ────────────────────────────────────────────────────────
+
+// zfCanonKind 把规划端子折成 connect_pin 的 canonical kind。落地侧
+// (zaaConnectKind)与预测侧(predictedMarkerBBox / laneStepFor)共用这一个映射,
+// 不许各自 switch —— kind 分家会让「预测的是 power 盒、落地的是 ground 盒」。
+func zfCanonKind(kind, net string) string {
+	if kind == "netport" {
+		return "net_port_bi"
+	}
+	if tidyNetClass(net) == "ground" {
+		return "ground"
+	}
+	return "power"
+}
+
+// zfTermGeom 是「一个端子落地后占多大」的**唯一函数**:走落地侧那条真实链
+// connect_pin(direction, offset) → endpointFor(5 网格吸附)→ predictedMarkerBBox
+// (marker 本体 ∪ 网名带,与 `sch check` 的 flagTextBand 严格对称)。
+//
+// 返回桩线段与 marker 包络两个盒子(都在传入坐标系里)。spreadX 见
+// zfPlacedTerm.SpreadX。
+func zfTermGeom(pinX, pinY, offset float64, dir, kind, net string, spreadX float64) (wire, marker layoutBBox) {
+	ex, ey := endpointFor(pinX, pinY, offset, dir)
+	wire = layoutBBox{
+		MinX: minF(pinX, ex), MinY: minF(pinY, ey),
+		MaxX: maxF(pinX, ex), MaxY: maxF(pinY, ey),
+	}
+	marker = predictedMarkerBBox(ex, ey, zfCanonKind(kind, net), dir, net)
+	marker.MinX -= spreadX
+	marker.MaxX += spreadX
+	return wire, marker
+}
+
+// zfAppendTerm 落一个端子:几何一律由 zfTermGeom 导出,桩线与 marker 一并入账。
+// 返回带 BBox 的完整端子(梯次要读它的占地)。
+func zfAppendTerm(out *zfPlacedGroup, t zfPlacedTerm) zfPlacedTerm {
+	wire, marker := zfTermGeom(t.PinX, t.PinY, t.Offset, t.Dir, t.Kind, t.Net, t.SpreadX)
+	t.BBox = marker
+	out.Wires = append(out.Wires, wire)
+	out.Terms = append(out.Terms, t)
+	return t
 }
 
 // zfGenGroup 生成一个组的局部几何(本体 min 角在原点)。
@@ -131,29 +230,19 @@ func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 		if t == nil {
 			return
 		}
-		y0 := 0.0
-		dir := "down"
+		pinY, dir := 0.0, "down"
 		if up {
-			y0, dir = bh, "up"
+			pinY, dir = bh, "up"
 		}
-		y1 := y0 - zfStub
-		if up {
-			y1 = y0 + zfStub
+		// R4:旗顺引脚朝外(up/down);netport 恒水平、无源件统一朝右(阅读方向)。
+		// **朝向就是 connect_pin 的 direction**:首版把 port 的桩画成竖的、盒子摆
+		// 到右边,那形态执行侧根本造不出来(桩只能沿 direction 直出),于是规划的
+		// 高度虚高、宽度虚低 —— 落地必然对不上。
+		if t.Kind == "netport" {
+			dir = "right"
 		}
-		out.Wires = append(out.Wires, layoutBBox{MinX: cx, MinY: minF(y0, y1), MaxX: cx, MaxY: maxF(y0, y1)})
-		if t.Kind == "netflag" { // R4:旗顺引脚朝外
-			b := layoutBBox{MinX: cx - t.W/2, MaxX: cx + t.W/2}
-			if up {
-				b.MinY, b.MaxY = y1, y1+t.H
-			} else {
-				b.MinY, b.MaxY = y1-t.H, y1
-			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b, Offset: zfStub})
-			return
-		}
-		// R4:netport 恒水平,无源件统一朝右(阅读方向)
-		out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: "right", Offset: zfStub,
-			BBox: layoutBBox{MinX: cx, MinY: y1 - zfPortH/2, MaxX: cx + t.W, MaxY: y1 + zfPortH/2}})
+		zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
+			PinX: cx, PinY: pinY, Offset: zfStub})
 	}
 	place(top, true)
 	place(bot, false)
@@ -217,25 +306,17 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 			if t.Kind == "netflag" {
 				stub = off
 			}
-			x0, x1 := -stub, 0.0
+			pinX := 0.0
 			if side == "right" {
-				x0, x1 = bw, bw+stub
+				pinX = bw
 			}
 			cy := y + zfPortH/2
-			out.Wires = append(out.Wires, layoutBBox{MinX: x0, MinY: cy, MaxX: x1, MaxY: cy})
-			var b layoutBBox
-			h := t.H
-			if t.Kind == "netport" {
-				h = zfPortH
-			}
-			if side == "left" {
-				b = layoutBBox{MinX: x0 - t.W, MinY: cy - h/2, MaxX: x0, MaxY: cy + h/2}
-			} else {
-				b = layoutBBox{MinX: x1, MinY: cy - h/2, MaxX: x1 + t.W, MaxY: cy + h/2}
-			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side, BBox: b, Offset: stub})
+			placed := zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side,
+				PinX: pinX, PinY: cy, Offset: stub})
 			if t.Kind == "netflag" {
-				off += t.W + zfFlagGap
+				// 梯次步长按**落地占地**(zfTermGeom 出的包络,含网名带)递增,
+				// 不再按实测宽 —— 实测宽是旧朝向下量的,换朝向就是错的尺。
+				off += (placed.BBox.MaxX - placed.BBox.MinX) + zfFlagGap
 			}
 			y -= zfPitch
 		}
@@ -249,26 +330,15 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 	for _, side := range []string{"down", "up"} {
 		off := zfStub
 		for _, t := range bySide[side] {
-			y0, dir := 0.0, "down"
+			pinY := 0.0
 			if side == "up" {
-				y0, dir = bh, "up"
+				pinY = bh
 			}
-			y1 := y0 - off
-			if side == "up" {
-				y1 = y0 + off
-			}
-			// 规划期不知道 pin 的 x(符号细节)——桩画在本体中线;bbox 横向取
-			// 「pin 可落本体任意 x、旗以 pin 居中」的包络(bw+W 宽),框尺寸不低估。
-			cx := bw / 2
-			out.Wires = append(out.Wires, layoutBBox{MinX: cx, MinY: minF(y0, y1), MaxX: cx, MaxY: maxF(y0, y1)})
-			b := layoutBBox{MinX: cx - (bw+t.W)/2, MaxX: cx + (bw+t.W)/2}
-			if side == "up" {
-				b.MinY, b.MaxY = y1, y1+t.H
-			} else {
-				b.MinY, b.MaxY = y1-t.H, y1
-			}
-			out.Terms = append(out.Terms, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir, BBox: b, Offset: off})
-			off += t.H + zfFlagGap
+			// 规划期不知道 pin 的 x(符号细节)——桩画在本体中线;marker 盒横向按
+			// 「pin 可落本体任意 x」的不确定带展宽(SpreadX = bw/2),框尺寸不低估。
+			placed := zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: side,
+				PinX: bw / 2, PinY: pinY, Offset: off, SpreadX: bw / 2})
+			off += (placed.BBox.MaxY - placed.BBox.MinY) + zfFlagGap
 		}
 	}
 	return out
@@ -301,6 +371,88 @@ func zfGroupBBox(g zfPlacedGroup) layoutBBox {
 	return b
 }
 
+// zfInflate 四周等量外扩一个盒子(负值即收缩)。
+func zfInflate(b layoutBBox, d float64) layoutBBox {
+	return layoutBBox{MinX: b.MinX - d, MinY: b.MinY - d, MaxX: b.MaxX + d, MaxY: b.MaxY + d}
+}
+
+// ── 收敛性的机械判据:预测 = 落地 ───────────────────────────────────────────
+
+// zfStubPolicy 是「落地侧怎么定桩长」的可替换策略:输入一个已布置组,返回与
+// Terms 逐位对应的桩长。**这是三处桩线伸展的那把尺的可插拔形式** —— 换掉它就是
+// 换掉落地策略,配对测试的负对照正是靠它成立。
+type zfStubPolicy func(g zfPlacedGroup) []float64
+
+// zfStubPlanned 是**现行**落地策略:规划桩长原样执行。
+// 它由两条保证共同兑现:
+//   - zone-arrange --apply 把每个计划端子的 Offset 显式喂给 connect_pin
+//     (zaaTermExec.Offset → moveConnTerm.Offset);
+//   - move 内核对未被计划端子覆盖的 pin 走 preserve 策略(原样复现移动前的桩),
+//     并把恢复段的 autoconnect 用 OffsetCap 夹住。
+func zfStubPlanned(g zfPlacedGroup) []float64 {
+	out := make([]float64, len(g.Terms))
+	for i, t := range g.Terms {
+		out[i] = t.Offset
+	}
+	return out
+}
+
+// zfStubFreeAutoconnect 是**旧的自由 offset 落地策略**的模型 —— 负对照专用,
+// 不许在生产路径上用。
+//
+// 它复刻 autoconnect 的两条实际行为:首支落 rules.OffsetMin(18),同侧第二支起
+// 按 laneStepFor 让开前一支的**整个占地**(candidateOffsets 常驻的标准档位
+// min+k·lane + applyLaneStagger 的「至少让开一个完整步长」)。netport 的一档是
+// ~89 —— 这就是 group-move 把 U 组从 315 宽撑到 523 宽(+208 ≈ 两档)的算术。
+func zfStubFreeAutoconnect(g zfPlacedGroup) []float64 {
+	rules := defaultAutoconnectRules()
+	lane := map[string]float64{}
+	out := make([]float64, len(g.Terms))
+	for i, t := range g.Terms {
+		kind := zfCanonKind(t.Kind, t.Net)
+		off := rules.OffsetMin
+		if used, ok := lane[t.Dir]; ok {
+			off = used + laneStepFor(kind, t.Net)
+		}
+		lane[t.Dir] = off
+		out[i] = off
+	}
+	return out
+}
+
+// zfLandedGroupBBox 按给定桩线策略**重新走一遍落地侧的函数链**,算出这个组落地
+// 后的包络。与生成期(zfGenPassive/zfGenMultiPin 累加出来的 zfGroupBBox)是两条
+// 独立代码路径:策略 = zfStubPlanned 时两者必须逐字相等,不等就说明有人绕过
+// zfTermGeom 手改了盒子(又造了一把尺)。
+func zfLandedGroupBBox(g zfPlacedGroup, stub zfStubPolicy) layoutBBox {
+	offs := stub(g)
+	b, has := layoutBBox{}, false
+	zfGrow(&b, &has, g.Body)
+	for i, t := range g.Terms {
+		off := t.Offset
+		if i < len(offs) {
+			off = offs[i]
+		}
+		wire, marker := zfTermGeom(t.PinX, t.PinY, off, t.Dir, t.Kind, t.Net, t.SpreadX)
+		zfGrow(&b, &has, wire)
+		zfGrow(&b, &has, marker)
+	}
+	return b
+}
+
+// zfLandedFrame 用给定桩线策略重算整个区的框尺寸(口径与 planZoneFollow 完全
+// 一致:内容并集 + 落地余量 → partitionFrameSize)。
+func zfLandedFrame(plan zfZonePlan, opts partitionOpts, stub zfStubPolicy) (w, h float64) {
+	content, has := layoutBBox{}, false
+	for _, g := range plan.Groups {
+		zfGrow(&content, &has, zfLandedGroupBBox(g, stub))
+	}
+	if !has {
+		return 0, 0
+	}
+	return partitionFrameSize(zfInflate(content, plan.Slack), opts.TitleBand, opts.NoteBand)
+}
+
 // zfTranslate 平移一个组(局部 → 区内布置)。
 func zfTranslate(g zfPlacedGroup, dx, dy float64) zfPlacedGroup {
 	sh := func(b layoutBBox) layoutBBox {
@@ -311,6 +463,10 @@ func zfTranslate(g zfPlacedGroup, dx, dy float64) zfPlacedGroup {
 	out.Terms = append([]zfPlacedTerm(nil), g.Terms...)
 	for i := range out.Terms {
 		out.Terms[i].BBox = sh(out.Terms[i].BBox)
+		// PinX/PinY 是复算的原料,必须跟着平移 —— 漏掉它,落地复判会拿区内局部
+		// 坐标去和绝对坐标比,结论毫无意义(而且看起来很像"规划错了")。
+		out.Terms[i].PinX += dx
+		out.Terms[i].PinY += dy
 	}
 	out.Wires = make([]layoutBBox, len(g.Wires))
 	for i, w := range g.Wires {
@@ -446,6 +602,12 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 	for _, g := range plan.Groups {
 		zfGrow(&plan.Content, &has, zfGroupBBox(g))
 	}
+	// 落地余量:规划框要当**上界**用(见 zfLandSlack)。**决策必须可见** ——
+	// 「框比内容大了一圈」如果只藏在常量里,下一个人量出来的框对不上就会去改
+	// 别的地方。Mode 是人读输出与 JSON(zones[].mode)都带的字段。
+	plan.Content = zfInflate(plan.Content, zfLandSlack)
+	plan.Slack = zfLandSlack
+	plan.Mode += fmt.Sprintf(" · 落地余量 %g(桩端点 5 网格吸附,规划框=落地框上界)", float64(zfLandSlack))
 	// 收敛后的框走**外框的唯一函数**(partitionFrameSize):收紧时区名带 + 说明带
 	// 就在账里,收紧完再画框 —— 而不是「按常量带收紧 → 画框 → 再放 note 装不下」。
 	// opts.NoteBand 由调用方按本区已登记说明的渲染高度预置(schZoneNoteBandHeight)。

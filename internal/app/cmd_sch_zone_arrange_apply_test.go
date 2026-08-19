@@ -144,3 +144,99 @@ func TestZaaPadTermsToPins(t *testing.T) {
 		t.Fatalf("不收缩:%d", len(got3))
 	}
 }
+
+// ── 断言③ 落地复判:绿勾必须与事实相符 ──────────────────────────────────────
+//
+// 缺陷形态(真机 4 轮取证):`--apply` 每轮都打「断言①② + 内核对账 + layout-lint
+// 全绿,已保存」,而落地后 `zone-plan` 实测分区框重叠 2 / 1 / 2 处。三条既有判据
+// 分别看电气 / 网表 / 器件两两重叠,没有一条看得见「区框胖了撞邻区」。
+
+// 落地后确实重叠的场景:必须报出来,不许算绿。
+func TestZaaRecheckFindings_ReportsLandedOverlap(t *testing.T) {
+	zones := []zaaLandedZone{
+		{Name: "U", PlanW: 315, PlanH: 351, FrameW: 353, FrameH: 382,
+			Rect: layoutBBox{MinX: 0, MinY: 0, MaxX: 353, MaxY: 382}},
+		{Name: "J_USB", PlanW: 300, PlanH: 300, FrameW: 300, FrameH: 300,
+			Rect: layoutBBox{MinX: 331, MinY: 40, MaxX: 631, MaxY: 340}},
+	}
+	got := zaaRecheckFindings(zones, 12)
+	if len(got) == 0 {
+		t.Fatal("落地框比规划框胖 38/31、且与邻区实测重叠 —— 必须报,不能打绿勾")
+	}
+	joined := strings.Join(got, ";")
+	if !strings.Contains(joined, "区 U 落地框") || !strings.Contains(joined, "gutter") {
+		t.Errorf("尺寸偏差条目要指名区、实测框、规划框、gutter:%v", got)
+	}
+	if !strings.Contains(joined, "区框实测重叠 U ↔ J_USB") {
+		t.Errorf("区框重叠必须单独成条(那正是用户实测到的 partitionOverlap):%v", got)
+	}
+}
+
+// 偏差在 gutter 之内、区框不相交 = 复判绿(不许一有偏差就红,否则判据没人信)。
+func TestZaaRecheckFindings_GreenWithinGutter(t *testing.T) {
+	zones := []zaaLandedZone{
+		{Name: "U", PlanW: 315, PlanH: 351, FrameW: 320, FrameH: 345,
+			Rect: layoutBBox{MinX: 0, MinY: 0, MaxX: 320, MaxY: 345}},
+		{Name: "Q", PlanW: 200, PlanH: 200, FrameW: 200, FrameH: 200,
+			Rect: layoutBBox{MinX: 332, MinY: 0, MaxX: 532, MaxY: 200}},
+	}
+	if got := zaaRecheckFindings(zones, 12); len(got) != 0 {
+		t.Fatalf("gutter 之内 + 零重叠该算绿:%v", got)
+	}
+}
+
+// 读不到的成员是一等公民:绝不排除出分母、绝不合成 0 —— 一次读故障不许伪装成
+// 「完美收敛」(progress-derived-not-recorded 同一条纪律)。
+func TestZaaRecheckFindings_UnknownIsNotGreen(t *testing.T) {
+	zones := []zaaLandedZone{{Name: "U", PlanW: 315, PlanH: 351, Missing: []string{"C7"}}}
+	got := zaaRecheckFindings(zones, 12)
+	if len(got) != 1 || !strings.Contains(got[0], "不算过") {
+		t.Fatalf("成员读不到必须如实报、不算过:%v", got)
+	}
+}
+
+// 复判用的说明带高必须与规划**逐区一致**:从规划框反推(框是唯一函数,带高是它
+// 的可逆量),不许再读一遍 note —— 读第二遍就是第二把尺。
+func TestZaaZoneNoteBand_RoundTripsPlanFrame(t *testing.T) {
+	content := layoutBBox{MinX: 10, MinY: 20, MaxX: 210, MaxY: 120}
+	const titleBand, noteBand = 30.0, 55.0
+	w, h := partitionFrameSize(content, titleBand, noteBand)
+	z := zoneArrangeZoneOut{Name: "U", Content: content, FrameW: w, FrameH: h}
+	if got := zaaZoneNoteBand(z, titleBand); got != noteBand {
+		t.Fatalf("说明带高该反推回 %.0f,got %.0f", noteBand, got)
+	}
+	// 反推出来的带高必须让实测框与规划框在无变化时逐字相等。
+	r := partitionFrameRect(content, titleBand, zaaZoneNoteBand(z, titleBand))
+	if r.MaxX-r.MinX != w || r.MaxY-r.MinY != h {
+		t.Fatalf("反推带高后重算的框 %.0f×%.0f ≠ 规划框 %.0f×%.0f", r.MaxX-r.MinX, r.MaxY-r.MinY, w, h)
+	}
+}
+
+// 桩长硬上限 = 计划里最长的桩(落地桩不越过规划桩 → 落地框不越过规划框)。
+func TestZaaMaxPlannedStub(t *testing.T) {
+	if got := zaaMaxPlannedStub(nil); got != zfStub {
+		t.Fatalf("无计划端子时该退到短桩 %g,got %g", zfStub, got)
+	}
+	execs := []zaaMemberExec{
+		{Terms: []zaaTermExec{{Offset: 20}, {Offset: 48}}},
+		{Terms: []zaaTermExec{{Offset: 0}}}, // 0 = connect_pin 默认,不该拉低上限
+	}
+	if got := zaaMaxPlannedStub(execs); got != 48 {
+		t.Fatalf("上限该取计划最长桩 48,got %g", got)
+	}
+}
+
+// 单边判据:规划框是落地框的**上界**(已含落地余量),落地更瘦不是缺陷 ——
+// 双边判会让结构性余量先吃掉一半 gutter 预算,判据就不再可信。
+func TestZaaRecheckFindings_ThinnerThanPlanIsNotRed(t *testing.T) {
+	zones := []zaaLandedZone{{Name: "U", PlanW: 343, PlanH: 444, FrameW: 320, FrameH: 410,
+		Rect: layoutBBox{MinX: 0, MinY: 0, MaxX: 320, MaxY: 410}}}
+	if got := zaaRecheckFindings(zones, 12); len(got) != 0 {
+		t.Fatalf("落地比规划瘦不该报红:%v", got)
+	}
+	// 反向:胖出 gutter 必须红。
+	zones[0].FrameW, zones[0].FrameH = 343+13, 444
+	if got := zaaRecheckFindings(zones, 12); len(got) != 1 {
+		t.Fatalf("胖出 gutter 必须红:%v", got)
+	}
+}

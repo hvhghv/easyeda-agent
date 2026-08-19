@@ -58,7 +58,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 | S1 | 图纸/分页 reconcile 到模块计划 | `sch pages` → `page-rename`/`page-new`/`page-delete` → `sch sheet-geometry --json` | 页集合=模块计划;每页有 A4 sheet 💾 |
 | S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 **且 `labelScopeDegraded=false`**(降级=判据验不了,不是"没问题") |
 | S3 | 按组摆放(块优先;命中块 S3+S4 一条命令) | `sch block-apply <id> --bind 端口=网名` / `sch autolayout --engine template` / `sch place`+`modify` | `sch gate --only layout-lint,clusters` 无 ERROR 💾 |
-| S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解;phase B = 边归属+多层货架+回溯)→ `--apply`(断言①②+假失败清创+分级回滚) | verdict=pass 且断言①②绿;报出的问题**重跑一轮 apply(两遍法),不逐器件手挪**。`blocked` 时先看 phase A 那一栏收敛了没(**排不下的是形状不是面积**),再考虑 `page-new` 拆页 —— A4-only,不换纸 |
+| S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解;phase B = 边归属+多层货架+回溯)→ `--apply`(断言①②+假失败清创+分级回滚+**断言③落地复判**) | verdict=pass 且断言①②③绿(③ = 落地实测框 vs 规划框偏差 ≤ gutter 且区框零重叠)。**断言③红时不要「多跑几遍」** —— 桩线伸展已统一为一把尺,规划框就是落地框的预测,再跑一轮只会追尾(真机 4 轮取证:每轮 dry-run pass、落地必重叠);按复判表定位是哪个区胖了。`blocked` 时先看 phase A 那一栏收敛了没(**排不下的是形状不是面积**),再考虑 `page-new` 拆页 —— A4-only,不换纸 |
 | S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
 | S5 | 校验门(机械真值) | 逐页 `sch gate --strict --doc <页>` + 全工程 `sch nets --strict` + `sch reconcile` | 每页 verdict=pass;无网名变体/单引脚网;意图对账无差异 |
 | S6 | 调整闭环 | 照 gate 报告「下一步」修 → 重跑 gate | verdict=pass → `sch save` 确认 `saved:true` 💾 |
@@ -252,6 +252,9 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
     里面大片空白,读图的人得不到任何信息。
   - **组间留通道用 `sch group-move --group <id>`**(每组一个抓手,平移后自带电气自检;
     同块多个子组要一起挪时用 `--groups g1,g2` 一次整体移动,不撕裂组间共享导线)。
+    它是**刚体平移**:重连按移动前实测的桩方向/长度原样重建,组框尺寸不变
+    (2026-08-20 修复前,一次 `--dx 40` 会把组框从 315×389 撑到 523×406,
+    重叠从 1 处变 3 处 —— 「挪一下让开」反而毁掉收敛)。
     `sch zone-plan` 的 `partitionOverlap` 就是「通道没留够」的判据:它非 0 说明两个功能
     子群的虚拟组在版面上交叠 —— 那时**不存在**既框住各自内容又互不重叠的矩形,
     只能挪件,不能靠画框迁就。
@@ -340,8 +343,9 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 ### S6 — 调整闭环(立刻调,再验)
 - **先看 gate 报告的「下一步」** —— 每个失败 stage 自带规定的修法,别自己另发明一套。
 - `layout-lint` 失败 → **成片的布局问题(分区拥挤/标签互叠/partitionOverlap)先跑
-  `sch zone-arrange --apply`**(分区级确定性收敛,两遍法:落地实测反哺下一轮规划)——
-  **不要陷入逐器件手工修补**;只有孤立单件冲突才用 `sch modify`(单件)/`sch align`/
+  `sch zone-arrange --apply`**(分区级确定性收敛;规划框 = 落地框的预测,落地后自带
+  **断言③复判**)——**不要陷入逐器件手工修补**,但**也不要靠重跑收敛**:断言③红说明
+  某个区实测比规划胖,重跑只是追尾(真机 4 轮不收敛),按复判表看是哪个区、差多少;只有孤立单件冲突才用 `sch modify`(单件)/`sch align`/
   `sch distribute`(成排)/`sch autoplace-free`(自动找空位)。**几何先修**:重叠会连锁出
   一堆电气误报,先治几何再看电气,能省掉大半来回。
 - `check` / `bridge-check` / `drc` 失败 → 补线、拆桥、清孤儿或补 NC → **重跑 gate 并重新 `sch read` 对账**。

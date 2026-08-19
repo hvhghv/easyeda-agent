@@ -65,15 +65,11 @@ type zaaMemberExec struct {
 	Snaps              []zaaPinSnap // 本件的 pin 快照(回滚重建原料)
 }
 
-// zaaConnectKind 把规划端子折成 connect_pin 口径。
+// zaaConnectKind 把规划端子折成 connect_pin 口径。**映射本体在 zfCanonKind** ——
+// 规划侧(端子几何预测)与落地侧(connect_pin 的 kind)必须是同一个函数,各自
+// switch 会出现「预测的是 power 盒、落地的是 ground 旗」这种看不见的分家。
 func zaaConnectKind(t zfPlacedTerm) string {
-	if t.Kind == "netport" {
-		return "net_port_bi"
-	}
-	if tidyNetClass(t.Net) == "ground" {
-		return "ground"
-	}
-	return "power"
+	return zfCanonKind(t.Kind, t.Net)
 }
 
 // zaaGateSetEquality 是断言①的名单形式:sweep 集与重建集必须相等。
@@ -479,8 +475,12 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		}
 		items = append(items, it)
 	}
+	// 桩长硬上限 = 计划里最长的桩:计划端子本来就原样执行(Offset 显式喂
+	// connect_pin),没被计划覆盖的 pin 走内核 preserve/autoconnect 兜底时也不许
+	// 比规划走得更深 —— 否则区框当场比规划胖一档,而 dry-run 还在打 pass。
 	krep, kerr := schMoveKernel(cfg, win, docUUID, items,
-		moveKernelOpts{Label: "zone-arrange", Stdout: stdout, Stderr: stderr})
+		moveKernelOpts{Label: "zone-arrange", Stdout: stdout, Stderr: stderr,
+			StubPolicy: moveStubPreserve, MaxStub: zaaMaxPlannedStub(execs)})
 	if kerr != nil {
 		return kerr
 	}
@@ -557,12 +557,35 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	if _, err := requestAutolayoutAction(cfg, "schematic.save", win, nil, docUUID, "zone-arrange save"); err != nil {
 		fmt.Fprintf(stderr, "⚠ 显式保存失败(%v)—— daemon 防抖自动保存仍会兜底\n", err)
 	}
+
+	// ── 落地复判(断言③)────────────────────────────────────────────────────
+	// 「规划 pass → 落地 overlap」是本命令最贵的一类假绿:断言①②看电气、内核对账
+	// 看网表、layout-lint 看器件两两重叠,没有一条看得见「区框胖了撞邻区」。
+	// 这里重读一次真几何,按**同一个外框函数**算实测框,与规划框逐区比 ——
+	// 偏差 > gutter 或区框重叠 → 如实报,并以非零退出让它可 gate。
+	var recheck []string
+	if landed, rerr := zaaLandedRecheck(cfg, win, docUUID, out, opts); rerr != nil {
+		recheck = []string{fmt.Sprintf("落地复判无法运行(%v)—— 没有证明不算过", rerr)}
+	} else {
+		recheck = zaaRecheckFindings(landed, opts.Gutter)
+		for _, z := range landed {
+			fmt.Fprintf(stdout, "  复判 %s:实测框 %.0f×%.0f / 规划框 %.0f×%.0f\n",
+				z.Name, z.FrameW, z.FrameH, z.PlanW, z.PlanH)
+		}
+	}
+
 	if lintWarn != "" {
 		fmt.Fprintf(stdout, "△ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)绿,已保存;%s\n", executed, len(execs), lintWarn)
 	} else {
-		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)+ layout-lint 全绿,已保存\n", executed, len(execs))
+		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)+ layout-lint 绿,已保存\n", executed, len(execs))
 	}
 	fmt.Fprintln(stdout, "note: 分区框未重画 —— `sch zone-draw --mode partition` 更新;区名/说明带随框走")
+	if len(recheck) > 0 {
+		// **不回滚**:位姿与电气都是好的,回滚只会把好的也拆掉。如实报 + 非零退出。
+		return fmt.Errorf("断言③红(落地复判):%s —— 电气与位姿已落地并保存,但分区几何与规划不符;`sch zone-plan` 复核后按上表调整(收敛不了就拆页/改 --gutter)",
+			strings.Join(recheck, ";"))
+	}
+	fmt.Fprintf(stdout, "✓ 断言③绿(落地复判):实测框与规划框偏差 ≤ gutter %.0f,区框零重叠\n", opts.Gutter)
 	return nil
 }
 
@@ -619,6 +642,133 @@ func zaaBrokenPins(verr error) []string {
 		}
 	}
 	return out
+}
+
+// ── 落地复判:绿勾必须与事实相符 ─────────────────────────────────────────────
+//
+// 真机 4 轮取证:`--apply` 每轮都打「断言①② + 内核对账 + layout-lint 全绿,已保存」,
+// 而落地后 `zone-plan` 实测分区框重叠 2 / 1 / 2 处。断言①②管的是**电气**(删除集
+// = 重建集、曾连接 pin 仍连接),内核对账管的是**网表**,layout-lint 管的是**器件
+// 两两重叠** —— 三条判据没有一条看得见「区框比规划胖了、于是撞上邻区」。
+// 缺的那条判据在这里补上:落地后重读一次,按同一个外框函数算实测框,与规划框比。
+
+// zaaLandedZone 是一个区的落地实测(与规划的对照项)。
+type zaaLandedZone struct {
+	Name           string
+	Content        layoutBBox // 实测内容并集(成员 L1 簇体积)
+	Rect           layoutBBox // 实测框 = partitionFrameRect(内容, 区名带, 说明带)
+	FrameW, FrameH float64
+	PlanW, PlanH   float64
+	// Missing 是这一区**读不到**的成员。unknown 是一等公民:读不到就绝不排除出
+	// 分母、也绝不合成 0,否则一次读故障会伪装成「完美收敛」。
+	Missing []string
+}
+
+// zaaRecheckFindings 是复判的纯判据:实测框与规划框的偏差 > gutter,或实测区框
+// 两两重叠,或有成员读不到 —— 任一条成立就出条目(空 = 复判绿)。
+//
+// 为什么阈值是 gutter:排布器就是靠 gutter 把相邻区隔开的,偏差一旦大于它,
+// 「规划无重叠」就不再蕴含「落地无重叠」。这正是本次缺陷的形式化。
+func zaaRecheckFindings(zones []zaaLandedZone, gutter float64) []string {
+	var out []string
+	for _, z := range zones {
+		if len(z.Missing) > 0 {
+			out = append(out, fmt.Sprintf("区 %s 有 %d 个成员读不到(%s)—— 实测框不可信,不算过",
+				z.Name, len(z.Missing), strings.Join(z.Missing, ",")))
+			continue
+		}
+		// **单边判据**:规划框是落地框的**上界**(phase A 已把落地余量 zfLandSlack
+		// 算进内容盒),所以只有「落地比规划**胖**」才是缺陷 —— 那正是「规划无重叠
+		// 却落地重叠」的成因。落地更瘦只说明余量没用满,不是问题,更不该占掉
+		// gutter 预算(否则结构性余量会把判据的容忍度先吃掉一半)。
+		dw, dh := z.FrameW-z.PlanW, z.FrameH-z.PlanH
+		if dw > gutter || dh > gutter {
+			out = append(out, fmt.Sprintf("区 %s 落地框 %.0f×%.0f 比规划框 %.0f×%.0f 胖(超出 %+.0f/%+.0f,gutter %.0f)——「规划无重叠」不再蕴含「落地无重叠」",
+				z.Name, z.FrameW, z.FrameH, z.PlanW, z.PlanH, dw, dh, gutter))
+		}
+	}
+	for i := 0; i < len(zones); i++ {
+		for j := i + 1; j < len(zones); j++ {
+			a, b := zones[i], zones[j]
+			if len(a.Missing) > 0 || len(b.Missing) > 0 {
+				continue
+			}
+			ox := minF(a.Rect.MaxX, b.Rect.MaxX) - maxF(a.Rect.MinX, b.Rect.MinX)
+			oy := minF(a.Rect.MaxY, b.Rect.MaxY) - maxF(a.Rect.MinY, b.Rect.MinY)
+			if ox > 0 && oy > 0 {
+				out = append(out, fmt.Sprintf("区框实测重叠 %s ↔ %s:%.0f×%.0f", a.Name, b.Name, ox, oy))
+			}
+		}
+	}
+	return out
+}
+
+// zaaZoneNoteBand 从规划输出反推这一区的说明带高 —— 框是唯一函数
+// (partitionFrameRect),带高就是它的可逆量:frameH − 内容高 − 2·pad − 区名带。
+// 这样复判用的带高与规划**逐区一致**,不必再读一遍 note(读第二遍就是第二把尺)。
+func zaaZoneNoteBand(z zoneArrangeZoneOut, titleBand float64) float64 {
+	band := z.FrameH - (z.Content.MaxY - z.Content.MinY) - 2*partitionContentPad - titleBand
+	if band < 0 {
+		return 0
+	}
+	return band
+}
+
+// zaaLandedRecheck 重读落地后的页面,按 L1 簇算每个区的实测框。纯读。
+func zaaLandedRecheck(cfg *appConfig, win, docUUID string, out *zoneArrangeOut,
+	opts partitionOpts) ([]zaaLandedZone, error) {
+	res, err := requestAutolayoutAction(cfg, "schematic.components.list", win,
+		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "zone-arrange 落地复判")
+	if err != nil {
+		return nil, err
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		return nil, perr
+	}
+	wires, werr := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if werr != nil {
+		return nil, fmt.Errorf("读导线:%w", werr)
+	}
+	clusters, _ := buildSchClusters(comps, wires)
+	byDesig := map[string]schCluster{}
+	for _, c := range clusters {
+		byDesig[strings.ToUpper(c.Designator)] = c
+	}
+	var zones []zaaLandedZone
+	for _, z := range out.Zones {
+		lz := zaaLandedZone{Name: z.Name, PlanW: z.FrameW, PlanH: z.FrameH}
+		has := false
+		for _, g := range z.Groups {
+			c, ok := byDesig[strings.ToUpper(g.Designator)]
+			if !ok {
+				lz.Missing = append(lz.Missing, g.Designator)
+				continue
+			}
+			zfGrow(&lz.Content, &has, c.Box)
+		}
+		if !has {
+			lz.Missing = append(lz.Missing, "(全区无实测几何)")
+			zones = append(zones, lz)
+			continue
+		}
+		lz.Rect = partitionFrameRect(lz.Content, opts.TitleBand, zaaZoneNoteBand(z, opts.TitleBand))
+		lz.FrameW, lz.FrameH = lz.Rect.MaxX-lz.Rect.MinX, lz.Rect.MaxY-lz.Rect.MinY
+		zones = append(zones, lz)
+	}
+	return zones, nil
+}
+
+// zaaMaxPlannedStub 是本次计划里最长的桩 —— 内核常规重连步的桩长硬上限。
+// 落地桩不越过规划桩,落地框就不越过规划框(恢复段有意不夹,见 moveKernelOpts）。
+func zaaMaxPlannedStub(execs []zaaMemberExec) float64 {
+	m := zfStub
+	for _, e := range execs {
+		for _, t := range e.Terms {
+			m = maxF(m, t.Offset)
+		}
+	}
+	return m
 }
 
 func allSnaps(execs []zaaMemberExec) []zaaPinSnap {

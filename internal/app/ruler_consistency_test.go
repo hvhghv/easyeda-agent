@@ -153,3 +153,42 @@ func TestRuler_GateOverlapEpsMatchesCheck(t *testing.T) {
 			gateDefaultOverlapEps, schMarkerOverlapEps)
 	}
 }
+
+// 「桩线伸展」也只有一把尺。2026-08-20 真机 4 轮取证:同一件事有三套算法
+// (phase A 自拼端子盒 / --apply 未覆盖 pin 走自由 autoconnect / group-move 刚体
+// 平移也走自由 autoconnect),于是 dry-run 每轮 pass、落地每轮重叠,而且不收敛。
+// 钉住三条配对:
+//
+//	① kind 映射:规划侧 zfCanonKind == 落地侧 zaaConnectKind;
+//	② 端子几何:zfTermGeom 的 marker 盒 == 落点评分器/`sch check` 的
+//	   predictedMarkerBBox(**同一个函数**,不是"近似相等");
+//	③ 桩端点:走 endpointFor(连接器 connect_pin 的 5 网格吸附),不许另算。
+func TestRuler_StubGeometrySingleFunction(t *testing.T) {
+	cases := []struct{ kind, net, dir string }{
+		{"netflag", "GND", "down"}, {"netflag", "GND", "up"},
+		{"netflag", "+3V3", "up"}, {"netflag", "5V", "left"},
+		{"netport", "USB_DTR", "right"}, {"netport", "MCU_TX", "left"},
+	}
+	for _, c := range cases {
+		// ① 两侧的 canonical kind 必须逐字相同。
+		if got, want := zfCanonKind(c.kind, c.net), zaaConnectKind(zfPlacedTerm{Kind: c.kind, Net: c.net}); got != want {
+			t.Fatalf("%s/%s:规划侧 kind %q ≠ 落地侧 kind %q(两把尺!)", c.kind, c.net, got, want)
+		}
+		// ②③ 几何必须是落地那条链本身。
+		const px, py, off = 100.0, 200.0, 30.0
+		ex, ey := endpointFor(px, py, off, c.dir)
+		wire, marker := zfTermGeom(px, py, off, c.dir, c.kind, c.net, 0)
+		if want := predictedMarkerBBox(ex, ey, zfCanonKind(c.kind, c.net), c.dir, c.net); marker != want {
+			t.Fatalf("%s/%s/%s:规划的 marker 盒 %+v ≠ predictedMarkerBBox %+v(两把尺!)",
+				c.kind, c.net, c.dir, marker, want)
+		}
+		if wire.MinX > ex || wire.MaxX < ex || wire.MinY > ey || wire.MaxY < ey {
+			t.Fatalf("%s/%s/%s:桩线段没盖住 endpointFor 的端点(%g,%g):%+v", c.kind, c.net, c.dir, ex, ey, wire)
+		}
+	}
+	// 落地余量必须就是桩端点吸附的那一格 —— 它是规划框成为**上界**的依据。
+	if zfLandSlack != acSchGrid {
+		t.Fatalf("zfLandSlack=%v ≠ acSchGrid=%v —— 余量与吸附网格分家,规划框不再是落地框的上界",
+			float64(zfLandSlack), float64(acSchGrid))
+	}
+}

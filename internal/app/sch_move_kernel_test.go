@@ -38,8 +38,12 @@ type fakeMoveOps struct {
 	modifyLandsAnyway bool             // 注入错误时写仍落地(超时假失败)
 
 	autoconnectFn func(conns []acConnSpec, replace bool) ([]string, []string, error)
-	connectErr    error
-	docErr        error // resolveDoc 注入:目标页不可解析(工程被重建)
+	// acRules 记下最后一次 autoconnect 拿到的规则(桩长上限的断言用)。
+	acRules    []autoconnectRules
+	connectErr error
+	// connectHook 让测试看见每条 connect_pin 的完整参数(桩长/方向的断言用)。
+	connectHook func(pinX, pinY float64, t moveConnTerm)
+	docErr      error // resolveDoc 注入:目标页不可解析(工程被重建)
 
 	log []string
 }
@@ -141,14 +145,20 @@ func (f *fakeMoveOps) anchorOf(desig string) (float64, float64, bool, error) {
 
 func (f *fakeMoveOps) connectPin(pinX, pinY float64, t moveConnTerm) error {
 	f.record("connectPin %s %s %g,%g", t.Net, t.Direction, pinX, pinY)
+	if f.connectHook != nil {
+		f.connectHook(pinX, pinY, t)
+	}
 	return f.connectErr
 }
 
-func (f *fakeMoveOps) autoconnect(conns []acConnSpec, replace bool) ([]string, []string, error) {
+func (f *fakeMoveOps) autoconnect(conns []acConnSpec, replace bool, rules autoconnectRules) ([]string, []string, error) {
 	refs := make([]string, 0, len(conns))
 	for _, c := range conns {
 		refs = append(refs, c.PinRef)
 	}
+	f.mu.Lock()
+	f.acRules = append(f.acRules, rules)
+	f.mu.Unlock()
 	// 末尾追加 replace 标记:既能用前缀断言引脚集合,也能断言恢复段走 replace。
 	f.record("autoconnect %s replace=%v", strings.Join(refs, ","), replace)
 	if f.autoconnectFn != nil {
@@ -259,9 +269,162 @@ func TestMoveKernel_SuccessPathSnapsToGrid(t *testing.T) {
 			t.Errorf("旧图元 %s 未被清扫", id)
 		}
 	}
-	// 快照重连必须覆盖全部已连 pin。
-	if f.calls("autoconnect R1:1,R1:2") != 1 {
-		t.Fatalf("快照重连应对 R1:1,R1:2 各连一次,log=%v", f.log)
+	// 重连必须覆盖全部已连 pin,且**默认走 preserve**:原样复现移动前的桩几何
+	// (5V 朝上 30、GND 朝下 30),而不是丢给 autoconnect 重新评分。
+	if f.calls("connectPin 5V up") != 1 || f.calls("connectPin GND down") != 1 {
+		t.Fatalf("刚体平移应原样重建两只桩,log=%v", f.log)
+	}
+	if f.calls("autoconnect ") != 0 {
+		t.Fatalf("桩几何能复现时不该退回 autoconnect 评分,log=%v", f.log)
+	}
+}
+
+// ── 刚体平移不撑胖:preserve 复现原桩,free(旧行为)会换成评分器挑的桩 ────────
+//
+// 真机取证:group-move --dx 40 把 U 组框从 315×389 撑到 523×406(+208)。根因是
+// 内核对「没有计划端子」的 pin 一律走 autoconnect 自由评分,而评分器的档位里
+// 常驻 min+k·laneStepFor。这里钉住两条:
+//   - 默认(preserve):重连指令 = 移动前实测的 (direction, offset),逐条相等;
+//   - 负对照(free):同一场景退回 autoconnect,preserve 的断言必须失效。
+func TestMoveKernel_RigidMovePreservesStubGeometry(t *testing.T) {
+	f := kernelFixture()
+	var got []moveConnTerm
+	f.connectHook = func(px, py float64, t moveConnTerm) { got = append(got, t) }
+	if _, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, kernelTestOpts()); err != nil {
+		t.Fatalf("成功路径不该报错:%v", err)
+	}
+	want := map[string]moveConnTerm{
+		"1": {Pin: "1", Kind: "power", Net: "5V", Direction: "up", Rotation: 0, Offset: 30},
+		"2": {Pin: "2", Kind: "ground", Net: "GND", Direction: "down", Rotation: 0, Offset: 30},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("该原样重建 %d 只桩,得到 %d(%+v)", len(want), len(got), got)
+	}
+	for _, g := range got {
+		w, ok := want[g.Pin]
+		if !ok {
+			t.Fatalf("多出来的重连指令 %+v", g)
+		}
+		if g != w {
+			t.Errorf("pin%s 桩几何被改写:want %+v got %+v —— 刚体平移必须几何不变", g.Pin, w, g)
+		}
+	}
+
+	// 判据的最终形式:**框尺寸不变**。按落地那条链(endpointFor →
+	// predictedMarkerBBox)算移动前后的组包络,尺寸必须逐字相等 —— 位置随平移走,
+	// 尺寸不许变(真机反例:U 组 315×389 → 523×406)。
+	beforeW, beforeH := moveTestGroupSize(t, f, 100, 100, map[string]moveConnTerm{
+		"1": {Direction: "up", Kind: "power", Net: "5V", Offset: 30},
+		"2": {Direction: "down", Kind: "ground", Net: "GND", Offset: 30},
+	})
+	landed := map[string]moveConnTerm{}
+	for _, g := range got {
+		landed[g.Pin] = g
+	}
+	afterW, afterH := moveTestGroupSize(t, f, 300, 400, landed)
+	if beforeW != afterW || beforeH != afterH {
+		t.Errorf("刚体平移撑胖了组框:%.0f×%.0f → %.0f×%.0f", beforeW, beforeH, afterW, afterH)
+	}
+
+	// 负对照:换回自由 offset 策略,connect_pin 不再收到任何原样重建指令,
+	// 两只 pin 全部落进 autoconnect(桩长由评分器重挑 = 框会被撑胖)。
+	fFree := kernelFixture()
+	var freeGot []moveConnTerm
+	fFree.connectHook = func(px, py float64, t moveConnTerm) { freeGot = append(freeGot, t) }
+	opts := kernelTestOpts()
+	opts.StubPolicy = moveStubFree
+	if _, err := schMoveKernelWith(fFree, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, opts); err != nil {
+		t.Fatalf("负对照不该报错:%v", err)
+	}
+	if len(freeGot) != 0 {
+		t.Fatalf("负对照下不该有原样重建指令(否则 preserve 断言钉不住任何东西):%+v", freeGot)
+	}
+	if fFree.calls("autoconnect R1:1,R1:2") != 1 {
+		t.Fatalf("负对照必须退回 autoconnect 自由评分,log=%v", fFree.log)
+	}
+	// 而自由评分挑出来的桩(最浅档 OffsetMin,或更深的 laneStepFor 档)与原桩
+	// (30)不同 —— 「框尺寸不变」的断言在负对照下必须**失败**,否则它钉不住任何东西。
+	freeOff := defaultAutoconnectRules().OffsetMin
+	freeW, freeH := moveTestGroupSize(t, fFree, 300, 400, map[string]moveConnTerm{
+		"1": {Direction: "up", Kind: "power", Net: "5V", Offset: freeOff},
+		"2": {Direction: "down", Kind: "ground", Net: "GND", Offset: freeOff},
+	})
+	if freeW == beforeW && freeH == beforeH {
+		t.Fatalf("负对照下组框竟然没变(%.0f×%.0f)—— 自由评分模型与原桩长撞车,换个夹具", freeW, freeH)
+	}
+}
+
+// moveTestGroupSize 按**落地那条链**算 R1 在锚点 (ax,ay) 上、按给定桩几何重连后
+// 的组包络尺寸(本体 ∪ 每支桩线 ∪ 每支 marker 的渲染包络)。负对照要比的正是它。
+func moveTestGroupSize(t *testing.T, f *fakeMoveOps, ax, ay float64, terms map[string]moveConnTerm) (w, h float64) {
+	t.Helper()
+	var base layoutComp
+	for _, c := range f.comps {
+		if c.Designator == "R1" {
+			base = c
+		}
+	}
+	if base.BBox == nil {
+		t.Fatal("夹具里 R1 该有 bbox")
+	}
+	dx, dy := ax-base.X, ay-base.Y
+	box := layoutBBox{MinX: base.BBox.MinX + dx, MinY: base.BBox.MinY + dy,
+		MaxX: base.BBox.MaxX + dx, MaxY: base.BBox.MaxY + dy}
+	grow := func(b layoutBBox) {
+		box.MinX, box.MinY = minF(box.MinX, b.MinX), minF(box.MinY, b.MinY)
+		box.MaxX, box.MaxY = maxF(box.MaxX, b.MaxX), maxF(box.MaxY, b.MaxY)
+	}
+	for _, p := range base.Pins {
+		tm, ok := terms[p.Number]
+		if !ok {
+			t.Fatalf("pin%s 没有重连指令 —— 组框无从比较", p.Number)
+		}
+		px, py := p.X+dx, p.Y+dy
+		ex, ey := endpointFor(px, py, tm.Offset, tm.Direction)
+		grow(layoutBBox{MinX: minF(px, ex), MinY: minF(py, ey), MaxX: maxF(px, ex), MaxY: maxF(py, ey)})
+		grow(predictedMarkerBBox(ex, ey, tm.Kind, tm.Direction, tm.Net))
+	}
+	return box.MaxX - box.MinX, box.MaxY - box.MinY
+}
+
+// autoconnect 兜底路径必须带桩长硬上限:上限缺席 = laneStepFor 的标准档位
+// (netport 一档 ~89、三档 ~285)与无上界的 extendedOffsets 全部可选,一次重连
+// 就能把组框撑成本体的几倍。
+func TestMoveKernel_AutoconnectFallbackIsOffsetCapped(t *testing.T) {
+	f := kernelFixture()
+	opts := kernelTestOpts()
+	opts.StubPolicy = moveStubFree
+	opts.MaxStub = 24
+	if _, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, opts); err != nil {
+		t.Fatalf("不该报错:%v", err)
+	}
+	if len(f.acRules) == 0 {
+		t.Fatal("重连步必须调过 autoconnect")
+	}
+	if f.acRules[0].OffsetCap != 24 {
+		t.Fatalf("常规重连步应把 MaxStub 作为硬上限传下去,got %v", f.acRules[0].OffsetCap)
+	}
+	// 没给 MaxStub 时兜底上限至少封住 laneStepFor 档位(≥ OffsetMax,< 一个 netport 档)。
+	f2 := kernelFixture()
+	opts2 := kernelTestOpts()
+	opts2.StubPolicy = moveStubFree
+	if _, err := schMoveKernelWith(f2, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, opts2); err != nil {
+		t.Fatalf("不该报错:%v", err)
+	}
+	cap := f2.acRules[0].OffsetCap
+	if cap < defaultAutoconnectRules().OffsetMax {
+		t.Fatalf("兜底上限不得比细档上界还紧,got %v", cap)
+	}
+	if lane := laneStepFor("net_port_bi", "USB_DTR"); cap >= defaultAutoconnectRules().OffsetMin+lane {
+		t.Fatalf("兜底上限必须封住 laneStepFor 标准档位(%.0f),got %v", defaultAutoconnectRules().OffsetMin+lane, cap)
 	}
 }
 
@@ -306,8 +469,8 @@ func TestMoveKernel_FakeFailureRecheckedByLightRead(t *testing.T) {
 	if f.calls("anchorOf R1") == 0 {
 		t.Fatalf("必须走轻读复核(anchorOf),log=%v", f.log)
 	}
-	// 复核判成后管线继续:重连 + 对账都要跑。
-	if f.calls("autoconnect ") == 0 {
+	// 复核判成后管线继续:重连 + 对账都要跑(重连默认走 preserve 的原样重建)。
+	if f.calls("connectPin ") == 0 {
 		t.Fatal("复核判成后必须继续重连步")
 	}
 }
@@ -330,8 +493,8 @@ func TestMoveKernel_NewBridgeFailsReconcileAndRecovers(t *testing.T) {
 	if !strings.Contains(err.Error(), "bridge") && !strings.Contains(err.Error(), "短路") {
 		t.Fatalf("错误必须点名短路:%v", err)
 	}
-	// 恢复段必须被调用(第一次 autoconnect 是重连步,之后至少一次是恢复段)。
-	if f.calls("autoconnect ") < 2 {
+	// 恢复段必须被调用(常规重连步已走 preserve 的 connect_pin,autoconnect 只剩恢复段)。
+	if f.calls("autoconnect ") < 1 {
 		t.Fatalf("对账红必须走恢复段,log=%v", f.log)
 	}
 }
@@ -380,7 +543,7 @@ func TestMoveKernel_ReconcileHealsAfterRecovery(t *testing.T) {
 	if len(rep.Notes) == 0 {
 		t.Fatal("首轮红必须留痕(note)")
 	}
-	if f.calls("autoconnect ") < 2 {
+	if f.calls("autoconnect ") < 1 {
 		t.Fatalf("必须走过恢复段补连,log=%v", f.log)
 	}
 }
@@ -488,7 +651,8 @@ func TestMoveKernel_MergeSwallowsThirdPartyPin_EarlyDetectAndRepair(t *testing.T
 				t.Fatalf("早检修复必须走 replace(灌错网要先拆再连):%s", l)
 			}
 		}
-		if strings.HasPrefix(l, "autoconnect R1:1,R1:2") {
+		// 重连步的第一发写(preserve 的原样重建)= 新桩线落地时刻。
+		if idxRest < 0 && strings.HasPrefix(l, "connectPin ") {
 			idxRest = i
 		}
 	}
@@ -612,11 +776,52 @@ func TestMoveKernel_ExplicitTermsExcludeSnapshotReconnect(t *testing.T) {
 	if f.calls("connectPin 5V left") != 1 {
 		t.Fatalf("显式端子必须走 connect_pin,log=%v", f.log)
 	}
-	// R1:1 被端子覆盖 → 快照 autoconnect 只连 R1:2。
-	if f.calls("autoconnect R1:2") != 1 || f.calls("autoconnect R1:1,R1:2") != 0 {
-		t.Fatalf("被显式端子覆盖的 pin 不得重复走快照重连,log=%v", f.log)
+	// R1:1 被端子覆盖 → 只剩 R1:2 走重连兜底(preserve 下是原样重建的 GND 桩)。
+	if f.calls("connectPin GND down") != 1 || f.calls("connectPin 5V up") != 0 {
+		t.Fatalf("被显式端子覆盖的 pin 不得重复重连,log=%v", f.log)
+	}
+	if f.calls("autoconnect ") != 0 {
+		t.Fatalf("桩几何能复现时不该退回 autoconnect,log=%v", f.log)
 	}
 	if f.calls("modify ") != 0 {
 		t.Fatalf("HasTarget=false 不得 modify,log=%v", f.log)
+	}
+}
+
+// 硬上限凌驾于「原样重建」之上:收敛场景(zone-arrange 传规划最长桩)下,老页面
+// 横跨半页的长桩正是要消灭的东西,不能借「复现旧几何」搬进新框。
+func TestMoveKernel_PreserveYieldsToMaxStub(t *testing.T) {
+	f := kernelFixture()
+	var got []moveConnTerm
+	f.connectHook = func(px, py float64, t moveConnTerm) { got = append(got, t) }
+	opts := kernelTestOpts()
+	opts.MaxStub = 20 // 夹具的原桩是 30 —— 超限
+	if _, err := schMoveKernelWith(f, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, opts); err != nil {
+		t.Fatalf("不该报错:%v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("超过硬上限的旧桩不许原样重建:%+v", got)
+	}
+	if f.calls("autoconnect R1:1,R1:2") != 1 {
+		t.Fatalf("超限的 pin 该退回(同样被夹住的)autoconnect,log=%v", f.log)
+	}
+	if len(f.acRules) == 0 || f.acRules[0].OffsetCap != 20 {
+		t.Fatalf("兜底 autoconnect 必须带同一个上限,got %+v", f.acRules)
+	}
+	// 上限放宽到原桩长度就该恢复原样重建(判据是上限,不是"永远不重建")。
+	f2 := kernelFixture()
+	var got2 []moveConnTerm
+	f2.connectHook = func(px, py float64, t moveConnTerm) { got2 = append(got2, t) }
+	opts2 := kernelTestOpts()
+	opts2.MaxStub = 30
+	if _, err := schMoveKernelWith(f2, []moveItem{
+		{Designator: "R1", HasTarget: true, X: 300, Y: 400},
+	}, opts2); err != nil {
+		t.Fatalf("不该报错:%v", err)
+	}
+	if len(got2) != 2 {
+		t.Fatalf("上限 ≥ 原桩时该原样重建 2 只桩,got %+v", got2)
 	}
 }
