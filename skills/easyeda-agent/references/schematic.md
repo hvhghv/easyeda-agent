@@ -545,6 +545,13 @@ validatePartitions(同一把尺)→ 三态 verdict:
 区框口径 = 成员 L1 虚拟组**全图元并集**(标签必在框内)。导线读不到会直接报错
 (端子归属靠导线,距离启发式必错)。
 
+> **外框只有一个函数(2026-08-20 用户裁定)**:`frame = f(成员 L1 虚拟组全图元并集,
+> 区名带, 说明带)`。`zone-plan` 的框、`zone-arrange` phase A 的现状框与收敛后框
+> 走的是**同一个函数本体**。带高由**已登记说明的内容 + 字号**推导(不是常量、更
+> 不读 note 的落点坐标)—— 所以 **phase A 收紧时 title/note 就已经在账里**,不再是
+> 「按常量带收紧 → 画框 → 再放 note 装不下 → 说明探出框外」。改任一侧,
+> `TestRuler_ZoneFrameSingleFunction` 会红。
+
 `--apply` 落地执行(断言① 删除集=重建集 → 页级深度清扫 → 逐件落位重连 →
 断言② 曾连接 pin 仍连接 → 对账修复循环 → **假失败清创**(自动删同位重复/
 同树冗余标记,复用 check 的 suggestDeleteIds 判据)→ bridge-check 红才整体
@@ -579,7 +586,21 @@ frame down by one height and pushes it past the sheet/title-block edge.
 
 Before drawing a partition, require all five `zone-plan` validation counters
 (`sheetOverflow`, `partitionOverlap`, `titleBlockHits`, `moduleOutsideZone`,
-`labelCollisions`) to be zero. Frames are **always data-driven**: whole-sheet partitions derived from live module
+`labelCollisions`) to be zero.
+
+> **`moduleOutsideZone` 判的是 L1 虚拟组,而且判定侧独立重算(2026-08-20)。**
+> 此前它复用生成侧那份模块 bbox —— 而那份 bbox 已被上游削过,于是「生成漏掉的
+> 标签,判定也看不见」,判据结构上恒报 0(真机 POWER 页:8 个 L1 组里 5 个探出
+> 框外,六项全绿)。现在判定侧从活体的 `sch clusters` 口径重算每个位号的 L1 组
+> 体积再与框做包含判定,并逐条给出**是谁、超了多少、往哪超**。
+>
+> **降级恒定可见 + fail-closed**:JSON 里 `labelScopeDegraded` 与 `labelScope`
+> **永远出现**(不再被 omitempty 抹掉)。归属做不成时(读不到导线 / 某件没有
+> 引脚几何 / 某件没有 L1 组记录)`labelScope.degraded=true` 并点名位号,
+> `moduleOutsideZone` 按「不可信」计数 —— **验不了就不许报绿**。看到降级先跑
+> `easyeda sch clusters --members` 核对,别去调 `--gutter`。
+
+Frames are **always data-driven**: whole-sheet partitions derived from live module
 bboxes, 22pt titles by default. The old fixed nine-grid mode (`--mode zones`) is
 **retired** — its rectangles had nothing to do with where the parts actually are,
 so on a single-module page spanning the sheet the frame missed the circuit entirely.

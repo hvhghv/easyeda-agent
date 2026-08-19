@@ -119,6 +119,32 @@ func TestRuler_TidyLabelRotationMatchesFrozenTable(t *testing.T) {
 	}
 }
 
+// 外框只有**一个**函数:zone-plan 第一遍的框、zone-arrange phase A 的现状框、
+// phase A 收敛后的框,三者必须逐字段同源(2026-08-20 用户裁定)。此前 phase A 自己
+// 拿常量 NoteBand 拼了一份,而 zone-plan 按已登记说明的实际渲染高算 —— 两套带账,
+// 收紧出来的框装不下后放的 note。详细正负对照见 cmd_sch_zone_frame_test.go。
+func TestRuler_ZoneFrameSingleFunction(t *testing.T) {
+	opts := defaultPartitionOpts()
+	content := layoutBBox{100, 200, 500, 640}
+	for _, noteH := range []float64{0, 13, 39, 91} {
+		r := partitionFirstPassRect(content, opts, noteH)
+		w, h := zoneArrangeRawFrame(content, opts, noteH)
+		if r.MaxX-r.MinX != w || r.MaxY-r.MinY != h {
+			t.Fatalf("noteH=%.0f:zone-plan 框 %.0f×%.0f ≠ phase A 框 %.0f×%.0f(两把尺!)",
+				noteH, r.MaxX-r.MinX, r.MaxY-r.MinY, w, h)
+		}
+		// 带高只由「已登记说明的内容+字号」推导 —— 读落点就会造出自增长反馈环。
+		band := schZoneNoteBandHeight(opts.NoteBand, noteH)
+		want := layoutBBox{
+			MinX: content.MinX - partitionContentPad, MinY: content.MinY - partitionContentPad - band,
+			MaxX: content.MaxX + partitionContentPad, MaxY: content.MaxY + partitionContentPad + opts.TitleBand,
+		}
+		if r != want {
+			t.Fatalf("noteH=%.0f:外框算式漂了 %+v want %+v", noteH, r, want)
+		}
+	}
+}
+
 // gate 的 check 段与 `sch check` 必须用同一个 marker-overlap 阈值:2026-08-17
 // 真机上 check 报 0、gate --strict 报 9,根因是 gateDefaultOverlapEps 手抄了 0.5。
 func TestRuler_GateOverlapEpsMatchesCheck(t *testing.T) {

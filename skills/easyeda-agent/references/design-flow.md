@@ -56,7 +56,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 |---|---|---|---|
 | S0 | 方案书:选块选型、网名表、分页计划、架构决策 | `blocks ls/search/show` → spec 写盘 → `easyeda spec validate` | validate 无 ERROR;milestone 档经用户确认 |
 | S1 | 图纸/分页 reconcile 到模块计划 | `sch pages` → `page-rename`/`page-new`/`page-delete` → `sch sheet-geometry --json` | 页集合=模块计划;每页有 A4 sheet 💾 |
-| S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 |
+| S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 **且 `labelScopeDegraded=false`**(降级=判据验不了,不是"没问题") |
 | S3 | 按组摆放(块优先;命中块 S3+S4 一条命令) | `sch block-apply <id> --bind 端口=网名` / `sch autolayout --engine template` / `sch place`+`modify` | `sch gate --only layout-lint,clusters` 无 ERROR 💾 |
 | S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解;phase B = 边归属+多层货架+回溯)→ `--apply`(断言①②+假失败清创+分级回滚) | verdict=pass 且断言①②绿;报出的问题**重跑一轮 apply(两遍法),不逐器件手挪**。`blocked` 时先看 phase A 那一栏收敛了没(**排不下的是形状不是面积**),再考虑 `page-new` 拆页 —— A4-only,不换纸 |
 | S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
@@ -237,7 +237,10 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
     已登记说明的实际渲染高度预留**(不再是写死的单行高):多行(1~3 行)说明放心写,
     带装不下时框向外扩(下探),器件区不挤;高度只从登记说明的**内容+字号**推导、
     绝不读落点坐标,所以重复跑 `zone-plan` 幂等收敛 —— 框几何只随「登记了哪些说明」
-    变,不随「说明落在哪」变。登记的说明**不反哺
+    变,不随「说明落在哪」变。**外框只有一个函数**(2026-08-20 用户裁定):
+    `frame = f(成员 L1 虚拟组全图元并集, 区名带, 说明带)`,`zone-plan` 与
+    `zone-arrange` phase A 共用同一本体、同一份带高 —— **收紧时 title/note 就在账里**,
+    不再是「按常量带收紧 → 画框 → 再放 note 装不下」。登记的说明**不反哺
     分区框几何**(框由器件内容反推,说明的家是框内说明带)——重画分区框不会因为
     说明越画越大。说明只写**需要注意的**(关键参数、易错点),
     一到两行,不要复述电路。含 `~`/`+/-`/引号/`%` 的说明文字是安全的(经 JSON 转义

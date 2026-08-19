@@ -90,6 +90,9 @@ type partitionValidation struct {
 	// sheetEdgeMinGap — a frame flush against the printed sheet frame reads as a
 	// confusing double line (live feedback 2026-08-11).
 	SheetMarginHits int `json:"sheetMarginHits"`
+	// ModuleOutsideDetail 逐条说出**是谁**探出了框、超了多少、往哪个方向 ——
+	// 判据的价值不在报数,在给出能执行的下一步(两把尺那条复发病的另一半)。
+	ModuleOutsideDetail []string `json:"moduleOutsideDetail,omitempty"`
 }
 
 func (v partitionValidation) clean() bool {
@@ -141,9 +144,16 @@ type partitionPlan struct {
 	// Capacity 回答「这一页是不是根本装不下」——与「摆得不好」是两种病,
 	// 修法完全不同(收敛/拆页 vs 挪一挪)。见 sch_zone_capacity.go。
 	Capacity schZoneCapacity `json:"capacity"`
-	// LabelScopeDegraded:导线读取失败,模块 bbox 退回了距离启发式 —— 标签入框
-	// 是硬约束(用户裁定),降级必须可见,漏掉的旗恰恰是判据看不见的那种。
-	LabelScopeDegraded bool `json:"labelScopeDegraded,omitempty"`
+	// LabelScopeDegraded:模块 bbox 的「标签范围」口径不可信 —— 标签入框是硬约束
+	// (用户裁定),降级必须可见,漏掉的旗恰恰是判据看不见的那种。
+	//
+	// **没有 omitempty 是有意的**:2026-08-20 查三份真机 JSON 快照,这个字段一次
+	// 都没出现过(值为 false 就被 omitempty 抹掉),于是「降级信号」在输出里根本
+	// 不存在,等于哑的。降级标志必须**恒定出现**,读的人才能区分「没降级」与
+	// 「这版没有这个字段」。
+	LabelScopeDegraded bool `json:"labelScopeDegraded"`
+	// LabelScope 是同一件事的可归因版本:降不降级、为什么降、涉及哪些位号。
+	LabelScope schZoneLabelScope `json:"labelScope"`
 	// SheetAssumed:页上没有图框图元,按 A4-only 域界假定 1170×825 规划
 	// (图框需人工在 UI 重放;见 schSheetOrA4)。
 	SheetAssumed bool `json:"sheetAssumed,omitempty"`
@@ -174,6 +184,64 @@ const defaultNoteBandLines = 2
 // 与预测(placeSchNote 的预扩)必须走同一个函数** —— 两把尺一分家,就会出现
 // 「落点按 A 算、框按 B 画」的框外说明。
 func requiredNoteBand(noteH float64) float64 { return noteH + noteGap }
+
+// ── 外框的唯一函数(用户裁定 2026-08-20)────────────────────────────────────
+//
+// > zone 虚拟框**就是算法算出来的**,应该依据「虚拟组(内含器件元素 + 网络标签)
+// > + title + notes」**直接计算**外框。做 title + note 的时候,没有和其他虚拟组
+// > 一起进收紧布局,然后才画框。
+//
+//	frame = f(成员 L1 虚拟组全图元的并集, 区名带高, 说明带高)
+//
+// 三个消费者共用这一个函数本体,不许各算各的:
+//   - `zone-plan` 第一遍(planPartitions)—— 画框 + 判据的基准框;
+//   - `zone-arrange` phase A 的现状口径框(rawW/rawH)与收敛后框(FrameW/FrameH);
+//   - 任何新的排布/收紧路径。
+//
+// 此前 phase A 自己拿 `2*pad + TitleBand + NoteBand(常量)` 拼了一份 —— 而
+// zone-plan 侧的说明带是按**已登记说明的实际渲染高度**算的(真机 42/55,随行数变),
+// 两套带账 = 两把尺:按常量带收紧出来的框,画完再放 note 就装不下,note 探出框外。
+// 这正是 9ee3e13 自己挂的那笔账(「NoteBand 是另一套带账,不知登记说明高度」)。
+//
+// **带高只许由内容+字号推导(noteSizeOf),绝不读 note 的落点坐标** —— 落点依赖框、
+// 框又依赖带,读落点就重新引入「放一条 note → 带变 → 框动 → note 又不在带里」的
+// 自增长反馈环(9ee3e13 建立的不变式,不要回退)。
+//
+// 说明**宽度**这一维有意不进本函数:窄框为说明横向扩边需要知道邻框与页面障碍,
+// 那是规划器第二遍(reserveZoneNoteArea)的事,而第二遍与 `sch note` 的落点侧
+// 共用同一个函数本体 —— 已经是同一把尺。把宽度也塞进第一遍会让「登记前 note 侧
+// 算出的框」与「登记后 planner 重算的框」再次分家(先右后左扩 vs 对称扩)。
+func partitionFrameRect(content layoutBBox, titleBand, noteBand float64) layoutBBox {
+	return layoutBBox{
+		MinX: content.MinX - partitionContentPad,
+		MinY: content.MinY - partitionContentPad - noteBand,
+		MaxX: content.MaxX + partitionContentPad,
+		MaxY: content.MaxY + partitionContentPad + titleBand,
+	}
+}
+
+// partitionFrameSize 是同一个函数的尺寸投影(排布器只关心装多大)。
+func partitionFrameSize(content layoutBBox, titleBand, noteBand float64) (w, h float64) {
+	r := partitionFrameRect(content, titleBand, noteBand)
+	return r.MaxX - r.MinX, r.MaxY - r.MinY
+}
+
+// schZoneNoteBandHeight 是说明带高的**唯一口径**:没有登记说明就用默认带,
+// 有就按已登记说明里最高的一条推导(requiredNoteBand = 渲染高 + 带内底距)。
+func schZoneNoteBandHeight(defaultBand, noteH float64) float64 {
+	if noteH > 0 {
+		if nb := requiredNoteBand(noteH); nb > defaultBand {
+			return nb
+		}
+	}
+	return defaultBand
+}
+
+// partitionFirstPassRect 是 zone-plan 第一遍的框(未做纸边/图签收拢、未为说明
+// 横向扩边)。与 zoneArrangeRawFrame 同源 —— 见 ruler 配对测试。
+func partitionFirstPassRect(content layoutBBox, opts partitionOpts, noteH float64) layoutBBox {
+	return partitionFrameRect(content, opts.TitleBand, schZoneNoteBandHeight(opts.NoteBand, noteH))
+}
 
 func defaultPartitionOpts() partitionOpts {
 	// Margin 20 → 28 (2026-08-11): at 20 the frame sat 26 units from the sheet
@@ -275,7 +343,6 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		// 多行说明在带内候选点必撞器件区,被回退链踢到框外。带加高 = rect.MinY
 		// 进一步下探(向外扩),器件区(content ± pad)一寸不挤。高度来自登记记录
 		// 的文字尺寸(NoteHeight,内容+字号),不来自落点 bbox —— 不构成反馈环。
-		noteBand := opts.NoteBand
 		var noteW, noteH float64
 		for _, i := range cells[k] {
 			if h := modules[i].NoteHeight; h > noteH {
@@ -285,11 +352,7 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 				noteW = w
 			}
 		}
-		if noteH > 0 {
-			if nb := requiredNoteBand(noteH); nb > noteBand {
-				noteBand = nb
-			}
-		}
+		noteBand := schZoneNoteBandHeight(opts.NoteBand, noteH)
 		// **框 = 成员虚拟组体积的并集 + 边距 + 上标题带 + 下说明带,不做任何裁剪。**
 		//
 		// 此前这里把矩形 clamp 到网格单元(`math.Min(cell.MaxX, …)`),于是模块的
@@ -302,12 +365,7 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		// 毛病,是布局的事实:两个模块的虚拟组本身交叠时,不存在既包住又互不重叠的
 		// 一组矩形。那件事由 partitionOverlap 如实报出来,修法是挪件(S3 的组间留通道),
 		// 不是把框切短来掩盖。
-		rect := layoutBBox{
-			MinX: content.MinX - partitionContentPad,
-			MinY: content.MinY - partitionContentPad - noteBand,
-			MaxX: content.MaxX + partitionContentPad,
-			MaxY: content.MaxY + partitionContentPad + opts.TitleBand,
-		}
+		rect := partitionFrameRect(content, opts.TitleBand, noteBand)
 		// 说明带/标题带是**我们加的预留**,不是内容:它撞上图签就缩,而
 		// 「content ± pad」这一圈是构造保证,一步都不让。于是「框住自己的内容」
 		// 永远成立,而「不压图签」在装得下时也成立;两者真冲突时(模块自己压到图签)
@@ -475,7 +533,34 @@ func bboxContains(outer, inner layoutBBox) bool {
 		inner.MaxX <= outer.MaxX+eps && inner.MaxY <= outer.MaxY+eps
 }
 
+// partitionJudge 是 moduleOutsideZone 的**独立判定输入**。
+//
+// 为什么必须独立:判据此前复用生成侧的 `m.BBox` —— 而那个 bbox 已经被上游削过
+// (clusterOf 查不到就静默退回器件本体、无引脚几何时整组体积退化成本体),于是
+// 「生成漏掉的标签,判定也看不见」,判据在验一个被削过的集合,结构上恒报 0。
+// 真机取证 2026-08-20:POWER 页 8 个 L1 组里 5 个探出框外,moduleOutsideZone=0。
+//
+// 判定侧只与生成侧共享**一件事实**:谁属于哪个区(认领 / 虚拟组成员表)。
+// 几何一律从活体的 L1 组表(`sch clusters` 口径)现取。
+type partitionJudge struct {
+	// PartsOf:区名 → 成员位号(已解析到本页的那些)。
+	PartsOf map[string][]string
+	// ClusterOf:位号 → 该件 L1 虚拟组的实测体积(器件本体 ∪ 它自己的 marker/桩线)。
+	ClusterOf map[string]layoutBBox
+	// Scope:口径可信度。不可信的位号按「探出框外」计(fail-closed)——
+	// 标签入框是硬约束,验不了就不许报绿。
+	Scope schZoneLabelScope
+}
+
 func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *layoutBBox) partitionValidation {
+	return validatePartitionsWithJudge(plan, modules, keepout, nil)
+}
+
+// validatePartitionsWithJudge 是带独立判定输入的完整校验。judge=nil 时退回旧的
+// 「按生成侧 m.BBox 判」——**只有纯几何单测和 zaValidate(框级四项)能用**,
+// 活体路径必须给 judge,否则判据看不见上游漏掉的标签。
+func validatePartitionsWithJudge(plan partitionPlan, modules []partitionModule,
+	keepout *layoutBBox, judge *partitionJudge) partitionValidation {
 	var v partitionValidation
 	ps := plan.Partitions
 	// Same inflated basis the planner lifts with (titleBlockSafety): validating
@@ -528,14 +613,31 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 			partOf[name] = p.BBox
 		}
 	}
+	// **按整个 L1 虚拟组判,不是按器件本体**:框的职责是「框住这个模块」,而模块的
+	// 体积包含它自己的 marker/桩线。只判本体时,框可以把地旗、网络标签甩在外面
+	// 却依然报 clean —— 用户截图一眼看出 D1 的 GND 垂在 ESD 框外,而 validation
+	// 五项全 0。判据必须判所见。
+	//
+	// judge 非空时**逐个 L1 组独立重算**(不碰 m.BBox);为空时退回旧口径。
 	for _, m := range modules {
 		pb, ok := partOf[m.Name]
-		// **按整个 L1 虚拟组判,不是按器件本体**:框的职责是「框住这个模块」,而模块的
-		// 体积包含它自己的 marker/桩线。只判本体时,框可以把地旗、网络标签甩在外面
-		// 却依然报 clean —— 用户截图一眼看出 D1 的 GND 垂在 ESD 框外,而 validation
-		// 五项全 0。判据必须判所见。
-		if !ok || !bboxContains(pb, m.BBox) {
+		if !ok {
 			v.ModuleOutsideZone++
+			v.ModuleOutsideDetail = append(v.ModuleOutsideDetail,
+				fmt.Sprintf("%s:没有分配到任何分区框", m.Name))
+			continue
+		}
+		if judge == nil {
+			if !bboxContains(pb, m.BBox) {
+				v.ModuleOutsideZone++
+				v.ModuleOutsideDetail = append(v.ModuleOutsideDetail,
+					fmt.Sprintf("%s:模块体积 %s 探出框 %s", m.Name, bboxText(m.BBox), bboxText(pb)))
+			}
+			continue
+		}
+		if why := judgeModuleLabels(m.Name, pb, judge); len(why) > 0 {
+			v.ModuleOutsideZone++
+			v.ModuleOutsideDetail = append(v.ModuleOutsideDetail, why...)
 		}
 	}
 	// A title band overlapping a module body would put the big title on top of a
@@ -550,6 +652,58 @@ func validatePartitions(plan partitionPlan, modules []partitionModule, keepout *
 	return v
 }
 
+// judgeModuleLabels 逐个 L1 虚拟组判「有没有被这个框罩住」,返回可执行的说明。
+// 不可信(引脚几何缺失 / 无 L1 组 / 导线读不到)一律按**探出**处理:验不了就不许
+// 报绿 —— 那正是 2026-08-20 那次「五个组探出框外、判据全 0」的成因。
+func judgeModuleLabels(name string, frame layoutBBox, judge *partitionJudge) []string {
+	var out []string
+	parts := judge.PartsOf[name]
+	if len(parts) == 0 {
+		return []string{fmt.Sprintf("%s:判定侧拿不到成员位号 —— L1 组口径不可信,不予放行", name)}
+	}
+	for _, d := range parts {
+		key := strings.ToUpper(d)
+		cb, has := judge.ClusterOf[key]
+		if !has || judge.Scope.untrusted(key) {
+			out = append(out, fmt.Sprintf(
+				"%s/%s:读不到可信的 L1 虚拟组体积(标签范围口径降级)—— 先修数据再谈框:`easyeda sch clusters --members`",
+				name, key))
+			continue
+		}
+		if bboxContains(frame, cb) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s/%s:L1 组体积 %s 探出框 %s(%s)",
+			name, key, bboxText(cb), bboxText(frame), overhangText(frame, cb)))
+	}
+	return out
+}
+
+// overhangText 说清超出的方向与量 —— 判据必须给能执行的下一步。
+func overhangText(frame, inner layoutBBox) string {
+	var parts []string
+	if d := frame.MinX - inner.MinX; d > 0.01 {
+		parts = append(parts, fmt.Sprintf("左超 %.0f", d))
+	}
+	if d := inner.MaxX - frame.MaxX; d > 0.01 {
+		parts = append(parts, fmt.Sprintf("右超 %.0f", d))
+	}
+	if d := frame.MinY - inner.MinY; d > 0.01 {
+		parts = append(parts, fmt.Sprintf("下超 %.0f", d))
+	}
+	if d := inner.MaxY - frame.MaxY; d > 0.01 {
+		parts = append(parts, fmt.Sprintf("上超 %.0f", d))
+	}
+	if len(parts) == 0 {
+		return "边界擦线"
+	}
+	return strings.Join(parts, "、")
+}
+
+func bboxText(b layoutBBox) string {
+	return fmt.Sprintf("(%.0f,%.0f)..(%.0f,%.0f)", b.MinX, b.MinY, b.MaxX, b.MaxY)
+}
+
 func strInSlice(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {
@@ -559,47 +713,79 @@ func strInSlice(ss []string, s string) bool {
 	return false
 }
 
-// modulesFromClaims builds the planner input from `sch zones` claims: each module's
-// bbox is the union of its parts' live bboxes. Modules whose parts aren't on the
-// active page (no bbox) are skipped.
-// schModuleMarkerReach is how far beyond a claimed part's bbox its net markers
-// (stub flags) are folded into the module bbox: stub offset (~18-24) + flag body
-// (~21-35). Without this the partition frame hugs the PART bboxes only and every
-// downward GND flag dangles OUTSIDE the frame (live 2026-08-12: all three POWER
-// caps' GND rendered below the frame).
-const schModuleMarkerReach = 60.0
+// schMarkerFoldReach 是**降级路径**(读不到导线)里 marker 收编的最大距离。
+//
+// 旧值 schModuleMarkerReach=60 是拍的,而且注释自承「会漏远处的旗」:实测桩线
+// offset 常见 18–98,再加上标签渲染宽度,轻松超过 60 —— 漏掉的恰恰是判据也看不见
+// 的那种旗。这里改用 `buildSchClusters` 自己的无线兜底同一把尺(6*schStubLen),
+// 两条归属路径不再各拿一把尺;而且这条路径现在**恒被标记为降级**(见
+// schZoneLabelScope),所以它的职责只剩「尽量别漏」,不再假装可信。
+const schMarkerFoldReach = 6 * schStubLen
 
-// modulesFromClaims 把认领折成模块 bbox。
+// schZoneLabelScope 是「模块 bbox 到底罩住了多少标签」的可信度记录。
+//
+// 标签入框是硬约束(用户裁定 2026-08-16),所以「口径不可信」必须是**一等公民**:
+// 生成侧漏掉的旗,判定侧也看不见(它俩曾共用同一个 m.BBox),于是判据恒报 0 而
+// 用户截图一眼看出标签垂在框外。降级从此显式序列化,并让 moduleOutsideZone
+// 按「不可信」处理(fail-closed),不许静默。
+type schZoneLabelScope struct {
+	Degraded bool `json:"degraded"`
+	// WiresUnavailable:导线读不到 —— L1 归属整体退回距离启发式。
+	WiresUnavailable bool `json:"wiresUnavailable,omitempty"`
+	// NoPinGeometry:认领的件在本次回读里没有引脚几何。**这是 2026-08-20 真机
+	// 那次假绿的真凶**:`computePartitionPlan` 拉几何时只要了 includeBBox,没要
+	// includePins,于是 buildSchClusters 一个 marker/桩线都归不了属,每个 L1 组的
+	// 体积退化成器件本体 —— clusterOf 非空、每个键都在,degraded 却是 false。
+	NoPinGeometry []string `json:"noPinGeometry,omitempty"`
+	// NoCluster:认领的件在本页有 bbox,却没有对应的 L1 组记录。
+	NoCluster []string `json:"noCluster,omitempty"`
+	// OffPage:认领的件不在本页(跨页认领,信息项,不算降级)。
+	OffPage []string `json:"offPage,omitempty"`
+	// UnownedMarkers:既不沾任何导线、离谁都远的 marker 数(信息项)。
+	UnownedMarkers int `json:"unownedMarkers,omitempty"`
+}
+
+// untrusted 报告某个位号的 L1 组体积是否不可信(判定侧据此 fail-closed)。
+func (s schZoneLabelScope) untrusted(desig string) bool {
+	if s.WiresUnavailable {
+		return true
+	}
+	key := strings.ToUpper(desig)
+	return strInSlice(s.NoPinGeometry, key) || strInSlice(s.NoCluster, key)
+}
+
+// modulesFromClaims 是旧签名(丢掉可信度记录)—— 只给不做标签判定的排布类
+// 消费者用(`sch sheet tidy`)。**画框/判据路径一律走 modulesFromClaimsScoped**。
+func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp,
+	clusterOf map[string]layoutBBox) []partitionModule {
+	m, _ := modulesFromClaimsScoped(zones, comps, clusterOf)
+	return m
+}
+
+// modulesFromClaimsScoped 把认领折成模块 bbox,**并报出每一处口径降级**。
 //
 // clusterOf 是**按导线归属**算出的「器件 + 只挂在它自己引脚上的 marker/桩线」体积
 // (`buildSchClusters`)。有它就用它 —— 框住的必须是整个 L1 虚拟组,而不是器件本体:
-// 用户截图实证 D1 的 GND 旗垂在 ESD 框外面。nil 时退回旧的**距离启发式**折叠
-// (`foldMarkers`):按锚点离模块 bbox 多远来收编,够不着的旗就漏在框外,而且可能
-// 把邻居的旗收进来 —— 这正是「归属靠距离」的老毛病,能拿到导线就别用它。
-func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp,
-	clusterOf map[string]layoutBBox) []partitionModule {
+// 用户截图实证 D1 的 GND 旗垂在 ESD 框外面。
+//
+// **不再静默退回器件本体**:某个位号在 clusterOf 里查不到时,旧代码悄悄
+// `grow(&u, *c.BBox)`,该件的旗/桩线就此蒸发 —— 而判定用的是同一个 u,于是
+// 「生成漏掉的标签,判定也看不见」。现在这条路仍然给出一个可画的框(否则整页
+// 画不出来),但会把位号记进 NoCluster,判定侧据此把该模块按不可信处理。
+func modulesFromClaimsScoped(zones map[string]*schZoneClaim, comps []layoutComp,
+	clusterOf map[string]layoutBBox) ([]partitionModule, schZoneLabelScope) {
+	scope := schZoneLabelScope{WiresUnavailable: clusterOf == nil}
 	byDesig := map[string]layoutComp{}
 	for _, c := range comps {
 		if c.Designator != "" && c.BBox != nil {
 			byDesig[strings.ToUpper(c.Designator)] = c
 		}
 	}
-	// Markers with a bbox, for the marker-reach fold below.
+	// Markers with a bbox, for the degraded (no-wire) nearest-part fold below.
 	var markers []layoutComp
 	for _, c := range comps {
 		if isSchMarker(c.ComponentType) && c.BBox != nil && c.AnchorAvailable {
 			markers = append(markers, c)
-		}
-	}
-	foldMarkers := func(u *layoutBBox) {
-		for _, m := range markers {
-			if m.X >= u.MinX-schModuleMarkerReach && m.X <= u.MaxX+schModuleMarkerReach &&
-				m.Y >= u.MinY-schModuleMarkerReach && m.Y <= u.MaxY+schModuleMarkerReach {
-				u.MinX = minF(u.MinX, m.BBox.MinX)
-				u.MinY = minF(u.MinY, m.BBox.MinY)
-				u.MaxX = maxF(u.MaxX, m.BBox.MaxX)
-				u.MaxY = maxF(u.MaxY, m.BBox.MaxY)
-			}
 		}
 	}
 	var names []string
@@ -607,6 +793,40 @@ func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp,
 		names = append(names, n)
 	}
 	sort.Strings(names)
+
+	// 降级路径的归属表:每支 marker 归给**离它最近的认领件**(全页择优,不是
+	// 逐模块各判各的 —— 旧写法同一支旗可以同时被两个模块收编,体积双算)。
+	ownerOfMarker := map[int]string{}
+	if clusterOf == nil {
+		type claimed struct {
+			key  string
+			bbox layoutBBox
+		}
+		var parts []claimed
+		for _, name := range names {
+			zc := zones[name]
+			if zc == nil {
+				continue
+			}
+			for _, d := range zc.Parts {
+				if c, ok := byDesig[strings.ToUpper(d)]; ok {
+					parts = append(parts, claimed{strings.ToUpper(d), *c.BBox})
+				}
+			}
+		}
+		for mi, m := range markers {
+			best, bestD := "", math.Inf(1)
+			for _, p := range parts {
+				if d := pointBoxDist(m.X, m.Y, p.bbox); d < bestD {
+					best, bestD = p.key, d
+				}
+			}
+			if best != "" && bestD <= schMarkerFoldReach {
+				ownerOfMarker[mi] = best
+			}
+		}
+	}
+
 	var out []partitionModule
 	for _, name := range names {
 		zc := zones[name]
@@ -629,23 +849,55 @@ func modulesFromClaims(zones map[string]*schZoneClaim, comps []layoutComp,
 			key := strings.ToUpper(d)
 			c, ok := byDesig[key]
 			if !ok {
+				scope.OffPage = appendUniqueStr(scope.OffPage, key)
 				continue
 			}
 			grow(&core, *c.BBox) // core = 器件本体(压图签时按它收拢)
+			// 引脚几何缺失 = L1 归属结构上做不成(marker 顺着桩线找宿主靠的就是
+			// 引脚坐标)。**必须在这里报**,不能等 clusterOf 查得到就当没事:
+			// 查得到的那个体积此时恰好等于器件本体,静默通过 = 判据永远看不见旗。
+			if clusterOf != nil && !c.PinsAvailable {
+				scope.NoPinGeometry = appendUniqueStr(scope.NoPinGeometry, key)
+			}
 			if cb, has := clusterOf[key]; has {
 				grow(&u, cb) // 画框口径 = 整个 L1 虚拟组(本体 ∪ 它自己的 marker/桩线)
 				continue
 			}
+			if clusterOf != nil {
+				scope.NoCluster = appendUniqueStr(scope.NoCluster, key)
+			}
 			grow(&u, *c.BBox)
+			if clusterOf == nil {
+				for mi := range markers {
+					if ownerOfMarker[mi] == key {
+						grow(&u, markerJudgeBBox(markers[mi]))
+					}
+				}
+			}
 		}
 		if u != nil {
-			if clusterOf == nil {
-				foldMarkers(u) // 没有导线归属时的兜底:按距离收编附近的旗
-			}
 			out = append(out, partitionModule{Name: name, BBox: *u, CoreBBox: *core})
 		}
 	}
-	return out
+	sort.Strings(scope.NoPinGeometry)
+	sort.Strings(scope.NoCluster)
+	sort.Strings(scope.OffPage)
+	scope.Degraded = scope.WiresUnavailable || len(scope.NoPinGeometry) > 0 || len(scope.NoCluster) > 0
+	return out, scope
+}
+
+// pointBoxDist 是点到矩形的距离(点在矩形内时为 0)。
+func pointBoxDist(x, y float64, b layoutBBox) float64 {
+	dx := math.Max(0, math.Max(b.MinX-x, x-b.MaxX))
+	dy := math.Max(0, math.Max(b.MinY-y, y-b.MaxY))
+	return math.Hypot(dx, dy)
+}
+
+func appendUniqueStr(ss []string, s string) []string {
+	if strInSlice(ss, s) {
+		return ss
+	}
+	return append(ss, s)
 }
 
 func minF(a, b float64) float64 {
@@ -703,10 +955,21 @@ func newSchZonePlanCmd(cfg *appConfig, window *string, stdout, stderr io.Writer)
 		Long: `Compute a whole-sheet functional partition plan (issue #149) from the LIVE
 geometry: usable sheet (minus margin) carved into columns/rows at the natural gaps
 between module clusters, each partition lifted clear of the title-block keep-out and
-given a big-font title band. Reads modules from ` + "`sch zones`" + ` claims (each
-module's bbox = union of its parts). Pure计算 — prints the plan + validation
-(sheetOverflow / partitionOverlap / titleBlockHits / moduleOutsideZone /
-labelCollisions, all should be 0). Draw it with ` + "`sch zone-draw --mode partition`" + `.`,
+given a big-font title band. Reads modules from ` + "`sch zones`" + ` claims / virtual groups.
+
+**外框是一个纯函数**:frame = f(成员 L1 虚拟组全图元并集, 区名带, 说明带) ——
+` + "`zone-arrange`" + ` phase A 的收紧用的是同一个函数本体、同一份带高(带高由已登记
+说明的内容+字号推导,绝不读 note 落点),所以收紧完再画框,而不是按常量带收紧、
+画完框再放 note 装不下。
+
+Pure计算 — prints the plan + validation (sheetOverflow / partitionOverlap /
+titleBlockHits / moduleOutsideZone / labelCollisions, all should be 0).
+` + "`moduleOutsideZone`" + ` 判的是**整个 L1 虚拟组**(器件 ∪ 它自己的 marker/桩线),
+且判定侧**独立重算**几何 —— 生成侧漏掉的标签它看得见。归属做不成时
+(读不到导线 / 无引脚几何 / 无 L1 组记录)输出里的 ` + "`labelScopeDegraded`" + `
+为 true 并点名位号,该模块按「不可信」计入 moduleOutsideZone(验不了不报绿)。
+
+Draw it with ` + "`sch zone-draw --mode partition`" + `.`,
 		Example: `  easyeda sch zones set --spec s0.json --project ceshi
   easyeda sch zone-plan --project ceshi --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -780,8 +1043,19 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	if err := ensureActiveDoc(cfg, window); err != nil {
 		return partitionPlan{}, nil, fmt.Errorf("zone-plan: restore pinned page %s: %w", docUUID, err)
 	}
+	// **includePins 是必需的,不是可选的**(根因,2026-08-20 真机+代码双取证):
+	// `buildSchClusters` 靠**引脚坐标**把桩线连通块认到器件头上,marker 再顺着自己
+	// 的桩线找宿主。此前这里只要了 includeBBox —— 一个引脚都没有 → 没有一根线归得了
+	// 属 → 每个 L1 组的体积原样退化成器件本体,而 clusterOf 非空、每个键都在,
+	// `labelScopeDegraded` 于是恒为 false。真机症状:框只罩住器件本体,POWER 页
+	// 8 个 L1 组里 5 个的旗/桩线垂在框外,moduleOutsideZone 却报 0。
+	//
+	// 排序注意(见 memory pins-readback-poisons-modify):带引脚的回读会让**紧随
+	// 其后的 `schematic.component.modify`** 被平台拒(cmdKey)。本路径下游只有
+	// 只读 + exec_js 建图元(zone-draw)/ 建文字(sch note),不发 modify;要挪件请走
+	// `sch zone-arrange --apply` 自己的取数(它本来就带引脚,且清扫在前)。
 	res, err := requestAutolayoutAction(cfg, "schematic.components.list", window,
-		map[string]any{"includeBBox": true}, docUUID, "read partition geometry")
+		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "read partition geometry")
 	if err != nil {
 		return partitionPlan{}, nil, err
 	}
@@ -798,16 +1072,18 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	// **标签入框是硬约束(用户裁定 2026-08-16)**:降级路径必须在输出里可见
 	// (labelScopeDegraded),不许静默 —— 距离启发式漏掉的旗恰恰是判据看不见的那种。
 	var clusterOf map[string]layoutBBox
+	unowned := 0
 	if wires, werr := fetchSchWirePolylines(cfg, window, docUUID); werr == nil {
-		if cs, _ := buildSchClusters(comps, wires); len(cs) > 0 {
+		if cs, un := buildSchClusters(comps, wires); len(cs) > 0 {
+			unowned = un
 			clusterOf = map[string]layoutBBox{}
 			for _, c := range cs {
 				clusterOf[strings.ToUpper(c.Designator)] = c.Box
 			}
 		}
 	}
-	degraded := clusterOf == nil
-	modules := modulesFromClaims(zones, comps, clusterOf)
+	modules, scope := modulesFromClaimsScoped(zones, comps, clusterOf)
+	scope.UnownedMarkers = unowned
 	if len(modules) == 0 {
 		return partitionPlan{}, nil, fmt.Errorf("no module bboxes resolved — the claimed parts aren't on this page (place them / `doc switch`)")
 	}
@@ -831,9 +1107,45 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	// 落点侧构造的那份逐条同源 —— 两边不同源就又是两把尺。
 	noteObstacles := collectNoteObstacles(comps, filterUnregisteredTexts(texts, registeredNoteIDs(zones)))
 	plan := planPartitionsWithNotes(*sheet, keepout, modules, opts, noteObstacles)
-	plan.LabelScopeDegraded = degraded
+	plan.LabelScope = scope
+	plan.LabelScopeDegraded = scope.Degraded
 	plan.SheetAssumed = sheetAssumed
+	// **判据与生成解耦**:planPartitionsWithNotes 内部那一遍用的是生成侧的
+	// m.BBox(纯几何后置断言);活体路径必须用**独立重算**的 L1 组表再判一遍,
+	// 否则上游漏掉的标签判定侧同样看不见(恒报 0)。
+	plan.Validation = validatePartitionsWithJudge(plan, modules, keepout,
+		buildPartitionJudge(zones, comps, clusterOf, scope))
 	return plan, zones, nil
+}
+
+// buildPartitionJudge 从活体几何**独立重算**判定输入:区名 → 成员位号 →
+// 该位号的 L1 虚拟组体积。与生成侧唯一共享的是「谁属于哪个区」这份认领事实。
+func buildPartitionJudge(zones map[string]*schZoneClaim, comps []layoutComp,
+	clusterOf map[string]layoutBBox, scope schZoneLabelScope) *partitionJudge {
+	onPage := map[string]bool{}
+	for _, c := range comps {
+		if c.Designator != "" && c.BBox != nil {
+			onPage[strings.ToUpper(c.Designator)] = true
+		}
+	}
+	j := &partitionJudge{PartsOf: map[string][]string{}, ClusterOf: map[string]layoutBBox{}, Scope: scope}
+	for name, zc := range zones {
+		if zc == nil {
+			continue
+		}
+		for _, d := range zc.Parts {
+			key := strings.ToUpper(d)
+			if !onPage[key] {
+				continue // 跨页认领:本页判不着,由 OffPage 记录(信息项)
+			}
+			j.PartsOf[name] = append(j.PartsOf[name], key)
+		}
+		sort.Strings(j.PartsOf[name])
+	}
+	for k, v := range clusterOf {
+		j.ClusterOf[k] = v
+	}
+	return j
 }
 
 // schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左上(y-UP 向下排行),
@@ -852,6 +1164,69 @@ func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {
 // 几何解耦,幂等)。返回本页文本供调用方构造说明带的占用表。
 // best-effort:text.list 失败保持尺寸=0(带退回默认高度),不阻断画框。
 func applyZoneNoteSizes(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim, modules []partitionModule) []zoneMoveText {
+	texts := fetchZoneNoteTexts(cfg, window, docUUID, zones)
+	if texts == nil {
+		return nil
+	}
+	setZoneNoteSizes(zones, modules, texts)
+	return texts
+}
+
+// setZoneNoteSizes 是 applyZoneNoteSizes 的纯核(可单测):按登记记录
+// (claim.NoteIDs)把每个模块的 NoteWidth/NoteHeight 设为其说明里最大的一条。
+// 已删说明(id 不在 texts 里)静默跳过 —— 与 fold 对 stale 登记的口径一致。
+func setZoneNoteSizes(zones map[string]*schZoneClaim, modules []partitionModule, texts []zoneMoveText) {
+	sizes := zoneNoteSizes(zones, texts)
+	for i := range modules {
+		s := sizes[modules[i].Name]
+		if s.H > modules[i].NoteHeight {
+			modules[i].NoteHeight = s.H
+		}
+		if s.W > modules[i].NoteWidth {
+			modules[i].NoteWidth = s.W
+		}
+	}
+}
+
+// zoneNoteSize 是一个区「已登记说明里最大的一条」的渲染尺寸。
+type zoneNoteSize struct{ W, H float64 }
+
+// zoneNoteSizes 是说明尺寸的**唯一纯核**:区名 → 该区已登记说明的最大渲染宽/高。
+// `zone-plan`(带高 → 框)与 `zone-arrange` phase A(带高 → 收紧框)共用它 ——
+// 一个读文字尺寸、一个读常量,就是两把尺,收紧出来的框装不下后放的 note。
+// 已删说明(id 不在 texts 里)静默跳过;尺寸只由内容+字号决定,与落点无关。
+func zoneNoteSizes(zones map[string]*schZoneClaim, texts []zoneMoveText) map[string]zoneNoteSize {
+	byID := map[string]zoneMoveText{}
+	for _, t := range texts {
+		byID[t.ID] = t
+	}
+	out := map[string]zoneNoteSize{}
+	for name, zc := range zones {
+		if zc == nil {
+			continue
+		}
+		var s zoneNoteSize
+		for _, nid := range zc.NoteIDs {
+			t, ok := byID[nid]
+			if !ok {
+				continue
+			}
+			w, h := noteSizeOf(t.Content, t.FontSize)
+			if h > s.H {
+				s.H = h
+			}
+			if w > s.W {
+				s.W = w
+			}
+		}
+		out[name] = s
+	}
+	return out
+}
+
+// fetchZoneNoteTexts 拉本页文本(只在有登记说明时才发请求)。best-effort:
+// 读失败返回 nil,带退回默认高度,不阻断规划。
+func fetchZoneNoteTexts(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim) []zoneMoveText {
 	needed := false
 	for _, zc := range zones {
 		if zc != nil && len(zc.NoteIDs) > 0 {
@@ -866,38 +1241,7 @@ func applyZoneNoteSizes(cfg *appConfig, window, docUUID string, zones map[string
 	if err != nil {
 		return nil
 	}
-	texts := parseZoneMoveTexts(res.Result)
-	setZoneNoteSizes(zones, modules, texts)
-	return texts
-}
-
-// setZoneNoteSizes 是 applyZoneNoteSizes 的纯核(可单测):按登记记录
-// (claim.NoteIDs)把每个模块的 NoteWidth/NoteHeight 设为其说明里最大的一条。
-// 已删说明(id 不在 texts 里)静默跳过 —— 与 fold 对 stale 登记的口径一致。
-func setZoneNoteSizes(zones map[string]*schZoneClaim, modules []partitionModule, texts []zoneMoveText) {
-	byID := map[string]zoneMoveText{}
-	for _, t := range texts {
-		byID[t.ID] = t
-	}
-	for i := range modules {
-		zc := zones[modules[i].Name]
-		if zc == nil {
-			continue
-		}
-		for _, nid := range zc.NoteIDs {
-			t, ok := byID[nid]
-			if !ok {
-				continue
-			}
-			w, h := noteSizeOf(t.Content, t.FontSize)
-			if h > modules[i].NoteHeight {
-				modules[i].NoteHeight = h
-			}
-			if w > modules[i].NoteWidth {
-				modules[i].NoteWidth = w
-			}
-		}
-	}
+	return parseZoneMoveTexts(res.Result)
 }
 
 // foldZoneNotesIntoModules 把每个区登记的 note bbox 并进该区模块的 BBox。
@@ -948,6 +1292,29 @@ func foldZoneNotesIntoModules(cfg *appConfig, window, docUUID string, zones map[
 	}
 }
 
+// labelScopeReason 把降级折成一句能执行的话。
+func labelScopeReason(s schZoneLabelScope) string {
+	var parts []string
+	if s.WiresUnavailable {
+		parts = append(parts, "读不到导线(L1 归属退回距离启发式)")
+	}
+	if len(s.NoPinGeometry) > 0 {
+		parts = append(parts, fmt.Sprintf("这些件没有引脚几何,marker/桩线归不了属:%s",
+			strings.Join(s.NoPinGeometry, " ")))
+	}
+	if len(s.NoCluster) > 0 {
+		// 最常见的一种:位号还没分配(`C?`/`U?`)—— `sch clusters` 那边按
+		// `位号@primitiveId` 记账,与认领表里的原始串对不上。刷位号即可。
+		parts = append(parts, fmt.Sprintf("这些件没有 L1 虚拟组记录:%s(先看位号是不是还没分配 `C?`/`U?`)",
+			strings.Join(s.NoCluster, " ")))
+	}
+	if s.UnownedMarkers > 0 {
+		parts = append(parts, fmt.Sprintf("%d 支 marker 无主", s.UnownedMarkers))
+	}
+	parts = append(parts, "核对:`easyeda sch clusters --members`")
+	return strings.Join(parts, ";")
+}
+
 func renderPartitionPlan(plan partitionPlan, w io.Writer) {
 	fmt.Fprintf(w, "zone-plan: %d partition(s) on sheet (%.0f,%.0f)..(%.0f,%.0f)\n",
 		len(plan.Partitions), plan.Sheet.MinX, plan.Sheet.MinY, plan.Sheet.MaxX, plan.Sheet.MaxY)
@@ -955,9 +1322,16 @@ func renderPartitionPlan(plan partitionPlan, w io.Writer) {
 		fmt.Fprintf(w, "  [%s]  (%.0f,%.0f)..(%.0f,%.0f)\n",
 			strings.Join(p.Modules, " / "), p.BBox.MinX, p.BBox.MinY, p.BBox.MaxX, p.BBox.MaxY)
 	}
+	if s := plan.LabelScope; s.Degraded {
+		fmt.Fprintf(w, "⚠ 标签范围口径降级(labelScopeDegraded=true)—— 模块 bbox 罩不住的旗/桩线,判据也验不了:%s\n",
+			labelScopeReason(s))
+	}
 	v := plan.Validation
 	fmt.Fprintf(w, "validation: sheetOverflow=%d partitionOverlap=%d titleBlockHits=%d moduleOutsideZone=%d labelCollisions=%d\n",
 		v.SheetOverflow, v.PartitionOverlap, v.TitleBlockHits, v.ModuleOutsideZone, v.LabelCollisions)
+	for _, d := range v.ModuleOutsideDetail {
+		fmt.Fprintf(w, "  ✗ %s\n", d)
+	}
 	if v.clean() {
 		fmt.Fprintln(w, "✓ plan is clean")
 		return
@@ -1016,7 +1390,15 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 		return err
 	}
 	if !plan.Validation.clean() {
-		return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations", plan.Validation)
+		why := ""
+		if len(plan.Validation.ModuleOutsideDetail) > 0 {
+			why = "\n  " + strings.Join(plan.Validation.ModuleOutsideDetail, "\n  ")
+		}
+		if plan.LabelScope.Degraded {
+			why += "\n  ⚠ 标签范围口径降级:" + labelScopeReason(plan.LabelScope)
+		}
+		return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations%s",
+			plan.Validation, why)
 	}
 	if fontSize <= 0 {
 		fontSize = defaultPartitionZoneFontSize

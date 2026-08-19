@@ -64,6 +64,13 @@ type zoneArrangeOut struct {
 	SheetAssumed bool `json:"sheetAssumed,omitempty"`
 }
 
+// zoneArrangeRawFrame 是 phase A 的**现状口径框**尺寸(L1 全图元并集 + pad +
+// 区名带 + 说明带)。与 zone-plan 第一遍的 partitionFirstPassRect 共用同一个函数
+// 本体(partitionFrame*),同一份带高口径 —— 逐字段配对由 ruler 一致性测试钉住。
+func zoneArrangeRawFrame(raw layoutBBox, opts partitionOpts, noteH float64) (w, h float64) {
+	return partitionFrameSize(raw, opts.TitleBand, schZoneNoteBandHeight(opts.NoteBand, noteH))
+}
+
 // schSheetOrA4 返回活页图框 bbox;图框图元缺失时按 A4-only 域界假定(带标志)。
 func schSheetOrA4(comps []layoutComp) (*layoutBBox, bool) {
 	if s := sheetBBoxOf(comps); s != nil {
@@ -172,6 +179,12 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	}
 	sort.Strings(names)
 
+	// **收紧必须把区名带 + 说明带一起算进去,收紧完再画框**(用户裁定 2026-08-20)。
+	// 此前 phase A 用的是常量 `opts.NoteBand`,而 zone-plan 侧的带高按**已登记说明
+	// 的实际渲染高度**算 —— 两套带账。按常量带收紧出来的框,画完再放 note 就装不下,
+	// 说明探出框外(9ee3e13 自己挂的那笔账)。尺寸只由内容+字号推导,与落点无关。
+	noteSizes := zoneNoteSizes(zones, fetchZoneNoteTexts(cfg, window, docUUID, zones))
+
 	out := &zoneArrangeOut{Sheet: *sheet, Keepout: keepout, SheetAssumed: sheetAssumed}
 	var zaZones []zaZone
 	for _, name := range names {
@@ -193,12 +206,16 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		if len(groups) == 0 {
 			continue
 		}
-		plan, ferr := planZoneFollow(name, groups, opts)
+		// 本区的**有效带高**:有登记说明就按它的渲染高度,没有就用默认带。
+		// planZoneFollow 收敛后的框(FrameW/FrameH)与这里的现状框(rawW/rawH)
+		// 都走同一个 partitionFrame* 本体,zone-plan 的第一遍框也是它 —— 一把尺。
+		zopts := opts
+		zopts.NoteBand = schZoneNoteBandHeight(opts.NoteBand, noteSizes[name].H)
+		plan, ferr := planZoneFollow(name, groups, zopts)
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("phase A(%s): %w", name, ferr)
 		}
-		rawW := (raw.MaxX - raw.MinX) + 2*partitionContentPad
-		rawH := (raw.MaxY - raw.MinY) + 2*partitionContentPad + opts.TitleBand + opts.NoteBand
+		rawW, rawH := zoneArrangeRawFrame(raw, opts, noteSizes[name].H)
 		home := [2]float64{(raw.MinX + raw.MaxX) / 2, (raw.MinY + raw.MaxY) / 2}
 		out.Zones = append(out.Zones, zoneArrangeZoneOut{
 			Name: name, Mode: plan.Mode, RawW: rawW, RawH: rawH,

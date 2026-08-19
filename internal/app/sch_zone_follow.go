@@ -446,7 +446,9 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 	for _, g := range plan.Groups {
 		zfGrow(&plan.Content, &has, zfGroupBBox(g))
 	}
-	plan.FrameW = (plan.Content.MaxX - plan.Content.MinX) + 2*partitionContentPad
-	plan.FrameH = (plan.Content.MaxY - plan.Content.MinY) + 2*partitionContentPad + opts.TitleBand + opts.NoteBand
+	// 收敛后的框走**外框的唯一函数**(partitionFrameSize):收紧时区名带 + 说明带
+	// 就在账里,收紧完再画框 —— 而不是「按常量带收紧 → 画框 → 再放 note 装不下」。
+	// opts.NoteBand 由调用方按本区已登记说明的渲染高度预置(schZoneNoteBandHeight)。
+	plan.FrameW, plan.FrameH = partitionFrameSize(plan.Content, opts.TitleBand, opts.NoteBand)
 	return plan, nil
 }
