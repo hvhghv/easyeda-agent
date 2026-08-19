@@ -74,9 +74,13 @@ the block does and what its key parameters are. The skill's schematic layout
 default is: one short note per module, parked just below/beside its zone frame.
 
   - **省略 --x/--y = 自动落点(推荐)**:说明文字和器件、marker、已有文字、图签
-    keep-out 是**同级的布局对象**,一起进同一张碰撞表求解 —— 优先贴该区内容
-    下沿(读图习惯:先看电路再看下面那行说明),排不下依次试区内上沿/区外侧/
-    区正下方,最后整页从左下往上扫。放不下就报错**拒绝画**,不把说明糊在电路上。
+    keep-out 是**同级的布局对象**,一起进同一张碰撞表求解。给了 --zone 时,说明
+    的家是该区分区框底部的**说明带**:先按框宽折行,框装不下就把框**横向扩边**
+    (窄框扩到最小可读宽度),带内被邻区桩线占住就把框底**下探**到占用之下 ——
+    **框为说明扩边,而不是把说明踢出框**。扩过边要重跑
+    sch zone-draw --mode partition 让画布上的框跟上(命令会在 stderr 提示)。
+  - 区里实在装不下(可扩边界被纸边/图签/邻框顶死)才退到区外走廊/整页扫描,
+    并明确警告;整页都放不下就报错**拒绝画**,不把说明糊在电路上。
   - 显式给 --x/--y 时坐标一字不改,但仍会回读碰撞;压到东西会明确警告(不静默)。
   - Multi-line: a literal \n in --text becomes a real line break.
   - Coordinates are schematic units, y-UP (larger y = higher on the sheet).

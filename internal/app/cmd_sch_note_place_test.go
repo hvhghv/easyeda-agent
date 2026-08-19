@@ -271,13 +271,34 @@ func TestWrapNoteContentRespectsExistingNewlines(t *testing.T) {
 	// 首行 ~10 全角(90u @font9 口径按 wrapNoteLines 的 groupNoteFontSize 计),
 	// 第二行 8 全角;maxWidth 给 160:两行各自都装得下,谁都不该被折。
 	content := "IO2高=亮 R3=1k限流\n丝印标正负极性(PCB)"
-	got := wrapNoteContent(content, 160)
+	got := wrapNoteContent(content, 9, 160)
 	if got != content {
 		t.Fatalf("both lines fit; wrap must be a no-op\nwant: %q\ngot:  %q", content, got)
 	}
 	// 真超宽的单行仍要折。
 	long := strings.Repeat("宽", 40)
-	if wrapped := wrapNoteContent(long, 160); !strings.Contains(wrapped, "\n") {
+	if wrapped := wrapNoteContent(long, 9, 160); !strings.Contains(wrapped, "\n") {
 		t.Fatalf("a genuinely overwide line must still wrap, got %q", wrapped)
+	}
+}
+
+// 折行必须用**说明自己的字号**量 —— 与 noteSizeOf(尺寸回读)同一把尺。
+// 此前借用组说明那把尺(常量 groupNoteFontSize=10.2),于是「按框宽折的行」
+// 回读出来的宽度与折行预算对不上,再叠上吸格右移就探出框外。
+func TestWrapNoteContentUsesItsOwnFontRuler(t *testing.T) {
+	const line = "SY8089 5V→3V3 2A 1.5MHz 输入22uF 输出22uF"
+	for _, fs := range []float64{8, 10, 14} {
+		for _, maxW := range []float64{140, 220, 400} {
+			wrapped := wrapNoteContent(line, fs, maxW)
+			w, _ := noteSizeOf(wrapped, fs)
+			if w > maxW+acOverlapEps {
+				t.Errorf("font %.0f / 预算 %.0f:折完仍宽 %.1f —— 折行与尺寸回读必须同一把尺\n%q", fs, maxW, w, wrapped)
+			}
+		}
+	}
+	// 折行宽度下限:再窄也不切成竖排单字(窄框由框扩边解决,不是把字切碎)。
+	narrow := wrapNoteContent(line, 10, 20)
+	if w, _ := noteSizeOf(narrow, 10); w < noteMinReadableWidth-10*1.0 {
+		t.Errorf("窄预算下折行仍应保持可读宽度 ≈%.0f,实际 %.1f", noteMinReadableWidth, w)
 	}
 }

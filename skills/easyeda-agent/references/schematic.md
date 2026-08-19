@@ -373,12 +373,24 @@ pin(包括共线合并吞掉的**第三方**器件的脚,esp32Mini P2 的 P0 缺
   区名全名/末段短名/组 id/唯一前缀均可;区不在本页分区计划时 stderr 有 warning、
   输出带 `zoneMatched=false`(绝不静默整页兜底)。注意:登记的说明**不反哺分区框
   几何**(框由器件内容反推;说明住在框内说明带)——不会出现"框每重画一次向下
-  长一截"的自增长。**说明带高度按已登记说明的实际渲染高度预留**(旧版写死单行
-  26,2~3 行说明结构上塞不进带、被踢到框外):高度只从内容+字号推导(不读落点),
-  幂等;放多行说明后重跑 `sch zone-draw --mode partition`,框会带着加高的带重画。
+  长一截"的自增长。**说明位置的预留是二维的,而且框会为说明扩边**:
+  - **高**:带高按已登记说明的实际渲染高度预留(旧版写死单行 26,2~3 行说明
+    结构上塞不进带、被踢到框外)。
+  - **宽**:说明先按**框宽**折行(按它自己的 `--font-size` 量,与尺寸回读同一把
+    尺),折完还比框宽就把框**横向扩边**。**窄框(如区里只有一个 2 脚接线端子,
+    框宽 68)一律扩到最小可读宽度 120** —— 而不是"既装不进又永远报警"。
+  - **带内占用**:邻区桩线/marker 伸进说明带时,框底**下探**到占用之下,说明仍
+    留在自己的框里(旧行为是把说明踢到"区外走廊",落在框外下方)。
+  - 扩边不越过纸边 / 图签安全带 / **邻区的基础框**(留一个 gutter),所以为说明
+    扩边不会自己撑出 `partitionOverlap` 让 `zone-draw` 拒画。
+  尺寸只从内容+字号推导(**不读落点 bbox**),幂等;规划器与 `sch note` 落点共用
+  同一个预留函数,所以"planner 算的框"必然包住"note 落的点"。
+  **放完说明要重跑 `sch zone-draw --mode partition`** —— 框可能已为说明扩边/下探,
+  画布上的框是旧的;`sch note` 扩了边会在 stderr 明确提示。
   配套判据 **`note-outside-zone`**(`sch check`,WARN,`--strict` 阻塞):登记说明
-  的 bbox 不在自己分区框内即报,带坐标/框范围/修法(`prim-delete` 旧说明 + 重跑
-  `sch note --zone <区>` 自动落点)。
+  的 bbox 不在自己分区框内即报。文案分两档、**都可执行**:带装得下 → 直接给算好的
+  `--x/--y` 坐标(照抄即可,不会再落回原处);可扩边界内确实装不下 → 明说"别原样
+  重跑",改为缩短文字/减小 `--font-size`,或 `sch group-move` 给这个区腾地方。
 - pin 号 ≠ 坐标序:`disconnect --pin X:2` 按**引脚号**解析(LED1 的 pin1 可能在
   右侧)。删桩前先 `autoconnect --dry-run` 核对该 pin 当前网名,防拆错脚。
 - **tidy 流水线跑完必须 `sch export-image` 做一次视觉复查**——机械门(gate/
@@ -585,11 +597,28 @@ compensated. Every successful draw or clear explicitly requires
 - **partial 语义(#151)**:部分区画成时**exit 0**,stdout 报
   `partial: N/M zone(s) not applied` + 每区原因;全部区都失败且画布零变化才
   非零退出。看到 partial 就**重跑同一条命令**补缺,不要手工 exec_js 补框。
-- daemon 侧配套:`easyeda health` 的 `writeHealth` 字段按窗口报最近 20 次转发
-  动作的失败率/连败数,`degraded:true` = 连接器在负载下劣化;此时任何**写**
-  失败的响应会带结构化 `result.degraded` + 「先轻读复核再考虑重试」的告诫。
+- daemon 侧配套:`easyeda health` 的 `writeHealth` 按窗口报最近 20 次转发动作的
+  **效果失败率**(不是返回码失败率,见下条)+ 连败数 + 逐 action 分桶,
+  `degraded:true` = 连接器在负载下劣化;此时**写**失败(以及「返回 ok 但被证明
+  没落地」)的响应会带结构化 `result.degraded` + 「先轻读复核再考虑重试」的告诫。
   daemon 只对幂等导航动作(`document.open`/`schematic.page.open`)自动
   「轻读探测→settle→重发一次」,内容写永不 daemon 级重发。
+- **writeHealth 读的是「写的效果」,不是「调用的返回码」**(2026-08-19 口径修订)。
+  真机跑完一整场端到端时它曾全程 `failureRate 0.05 / degraded:false`,而同期画布
+  上大面积的写根本没生效 —— 因为主要故障形态是**返回成功但画布没变**。现在:
+  - 返回成功 + 回读证实没生效 → 计 failure,并记进 `fakeSuccesses`;
+  - 返回失败 + 回读证实已落地 → **不**计 failure,单独记 `fakeFailures`
+    (同样是不健康信号,但处置相反:假成功要补写,假失败绝不能重发);
+  - `verified` = 有回读证据的样本数。**`verified` 很低而 `failureRate` 很绿,
+    只能读成「没人核对过」,不是「全都好」**;
+  - `actions{}` / `degradedActions[]` 是逐 action 分桶 —— 混合流量里
+    「connect_pin 这一批 40% 失败」不会再被 20 样本的均值稀释成 5%,
+    哪条路没在工作会被点名。
+  证据两个来源:连接器在 result 里自带的回读结论(`partial` / `survivedTotal` /
+  `notApplied`)由 daemon 直接内省;命令自己做的回读(block-apply 落地回读、
+  `sch connect` 的 slow-landed 复核、zone-draw 的 landed-check)走
+  `POST /writeverify` 回传。**新写带回读的命令时,把结论也回传一次**
+  (`reportWriteVerified`),否则健康度看不见这条路的真实成色。
 
 ## Zone-less packing — `sch autoplace-free`
 

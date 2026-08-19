@@ -37,12 +37,73 @@ const noteAnchorStep = 20.0
 // 一撞就整个跌进整页扫描,说明被甩到页角(真机症状)。
 const noteCorridorTiers = 5
 
-// wrapNoteContent 把一段可能含 \n 的说明按 maxWidth 折行。**必须先按 \n 拆行再
-// 逐行 wrap**:此前把整段当一行传给 wrapNoteLines,宽度累计跨过换行符继续加,
+// noteMinReadableWidth 是说明允许被折到的最窄渲染宽度。再窄就成了竖排单字,
+// 不叫说明。**窄框必须为说明横向扩边到这个宽度** —— 2026-08-19 真机:POWER_IN
+// 区里只有一个 2 脚接线端子,框宽 68,任何可读说明都比 68 宽,于是「装不进框」
+// 与「note-outside-zone 必报」同时成立,判据变成一条永远响、又给不出可执行
+// 修法的噪音。框由器件 bbox 推导,但**可以为说明扩边**。
+const noteMinReadableWidth = 120.0
+
+// noteBandDepthSteps 是说明带为躲开「伸进带里的外来图元」最多下探的档数
+// (每档一个 noteAnchorStep)。真机取证:P1_POWER 的说明带 y[472,528] 里
+// x[604,686] 被邻区 L1 的桩线/marker 占住,435 宽的说明在带内唯一的横向候选点
+// 上必撞 —— 旧行为跌进「区外走廊」把说明踢出框,新行为是把框底下探到占用之下,
+// 说明仍在自己的框里。
+const noteBandDepthSteps = 8
+
+// requiredNoteWidth 把「说明渲染宽」换算成能装下它的**框宽**(左右各留 noteGap)。
+// 与 requiredNoteBand(高)配对:预留说明位置是二维的,此前只有高度参与预留,
+// 宽度既不参与预留也不参与落点判定,而 note-outside-zone 的判据却是严格的框包含
+// —— 生成侧与判定侧两把尺,必然出框外说明。
+func requiredNoteWidth(noteW float64) float64 { return noteW + 2*noteGap }
+
+// noteWrapWidth 把框宽换算成说明的折行宽度上限:框内可用宽度,但不低于
+// noteMinReadableWidth(低于它就为说明扩边,而不是把字切成竖排)。
+func noteWrapWidth(frameW float64) float64 {
+	if w := frameW - 2*noteGap; w > noteMinReadableWidth {
+		return w
+	}
+	return noteMinReadableWidth
+}
+
+// noteRuneWidth 是 noteSizeOf 的逐字口径 —— 折行必须用**同一把尺**量。此前
+// `sch note` 借用 wrapNoteLines(组说明用的那把尺,常量 groupNoteFontSize=10.2),
+// 而尺寸回读走 noteSizeOf(--font-size,默认 10):折出来的行按 10.2 量刚好不超,
+// 按 10 量也没超,但两边的"框宽预算"从来对不上,再叠上吸格(snapNote 可把落点
+// 右移 2.5)就会出现「按 A 算不出框、画出来出框」。两把尺是本仓的复发病。
+func noteRuneWidth(r rune, fontSize float64) float64 {
+	if r > 0x2E80 { // CJK 全宽,与 noteSizeOf 同口径
+		return fontSize
+	}
+	return fontSize * 0.55
+}
+
+// wrapNoteContent 把一段可能含 \n 的说明按 maxWidth 折行,**按它自己的字号量**。
+// 必须先按 \n 拆行再逐行 wrap:此前把整段当一行 wrap,宽度累计跨过换行符继续加,
 // 于是「首行完整、第二行开头 3~4 字就被折断」(2026-08-18 P2 LED 说明真机定案:
 // "丝印标正负极性" 折成 "丝印标正/负极性",与宽度无关、纯粹是账没清零)。
-func wrapNoteContent(content string, maxWidth float64) string {
-	return strings.Join(wrapNoteLines(strings.Split(content, "\n"), maxWidth), "\n")
+func wrapNoteContent(content string, fontSize, maxWidth float64) string {
+	if fontSize <= 0 {
+		fontSize = schNoteDefaultFontSize
+	}
+	if maxWidth < noteMinReadableWidth {
+		maxWidth = noteMinReadableWidth
+	}
+	var out []string
+	for _, ln := range strings.Split(content, "\n") {
+		line, w := make([]rune, 0, len(ln)), 0.0
+		for _, r := range ln {
+			rw := noteRuneWidth(r, fontSize)
+			if w+rw > maxWidth+acOverlapEps && len(line) > 0 {
+				out = append(out, string(line))
+				line, w = line[:0], 0
+			}
+			line = append(line, r)
+			w += rw
+		}
+		out = append(out, string(line)) // 空行照留:说明的分段是作者的意图
+	}
+	return strings.Join(out, "\n")
 }
 
 // noteSizeOf 估算一段说明文字的渲染尺寸。schNoteBBoxEstimate 是它的 bbox 版本
@@ -82,20 +143,7 @@ func noteAnchorBBox(x, y, w, h float64) layoutBBox {
 // 纯函数:障碍、图纸、尺寸进,锚点出,不碰网络。
 func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *layoutBBox, sheet layoutBBox, keepout *layoutBBox) (x, y float64, ok bool) {
 	free := func(bx, by float64) bool {
-		b := noteAnchorBBox(bx, by, w, h)
-		if b.MinX < sheet.MinX+noteGap || b.MaxX > sheet.MaxX-noteGap ||
-			b.MinY < sheet.MinY+noteGap || b.MaxY > sheet.MaxY-noteGap {
-			return false
-		}
-		if keepout != nil && boxesGapOverlap(b, *keepout, 0) {
-			return false
-		}
-		for _, ob := range obstacles {
-			if boxesGapOverlap(b, ob, noteGap) {
-				return false
-			}
-		}
-		return true
+		return noteSpotFree(noteAnchorBBox(bx, by, w, h), obstacles, sheet, keepout)
 	}
 	// try 先把候选吸到网格再判碰:**判定坐标必须 = 落地坐标**。吸附后再判,才不会
 	// 出现「按原始候选算不撞、按吸附后的落点画出来擦上」的半格假阴性。
@@ -110,15 +158,13 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 	var cands [][2]float64
 	// **说明带优先**:分区框底部留出来的那条带就是给它的(区名在顶、说明在底,
 	// 都在框内)。带里放不下才退到下面那串兜底候选 —— 那些会把说明挤出框外。
-	// 沿带横向逐档扫(此前只有 MinX 单点):第二条说明不再因为第一条占着带左端
-	// 就整个跌出框外,而是在同一条带里并排右移。
 	if noteBand != nil {
-		by := noteBand.MinY + h + noteGap
-		xEnd := math.Max(noteBand.MinX+noteGap, noteBand.MaxX-w-noteGap)
-		for bx := noteBand.MinX + noteGap; bx <= xEnd+acOverlapEps; bx += noteAnchorStep {
-			if sx, sy, hit := try(bx, by); hit {
-				return sx, sy, true
-			}
+		frame := *noteBand
+		if zoneRect != nil {
+			frame = *zoneRect
+		}
+		if sx, sy, hit := scanNoteBand(*noteBand, frame, w, h, obstacles, sheet, keepout); hit {
+			return sx, sy, true
 		}
 	}
 	if zoneRect != nil {
@@ -213,6 +259,152 @@ func noteCorridorCandidates(z layoutBBox, w, h float64) [][2]float64 {
 	return out
 }
 
+// noteSpotFree 是「这个落点能不能用」的**唯一**判据:图纸边距 + 图签禁区 +
+// 与任何障碍留 noteGap。planner(reserveZoneNoteArea)与 sch note 落点共用它。
+func noteSpotFree(b layoutBBox, obstacles []layoutBBox, sheet layoutBBox, keepout *layoutBBox) bool {
+	if b.MinX < sheet.MinX+noteGap || b.MaxX > sheet.MaxX-noteGap ||
+		b.MinY < sheet.MinY+noteGap || b.MaxY > sheet.MaxY-noteGap {
+		return false
+	}
+	if keepout != nil && boxesGapOverlap(b, *keepout, 0) {
+		return false
+	}
+	for _, ob := range obstacles {
+		if boxesGapOverlap(b, ob, noteGap) {
+			return false
+		}
+	}
+	return true
+}
+
+// scanNoteBand 在说明带里从左往右扫一个可用落点,**并要求落点整体落在框内**。
+//
+// 框内包含此前不是构造保证:带内候选只判纸边/图签/图元,不判框。于是「说明宽
+// 435、框宽 435」的真机场景里,带内唯一候选算出来的 bbox 右沿本来就探出框外,
+// 再叠上吸格右移 2.5,画出来必然框外 —— 而 note-outside-zone 判的正是框包含。
+// 判定与生成同一把尺:能用的落点必须先在框里。
+func scanNoteBand(band, frame layoutBBox, w, h float64, obstacles []layoutBBox,
+	sheet layoutBBox, keepout *layoutBBox) (x, y float64, ok bool) {
+	by := band.MinY + h + noteGap
+	xEnd := math.Max(band.MinX+noteGap, band.MaxX-w-noteGap)
+	for bx := band.MinX + noteGap; bx <= xEnd+acOverlapEps; bx += noteAnchorStep {
+		sx, sy := snapNote(bx), snapNote(by)
+		b := noteAnchorBBox(sx, sy, w, h)
+		if !bboxContains(frame, b) {
+			continue
+		}
+		if noteSpotFree(b, obstacles, sheet, keepout) {
+			return sx, sy, true
+		}
+	}
+	return 0, 0, false
+}
+
+// noteExpandCeilX / noteExpandFloorX / noteExpandFloorY 是框为说明扩边时**不许
+// 越过**的三条界:纸边(内缩 sheetEdgeMinGap)、图签安全带、以及在对应方向上
+// 挡路的邻区框(留一个 gutter)。有了这三条界,「为说明扩边」永远不会自己造出
+// partitionOverlap / sheetMarginHits —— 否则 zone-draw 会因为我们自己撑出来的
+// 违规而拒绝画框,把「永远报警」换成「永远画不出」。
+func noteExpandCeilX(rect layoutBBox, blockers []layoutBBox, sheet layoutBBox, gutter float64) float64 {
+	lim := sheet.MaxX - sheetEdgeMinGap
+	for _, b := range blockers {
+		if b.MaxY <= rect.MinY || b.MinY >= rect.MaxY {
+			continue // 纵向不重叠,挡不着
+		}
+		if b.MinX >= rect.MaxX && b.MinX-gutter < lim {
+			lim = b.MinX - gutter
+		}
+	}
+	return lim
+}
+
+func noteExpandFloorX(rect layoutBBox, blockers []layoutBBox, sheet layoutBBox, gutter float64) float64 {
+	lim := sheet.MinX + sheetEdgeMinGap
+	for _, b := range blockers {
+		if b.MaxY <= rect.MinY || b.MinY >= rect.MaxY {
+			continue
+		}
+		if b.MaxX <= rect.MinX && b.MaxX+gutter > lim {
+			lim = b.MaxX + gutter
+		}
+	}
+	return lim
+}
+
+func noteExpandFloorY(rect layoutBBox, blockers []layoutBBox, sheet layoutBBox, gutter float64) float64 {
+	lim := sheet.MinY + sheetEdgeMinGap
+	for _, b := range blockers {
+		if b.MaxX <= rect.MinX || b.MinX >= rect.MaxX {
+			continue // 横向不重叠
+		}
+		if b.MaxY <= rect.MinY && b.MaxY+gutter > lim {
+			lim = b.MaxY + gutter
+		}
+	}
+	return lim
+}
+
+// reserveZoneNoteArea 是「为一条说明在它自己的分区框里留地方」的**唯一实现**
+// (纯函数)。planner(planPartitions 的第二遍)与 `sch note` 的自动落点共用它 ——
+// 这就是「生成与判定同一把尺」的机械保证:planner 按它算出框/带,note 按它算出
+// 落点,落点必然被框包含,note-outside-zone 结构上不再误报。
+//
+//	rect      : 未为说明扩边前的分区框(内容 ± pad + 标题带 + 按高度预留的带)
+//	bandTop   : 说明带顶 = 器件区下沿(= content.MinY - partitionContentPad)。
+//	            **扩边时它固定不动** —— 器件区一寸不挤,框只向外长。
+//	w,h       : 说明的渲染尺寸(已按框宽折行)
+//	obstacles : 说明不许压的图元(器件 / marker 文字带 / 未登记的自由文本)
+//	neighbors : 其它分区的**基础框**(扩边前),用来定扩边界
+//
+// 两个维度都参与预留:
+//   - 宽:框宽 < requiredNoteWidth(w) 就横向扩边(先右后左)。窄框(2 脚端子)
+//     结构上装不下任何可读说明,唯一讲得通的策略就是让框为说明扩边。
+//   - 高:带高至少 requiredNoteBand(h);带内被外来图元(邻区桩线/marker)占住时
+//     逐档下探,直到带里有一处可用落点。
+//
+// ok=false = 这一区在可扩边界内结构上装不下这条说明。**调用方必须显式报出来**,
+// 不许静默把说明踢到框外 —— 那正是这次要根治的症状。
+func reserveZoneNoteArea(rect layoutBBox, bandTop, w, h float64, obstacles []layoutBBox,
+	sheet layoutBBox, keepout *layoutBBox, neighbors []layoutBBox, gutter float64) (outRect, band layoutBBox, ax, ay float64, ok bool) {
+
+	blockers := append([]layoutBBox(nil), neighbors...)
+	if safe := inflatedTitleKeepout(keepout); safe != nil {
+		blockers = append(blockers, *safe)
+	}
+	outRect = rect
+	// ① 横向扩边:框宽装不下说明就往外长,先右后左,不越过扩边界。
+	if need := requiredNoteWidth(w); need > outRect.MaxX-outRect.MinX {
+		deficit := need - (outRect.MaxX - outRect.MinX)
+		right := math.Min(deficit, math.Max(0, noteExpandCeilX(outRect, blockers, sheet, gutter)-outRect.MaxX))
+		outRect.MaxX += right
+		if left := deficit - right; left > 0 {
+			outRect.MinX -= math.Min(left, math.Max(0, outRect.MinX-noteExpandFloorX(outRect, blockers, sheet, gutter)))
+		}
+	}
+	// ② 纵向:带高 ≥ requiredNoteBand(h),带内有占用就逐档下探。
+	floor := noteExpandFloorY(outRect, blockers, sheet, gutter)
+	base := math.Min(outRect.MinY, bandTop-requiredNoteBand(h))
+	bandOf := func(r layoutBBox) layoutBBox {
+		return layoutBBox{MinX: r.MinX, MinY: r.MinY, MaxX: r.MaxX,
+			MaxY: math.Min(r.MaxY, math.Max(r.MinY, bandTop))}
+	}
+	for k := 0; k <= noteBandDepthSteps; k++ {
+		r := outRect
+		r.MinY = base - float64(k)*noteAnchorStep
+		if r.MinY < floor-acOverlapEps {
+			break
+		}
+		b := bandOf(r)
+		if x, y, hit := scanNoteBand(b, r, w, h, obstacles, sheet, keepout); hit {
+			return r, b, x, y, true
+		}
+	}
+	// 装不下:仍然把「最小预留」形态交出去(带高够、宽度尽力扩过),但 ok=false ——
+	// 调用方据此发可执行的告警,而不是假装成功。
+	outRect.MinY = math.Min(outRect.MinY, math.Max(base, floor))
+	return outRect, bandOf(outRect), 0, 0, false
+}
+
 // snapNote 把锚点吸到 5 格网格(与连接网格同口径,避免半格漂移)。
 func snapNote(v float64) float64 { return math.Round(v/destaggerGrid) * destaggerGrid }
 
@@ -245,22 +437,51 @@ func collectNoteObstacles(comps []layoutComp, texts []zoneMoveText) []layoutBBox
 	return out
 }
 
-// extendZoneBandForNote 预扩说明带(纯函数,新 1):分区计划是在这条说明**登记
-// 之前**算的,带高还不包含它;若说明高度装不进现有带(requiredNoteBand(h) > 带高),
-// 就按「登记之后 zone-plan 会重算出的几何」把框底下探、带同步加高 —— 公式与
-// planPartitions 完全同一把尺(requiredNoteBand),因此落点与随后重画的框精确
-// 对上:先放说明、再 zone-draw,说明恰在新带内;重复跑 zone-plan 收敛稳定。
-// 器件区不动(只向外扩);扩出去撞图签/纸边的候选仍由 free() 统一否决。
-func extendZoneBandForNote(zoneRect, noteBand layoutBBox, h float64) (layoutBBox, layoutBBox) {
-	need := requiredNoteBand(h)
-	cur := noteBand.MaxY - noteBand.MinY
-	if need <= cur {
-		return zoneRect, noteBand
+// filterUnregisteredTexts 去掉所有**已登记到某个区**的说明,留下自由文本。
+//
+// 说明带的预留(reserveZoneNoteArea 的下探判定)必须看不见已登记说明,否则
+// 「放一条 note → note 进带 → 带被它自己顶得再下探 → note 又不在带里」就是
+// 根因 C 那个自增长反馈环的翻版。登记说明的家是构造出来的带,它不参与带的推导。
+func filterUnregisteredTexts(texts []zoneMoveText, registered map[string]bool) []zoneMoveText {
+	if len(registered) == 0 {
+		return texts
 	}
-	zoneRect.MinY -= need - cur
-	noteBand.MinY = zoneRect.MinY
-	noteBand.MaxY = noteBand.MinY + need
-	return zoneRect, noteBand
+	out := make([]zoneMoveText, 0, len(texts))
+	for _, t := range texts {
+		if !registered[t.ID] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// registeredNoteIDs 汇总一页上所有登记在区名下的说明 id。
+func registeredNoteIDs(zones map[string]*schZoneClaim) map[string]bool {
+	out := map[string]bool{}
+	for _, zc := range zones {
+		if zc == nil {
+			continue
+		}
+		for _, id := range zc.NoteIDs {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// partitionBaseRects 返回**除 zoneName 之外**每个分区的基础框(为说明扩边之前
+// 的形态)。扩边界必须钉在基础框上,而不是别人扩过之后的框:`sch note` 拿到的
+// 是「本区还没登记这条说明」的计划,planner 重算时拿到的是「已登记」的计划,
+// 两边只有都用基础框,算出来的扩边界才逐字段相同(同一把尺)。
+func partitionBaseRects(parts []partitionRect, zoneName string) []layoutBBox {
+	var out []layoutBBox
+	for _, p := range parts {
+		if strInSlice(p.Modules, zoneName) {
+			continue
+		}
+		out = append(out, p.baseRect())
+	}
+	return out
 }
 
 // matchNotePartition 在分区计划里找 zoneName 归属的分区(纯函数)。
@@ -356,27 +577,59 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 
 	// 目标区的矩形:优先用 zone-plan 给该区算出的分区框(说明就该待在自己区里),
 	// 拿不到就退化成整页扫描——但**绝不静默**:未命中/计划不可用都要出警告。
-	// **文字比框宽时先折行** —— 否则说明带塞不下,落点会一路退到整页扫描、跑到
-	// 框外面去(实测 D_ESD 框宽 96,一行说明 200,落到了 x=50)。折行口径与区框里
-	// 的电路说明一致(wrapNoteLines),不新造一套。
+	//
+	// **折行按框宽、按说明自己的字号量**(同一把尺,见 wrapNoteContent):折完的
+	// 宽高再一起进 reserveZoneNoteArea —— 预留是二维的,宽度装不下就把框横向扩边,
+	// 带内被邻区桩线占住就把框底下探,**绝不把说明踢出框**(2026-08-19 真机:
+	// 435 宽说明 + 435 宽框 + 带内占用 → 旧行为落到框外下方 (250,435))。
 	//
 	// solverObstacles = 页面图元障碍 + 分区框障碍(根因 B)。分区框只喂给自动
 	// 求解器 —— 显式 --x/--y 落在自己区框内是完全合法的,不该被框障碍误警。
 	var zoneRect, noteBand *layoutBBox
+	var bandAnchor *[2]float64
 	solverObstacles := obstacles
 	if zoneName != "" {
-		if plan, _, zerr := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts()); zerr == nil {
+		opts := defaultPartitionOpts()
+		if plan, zoneClaims, zerr := computePartitionPlan(cfg, window, docUUID, opts); zerr == nil {
 			var otherRects []layoutBBox
 			zoneRect, noteBand, otherRects, zoneMatched = matchNotePartition(plan.Partitions, zoneName)
 			if zoneMatched {
-				if wrapped := wrapNoteContent(*content, zoneRect.MaxX-zoneRect.MinX-2*noteGap); wrapped != *content {
+				baseRect := *zoneRect
+				if wrapped := wrapNoteContent(*content, fontSize, noteWrapWidth(zoneRect.MaxX-zoneRect.MinX)); wrapped != *content {
 					*content = wrapped
 					w, h = noteSizeOf(*content, fontSize)
 				}
-				// 预扩说明带(新 1):计划算于登记之前,还不知道这条说明的高度;
-				// 按登记后 zone-plan 会重算出的几何预扩,落点才与重画的框对上。
-				zr, nb := extendZoneBandForNote(*zoneRect, *noteBand, h)
+				// 预留 = planner 登记之后会重算出的几何(同一个函数,同一份
+				// 障碍口径:已登记说明一律排除,否则又是自增长反馈环)。
+				bandObstacles := collectNoteObstacles(comps,
+					filterUnregisteredTexts(texts, registeredNoteIDs(zoneClaims)))
+				zr, nb, ax, ay, fit := reserveZoneNoteArea(*zoneRect, noteBand.MaxY, w, h,
+					bandObstacles, *sheet, keepout, partitionBaseRects(plan.Partitions, zoneName), opts.Gutter)
 				zoneRect, noteBand = &zr, &nb
+				if fit {
+					// 同区已有说明(登记过的)不在 bandObstacles 里 —— 带内再扫一遍
+					// 完整障碍表,让第二条说明并排右移而不是压在第一条上。扫描仍被
+					// 「框内包含」约束,所以怎么挪都还在自己的框里。
+					if !noteSpotFree(noteAnchorBBox(ax, ay, w, h), obstacles, *sheet, keepout) {
+						ax, ay, fit = scanNoteBand(nb, zr, w, h, obstacles, *sheet, keepout)
+					}
+				}
+				if fit {
+					bandAnchor = &[2]float64{ax, ay}
+				} else {
+					warns = append(warns, fmt.Sprintf(
+						"区 %q 的说明带(%.0f×%.0f)在可扩边界内装不下这条说明(%.0f×%.0f):说明只能落到框外,"+
+							"`sch check` 会报 note-outside-zone —— 缩短文字或减小 --font-size,"+
+							"或用 `sch group-move` 把邻近模块挪开给这个区腾地方",
+						zoneName, nb.MaxX-nb.MinX, nb.MaxY-nb.MinY, w, h))
+				}
+				if zr != baseRect {
+					warns = append(warns, fmt.Sprintf(
+						"分区框已为这条说明扩边:(%.0f,%.0f)..(%.0f,%.0f) → (%.0f,%.0f)..(%.0f,%.0f) —— "+
+							"画布上的框还是旧的,记得重跑 `sch zone-draw --mode partition`",
+						baseRect.MinX, baseRect.MinY, baseRect.MaxX, baseRect.MaxY,
+						zr.MinX, zr.MinY, zr.MaxX, zr.MaxY))
+				}
 			} else {
 				warns = append(warns, fmt.Sprintf("区 %q(解析为 %q)不在本页分区计划里,说明改为整页避让落点", zoneRef, zoneName))
 			}
@@ -396,6 +649,13 @@ func placeSchNote(cfg *appConfig, window, docUUID, zoneRef string, content *stri
 				break
 			}
 		}
+		return warns, zoneMatched, nil
+	}
+
+	// 带里已经算出落点就直接用它 —— 它与 planner 重算出的框逐字段同源(同一个
+	// reserveZoneNoteArea),所以 note-outside-zone 结构上不会再响。
+	if bandAnchor != nil {
+		*x, *y = bandAnchor[0], bandAnchor[1]
 		return warns, zoneMatched, nil
 	}
 

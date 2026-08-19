@@ -34,12 +34,18 @@ type partitionModule struct {
 	// 不该 hard-block 整个分区框。CoreBBox 零值时回退 BBox(手写测试兼容)。
 	BBox     layoutBBox `json:"bbox"`
 	CoreBBox layoutBBox `json:"coreBBox,omitempty"`
-	// NoteHeight 是该模块**已登记说明**(claim.NoteIDs)中最高一条的渲染高度
-	// (noteSizeOf,内容+字号 → 行数×行高)。说明带按它预留(见 planPartitions)。
+	// NoteHeight / NoteWidth 是该模块**已登记说明**(claim.NoteIDs)里最大的一条
+	// 渲染高/宽(noteSizeOf,内容+字号 → 行数×行高 / 最长行宽)。说明带按这两个
+	// 维度预留(见 planPartitions 的第二遍 reserveZoneNoteArea)。
 	// **只许由内容+字号推导,绝不从 note 的落点 bbox 反推** —— 落点依赖框、框又
-	// 依赖带高,读落点就会重新引入「放一条 note → 带高变 → 框动 → note 又不在
-	// 带内」的自增长反馈环(根因 C 的翻版)。内容与字号不随框动,幂等。
+	// 依赖带,读落点就会重新引入「放一条 note → 带变 → 框动 → note 又不在带内」
+	// 的自增长反馈环(根因 C 的翻版)。内容与字号不随框动,幂等。
+	//
+	// 宽度这一维是 2026-08-19 补的:此前只有高度参与预留,而 note-outside-zone
+	// 判的是严格框包含 —— 435 宽的说明配 435 宽的框,生成侧说"放得下"、判定侧说
+	// "在框外",两把尺。
 	NoteHeight float64 `json:"noteHeight,omitempty"`
+	NoteWidth  float64 `json:"noteWidth,omitempty"`
 }
 
 // moduleCoreBBox 返回校验口径 bbox(CoreBBox 未设置时回退 BBox)。
@@ -59,6 +65,18 @@ type partitionRect struct {
 	TitleBBox layoutBBox `json:"titleBBox"`
 	// NoteBBox 是框内底部留给电路说明的一条带(区名在顶、说明在底,都在框内)。
 	NoteBBox layoutBBox `json:"noteBBox"`
+	// BaseBBox 是**为说明扩边之前**的框。扩边界(不许越过哪个邻框)必须钉在基础
+	// 框上:`sch note` 看到的是「本区还没登记说明」的计划,planner 重算时看到的是
+	// 「已登记」的计划,两边只有都拿基础框当邻居,算出的扩边界才逐字段相同。
+	BaseBBox layoutBBox `json:"baseBBox"`
+}
+
+// baseRect 返回扩边前的框(老数据/手写测试没填 BaseBBox 时回退 BBox)。
+func (p partitionRect) baseRect() layoutBBox {
+	if (p.BaseBBox == layoutBBox{}) {
+		return p.BBox
+	}
+	return p.BaseBBox
 }
 
 // partitionValidation counts every way a plan can be wrong (all should be 0).
@@ -170,6 +188,18 @@ func defaultPartitionOpts() partitionOpts {
 // column/row bands at the natural gaps between module clusters, each partition
 // lifted above the title-block keep-out and given a top title band. Deterministic.
 func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionModule, opts partitionOpts) partitionPlan {
+	return planPartitionsWithNotes(sheet, keepout, modules, opts, nil)
+}
+
+// planPartitionsWithNotes 是带「说明预留」的完整规划器。noteObstacles 是说明不许
+// 压的页面图元(器件 / marker 文字带 / **未登记**的自由文本)—— 有它,说明带的
+// 预留才能看见「带内被邻区桩线占住」这种情况并把框底下探;没有它(nil,纯几何
+// 单测)预留退化成「只按尺寸留」。
+//
+// **登记说明必须排除在 noteObstacles 之外**:说明落进带 → 带被它自己顶得下探 →
+// 说明又不在带里,那正是根因 C 自增长反馈环的翻版。
+func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []partitionModule,
+	opts partitionOpts, noteObstacles []layoutBBox) partitionPlan {
 	plan := partitionPlan{Sheet: sheet, Keepout: keepout}
 	plan.Capacity = diagnoseZoneCapacity(sheet, keepout, modules, opts)
 	usable := layoutBBox{
@@ -223,6 +253,7 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 	safe := inflatedTitleKeepout(keepout)
 	// 网格只用来**决定谁跟谁同一组**(哪些模块合成一个分区),不再参与矩形的尺寸 ——
 	// 尺寸一律由成员虚拟组的并集决定(见下面 rect 的注释)。
+	noteNeeds := make([]partitionNoteNeed, 0, len(order))
 	for _, k := range order {
 		content := modules[cells[k][0]].BBox
 		for _, i := range cells[k][1:] {
@@ -245,11 +276,18 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 		// 进一步下探(向外扩),器件区(content ± pad)一寸不挤。高度来自登记记录
 		// 的文字尺寸(NoteHeight,内容+字号),不来自落点 bbox —— 不构成反馈环。
 		noteBand := opts.NoteBand
+		var noteW, noteH float64
 		for _, i := range cells[k] {
-			if h := modules[i].NoteHeight; h > 0 {
-				if nb := requiredNoteBand(h); nb > noteBand {
-					noteBand = nb
-				}
+			if h := modules[i].NoteHeight; h > noteH {
+				noteH = h
+			}
+			if w := modules[i].NoteWidth; w > noteW {
+				noteW = w
+			}
+		}
+		if noteH > 0 {
+			if nb := requiredNoteBand(noteH); nb > noteBand {
+				noteBand = nb
 			}
 		}
 		// **框 = 成员虚拟组体积的并集 + 边距 + 上标题带 + 下说明带,不做任何裁剪。**
@@ -307,18 +345,69 @@ func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionMo
 			names = append(names, modules[i].Name)
 		}
 		sort.Strings(names)
+		// 带顶 = 器件区下沿,**与带高无关**:框为说明加高/下探时它固定不动
+		// (器件区一寸不挤)。`sch note` 拿 NoteBBox.MaxY 当带顶复算预留,两边
+		// 因此对得上 —— 带顶若跟着带高走,登记前后就是两个不同的基准。
+		bandTop := math.Min(rect.MaxY, math.Max(rect.MinY, content.MinY-partitionContentPad))
 		plan.Partitions = append(plan.Partitions, partitionRect{
-			Modules: names,
-			BBox:    rect,
+			Modules:  names,
+			BBox:     rect,
+			BaseBBox: rect,
 			// Title band at the visual TOP (large y).
 			TitleBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MaxY - band, MaxX: rect.MaxX, MaxY: rect.MaxY},
 			// Note band at the visual BOTTOM (small y) —— 说明就放这儿,框内左下。
-			NoteBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MinY, MaxX: rect.MaxX,
-				MaxY: math.Min(rect.MaxY, rect.MinY+noteBand)},
+			NoteBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MinY, MaxX: rect.MaxX, MaxY: bandTop},
 		})
+		noteNeeds = append(noteNeeds, partitionNoteNeed{W: noteW, H: noteH, BandTop: bandTop})
 	}
+	reserveNoteAreas(&plan, noteNeeds, sheet, keepout, opts, noteObstacles)
 	plan.Validation = validatePartitions(plan, modules, keepout)
 	return plan
+}
+
+// partitionNoteNeed 是一个分区「已登记说明要占多大地方」的规划输入(与坐标无关)。
+type partitionNoteNeed struct{ W, H, BandTop float64 }
+
+// reserveNoteAreas 是规划器的**第二遍**:逐区把框扩到装得下它自己的说明。
+//
+// 为什么必须是第二遍:扩边界要看邻区的框,而邻区的框在第一遍才算出来。扩边界一律
+// 钉在**基础框**(BaseBBox,扩边前)上 —— `sch note` 手上只有「本区还没登记说明」
+// 的计划,planner 重算时手上是「已登记」的计划,两边只有都用基础框,算出来的框
+// 才逐字段相同(生成与判定同一把尺)。
+//
+// 扩不动(可扩边界内仍装不下)时**不硬撑**:框保持最小预留形态,由
+// note-outside-zone 带着「缩短文字/腾地方」的可执行修法如实报出来。
+func reserveNoteAreas(plan *partitionPlan, needs []partitionNoteNeed, sheet layoutBBox,
+	keepout *layoutBBox, opts partitionOpts, noteObstacles []layoutBBox) {
+	if len(needs) != len(plan.Partitions) {
+		return
+	}
+	bases := make([]layoutBBox, len(plan.Partitions))
+	for i := range plan.Partitions {
+		bases[i] = plan.Partitions[i].BaseBBox
+	}
+	for i := range plan.Partitions {
+		n := needs[i]
+		if n.H <= 0 {
+			continue // 这个区没登记说明:按默认带留着就行
+		}
+		var neighbors []layoutBBox
+		for j := range bases {
+			if j != i {
+				neighbors = append(neighbors, bases[j])
+			}
+		}
+		rect, band, _, _, _ := reserveZoneNoteArea(plan.Partitions[i].BBox, n.BandTop, n.W, n.H,
+			noteObstacles, sheet, keepout, neighbors, opts.Gutter)
+		titleBand := opts.TitleBand
+		if hgt := rect.MaxY - rect.MinY; titleBand > hgt/2 {
+			titleBand = hgt / 2
+		}
+		plan.Partitions[i].BBox = rect
+		plan.Partitions[i].NoteBBox = band
+		plan.Partitions[i].TitleBBox = layoutBBox{MinX: rect.MinX, MinY: rect.MaxY - titleBand,
+			MaxX: rect.MaxX, MaxY: rect.MaxY}
+	}
 }
 
 // axisInterval is a module's extent on one axis (min, max) plus its center, used
@@ -732,11 +821,16 @@ func computePartitionPlan(cfg *appConfig, window, docUUID string, opts partition
 	// 说明带(`sch note --zone` 的自动落点优先落带),不反哺框几何。
 	// (`sch sheet tidy` 的排布口径仍 fold —— 那是搬动时给说明留地方,不推导带。)
 	//
-	// 但说明带的**高度**要认已登记说明的文字尺寸(新 1):高度来自「登记记录的
-	// 内容+字号」(text.list 的 content/fontSize → noteSizeOf),与落点坐标无关,
-	// 所以带高只随「登记了什么说明」变、不随「说明落在哪」变 —— 幂等,无反馈环。
-	applyZoneNoteHeights(cfg, window, docUUID, zones, modules)
-	plan := planPartitions(*sheet, keepout, modules, opts)
+	// 但说明带的**尺寸**要认已登记说明的文字尺寸(新 1 + 宽度补丁):宽高都来自
+	// 「登记记录的内容+字号」(text.list 的 content/fontSize → noteSizeOf),与落点
+	// 坐标无关,所以带只随「登记了什么说明」变、不随「说明落在哪」变 —— 幂等,
+	// 无反馈环。
+	texts := applyZoneNoteSizes(cfg, window, docUUID, zones, modules)
+	// 说明带的占用表:器件 / marker 文字带 / **未登记**的自由文本。登记说明一律
+	// 排除(否则说明自己会把自己的带顶下去,又是自增长反馈环)。与 `sch note`
+	// 落点侧构造的那份逐条同源 —— 两边不同源就又是两把尺。
+	noteObstacles := collectNoteObstacles(comps, filterUnregisteredTexts(texts, registeredNoteIDs(zones)))
+	plan := planPartitionsWithNotes(*sheet, keepout, modules, opts, noteObstacles)
 	plan.LabelScopeDegraded = degraded
 	plan.SheetAssumed = sheetAssumed
 	return plan, zones, nil
@@ -751,12 +845,13 @@ func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {
 	return noteAnchorBBox(t.X, t.Y, w, h)
 }
 
-// applyZoneNoteHeights 把每个区已登记说明的最大渲染高度写进模块的 NoteHeight,
-// 供 planPartitions 预留说明带(新 1)。**只读内容+字号(noteSizeOf),绝不读
-// 落点坐标** —— 这是它与 foldZoneNotesIntoModules 的本质区别:fold 消费几何
-// (禁止进画框推导路径,见下),本函数消费文字尺寸(与框几何解耦,幂等)。
-// best-effort:text.list 失败保持 NoteHeight=0(带退回默认高度),不阻断画框。
-func applyZoneNoteHeights(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim, modules []partitionModule) {
+// applyZoneNoteSizes 把每个区已登记说明的最大渲染宽/高写进模块的 NoteWidth /
+// NoteHeight,供 planPartitions 预留说明位置(宽 + 高两维)。**只读内容+字号
+// (noteSizeOf),绝不读落点坐标** —— 这是它与 foldZoneNotesIntoModules 的本质
+// 区别:fold 消费几何(禁止进画框推导路径,见下),本函数消费文字尺寸(与框
+// 几何解耦,幂等)。返回本页文本供调用方构造说明带的占用表。
+// best-effort:text.list 失败保持尺寸=0(带退回默认高度),不阻断画框。
+func applyZoneNoteSizes(cfg *appConfig, window, docUUID string, zones map[string]*schZoneClaim, modules []partitionModule) []zoneMoveText {
 	needed := false
 	for _, zc := range zones {
 		if zc != nil && len(zc.NoteIDs) > 0 {
@@ -765,19 +860,21 @@ func applyZoneNoteHeights(cfg *appConfig, window, docUUID string, zones map[stri
 		}
 	}
 	if !needed {
-		return
+		return nil
 	}
 	res, err := requestAutolayoutAction(cfg, "schematic.text.list", window, map[string]any{}, docUUID, "read zone note sizes")
 	if err != nil {
-		return
+		return nil
 	}
-	setZoneNoteHeights(zones, modules, parseZoneMoveTexts(res.Result))
+	texts := parseZoneMoveTexts(res.Result)
+	setZoneNoteSizes(zones, modules, texts)
+	return texts
 }
 
-// setZoneNoteHeights 是 applyZoneNoteHeights 的纯核(可单测):按登记记录
-// (claim.NoteIDs)把每个模块的 NoteHeight 设为其说明中最高一条的渲染高度。
+// setZoneNoteSizes 是 applyZoneNoteSizes 的纯核(可单测):按登记记录
+// (claim.NoteIDs)把每个模块的 NoteWidth/NoteHeight 设为其说明里最大的一条。
 // 已删说明(id 不在 texts 里)静默跳过 —— 与 fold 对 stale 登记的口径一致。
-func setZoneNoteHeights(zones map[string]*schZoneClaim, modules []partitionModule, texts []zoneMoveText) {
+func setZoneNoteSizes(zones map[string]*schZoneClaim, modules []partitionModule, texts []zoneMoveText) {
 	byID := map[string]zoneMoveText{}
 	for _, t := range texts {
 		byID[t.ID] = t
@@ -792,8 +889,12 @@ func setZoneNoteHeights(zones map[string]*schZoneClaim, modules []partitionModul
 			if !ok {
 				continue
 			}
-			if _, h := noteSizeOf(t.Content, t.FontSize); h > modules[i].NoteHeight {
+			w, h := noteSizeOf(t.Content, t.FontSize)
+			if h > modules[i].NoteHeight {
 				modules[i].NoteHeight = h
+			}
+			if w > modules[i].NoteWidth {
+				modules[i].NoteWidth = w
 			}
 		}
 	}

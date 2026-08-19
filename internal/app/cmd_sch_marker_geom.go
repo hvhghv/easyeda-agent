@@ -859,9 +859,11 @@ func noteOutsideZoneFindingsFor(parts []partitionRect, zones map[string]*schZone
 			continue
 		}
 		var frame *layoutBBox
+		var band layoutBBox
 		for i := range parts {
 			if strInSlice(parts[i].Modules, name) {
 				frame = &parts[i].BBox
+				band = parts[i].NoteBBox
 				break
 			}
 		}
@@ -885,12 +887,33 @@ func noteOutsideZoneFindingsFor(parts []partitionRect, zones map[string]*schZone
 				Count:       1,
 				At:          &checkPoint{X: t.X, Y: t.Y},
 				BBox:        &b,
-				Message: fmt.Sprintf("区 %q 的说明 %s @(%.0f,%.0f) 在分区框 (%.0f,%.0f)..(%.0f,%.0f) 外 — 修法:`sch prim-delete --ids %s` 后重跑 `sch note --zone %s`(自动落点落说明带),或显式 --x/--y 放回框内",
-					name, t.ID, t.X, t.Y, frame.MinX, frame.MinY, frame.MaxX, frame.MaxY, t.ID, name),
+				Message:     noteOutsideZoneMessage(name, t, *frame, band),
 			})
 		}
 	}
 	return out
+}
+
+// noteOutsideZoneMessage 生成告警文案。**修法必须真的能执行** —— 旧文案一律说
+// 「prim-delete 后重跑 `sch note --zone X`」,而在两种真机情形下它必然死循环:
+// (a) 说明比带宽,重跑落到一模一样的框外坐标;(b) 框只有 68 宽(区里只有一个
+// 2 脚端子),任何可读说明都装不进,于是永远报警。现在 zone-plan 会为说明扩边/
+// 下探,所以第一档修法给的是**算好的落点坐标**(照抄即可,不可能再落回原处);
+// 只有在可扩边界内确实装不下时才给「缩短文字/腾地方」那一档,并说清是哪一维不够。
+func noteOutsideZoneMessage(zone string, t zoneMoveText, frame, band layoutBBox) string {
+	head := fmt.Sprintf("区 %q 的说明 %s @(%.0f,%.0f) 在分区框 (%.0f,%.0f)..(%.0f,%.0f) 外",
+		zone, t.ID, t.X, t.Y, frame.MinX, frame.MinY, frame.MaxX, frame.MaxY)
+	w, h := noteSizeOf(t.Content, t.FontSize)
+	tx, ty := snapNote(band.MinX+noteGap), snapNote(band.MinY+h+noteGap)
+	if bboxContains(frame, noteAnchorBBox(tx, ty, w, h)) {
+		return fmt.Sprintf("%s — 修法:`sch note --zone %s --text … --x %g --y %g`(说明带 (%.0f,%.0f)..(%.0f,%.0f) 已为它留好位置),"+
+			"或 `sch prim-delete --ids %s` 后重跑不带 --x/--y 的 `sch note --zone %s`;框几何变过就再跑一次 `sch zone-draw --mode partition`",
+			head, zone, tx, ty, band.MinX, band.MinY, band.MaxX, band.MaxY, t.ID, zone)
+	}
+	return fmt.Sprintf("%s — 这条说明(%.0f×%.0f)在本区可扩边界内装不下(说明带只有 %.0f×%.0f):"+
+		"缩短文字或减小 --font-size 后 `sch prim-delete --ids %s` 重放,或用 `sch group-move` 把邻近模块挪开给这个区腾横向/纵向空间;"+
+		"**别再原样重跑 `sch note`,那会落回同一个位置**",
+		head, w, h, band.MaxX-band.MinX, band.MaxY-band.MinY, t.ID)
 }
 
 // schTextCount extracts the number of free text primitives from a
