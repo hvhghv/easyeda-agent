@@ -28,9 +28,43 @@ type verifiedDeleteResult struct {
 	Errors   []string // 逐个删除时的错误(informational)
 }
 
+// settleAliveSet 是删除后的**证实回读**,走 settleRead(settle_read.go)。
+//
+// 为什么删完不能立刻读:平台的写入不是同步生效的,紧跟一次删的回读会读到还没
+// 落定的快照,于是把「已经删掉」渲染成「survived」。这个误报有实际代价 ——
+// 上层照着它重删、重试,而重试期间的每一次写又都是新的鬼影来源。判据自己的
+// 满足条件写在这里:**这批 id 一个都不在活体集里**。满足即定案,不满足才值得
+// 再读一拍(2×400ms,与仓里其它回读同一把尺,不另造一把)。
+//
+// 注意这只重复**读**,不重发写 —— 写的重试是本函数外面那一轮显式重删。
+func settleAliveSet(ids []string, aliveSet func() (map[string]bool, error)) (map[string]bool, error) {
+	type readOut struct {
+		alive map[string]bool
+		err   error
+	}
+	out, _ := settleRead(func() (readOut, bool) {
+		alive, err := aliveSet()
+		if err != nil {
+			return readOut{err: err}, false
+		}
+		for _, id := range ids {
+			if alive[id] {
+				return readOut{alive: alive}, false // 还有活着的 → 可能是没落定的快照
+			}
+		}
+		return readOut{alive: alive}, true
+	})
+	if out.err != nil {
+		return nil, out.err
+	}
+	return out.alive, nil
+}
+
 // deleteVerifiedOneByOne 逐个调 deleteOne,整批删完后用 aliveSet 回读证实;
-// 幸存者逐个重试一次,再回读一次定案。返回 error 仅当回读本身失败
-// (删了但无法证实 —— 调用方应按「未验证」处理,绝不能当成删干净)。
+// 幸存者逐个重试一次,再回读一次定案。两次证实回读都经过 settleAliveSet,
+// 所以「survived」只在**settle 之后仍然活着**时才成立。返回 error 仅当回读在
+// settle 预算内始终失败(删了但无法证实 —— 调用方应按「未验证」处理,绝不能
+// 当成删干净)。
 func deleteVerifiedOneByOne(
 	ids []string,
 	deleteOne func(id string) error,
@@ -55,7 +89,7 @@ func deleteVerifiedOneByOne(
 			out.Errors = append(out.Errors, id+": "+err.Error())
 		}
 	}
-	alive, err := aliveSet()
+	alive, err := settleAliveSet(uniq, aliveSet)
 	if err != nil {
 		return out, fmt.Errorf("delete verification read failed: %w", err)
 	}
@@ -70,7 +104,7 @@ func deleteVerifiedOneByOne(
 				out.Errors = append(out.Errors, id+" (retry): "+err.Error())
 			}
 		}
-		alive, err = aliveSet()
+		alive, err = settleAliveSet(out.Retried, aliveSet)
 		if err != nil {
 			return out, fmt.Errorf("delete verification read failed after retry: %w", err)
 		}

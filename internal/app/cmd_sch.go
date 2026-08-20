@@ -860,6 +860,9 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 				if err != nil {
 					return err
 				}
+				// 连接器的存活判定是删完**立刻**回读的,可能采到尚未落定的快照。
+				// 幸存者 settle 一拍后复核一轮,用复核回执定案(sch_prim_delete_settle.go)。
+				res = primDeleteSettleRecheck(cfg, window, res, stderr)
 				// Registry leg of the delete cascade: only designators whose delete
 				// was VERIFIED (not in result.survived) leave the group table.
 				if len(cascadePlan) > 0 {
@@ -1999,9 +2002,9 @@ func failOnSurvivingPrimitives(res *actionResult, stderr io.Writer) error {
 		return nil
 	}
 	survived, _ := res.Result["survivedTotal"].(float64)
-	fmt.Fprintf(stderr, "✗ %d primitive(s) survived the delete — they are still on the page.\n", int(survived))
-	fmt.Fprintln(stderr, "  Re-read (sch text-list / sch check) before assuming anything was removed;")
-	fmt.Fprintln(stderr, "  if they persist across a `doc reload`, delete them in the EasyEDA UI (issue #164).")
+	fmt.Fprintf(stderr, "✗ %d primitive(s) survived the delete (settle 复核后仍在) — they are still on the page.\n",
+		int(survived))
+	primDeleteResidueGuidance(stderr, res)
 	return errActionFailed
 }
 
