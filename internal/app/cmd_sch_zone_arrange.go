@@ -43,6 +43,11 @@ type zoneArrangeZoneOut struct {
 	FrameH float64         `json:"frameH"`
 	Home   [2]float64      `json:"home"`
 	Groups []zfPlacedGroup `json:"groups"` // 区内局部坐标(说明带上沿为 y=0 基准之上)
+	// Retained:本区没有采纳收敛(「不得变差」门拦下,原形保留)。**无 omitempty**
+	// —— false 被抹掉的话读的人分不清「没回退」与「这版没这个字段」。
+	Retained bool `json:"retained"`
+	// RetainWhy 是回退理由(同一句话也在 Mode 尾巴上)。
+	RetainWhy string `json:"retainWhy,omitempty"`
 	// Content 是收敛后全图元并集(区内局部)—— 执行侧把局部坐标映射到落位框的
 	// 绝对坐标要靠它:abs = rect.Min + (pad, noteBand+pad) + (local − Content.Min)。
 	Content layoutBBox `json:"content"`
@@ -118,6 +123,48 @@ func zfGroupFromCluster(c schCluster, pinCount int) zfGroup {
 	return g
 }
 
+// zfMeasureCluster 折出一个组的**现状实测几何**(「不得变差」门回退原形的原料)。
+//
+// 端子逐 **pin** 折(不是逐 marker):断言①比的是「计划端子网名多重集 == 已连接
+// pin 网名多重集」,只有从 pin 出发才保证多重集一致 —— 共树 pin 的 marker 归不到
+// 本组(cluster 的「专属 marker」规则),逐 marker 折就会少端子,原形计划反而过不了
+// 自己的门。方向/桩长由 tidyStubDirection 从 pin→标记锚的实测位移量出来,
+// 与 move 内核的 preserve 策略同一口径。
+//
+// 返回 nil:本体 bbox 读不到(没有实测就没有原形可保)。
+func zfMeasureCluster(c schCluster, part layoutComp, wires []schGroupWire, roots []int,
+	markers []layoutComp) *zfMeasured {
+	if part.BBox == nil {
+		return nil
+	}
+	m := &zfMeasured{Body: *part.BBox, Box: c.Box}
+	for _, p := range part.Pins {
+		mk, hasM, onWire := tidyPinAttachment(p.X, p.Y, wires, roots, markers)
+		if !onWire || !hasM {
+			continue // 悬空 / 普通导线直连:重建不了,交给 --apply 的断言①原样拒
+		}
+		kind := "netflag"
+		if mk.ComponentType == "netport" {
+			kind = "netport"
+		}
+		dir, off := tidyStubDirection(p.X, p.Y, mk.X, mk.Y)
+		m.Terms = append(m.Terms, zfPlacedTerm{Kind: kind, Net: mk.Net, Dir: dir,
+			PinX: p.X, PinY: p.Y, Offset: off})
+	}
+	// 确定性:平台给的 pin 顺序不进判据。自上而下、左右次之、同点按网名。
+	sort.SliceStable(m.Terms, func(i, j int) bool {
+		a, b := m.Terms[i], m.Terms[j]
+		if a.PinY != b.PinY {
+			return a.PinY > b.PinY
+		}
+		if a.PinX != b.PinX {
+			return a.PinX < b.PinX
+		}
+		return a.Net < b.Net
+	})
+	return m
+}
+
 func absF(v float64) float64 {
 	if v < 0 {
 		return -v
@@ -167,11 +214,20 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		byDesig[strings.ToUpper(c.Designator)] = c
 	}
 	pinCount := map[string]int{}
+	// partOf / roots / markers 是「不得变差」门回退原形时的实测原料
+	// (zfMeasureCluster):逐 pin 折现状端子要它们。
+	partOf := map[string]layoutComp{}
+	var markers []layoutComp
 	for _, c := range comps {
 		if c.ComponentType == "part" {
 			pinCount[strings.ToUpper(label(c))] = len(c.Pins)
+			partOf[strings.ToUpper(label(c))] = c
+		}
+		if isSchMarker(c.ComponentType) {
+			markers = append(markers, c)
 		}
 	}
+	roots := tidyWireRoots(wires)
 
 	names := make([]string, 0, len(zones))
 	for n := range zones {
@@ -200,7 +256,9 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 			if !ok {
 				continue
 			}
-			groups = append(groups, zfGroupFromCluster(c, pinCount[strings.ToUpper(d)]))
+			g := zfGroupFromCluster(c, pinCount[strings.ToUpper(d)])
+			g.Measured = zfMeasureCluster(c, partOf[strings.ToUpper(d)], wires, roots, markers)
+			groups = append(groups, g)
 			zfGrow(&raw, &hasRaw, c.Box)
 		}
 		if len(groups) == 0 {
@@ -211,7 +269,11 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		// 都走同一个 partitionFrame* 本体,zone-plan 的第一遍框也是它 —— 一把尺。
 		zopts := opts
 		zopts.NoteBand = schZoneNoteBandHeight(opts.NoteBand, noteSizes[name].H)
-		plan, ferr := planZoneFollow(name, groups, zopts)
+		// **「不得变差」门**(2026-08-20 真机):收敛在大符号单件组上是负优化 ——
+		// esp32s3_wroom1_module 433×541 → 244×767,宽收了 189 而高涨了 226,
+		// 越过可用高 765 → phase B blocked,而不收敛本来排得下。门按**可排布性**
+		// (不是面积)逐区判:原形可排而收敛不可排就保留原形,理由挂进 Mode。
+		plan, ferr := planZoneFollowGated(name, groups, zopts, zfDomainFor(*sheet, keepout, opts))
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("phase A(%s): %w", name, ferr)
 		}
@@ -220,7 +282,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		out.Zones = append(out.Zones, zoneArrangeZoneOut{
 			Name: name, Mode: plan.Mode, RawW: rawW, RawH: rawH,
 			FrameW: plan.FrameW, FrameH: plan.FrameH, Home: home, Groups: plan.Groups,
-			Content: plan.Content,
+			Content: plan.Content, Retained: plan.Retained, RetainWhy: plan.RetainWhy,
 		})
 		zaZones = append(zaZones, zaZone{Name: name, W: plan.FrameW, H: plan.FrameH, Home: home})
 	}
@@ -246,10 +308,14 @@ func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
 	if out.SheetAssumed {
 		fmt.Fprintf(w, "⚠ 本页没有图框图元 —— 按 A4-only 域界假定 1170×825 + 标准图签角规划;图框需人工在 EasyEDA UI 重放(平台无重建 API)\n")
 	}
-	fmt.Fprintf(w, "phase A 区内收敛(跟随规则 R1-R5)\n")
+	fmt.Fprintf(w, "phase A 区内收敛(跟随规则 R1-R5;「不得变差」门:收敛使本区排不下就保留原形)\n")
 	for _, z := range out.Zones {
-		fmt.Fprintf(w, "  %-8s %-42s 框 %.0f×%.0f → %.0f×%.0f\n",
-			z.Name, z.Mode, z.RawW, z.RawH, z.FrameW, z.FrameH)
+		mark := " " // 回退必须一眼可见,不许只藏在 Mode 的长句里
+		if z.Retained {
+			mark = "↩"
+		}
+		fmt.Fprintf(w, " %s%-8s %-42s 框 %.0f×%.0f → %.0f×%.0f\n",
+			mark, z.Name, z.Mode, z.RawW, z.RawH, z.FrameW, z.FrameH)
 	}
 	if !out.Arrange.OK {
 		how := "回退链 + 多层货架已试尽"
@@ -291,6 +357,8 @@ func newSchZoneArrangeCmd(cfg *appConfig, window *string, stdout, stderr io.Writ
 		Long: `Plan the whole-page functional-zone layout deterministically — same input, ONE output:
 
   phase A  区内收敛:卫星无源件竖放平行跟随锚件(R1-R5;GND 下/电源上是推论不是查表)
+           带**「不得变差」门**:收敛后的框若在本页(A4 域界 + 图签 keep-out)
+           不再有落点,就保留原形(行首 ↩,理由挂在 mode / JSON retainWhy)
   phase B  区间求解:边归属(质心回退+回退链)→ 每条边可开多层货架(第二列/第二行)
            → 放不下就回溯换上一个区的候选(确定性 DFS,5 格律,无随机)
   验证     复用 zone-plan 的 validatePartitions(同一把尺)

@@ -95,6 +95,23 @@ type zfGroup struct {
 	// MultiPin:引脚数 > 2。R1 对它不转向(符号管脚定义锁死),端子保持实测侧。
 	MultiPin bool
 	Terms    []zfTerm
+	// Measured 是这个组的**现状实测几何**(页面绝对坐标)—— 「不得变差」门
+	// (zfGateRegression)回退原形时的原料。nil = 调用方没喂实测(纯几何单测),
+	// 此时门无从回退,收敛照原样采纳。
+	Measured *zfMeasured
+}
+
+// zfMeasured 是一个组的现状实测几何。**它是观测,不是预测** —— Box 由
+// buildSchClusters 从真实图元量出来,是「现状口径框」(zoneArrangeRawFrame)的内容。
+type zfMeasured struct {
+	// Body 是器件本体实测盒(--apply 按它算平移量,必须与 components.list 的
+	// bbox 同源)。
+	Body layoutBBox
+	// Box 是 L1 体积:本体 ∪ 归属 marker ∪ 归属桩线 —— 现状口径框的内容并集。
+	Box layoutBBox
+	// Terms 是现状端子:逐 pin 从实测连接折出(Kind/Net/Dir/PinX/PinY/Offset)。
+	// **原料只有这六个量**;BBox 一律由 zfTermGeom 导出,回退路径不许自造第二把尺。
+	Terms []zfPlacedTerm
 }
 
 // zfPlacedTerm 是端子落位(区内局部坐标,y-UP)。
@@ -145,6 +162,12 @@ type zfZonePlan struct {
 	// 可见 —— 「gutter 按实测偏差上界自适应放大」这件事必须让人看得见,不许
 	// 悄悄塞在常数里。
 	Slack float64 `json:"slack"`
+	// Retained:本区**没有采纳收敛**,原形保留(「不得变差」门拦下)。
+	// **没有 omitempty 是有意的**:值为 false 就被抹掉的话,读的人无法区分
+	// 「没回退」与「这版没有这个字段」(zone-plan 的 labelScopeDegraded 踩过)。
+	Retained bool `json:"retained"`
+	// RetainWhy 是回退理由的结构化版本(同一句话也挂在 Mode 尾巴上给人读)。
+	RetainWhy string `json:"retainWhy,omitempty"`
 }
 
 // zfBBoxUnion 并集(零值安全:base 为空时直接取 b)。
@@ -613,4 +636,189 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 	// opts.NoteBand 由调用方按本区已登记说明的渲染高度预置(schZoneNoteBandHeight)。
 	plan.FrameW, plan.FrameH = partitionFrameSize(plan.Content, opts.TitleBand, opts.NoteBand)
 	return plan, nil
+}
+
+// ── 「不得变差」门:收敛只有在确实变好时才采纳(2026-08-20 真机取证)──────────
+//
+// 真机 ceshi / 页 MCU_IO:区 esp32s3_wroom1_module 只有一件 U2
+// (ESP32-S3-WROOM-1,41 脚,本体 71×421),实测 L1 体积 385×421 —— **marker 是
+// 横向铺开的**,各自贴在自己那一行引脚旁边,所以宽度大而高度不超过本体。
+//
+//	收敛前 433×541   收敛后 244×767   可用高只有 765
+//
+// 宽度收了 189,高度涨了 226 —— **差 2 个单位排不下**,phase B 当场
+// `N(405)纸面放不下→S(420)→W(533)→E(637)` 判 blocked;而收敛前的 433×541 是
+// 排得下的(图签上方可用 555 ≥ 541)。「不收敛能排,收敛了排不下」——
+// phase A 违背了它自己存在的理由(它不是优化,是 phase B 的前置条件)。
+//
+// 直接机理(复核确认):zfGroupFromCluster 按 marker 中心相对**本体中心**的主轴
+// 判挂侧(|dx| ≥ |dy| 才算左右)。本体 421 高、marker 横向触达约 ±100 —— 于是靠近
+// 上下两端那几行的 marker,|dy| 反而大于 |dx|,被判成 up/down,进了 zfGenMultiPin
+// 的**垂直梯次**:一支朝下的 netport 光本体+网名带就 57 高,梯次步长 57+6,四支
+// 摞下来就是两百多个单位的纵向增生。R1–R5 是给「小锚件 + 一圈分立卫星」设计的,
+// 用在「本体已经很高、marker 天生横向」的大符号上就把高度顶爆。
+//
+// 门的口径必须是**可排布性**,不是面积/周长:这一例宽度实实在在收窄了 189,
+// 面积也小了,但高度越过域界 → 不可排。所以判据是
+//
+//	原形可排(zfDomain.fits)∧ 收敛后不可排  →  回退原形
+//
+// 「任一维度变大」不必单独写进条件:fits 对 (w,h) 单调 —— 两维都不变大就不可能
+// 从可排变不可排。回退**逐区独立**(planZoneFollowGated 每区各判各的),且必须
+// 在输出里可见(Mode 尾巴 + Retained/RetainWhy 字段),绝不静默。
+
+// zfDomain 是 phase B 的可行域,与 newZaSearch 同一把尺:页边距之内的可用矩形
+// (锚按 5 格律取整)+ 图签安全带(inflatedTitleKeepout)+ gutter。
+// 配对由 ruler 一致性测试钉住 —— 两处各算各的域界就是又造了一把尺。
+type zfDomain struct {
+	L, R, B, T float64
+	// Keep 是**已按 titleBlockSafety 膨胀**的图签安全带(nil = 本页不设防)。
+	Keep *layoutBBox
+	G    float64 // gutter(区框与障碍之间的间距)
+}
+
+// zfDomainFor 由页面几何构造可行域(与 newZaSearch 的 zaFrame 逐字段同源)。
+func zfDomainFor(sheet layoutBBox, keepout *layoutBBox, opts partitionOpts) zfDomain {
+	return zfDomain{
+		L: snap5Up(sheet.MinX + opts.Margin), R: snap5Dn(sheet.MaxX - opts.Margin),
+		B: snap5Up(sheet.MinY + opts.Margin), T: snap5Dn(sheet.MaxY - opts.Margin),
+		Keep: inflatedTitleKeepout(keepout), G: opts.Gutter,
+	}
+}
+
+// strips 是图签安全带把可用域切出来的四条整条通道的净尺寸(左/右宽、下/上高)。
+// 负值 = 那条通道不存在。**归因用**:blocked 的人要知道「上方只剩多少高」。
+func (d zfDomain) strips() (left, right, below, above float64) {
+	if d.Keep == nil {
+		return d.R - d.L, d.R - d.L, d.T - d.B, d.T - d.B
+	}
+	return (d.Keep.MinX - d.G) - d.L, d.R - (d.Keep.MaxX + d.G),
+		(d.Keep.MinY - d.G) - d.B, d.T - (d.Keep.MaxY + d.G)
+}
+
+// fits 判「一个 w×h 的区框在本页上**还存不存在任何落点**」——
+// 即 phase B 归因里那句「纸面放不下」(zaEdgeProbe.Cands == 0)的纯几何形式。
+//
+// 单个矩形障碍下这是**精确判据**(不是启发式):框要么整个落在图签左侧那条
+// 通道、要么右侧、要么下方、要么上方,四条都塞不下就真的没有落点。
+// 对 (w,h) 单调:w,h 变小绝不会从可排变成不可排 —— 门靠这条性质省掉
+// 「任一维度变大」的显式判断。
+func (d zfDomain) fits(w, h float64) bool {
+	const eps = 1e-9
+	if w > (d.R-d.L)+eps || h > (d.T-d.B)+eps {
+		return false
+	}
+	if d.Keep == nil {
+		return true
+	}
+	left, right, below, above := d.strips()
+	return w <= left+eps || w <= right+eps || h <= below+eps || h <= above+eps
+}
+
+// zfGateRegression 是「不得变差」门的判据本体(纯函数,便于单测与负对照)。
+// 返回回退理由(空 = 采纳收敛)。
+func zfGateRegression(rawW, rawH, convW, convH float64, d zfDomain) string {
+	const eps = 1e-9
+	grewW, grewH := convW > rawW+eps, convH > rawH+eps
+	if !grewW && !grewH {
+		return "" // 两维都没变大 → fits 单调,不可能变差
+	}
+	if !d.fits(rawW, rawH) {
+		return "" // 原形本来就排不下 —— 收敛是唯一出路,不许拦
+	}
+	if d.fits(convW, convH) {
+		return "" // 收敛后仍有落点 → 采纳(负对照:宽涨一点但高大降,必须仍收敛)
+	}
+	var grew []string
+	if grewW {
+		grew = append(grew, fmt.Sprintf("宽 %.0f→%.0f", rawW, convW))
+	}
+	if grewH {
+		grew = append(grew, fmt.Sprintf("高 %.0f→%.0f", rawH, convH))
+	}
+	left, _, _, above := d.strips()
+	return fmt.Sprintf("收敛回退:%s 后本页无落点(可用 %.0f×%.0f;图签上方高 %.0f、左侧宽 %.0f)—— 保留原形 %.0f×%.0f",
+		joinCN(grew), d.R-d.L, d.T-d.B, above, left, rawW, rawH)
+}
+
+// joinCN 用顿号连接归因短语(确定性:输入已定序)。
+func joinCN(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += "、"
+		}
+		out += p
+	}
+	return out
+}
+
+// zfRetainPlan 是**原形计划**:不重排、不重生桩,把现状实测几何原样折成一份
+// zfZonePlan(区内局部坐标)。回退时输出它 —— 「保留原形」必须是一份下游能用的
+// 完整计划,不是「跳过这个区」:--apply 的断言①(计划端子网名多重集 = 已连接
+// pin 网名多重集)要求每件都有端子,漏了就整页拒绝执行。
+//
+// 三条与收敛路径不同的地方,都是**有意**的:
+//   - 端子几何仍走 zfTermGeom(一把尺),但桩长用**实测**桩长(Offset),不是 zfStub
+//     —— 原形保留的意思就是「一个单位都不动」;
+//   - Content 取「实测 L1 体积 ∪ 预测落地包络」:体积是观测(现状口径框的内容,
+//     与 zoneArrangeRawFrame 同源),并集只是防止重建后的标签探出观测框;
+//   - **不加 zfLandSlack**:那一格余量是给「规划坐标 → 落地坐标换网格相位」留的,
+//     而原形保留是刚体平移(Δ 已 snap5),落地几何与观测逐字相同,不需要余量。
+//     加了它,原形框反而比现状口径框大一圈,「不得变差」自己就变差了。
+//
+// 组间重叠断言在这里**不做**:实测 marker 是四面星形展开的,两组的包络矩形
+// 天然互相穿插(cmd_sch_clusters.go 的开篇就是这条),拿包络判会误炸。
+func zfRetainPlan(zone string, groups []zfGroup, opts partitionOpts) (zfZonePlan, bool) {
+	gs := append([]zfGroup(nil), groups...)
+	sort.SliceStable(gs, func(i, j int) bool { return tidyDesignatorLess(gs[i].Designator, gs[j].Designator) })
+
+	plan := zfZonePlan{Zone: zone, Mode: "原形保留(不重排、不重生桩)"}
+	content, has := layoutBBox{}, false
+	for _, g := range gs {
+		if g.Measured == nil {
+			return zfZonePlan{}, false // 没有实测几何 → 无从回退
+		}
+		out := zfPlacedGroup{Designator: g.Designator, Body: g.Measured.Body}
+		for _, t := range g.Measured.Terms {
+			zfAppendTerm(&out, t)
+		}
+		plan.Groups = append(plan.Groups, out)
+		zfGrow(&content, &has, g.Measured.Box)
+		zfGrow(&content, &has, zfGroupBBox(out))
+	}
+	if !has {
+		return zfZonePlan{}, false
+	}
+	// 平移到区内局部坐标(内容 min 角归零)——与收敛路径的坐标约定一致,
+	// --apply 的 abs = rect.Min + (pad, noteBand+pad) + (local − Content.Min) 才成立。
+	dx, dy := -content.MinX, -content.MinY
+	for i, g := range plan.Groups {
+		plan.Groups[i] = zfTranslate(g, dx, dy)
+	}
+	plan.Content = layoutBBox{MinX: 0, MinY: 0,
+		MaxX: content.MaxX - content.MinX, MaxY: content.MaxY - content.MinY}
+	plan.FrameW, plan.FrameH = partitionFrameSize(plan.Content, opts.TitleBand, opts.NoteBand)
+	return plan, true
+}
+
+// planZoneFollowGated = planZoneFollow + 「不得变差」门。**phase A 的生产入口**。
+// 纯函数;逐区独立判定(一个区回退不影响其它区照常收敛);判定只用算术,
+// 不依赖 map 遍历序。
+func planZoneFollowGated(zone string, groups []zfGroup, opts partitionOpts, dom zfDomain) (zfZonePlan, error) {
+	conv, err := planZoneFollow(zone, groups, opts)
+	if err != nil {
+		return conv, err // 收敛本身出错仍 fail-closed(R5 违例是缺陷,不是尺寸问题)
+	}
+	keep, ok := zfRetainPlan(zone, groups, opts)
+	if !ok {
+		return conv, nil
+	}
+	why := zfGateRegression(keep.FrameW, keep.FrameH, conv.FrameW, conv.FrameH, dom)
+	if why == "" {
+		return conv, nil
+	}
+	keep.Retained, keep.RetainWhy = true, why
+	keep.Mode += " · " + why
+	return keep, nil
 }
