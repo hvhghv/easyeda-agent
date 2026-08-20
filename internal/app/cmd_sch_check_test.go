@@ -49,6 +49,25 @@ func TestParseAndRenderCheck_Floating(t *testing.T) {
 	}
 }
 
+func TestRenderCheck_ManufactureNetlistUnavailable(t *testing.T) {
+	available := false
+	rep := checkReport{
+		Passed:           true,
+		NetlistAvailable: &available,
+		NetlistError:     "官方制造网表未返回文件。",
+		AnalysisBasis:    "geometry-only",
+		Summary:          checkSummary{},
+	}
+	var buf bytes.Buffer
+	renderCheckReport(rep, &buf)
+	out := buf.String()
+	for _, want := range []string{"官方制造网表不可用", "仅依据画布几何", "不宣称网表连通性已验证"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
 // Wire-crossing + wire-over-pin: render shows the type, coords, and routing hint.
 func TestRenderCheck_Routing(t *testing.T) {
 	at := &checkPoint{X: 90, Y: 135}

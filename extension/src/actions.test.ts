@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import {
 	connectPinEndpoint,
 	getComponentOrThrow,
+	netlabelCreateBackend,
 	normalizeDeviceRef,
 	runAction,
 	schematicComponentsList,
@@ -1936,5 +1937,71 @@ test('library.device.create verifies the native symbol and footprint association
 	finally {
 		delete (globalThis as any).eda;
 		removeLibraryEnumGlobals();
+	}
+});
+
+test('netlabel.create routes EasyEDA 3.x to native UI simulation', () => {
+	assert.equal(netlabelCreateBackend('3.2.184'), 'native-ui-simulation');
+	assert.equal(netlabelCreateBackend('3.0.0'), 'native-ui-simulation');
+	assert.equal(netlabelCreateBackend(''), 'native-ui-simulation');
+	assert.equal(netlabelCreateBackend('4.0.0'), 'official-api');
+});
+
+test('netlabel.create uses and verifies a non-3.x public API when one is available', async () => {
+	const previousVersion = (globalThis as any).PRO_EDITOR_VERSION;
+	const label = {
+		getState_PrimitiveId: () => 'netlabel-1',
+		getState_Value: () => 'FB_3V3',
+		getState_X: () => 215,
+		getState_Y: () => 390,
+	};
+	(globalThis as any).PRO_EDITOR_VERSION = '4.0.0';
+	(globalThis as any).eda = {
+		sch_PrimitiveAttribute: {
+			createNetLabel: async (x: number, y: number, net: string) => {
+				assert.deepEqual({ x, y, net }, { x: 215, y: 390, net: 'FB_3V3' });
+				return label;
+			},
+			get: async (id: string) => id === 'netlabel-1' ? label : undefined,
+		},
+	};
+	try {
+		const res: any = await runAction('schematic.netlabel.create', { net: 'FB_3V3', x: 215, y: 390 });
+		assert.deepEqual(res.result, {
+			primitiveId: 'netlabel-1', net: 'FB_3V3', x: 215, y: 390,
+			editorVersion: '4.0.0', verified: true,
+		});
+	}
+	finally {
+		delete (globalThis as any).eda;
+		if (previousVersion === undefined) delete (globalThis as any).PRO_EDITOR_VERSION;
+		else (globalThis as any).PRO_EDITOR_VERSION = previousVersion;
+	}
+});
+
+test('schematic.read treats a missing manufacture netlist as unknown, not floating', async () => {
+	(globalThis as any).eda = {
+		sch_PrimitiveComponent: {
+			getAll: async () => [mockComponent({ Designator: 'U1', ComponentType: 'part' })],
+			getAllPinsByPrimitiveId: async () => [{
+				getState_PinNumber: () => '1',
+				getState_PinName: () => 'IN',
+			}],
+		},
+		sch_ManufactureData: { getNetlistFile: async () => undefined },
+	};
+	try {
+		const res: any = await runAction('schematic.read', { includeCheck: false });
+		assert.equal(res.result.netlistAvailable, false);
+		assert.match(res.result.netlistError, /未返回文件/);
+		assert.equal(res.result.analysisBasis, 'geometry-only');
+		assert.deepEqual(res.result.floatingPins, []);
+		assert.equal(res.result.floatingPinCount, 0);
+		assert.deepEqual(res.result.components[0].pins, [
+			{ number: '1', name: 'IN', net: null, netState: 'unavailable' },
+		]);
+	}
+	finally {
+		delete (globalThis as any).eda;
 	}
 });

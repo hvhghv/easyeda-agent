@@ -2703,6 +2703,103 @@ const NET_PORT_KINDS: Record<string, NetPortDirection> = {
 	net_port_bi: 'BI',
 };
 
+function editorVersion(): string {
+	const value = (globalThis as { PRO_EDITOR_VERSION?: unknown }).PRO_EDITOR_VERSION;
+	return typeof value === 'string' ? value : '';
+}
+
+function editorMajorVersion(version: string): number | null {
+	const match = /^(\d+)/.exec(version.trim());
+	return match ? Number(match[1]) : null;
+}
+
+export function netlabelCreateBackend(version: string): 'native-ui-simulation' | 'official-api' {
+	const major = editorMajorVersion(version);
+	// EDA 3.2 advertises createNetLabel but leaves its Promise pending forever.
+	// Its own toolbar remains functional, so use that native interaction instead
+	// of treating the future API annotation as a client upgrade requirement.
+	return major === null || major <= 3 ? 'native-ui-simulation' : 'official-api';
+}
+
+interface NativeNetlabelSimulationResult {
+	ok: boolean;
+	primitiveId?: string;
+	error?: string;
+}
+
+async function createNetlabelViaNativeUI(x: number, y: number, net: string): Promise<NativeNetlabelSimulationResult> {
+	const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as {
+		new (body: string): () => Promise<unknown>;
+	};
+	const request = JSON.stringify({ x, y, net });
+	const fn = new AsyncFunction(`
+		const request = ${request};
+		const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+		const visible = element => {
+			const rect = element.getBoundingClientRect();
+			const style = getComputedStyle(element);
+			return rect.width > 100 && rect.height > 100 && style.display !== 'none' && style.visibility !== 'hidden';
+		};
+		const canvas = Array.from(document.querySelectorAll('canvas[data-type="sch-canvas"]')).find(visible);
+		const button = document.querySelector('[data-cmd="place_part(netlabel)"]');
+		if (!canvas || !button) return { ok: false, error: '未找到当前原理图画布或原生网络标签工具。' };
+		const svg = canvas.parentElement && canvas.parentElement.querySelector('svg');
+		const rect = canvas.getBoundingClientRect();
+		const rawViewBox = svg && svg.getAttribute('viewBox');
+		const viewBox = rawViewBox ? rawViewBox.trim().split(/\\s+/).map(Number) : [];
+		if (viewBox.length !== 4 || viewBox.some(v => !Number.isFinite(v)) || viewBox[2] <= 0 || viewBox[3] <= 0) {
+			return { ok: false, error: '当前原理图画布未提供可用的 SVG 视图坐标。' };
+		}
+		const clientX = rect.left + (request.x - viewBox[0]) / viewBox[2] * rect.width;
+		// Schematic data uses y-down while the rendered SVG uses y-up.
+		const clientY = rect.top + ((-request.y) - viewBox[1]) / viewBox[3] * rect.height;
+		if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+			return { ok: false, error: '目标网络标签坐标不在当前可见画布内。' };
+		}
+		const mouse = (type, options) => canvas.dispatchEvent(new MouseEvent(type, Object.assign({
+			bubbles: true, cancelable: true, view: window, clientX, clientY,
+		}, options)));
+		button.click();
+		await sleep(80);
+		mouse('mousemove', { buttons: 0 });
+		mouse('mousedown', { button: 0, buttons: 1 });
+		mouse('mouseup', { button: 0, buttons: 0 });
+		await sleep(180);
+		for (const type of ['keydown', 'keyup']) {
+			document.dispatchEvent(new KeyboardEvent(type, { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+		}
+		const inputVisible = element => {
+			const r = element.getBoundingClientRect();
+			const s = getComputedStyle(element);
+			return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+		};
+		const input = Array.from(document.querySelectorAll('input[data-test="Name"][data-attr-key]')).find(inputVisible);
+		const primitiveId = input && input.getAttribute('data-attr-key');
+		if (!input || !primitiveId) return { ok: false, error: '原生网络标签放置后未出现名称属性控件。' };
+		const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+		input.focus();
+		setValue.call(input, request.net);
+		input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+		input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+		for (const type of ['keydown', 'keypress', 'keyup']) {
+			input.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true }));
+		}
+		input.blur();
+		for (let attempt = 0; attempt < 8; attempt++) {
+			await sleep(80);
+			const renderedText = svg && Array.from(svg.querySelectorAll('text')).find(node => node.id === primitiveId && (node.textContent || '') === request.net);
+			const renderedCross = svg && Array.from(svg.querySelectorAll('path.netlabel-cross')).find(node => node.getAttribute('parent-id') === primitiveId);
+			if (renderedText && renderedCross) return { ok: true, primitiveId };
+		}
+		return { ok: false, primitiveId, error: '原生网络标签没有在画布中读回目标名称和十字标记。' };
+	`);
+	const value = await fn();
+	if (!value || typeof value !== 'object') {
+		return { ok: false, error: '原生网络标签模拟交互没有返回状态。' };
+	}
+	return value as NativeNetlabelSimulationResult;
+}
+
 const schematicNetflagCreate: Handler = async (payload) => {
 	const kind = requireString(payload, 'kind');
 	const x = requireNumber(payload, 'x');
@@ -2761,6 +2858,77 @@ const schematicNetflagCreate: Handler = async (payload) => {
 		result: {
 			primitiveId: component.getState_PrimitiveId(),
 			component: serializeComponent(component),
+		},
+	};
+};
+
+const schematicNetlabelCreate: Handler = async (payload) => {
+	const net = requireString(payload, 'net');
+	const x = requireNumber(payload, 'x');
+	const y = requireNumber(payload, 'y');
+	const version = editorVersion();
+	if (netlabelCreateBackend(version) === 'native-ui-simulation') {
+		let simulation: NativeNetlabelSimulationResult;
+		try {
+			simulation = await withTimeout(
+				createNetlabelViaNativeUI(x, y, net),
+				5_000,
+				'原生网络标签模拟交互超时。',
+			);
+		}
+		catch (err) {
+			if (err instanceof ActionError) throw err;
+			throw edaError(err, '原生网络标签模拟交互失败。');
+		}
+		if (!simulation.ok || !simulation.primitiveId) {
+			throw new ActionError(ErrorCodes.EDA_CALL_FAILED, simulation.error ?? '原生网络标签模拟交互失败。');
+		}
+		return {
+			result: {
+				primitiveId: simulation.primitiveId,
+				net,
+				x,
+				y,
+				editorVersion: version || null,
+				backend: 'native-ui-simulation',
+				verified: true,
+			},
+		};
+	}
+
+	let label;
+	try {
+		label = await withTimeout(
+			eda.sch_PrimitiveAttribute.createNetLabel(x, y, net),
+			5_000,
+			'创建普通网络标签超时；编辑器未完成官方 createNetLabel 调用。',
+		);
+	}
+	catch (err) {
+		if (err instanceof ActionError) throw err;
+		throw edaError(err, '创建普通网络标签失败。');
+	}
+	if (!label) {
+		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, '创建普通网络标签未返回图元。');
+	}
+
+	// A non-empty return alone is not sufficient: confirm the native attribute
+	// survived the editor's action commit and still carries the requested net.
+	const primitiveId = label.getState_PrimitiveId();
+	let verified;
+	try { verified = await eda.sch_PrimitiveAttribute.get(primitiveId); }
+	catch (err) { throw edaError(err, '读取回普通网络标签失败。'); }
+	if (!verified || verified.getState_Value() !== net) {
+		throw new ActionError(ErrorCodes.EDA_CALL_FAILED, `普通网络标签创建后读回不匹配（期望 ${net}）。`);
+	}
+	return {
+		result: {
+			primitiveId,
+			net,
+			x: verified.getState_X(),
+			y: verified.getState_Y(),
+			editorVersion: version || null,
+			verified: true,
 		},
 	};
 };
@@ -3337,20 +3505,21 @@ function collectWireSegments(wires: Array<{ getState_Line: () => Array<number>; 
 interface NetlistPinNets {
 	byDesignator: Map<string, Map<string, string>>;
 	available: boolean;
+	error?: string;
 }
 
 async function collectNetlistPinNets(): Promise<NetlistPinNets> {
 	const byDesignator = new Map<string, Map<string, string>>();
-	const muted = (): NetlistPinNets => ({ byDesignator, available: false });
+	const unavailable = (error: string): NetlistPinNets => ({ byDesignator, available: false, error });
 	let file: File | undefined;
-	try { file = await eda.sch_ManufactureData.getNetlistFile(); }
-	catch { return muted(); }
-	if (!file) return muted();
+	try { file = await eda.sch_ManufactureData.getNetlistFile('netlist.json'); }
+	catch (err) { return unavailable(`官方制造网表请求失败: ${describeThrown(err)}`); }
+	if (!file) return unavailable('官方制造网表未返回文件。');
 	let parsed: unknown;
 	try { parsed = JSON.parse(await file.text()); }
-	catch { return muted(); }
+	catch (err) { return unavailable(`官方制造网表无法解析: ${describeThrown(err)}`); }
 	const components = (parsed as { components?: Record<string, NetlistComponentInfo> })?.components;
-	if (!components || typeof components !== 'object') return muted();
+	if (!components || typeof components !== 'object') return unavailable('官方制造网表缺少 components 映射。');
 	for (const comp of Object.values(components)) {
 		const designator = String(comp.props?.Designator ?? '');
 		if (!designator || !comp.pinInfoMap) continue;
@@ -3409,7 +3578,7 @@ function interiorOnSegment(px: number, py: number, s: Seg): boolean {
 const schematicCheck: Handler = async (payload) => {
 	const allPages = optionalBoolean(payload, 'allPages') === true;
 	let components, wires;
-	const { byDesignator: netlistPinNets, available: netlistAvailable } = await collectNetlistPinNets();
+	const { byDesignator: netlistPinNets, available: netlistAvailable, error: netlistError } = await collectNetlistPinNets();
 	try {
 		components = await eda.sch_PrimitiveComponent.getAll(undefined, allPages);
 		wires = await eda.sch_PrimitiveWire.getAll();
@@ -3769,7 +3938,18 @@ const schematicCheck: Handler = async (payload) => {
 		danglingWires,
 		total: findings.length,
 	};
-	return { result: { passed: findings.length === 0, summary, findings } };
+	return {
+		result: {
+			passed: findings.length === 0,
+			netlistAvailable,
+			...(netlistAvailable ? {} : {
+				netlistError: netlistError ?? '官方制造网表不可用。',
+				analysisBasis: 'geometry-only',
+			}),
+			summary,
+			findings,
+		},
+	};
 };
 
 // ─── Bridge check (tree-granularity net-vs-copper consistency) ─────────
@@ -4174,7 +4354,7 @@ const schematicRead: Handler = async (payload) => {
 	}
 
 	// JSON-authoritative pin→net per designator (same source as schematic.check).
-	const { byDesignator: pinNets } = await collectNetlistPinNets();
+	const { byDesignator: pinNets, available: netlistAvailable, error: netlistError } = await collectNetlistPinNets();
 
 	const netToPins = new Map<string, Array<string>>();
 	const floating: Array<string> = [];
@@ -4195,10 +4375,15 @@ const schematicRead: Handler = async (payload) => {
 					list.push(key);
 					netToPins.set(net, list);
 				}
-				else if (designator && number) {
+				else if (netlistAvailable && designator && number) {
 					floating.push(`${designator}.${number}`);
 				}
-				pins.push({ number, name: p.getState_PinName?.() ?? '', net: net || null });
+				pins.push({
+					number,
+					name: p.getState_PinName?.() ?? '',
+					net: net || null,
+					...(netlistAvailable ? {} : { netState: 'unavailable' }),
+				});
 			}
 		}
 		catch { /* pins best-effort */ }
@@ -4237,6 +4422,11 @@ const schematicRead: Handler = async (payload) => {
 
 	return {
 		result: {
+			netlistAvailable,
+			...(netlistAvailable ? {} : {
+				netlistError: netlistError ?? '官方制造网表不可用。',
+				analysisBasis: 'geometry-only',
+			}),
 			components,
 			componentCount: components.length,
 			nets,
@@ -10926,6 +11116,7 @@ const HANDLERS: Record<string, Handler> = {
 	'schematic.wire.create': schematicWireCreate,
 	'schematic.group.move': schematicGroupMove,
 	'schematic.netflag.create': schematicNetflagCreate,
+	'schematic.netlabel.create': schematicNetlabelCreate,
 	'schematic.pin.set_no_connect': schematicPinSetNoConnect,
 	'schematic.pin.disconnect': schematicPinDisconnect,
 	'schematic.select': schematicSelect,

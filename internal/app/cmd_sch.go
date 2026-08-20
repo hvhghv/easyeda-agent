@@ -1219,6 +1219,39 @@ pull fresh ids before any follow-up mutation on it.`,
 		sch.AddCommand(c)
 	}
 
+	// ── netlabel ───────────────────────────────────────────────────────────
+	// schematic.netlabel.create — ordinary N-shaped label, deliberately not a
+	// netport fallback. On EasyEDA 3.x, whose public API symbol is only a
+	// hanging stub, the connector drives the editor's native label tool.
+	{
+		var net string
+		var x, y float64
+		c := &cobra.Command{
+			Use:   "netlabel",
+			Short: "Create a normal N-shaped network label",
+			Long: `Create a normal N-shaped schematic network label, not an arrow net port.
+
+EasyEDA 3.2 uses the editor's native network-label toolbar and canvas
+interaction because its public createNetLabel API stub never completes. The
+connector maps the requested schematic coordinate into the live canvas,
+commits the Name property, and verifies the rendered native label; it never
+silently substitutes a net port or text.`,
+			Args:    cobra.NoArgs,
+			Example: `  easyeda sch netlabel --net FB_3V3 --x 215 --y 390`,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if net == "" {
+					return fmt.Errorf("--net is required")
+				}
+				return dispatch(cfg, "schematic.netlabel.create", window,
+					map[string]any{"net": net, "x": x, "y": y}, stdout, stderr)
+			},
+		}
+		c.Flags().StringVar(&net, "net", "", "network name (required)")
+		c.Flags().Float64Var(&x, "x", 0, "schematic X coordinate (0.01 inch units)")
+		c.Flags().Float64Var(&y, "y", 0, "schematic Y coordinate (0.01 inch units)")
+		sch.AddCommand(c)
+	}
+
 	// ── connect ───────────────────────────────────────────────────────────
 	// schematic.power.connect_pin
 	{
@@ -1600,8 +1633,10 @@ JSON-authoritative net), nets (net → connected designator.pin keys, degree,
 power/ground flag), floating pins, and the geometric design check.
 
 Pin→net comes from the official manufacture netlist (same source as 'sch check'),
-so it's authoritative, not geometry-guessed. Use --no-check to skip the design
-check for a faster read.`,
+so it's authoritative, not geometry-guessed. If EasyEDA returns no manufacture
+netlist, netlistAvailable=false and netlistError explain the degradation: pin
+net=null is then unknown (netState=unavailable), never a claimed floating pin.
+Use --no-check to skip the geometric design check for a faster read.`,
 			Args: cobra.NoArgs,
 			Example: `  easyeda sch read
   easyeda sch read --all-pages

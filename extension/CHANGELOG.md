@@ -6,6 +6,29 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-08-20
+
+### Fixed
+- EasyEDA 3.2 now creates ordinary N-shaped network labels through its own
+  rendered toolbar and canvas interaction. The connector maps schematic
+  coordinates through the live SVG viewBox, commits the native Name property,
+  and verifies the rendered label text plus `netlabel-cross`; it never calls
+  the 3.x `createNetLabel` stub that leaves its Promise pending.
+
+## [1.0.10] - 2026-08-20
+
+### Added
+- `schematic.netlabel.create` and `easyeda sch netlabel` for native ordinary
+  N-shaped network labels. The action uses the official API and reads back the
+  created native attribute before reporting success.
+
+### Fixed
+- EasyEDA 3.x rejects the public `createNetLabel` stub before it can hold the
+  action queue or silently substitute a net port or plain text.
+- `schematic.read` and `schematic.check` now expose manufacture-netlist
+  unavailability explicitly. Unknown pin nets are no longer reported as every
+  pin floating when EasyEDA returns no netlist file.
+
 ## [1.0.9] - 2026-08-19
 
 ### Added
