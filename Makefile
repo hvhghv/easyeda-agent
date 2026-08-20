@@ -152,6 +152,9 @@ endif
 	rm -rf $(DIST) && mkdir -p $(DIST)
 	@echo "  syncing connector version to $(VERSION)..."
 	node extension/scripts/bump.mjs $(VERSION:v%=%) --require-changelog
+	@echo "  syncing skill version to $(VERSION)..."
+	@# SKILL.md 的 metadata.version 不会被 clawhub/gh 自动更新 —— 不同步就漂移。
+	python3 scripts/sync-skill-version.py $(VERSION:v%=%)
 	npm --prefix extension run typecheck
 	npm --prefix extension run build
 	@echo "  compiling CLI..."

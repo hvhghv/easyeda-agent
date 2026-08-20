@@ -124,7 +124,7 @@ easyeda update --check    # 只读三方版本表（cli / skill / connector）
 就降级成「跑一次下载的二进制、比对版本号」。**改动 release 资产命名 = 改动自更新的输入**，
 两边要一起改：`Makefile` 的 `release` 目标 ↔ `selfupdate.AssetName`。
 
-**版本号约定**：CLI 和 connector 始终用同一版本号（`make release` 负责把 `extension.json` 同步到 VERSION，不需要提前跑 `make eext`）。`make release` 会自动打 git tag、push 并创建 GitHub Release，**并把 skill 同版本发布到 ClawHub**（best-effort，失败不阻断；重试 `make publish-skill VERSION=…`，需已 `clawhub login`）。ClawHub 版本号不可覆盖；`publish-skill` 必须用绝对路径——clawhub 的 workdir 会被全局配置劫持到 `~/clawd`，相对路径会把旧副本发上去（0.8.1 踩过）。skillhub.cn 无 CLI API（纯网页社区），不集成。
+**版本号约定**：CLI、connector 和 skill 始终用同一版本号（`make release` 负责把 `extension.json` **和 `SKILL.md` 的 `metadata.version`** 同步到 VERSION，不需要提前跑 `make eext`）。skill 侧同步脚本是 `scripts/sync-skill-version.py`（`--check` 只校验不写，可单独跑）——**改 frontmatter 时别动 `  version:` 那行的两空格缩进格式**，脚本按它定位。注意与安装态的 `.version` 标记文件区分：那是 `easyeda update` 写在 skill 目录里的运行时标记（`internal/selfupdate`），`metadata.version` 是随包发布、离线可读的声明式元数据，发版后两者同值。`make release` 会自动打 git tag、push 并创建 GitHub Release，**并把 skill 同版本发布到 ClawHub**（best-effort，失败不阻断；重试 `make publish-skill VERSION=…`，需已 `clawhub login`）。ClawHub 版本号不可覆盖；`publish-skill` 必须用绝对路径——clawhub 的 workdir 会被全局配置劫持到 `~/clawd`，相对路径会把旧副本发上去（0.8.1 踩过）。skillhub.cn 无 CLI API（纯网页社区），不集成。
 
 **Changelog 门禁**：`extension/CHANGELOG.md` 必须有对应版本的 `## [x.y.z]` 条目。`make release` 会**硬校验**（缺条目直接报错退出，发版前先补 changelog）；`make eext`（dev 循环）只**警告**不阻断。校验逻辑在 `extension/scripts/bump.mjs`（`--require-changelog`）。
 

@@ -1,6 +1,12 @@
 ---
 name: easyeda-agent
 description: "Community EasyEDA Agent automation skill for EasyEDA Pro schematic and PCB work through the local easyeda-agent CLI/daemon/connector. Use when designing a board from scratch; inspecting, cleaning up, or safely refactoring an existing wired schematic; arranging multi-page functional modules; drawing page-scoped module frames and text labels; preserving and reconciling pin-to-net topology; placing/wiring real LCSC/JLC library parts; syncing schematic changes into PCB; laying out PCB components; running EasyEDA DRC/check/bridge-check/layout-lint; exporting BOM/netlists/artifacts; querying the embedded circuit-block library (`easyeda blocks ls/show/search`); or applying the bundled EasyEDA design workflows and conventions. 覆盖嘉立创EDA专业版原理图/PCB、混乱原理图整理、多页功能分区、框选文字标注、布线、铺铜、板框与机械门禁。适用于嘉立创EDA(JLC EDA / JLCEDA / LCEDA / EasyEDA Pro)与立创商城(LCSC)元件的电路板设计自动化。"
+license: MIT
+compatibility: "Requires the local easyeda-agent CLI and daemon (macOS/Linux/Windows) plus the EasyEDA Agent Connector extension installed in EasyEDA Pro with 'Allow external interaction' enabled. Bundled scripts need Python 3. Network access is needed only for LCSC part lookup and self-update."
+metadata:
+  author: zhoushoujianwork
+  version: "1.0.2"
+  homepage: "https://github.com/zhoushoujianwork/easyeda-agent"
 ---
 
 # EasyEDA Agent
@@ -41,7 +47,7 @@ EasyEDA tooling.
 12. **禁用 `eda.sch_Netlist.getNetlist()`**(已废弃、悬空脚挂死)— 网表走 `sch read/check/netlist/export`;raw 路径不得已才 `getNetlistFile()` 读 `File.text()`。→ schematic.md / actions.md
 13. **电气 clearance ≠ 手焊可达性** — P2 先持久化装配档案:`pcb stage set-assembly --profile hand-solder`(默认/下限40mil;大焊盘烙铁通道60mil);`layout-lint --gate` 有任何 tight pair 即失败,任何器件四面被围、无一侧 ≥60mil 烙铁通道(no-access)也失败;未过门不得确认布局。→ design-flow P2/P6 · issue #99
 14. **阶段门禁是机械强制的,不靠记忆** — 布线(`route-short`/`autoroute`,以及底层 `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`)未过 `outline_confirmed`+`pre_route_passed` 一律被拒,**daemon 在 /action 派发层也拦**(raw 调用绕不过);确认与**文档指纹**绑定——GUI 拖动 / `exec_js` 等门外改动会被下一个 gate 自动失效回退。**布完必查也是门**:布线后必须过 `post_route_checked`(`workflow advance` 自动跑 pcb check,ERROR/power-not-poured/width-under-spec 必须清零才放行丝印/交付;任何布线类 mutation 自动失效此门重新关上)。任意阶段切入 / 恢复会话:先 `easyeda workflow status --reconcile` 校准,再 `easyeda workflow advance` 按流程继续;**force 分级(#132)**:`--force <理由>` 只放行**软缺口**(如 pre_route_passed 未重跑)——机械骨架全未确认(placement_confirmed 与 outline_confirmed 双缺,或 state 不可知)时会被拒;真要在零确认板上布线用 `--force-unsafe <理由>`。两者都仅本次执行有效且入审计(连被拒的 --force 尝试也记 force-refused)。→ design-flow P6/P7 · issue #97/#132
-15. **原理图必须分页分区 + 每模块电路说明——默认必做,不是可选,「最小/单页」不是省略的借口** — 只要 ≥2 个功能模块:①**先理分页**:`sch pages` 看现状,页名无意义(P1/P2/Schematic1)或与模块不匹配就 `page-rename` 成功能名(如 `POWER`/`MCU`;**页名禁带 P1/P2 序号**——删页重建会让序号与实际页签顺序脱节),**用户已有分页不满足计划就改名 / `page-new` 补 / `page-delete` 删多余空页**——分页要对齐模块计划,不是照单全收;模块多/页挤才分多页,小板单页也行。②**每页画分区框**:`sch zones set`(认领模块→件)→ `sch zone-draw`(虚线框+区名;整纸版式用 `--mode partition` 按真实 bbox 切、给图签留缺口)——**单页小板也要画区框**。③**每模块配 1~3 行 `sch note` 电路说明**(作用+关键参数)。⚠**手工 `block-apply`/`sch place` 路径不会自动画框**(只有 `sch autolayout --apply` 自动画),必须显式补 ②③,否则等于没分区。摆放**没画区框+没写说明 = 布局未完成**,别当成品交付。**机械兜底(别靠记忆)**:`sch check` 有 `missing-partition` 检查项——多器件页(parts≥6)若 `sch text.list`==0(既没区名框也没说明)就报 WARN,`sch gate --strict` 会因此 FAIL 挡下未分区的板;看到它就补 ②③ 再交付。→ 铁律扫完看 ② 档位默认「原理图组织」行 · design-flow S1–S3
+15. **原理图必须分页分区 + 每模块电路说明——默认必做,不是可选,「最小/单页」不是省略的借口** — 只要 ≥2 个功能模块:①**先理分页**:`sch pages` 看现状,页名无意义(P1/P2/Schematic1)或与模块不匹配就 `page-rename` 成功能名(如 `POWER`/`MCU`;**页名禁带 P1/P2 序号**——删页重建会让序号与实际页签顺序脱节),**用户已有分页不满足计划就改名 / `page-new` 补 / `page-delete` 删多余空页**——分页要对齐模块计划,不是照单全收;模块多/页挤才分多页,小板单页也行。②**每页画分区框**:`sch zones set`(认领模块→件)→ `sch zone-draw`(虚线框+区名;整纸版式用 `--mode partition` 按真实 bbox 切、给图签留缺口)——**单页小板也要画区框**。③**每模块配 1~3 行 `sch note` 电路说明**(作用+关键参数)。⚠**手工 `block-apply`/`sch place` 路径不会自动画框**(只有 `sch autolayout --apply` 自动画),必须显式补 ②③,否则等于没分区。摆放**没画区框+没写说明 = 布局未完成**,别当成品交付。**`zone-draw` 报 `partitionOverlap` 时**:一个虚拟组/认领 = 一个框(与 `zone-arrange` 同一把尺,不再靠合并遮掩),非 0 就是两个区的体积真的互相压 —— 跑 `sch zone-arrange --apply` 重排或 `sch group-move` 挪件,调 `--gutter` 治不了;反过来 `zone-arrange` 断言③绿的页一定画得出来。**机械兜底(别靠记忆)**:`sch check` 有 `missing-partition` 检查项——多器件页(parts≥6)若 `sch text.list`==0(既没区名框也没说明)就报 WARN,`sch gate --strict` 会因此 FAIL 挡下未分区的板;看到它就补 ②③ 再交付。→ 铁律扫完看 ② 档位默认「原理图组织」行 · design-flow S1–S3
 
 ## ② 流程停点 + 档位默认 + 块地图速查
 
