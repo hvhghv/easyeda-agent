@@ -6,6 +6,8 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-08-20
+
 ### Changed — 动作串行化(FIFO)+ 放弃机制 + 顺序证据三字段
 
 **行为变化,读写对齐的地基。** 此前连接器**并发处理动作**:
