@@ -543,39 +543,52 @@ func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacemen
 
 // bapAdoptAfterPlaceFailure 是 place 失败(超时 / 成功但没回 id)后的收编入口。
 //
-// 返回三样东西,对应三种可证明的结局:
+// 返回三样东西,对应几种可证明的结局:
 //
 //	placement —— 唯一命中:这次 place 的产物被认回来了,调用方把它当已放置件处理。
-//	uncertain —— 什么也证明不了(没有落地前快照 / 回读失败):如实说不知道。
+//	uncertain —— 什么也证明不了(没有落地前快照 / 回读失败 / **回读没被证明新鲜**):
+//	             如实说不知道,并打印能执行的下一步。它进 MissingPrimitiveIDs,
+//	             于是整单如实报 PARTIAL STATE。
 //	adopted   —— 收编认出的**全部** id(唯一命中时就是那一个;多个疑似时全给)。
 //	             它们进回滚清扫单,并单独在报文里点名。
 //
-// 命中 0 个疑似且快照可用 = **证实这次 place 没落地**,三者全空 —— 那正是负对照:
-// 绝不凭空造一个 id,也绝不再吓唬调用方说"可能建了个残件"。
+// 命中 0 个疑似**且回读被证明新鲜** = 证实这次 place 没落地,三者全空 —— 那正是
+// 负对照:绝不凭空造一个 id,也绝不再吓唬调用方说"可能建了个残件"。新鲜度证明
+// 是 2026-08-20 补的门⓪(见 sch_place_adopt.go 文件头):没有它,这条「好消息」
+// 分支恰恰在唯一该起作用的场景(连接器 wedge)里系统性说反话。
 func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]bool,
 	created []bapPlacement, p bapPlacement, stderr io.Writer) (*bapPlacement, []string, []string) {
 
+	req := schAdoptRequest{Designator: p.Designator, X: p.X, Y: p.Y}
 	if known == nil {
 		msg := p.Designator + ": 没有落地前的器件快照,无法证明画布上多出来的是不是本次 place 的产物 —— " +
 			"拒绝按坐标猜测(那会误删页面上原有的同型器件)"
 		fmt.Fprintf(stderr, "adopt ✗ %s\n", msg)
+		schAdoptUncertainGuidance(stderr, req, nil)
 		return nil, []string{msg}, nil
 	}
 	// known = 快照 ∪ 本命令已成功放置的 id。少了后者,先落地的件会被当成孤儿。
+	// 同一批「已成功放置的 id」还兼任门⓪的**新鲜度探针**:它们必然在页面上,
+	// 所以一次反映当前页面的回读必须把它们全带回来。两个用途共用一份来源,
+	// 免得哪天一边加了 id 另一边忘了(门①宽松一点只是少收编,门⓪宽松一点会
+	// 直接放行一个说反话的结论)。
 	scope := make(map[string]bool, len(known)+len(created))
 	for id := range known {
 		scope[id] = true
 	}
+	probes := make([]string, 0, len(created))
 	for _, c := range created {
 		if id := strings.TrimSpace(c.PrimitiveID); id != "" {
 			scope[id] = true
+			probes = append(probes, id)
 		}
 	}
 
-	verdict, err := schAdoptRead(cfg, window, scope, schAdoptRequest{Designator: p.Designator, X: p.X, Y: p.Y})
+	verdict, err := schAdoptRead(cfg, window, scope, probes, req)
 	if err != nil {
 		msg := fmt.Sprintf("%s: 收编回读失败(%v)—— 无法判断这次 place 是否已经落地", p.Designator, err)
 		fmt.Fprintf(stderr, "adopt ✗ %s\n", msg)
+		schAdoptUncertainGuidance(stderr, req, nil)
 		return nil, []string{msg}, nil
 	}
 	if verdict.Adopted != nil {
@@ -591,6 +604,14 @@ func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]b
 		fmt.Fprintf(stderr, "adopt ~ %s\n", verdict.Reason)
 		schAdoptResidueGuidance(stderr, ids)
 		return nil, nil, ids
+	}
+	// 门⓪没过:回读什么也没证明。**必须**在「证实没落地」之前拦截 —— 这两条分支
+	// 的输入长得一模一样(都是「那里没有新器件」),区别只在这次回读可不可信。
+	if verdict.Uncertain {
+		msg := p.Designator + ": " + verdict.Reason
+		fmt.Fprintf(stderr, "adopt ? %s\n", msg)
+		schAdoptUncertainGuidance(stderr, req, verdict.MissingProbes)
+		return nil, []string{msg}, nil
 	}
 	// 证实没落地 —— 这是好消息,说出来。旧文案无条件吓唬"可能建了个 untracked
 	// 器件",于是每次超时都要人肉去页面上找,找不到也不敢确定。

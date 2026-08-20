@@ -18,6 +18,12 @@ package app
 // 与 deleteVerifiedOneByOne 是同一把尺:删一轮 → settle 回读 → 幸存者重删一次 →
 // 再回读定案。重发 delete 是安全的:对已经不在页上的 id,连接器把它归 notFound
 // 而不是再删一次别的东西。
+//
+// 这里同样**不**需要 sch_place_adopt.go 的新鲜度门(2026-08-20 复核):读得太早
+// 只会把已删的报成 survived(偏保守,上层重删 + 给处方),不会把没删的报成删掉。
+// 唯一的反向坏帧要求回读倒退到这些 id 出生之前,而 `sch prim-delete` 处理的是
+// **用户手上已有的** id(不是本命令几秒前建的),那种倒退不在这条路径的风险面上。
+// 完整推导见 sch_delete_verified.go 的 settleAliveSet 注释。
 
 import (
 	"fmt"
