@@ -1,0 +1,175 @@
+name: Build Windows artifacts
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows amd64 EXE and EasyEDA extension
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            extension/package-lock.json
+            mcp/package-lock.json
+
+      - name: Resolve and validate version
+        id: metadata
+        run: |
+          $manifest = Get-Content extension/extension.json -Raw | ConvertFrom-Json
+          $package = Get-Content extension/package.json -Raw | ConvertFrom-Json
+          $lock = Get-Content extension/package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+
+          $version = [string]$manifest.version
+          $packageVersion = [string]$package.version
+          $lockVersion = [string]$lock['packages']['']['version']
+
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw 'extension/extension.json does not contain a version'
+          }
+          if ($version -ne $packageVersion -or $version -ne $lockVersion) {
+            throw "Connector versions differ: extension.json=$version package.json=$packageVersion package-lock.json=$lockVersion"
+          }
+
+          $shortSha = $env:GITHUB_SHA.Substring(0, 8)
+          "CONNECTOR_VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact_suffix=v$version-$shortSha-run$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
+
+      - name: Install Connector dependencies
+        run: npm --prefix extension ci
+
+      - name: Install MCP dependencies
+        run: npm --prefix mcp ci --ignore-scripts
+
+      - name: Test Go packages
+        run: go test ./...
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+      - name: Test Connector
+        run: npm --prefix extension test
+
+      - name: Type-check Connector
+        run: npm --prefix extension run typecheck
+
+      - name: Build Windows executable
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+          GOOS: windows
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $ldflags = "-s -w -X github.com/zhoushoujianwork/easyeda-agent/internal/version.Version=$env:CONNECTOR_VERSION"
+          go build -trimpath -ldflags $ldflags -o artifacts/easyeda_windows_amd64.exe ./cmd/easyeda
+
+      - name: Smoke-test executable
+        run: |
+          $reported = (& .\artifacts\easyeda_windows_amd64.exe version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Version command failed with exit code $LASTEXITCODE"
+          }
+          if ($reported -notmatch [regex]::Escape($env:CONNECTOR_VERSION)) {
+            throw "Executable reported an unexpected version: $reported"
+          }
+          $reported
+
+      - name: Test MCP adapter with built executable
+        env:
+          EASYEDA_BIN: ${{ github.workspace }}\artifacts\easyeda_windows_amd64.exe
+        run: npm --prefix mcp test
+
+      - name: Build EasyEDA extension
+        run: npm --prefix extension run build
+
+      - name: Stage and validate EasyEDA extension
+        run: |
+          $name = "easyeda-agent-connector_v$env:CONNECTOR_VERSION.eext"
+          $source = Join-Path extension/build/dist $name
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Expected extension package was not produced: $source"
+          }
+          Copy-Item -LiteralPath $source -Destination (Join-Path artifacts $name)
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $source))
+          try {
+            $entries = @{}
+            foreach ($entry in $archive.Entries) {
+              $entries[$entry.FullName.TrimStart('./')] = $entry
+            }
+            if (-not $entries.ContainsKey('extension.json')) {
+              throw 'EEXT package does not contain extension.json'
+            }
+            if (-not $entries.ContainsKey('dist/index.js') -or $entries['dist/index.js'].Length -eq 0) {
+              throw 'EEXT package does not contain a non-empty dist/index.js'
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+      - name: Generate checksums
+        run: |
+          $lines = Get-ChildItem artifacts -File |
+            Where-Object { $_.Extension -in '.exe', '.eext' } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          if ($lines.Count -ne 2) {
+            throw "Expected two build artifacts before checksumming, found $($lines.Count)"
+          }
+          [System.IO.File]::WriteAllLines(
+            (Join-Path (Resolve-Path artifacts) 'checksums.txt'),
+            $lines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Get-Content artifacts/checksums.txt
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: easyeda-windows-${{ steps.metadata.outputs.artifact_suffix }}
+          path: |
+            artifacts/easyeda_windows_amd64.exe
+            artifacts/easyeda-agent-connector_v${{ steps.metadata.outputs.version }}.eext
+            artifacts/checksums.txt
+          if-no-files-found: error
+          retention-days: 30
