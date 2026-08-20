@@ -1,0 +1,118 @@
+name: Publish skill to skillhub.cn
+
+# 什么时候跑
+#   • release: published —— `make release VERSION=vX.Y.Z` 里的 `gh release create`
+#     会发出这个事件,于是发版顺带把 skill 推到 skillhub.cn,不用改 release 目标。
+#   • workflow_dispatch —— CI 挂了/后补版本时手动补发,手填版本号。
+#
+# token: 只读 secrets.SKILLHUB_TOKEN(skh_ 开头)。skillhub CLI **原生读同名环境变量**
+#   (优先级 --token > SKILLHUB_TOKEN > ~/.skillhub/credentials.json),所以这里
+#   既不用跑 `skillhub login`,也不会把凭据落到 runner 磁盘上。token 全程不 echo。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号(带不带 v 前缀都行,如 v1.0.3 或 1.0.3)"
+        required: true
+        type: string
+
+# 同一时刻只允许一个发布在跑,避免手动补发和 release 触发撞车重复发版。
+concurrency:
+  group: publish-skill-hub
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Validate and publish easyeda-agent skill
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+
+      # 版本号唯一来源:release 的 tag(或手动输入),统一剥掉 v 前缀 ——
+      # skillhub 要求合法 SemVer(x.y.z),带 v 会被 CLI 判为非法。
+      - name: Resolve version from tag or manual input
+        id: version
+        run: |
+          set -euo pipefail
+          RAW="${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.release.tag_name }}"
+          if [ -z "$RAW" ]; then
+            echo "::error::拿不到版本号 —— release 没有 tag_name,手动触发也没填 version。"
+            exit 1
+          fi
+          VERSION="${RAW#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::版本号 '$RAW' 不是合法 SemVer。skillhub 只收 x.y.z(可带 -rc.1 / +build 后缀)。"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "发布版本: $VERSION (来自 '$RAW')"
+
+      # 门禁:官方 Agent Skills 规范验证器,校验的是 repo 里那份**未加工**的
+      # SKILL.md。注意它和 skillhub 的要求是互斥的(它拒收 slug/displayName),
+      # 所以这一步必须跑在注入之前 —— 注入只发生在 make 目标的临时副本里。
+      - name: Validate skill against the Agent Skills spec
+        run: |
+          set -euo pipefail
+          npx -y skills-ref@latest validate ./skills/easyeda-agent
+
+      # 官方装法。**不要**改成 `npm i -g skillhub` —— npm 上的同名包是另一个
+      # 项目(skills.palebluedot.live),bin 名一样,装上会静默发错地方。
+      - name: Install the skillhub CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only --no-self-upgrade
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # 钉死用哪个 bin,不靠 PATH 解析顺序碰运气(PATH 上可能有同名的另一个
+          # 项目)。这里必须走 GITHUB_ENV 而不是 job 级 env: —— job 级 env 的值是
+          # 字面量,`$HOME` 不会被展开。
+          echo "SKILLHUB_BIN=$HOME/.local/bin/skillhub" >> "$GITHUB_ENV"
+
+      # 机械校验装出来的到底是不是官方 CLI。runner 镜像里**可能预装同名包**
+      # (npm/homebrew 上的 `skillhub` 是另一个项目,bin 名一模一样) —— 那样
+      # 轻则炸在 `unknown flag: --version`,重则**静默发布到错误的 registry**。
+      # 判据见 Makefile 的 SKILLHUB_RESOLVE_PY:探 publish --help 要的 flag。
+      - name: Verify it is the real skillhub.cn CLI
+        run: make skillhub-check
+
+      # 身份校验单独成步,好把「token 失效/未实名」和「打包或发布本身出错」
+      # 分开定位。whoami 只打 handle/role,不回显 token。
+      - name: Check the API token is valid
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SKILLHUB_TOKEN}" ]; then
+            echo "::error::secret SKILLHUB_TOKEN 是空的。到 https://skillhub.cn/dashboard/keys 建一个 skh_ 开头的 token,存成仓库 secret SKILLHUB_TOKEN。"
+            exit 1
+          fi
+          "$SKILLHUB_BIN" auth whoami --host https://api.skillhub.cn
+
+      # 打包/注入/预检/发布全在 Makefile 里,和本地手动补发共用同一条实现,
+      # 避免 CI 和本地两套逻辑漂移。详见 Makefile 的 publish-skill-hub 注释。
+      - name: Publish to skillhub.cn
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+        run: make publish-skill-hub VERSION=${{ steps.version.outputs.version }}
+
+      - name: Explain a failed publish
+        if: failure()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## skillhub 发布失败
+
+          对号入座:
+
+          - `401` — token 失效或被撤销。到 https://skillhub.cn/dashboard/keys 重建,更新 secret `SKILLHUB_TOKEN`。
+          - `403` — 账号没完成实名认证,平台不放行发布。
+          - `409` — slug `easyeda-agent` 被别人占了,或这个版本号已发过(版本不可覆盖)。
+          - `429` — 触发限频,等一分钟后重跑本 workflow。
+          - `SKILL.md 缺少 slug/displayName` — frontmatter 注入没生效,检查 Makefile 的 `publish-skill-hub`。
+
+          本地补发:`export SKILLHUB_TOKEN=skh_xxx && make publish-skill-hub VERSION=v<版本>`
+          EOF
