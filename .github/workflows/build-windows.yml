@@ -23,6 +23,8 @@ jobs:
     name: Windows amd64 EXE and EasyEDA extension
     runs-on: windows-latest
     timeout-minutes: 20
+    outputs:
+      artifact-name: ${{ steps.metadata.outputs.artifact_name }}
 
     defaults:
       run:
@@ -64,11 +66,15 @@ jobs:
           if ($version -ne $packageVersion -or $version -ne $lockVersion) {
             throw "Connector versions differ: extension.json=$version package.json=$packageVersion package-lock.json=$lockVersion"
           }
+          if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must match connector version: expected v$version, got $env:GITHUB_REF_NAME"
+          }
 
           $shortSha = $env:GITHUB_SHA.Substring(0, 8)
+          $artifactName = "easyeda-windows-v$version-$shortSha-run$env:GITHUB_RUN_NUMBER"
           "CONNECTOR_VERSION=$version" >> $env:GITHUB_ENV
           "version=$version" >> $env:GITHUB_OUTPUT
-          "artifact_suffix=v$version-$shortSha-run$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
 
       - name: Install Connector dependencies
         run: npm --prefix extension ci
@@ -166,10 +172,58 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: easyeda-windows-${{ steps.metadata.outputs.artifact_suffix }}
+          name: ${{ steps.metadata.outputs.artifact_name }}
           path: |
             artifacts/easyeda_windows_amd64.exe
             artifacts/easyeda-agent-connector_v${{ steps.metadata.outputs.version }}.eext
             artifacts/checksums.txt
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: build-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.build-windows.outputs.artifact-name }}
+          path: release-artifacts
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cd release-artifacts
+          sha256sum --check checksums.txt
+          test -s easyeda_windows_amd64.exe
+          test -s "easyeda-agent-connector_v${version}.eext"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          files=(
+            release-artifacts/easyeda_windows_amd64.exe
+            release-artifacts/easyeda-agent-connector_v*.eext
+            release-artifacts/checksums.txt
+          )
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" \
+              --title "easyeda-agent $tag" \
+              --generate-notes \
+              --verify-tag
+          fi
