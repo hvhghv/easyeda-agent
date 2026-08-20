@@ -305,6 +305,11 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		// esp32s3_wroom1_module 433×541 → 244×767,宽收了 189 而高涨了 226,
 		// 越过可用高 765 → phase B blocked,而不收敛本来排得下。门按**可排布性**
 		// (不是面积)逐区判:原形可排而收敛不可排就保留原形,理由挂进 Mode。
+		//
+		// **域是 phase A 的输入,不只是门的输入**(2026-08-20 第二笔真机取证):
+		// 收敛给一个区选形状时也要看空地长什么样 —— 域盲的 argmin max(w,h) 会把
+		// 5 个小无源件排成只进得了左通道的柱子,跟主控区抢同一条道。zfDomainFor
+		// 是与 phase B(newZaSearch)同源的那一份域,选形与门共用它。
 		plan, ferr := planZoneFollowGated(name, groups, zopts, zfDomainFor(*sheet, keepout, opts))
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("phase A(%s): %w", name, ferr)
@@ -340,7 +345,7 @@ func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {
 	if out.SheetAssumed {
 		fmt.Fprintf(w, "⚠ 本页没有图框图元 —— 按 A4-only 域界假定 1170×825 + 标准图签角规划;图框需人工在 EasyEDA UI 重放(平台无重建 API)\n")
 	}
-	fmt.Fprintf(w, "phase A 区内收敛(跟随规则 R1-R5;「不得变差」门:收敛使本区排不下就保留原形)\n")
+	fmt.Fprintf(w, "phase A 区内收敛(跟随规则 R1-R5;**域感知选形**:候选先比可排布档位、再比「几条通道装得下」,平局才回到原有紧凑序;「不得变差」门:收敛使本区排不下就保留原形)\n")
 	for _, z := range out.Zones {
 		mark := " " // 回退必须一眼可见,不许只藏在 Mode 的长句里
 		if z.Retained {

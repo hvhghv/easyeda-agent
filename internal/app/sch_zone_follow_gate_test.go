@@ -297,7 +297,7 @@ func TestZfSide_TallBodyMarkersHangSideways(t *testing.T) {
 	}
 
 	// B:收敛框在本页有落点。
-	conv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{g}, opts)
+	conv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{g}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestZfSide_TallBodyMarkersHangSideways(t *testing.T) {
 			t.Fatalf("变异对照失效:首版判据下 %s 该被误判成 %s,得到 %q", net, want, legSides[net])
 		}
 	}
-	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{leg}, opts)
+	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{leg}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestZfGate_PhaseBPlacesWroomZoneAfterFix(t *testing.T) {
 	sheet, keepout, _ := zfGateA4Domain(opts)
 	g, c := zfFixtureWroom6()
 
-	conv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{g}, opts)
+	conv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{g}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestZfGate_PhaseBPlacesWroomZoneAfterFix(t *testing.T) {
 	}
 
 	// 变异对照:首版判据下同一页必须 blocked 在这一区(缺陷可复现,修复才算数)。
-	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{zfGateLegacyGroup(c, 41)}, opts)
+	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{zfGateLegacyGroup(c, 41)}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestZfGate_ConvergenceRegressionRetained(t *testing.T) {
 	if rawW != 348 || rawH != 311 {
 		t.Fatalf("现状口径框该是 348×311,得到 %.0f×%.0f", rawW, rawH)
 	}
-	conv, err := planZoneFollow("J1_HEADER", []zfGroup{g}, opts)
+	conv, err := planZoneFollow("J1_HEADER", []zfGroup{g}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestZfGate_ConvergenceStillAdoptedWhenItHelps(t *testing.T) {
 	if rawW != 72 || rawH != 834 {
 		t.Fatalf("现状口径框该是真机 U_3V3 那个 72×834,得到 %.0f×%.0f", rawW, rawH)
 	}
-	conv, err := planZoneFollow("U_3V3", []zfGroup{g}, opts)
+	conv, err := planZoneFollow("U_3V3", []zfGroup{g}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +836,7 @@ func TestZfGate_NoMeasuredGeometryFallsThrough(t *testing.T) {
 	if got.Retained {
 		t.Fatal("没有实测几何却报了回退 —— 回退的是什么形?")
 	}
-	want, err := planZoneFollow("U", zfFixtureU(), opts)
+	want, err := planZoneFollow("U", zfFixtureU(), opts, dom)
 	if err != nil {
 		t.Fatal(err)
 	}

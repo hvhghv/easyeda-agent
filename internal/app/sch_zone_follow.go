@@ -5,7 +5,9 @@ package app
 //	R1 跟随:卫星无源件朝向 = 锚件朝向(原理图锚件恒 upright → 卫星一律竖放、
 //	   互相平行);多脚件保持符号朝向,端子保持实测侧。
 //	R2 排列轴 = 贴边切向:卫星贴锚件下方 → 横排一排竖立的件(顶边对齐);
-//	   贴左/右 → 竖列堆叠。贴哪侧取 argmin max(宽,高),平局序 左<右<下。
+//	   贴左/右 → 竖列堆叠。贴哪侧、每行摆几件由**域感知选形**定(zfPickShape:
+//	   先比可排布档位与「装得下的通道条数」,平局才回到 argmin max(宽,高)、
+//	   平局序 左<右<下)。
 //	R3 上下端推导(**不查「电源上/地下」固定表** —— 那条从规定降级为推论):
 //	   有 rail 脚的件 GND 端朝下、电源端朝上;双信号件原左脚→上(+90° 旋转约定)。
 //	R4 标签:旗顺引脚朝外(上端旗朝上、下端旗朝下);netport 恒水平(铁则4,
@@ -523,119 +525,334 @@ func zfTranslate(g zfPlacedGroup, dx, dy float64) zfPlacedGroup {
 	return out
 }
 
+// ── 形状候选 + 域感知选形(2026-08-20 用户取证:收敛目标此前是「域盲」的)────
+//
+// 缺陷:phase A 给一个区选形状时**根本不看空地长什么样**。两条支路各有各的病:
+//
+//	① 「无主导锚件」支路**连候选都没有** —— 「全员单列」是硬编码的(首版这里
+//	   没有任何取舍,谈不上目标函数);
+//	② 锚件支路有三个候选,但目标函数是 argmin max(w,h)(求方),同样域盲。
+//
+// 真机取证(ceshi / 页 MCU_IO / A4:可用域 1110×765,图签把它切成
+// 「左通道 396 宽 × 765 高」+「上通道 1110 宽 × 555 高」):
+//
+//	wroom-passives  5 个 0402/0805 小无源件 → **单列** 152×696
+//	                  696 > 555 → 只进得了左通道
+//	wroom-core      单件 WROOM 模组         → 325×556.5
+//	                  556.5 > 555 → **也**只进得了左通道
+//	→ 两个区抢同一条 396 宽的通道:并排 325+152+12 > 396、上下叠 556+696+12 > 765
+//	   → phase B blocked(报「wroom-core 被 wroom-passives 挡」)。
+//
+// **注意两个区各自的 fitRank 都是 2**(都有落点)—— 「不得变差」门的掉档判据
+// 结构上看不见这种病:病在**落点自由度**,不在「有没有落点」。所以选形要用两把
+// 钥匙,都从 zfDomain 的同一份 strips() 出来(fits 已重写成 stripFits>0 的投影,
+// 与 phase B 的 zaFrame 同源 —— 不许另写一份通道算术):
+//
+//	① fitRank    三档可排布性(2 有落点 / 1 只被图签挡 / 0 连可用域都装不下)
+//	② stripFits  **本页有几条通道装得下它**(落点自由度的离散度量)
+//
+// 选择律(三条性质缺一不可,机械可验):
+//
+//	① 候选里存在装得进通道的形状时绝不选装不进的 —— (fitRank, stripFits)
+//	   字典序取最大;
+//	② 不许退化成「永远选最扁」—— 候选先按**原有紧凑性偏好**定序(首版会选中的
+//	   那个形态排最前,其余按 argmin max(w,h)),两把钥匙**平局时取序最靠前者**。
+//	   都装得下时钥匙全平,选出来的就是原有偏好那一个,版面一个单位都不动;
+//	③ 域未知(zfDomain 零值/退化)→ 整套退回原有偏好,老调用点与纯几何单测的
+//	   输出逐字不变。
+
+// zfGenned 是一个已生成局部几何的组(带包络与 MultiPin 标记)。
+type zfGenned struct {
+	g        zfPlacedGroup
+	bb       layoutBBox
+	multiPin bool
+}
+
+func zfGennedArea(x zfGenned) float64 {
+	return (x.bb.MaxX - x.bb.MinX) * (x.bb.MaxY - x.bb.MinY)
+}
+
+// zfShapeCand 是一个**形状候选**:同一批组的一种摆法 + 它的框尺寸。
+type zfShapeCand struct {
+	mode    string
+	groups  []zfPlacedGroup
+	content layoutBBox
+	w, h    float64
+	// orig:首版(域盲)会选中的那个形态。平局时它赢 —— 「加了候选」本身不许
+	// 改变任何已经排得下的版面。
+	orig bool
+	// pref 是**原有紧凑性偏好**的代价:orig 候选用首版那把尺(锚件支路的
+	// sideCost,逐字保留),其余候选用 max(框宽,框高)。两种量纲从不互相比较
+	// (orig 永远排在前面),所以不构成第三把尺。
+	pref float64
+}
+
+// zfShelfPack 把一串组摆成「每行 perRow 件」的货架块:行内左对齐、顶边对齐,
+// 行与行自上而下;块的左上角在原点(y-UP,所以往下是负 y)。
+// perRow=1 就是「单列」(首版形态),perRow=len(items) 就是「单排」。
+// 返回逐件的平移量(把组包络的左上角钉到货架格上)与块的净宽高。
+//
+// reach:相邻两件任一是 MultiPin 时,间距补 zfPinReach —— MultiPin 的无端子裸
+// 引脚伸出本体 bbox(SOT-23 实测 9~15),规划器没有 pin 几何,单列 gap 20 曾让
+// Q1-E 与 Q2-C 端点在组间走廊物理同点(隐式短路,真机两次复现)。**只有「无主导
+// 锚件」支路开它**:锚件支路的卫星间距首版就是裸 zfGroupGap,候选化不许顺手改
+// 已有形态的几何(那是另一笔账)。
+func zfShelfPack(items []zfGenned, perRow int, reach bool) (offs [][2]float64, w, h float64) {
+	if perRow < 1 {
+		perRow = 1
+	}
+	gap := func(a, b bool) float64 {
+		if reach && (a || b) {
+			return zfGroupGap + zfPinReach
+		}
+		return zfGroupGap
+	}
+	offs = make([][2]float64, len(items))
+	y, maxW, prevRowMulti := 0.0, 0.0, false
+	for start := 0; start < len(items); start += perRow {
+		end := start + perRow
+		if end > len(items) {
+			end = len(items)
+		}
+		row := items[start:end]
+		rowMulti := false
+		for _, it := range row {
+			rowMulti = rowMulti || it.multiPin
+		}
+		if start > 0 {
+			y -= gap(prevRowMulti, rowMulti)
+		}
+		x, rowH := 0.0, 0.0
+		for i, it := range row {
+			if i > 0 {
+				x += gap(row[i-1].multiPin, it.multiPin)
+			}
+			offs[start+i] = [2]float64{x - it.bb.MinX, y - it.bb.MaxY}
+			x += it.bb.MaxX - it.bb.MinX
+			rowH = maxF(rowH, it.bb.MaxY-it.bb.MinY)
+		}
+		maxW = maxF(maxW, x)
+		y -= rowH
+		prevRowMulti = rowMulti
+	}
+	return offs, maxW, -y
+}
+
+// zfShelfMode / zfSideCN 是候选的人读名(进 Mode,也进 JSON 的 zones[].mode)。
+func zfShelfMode(perRow, n int) string {
+	switch {
+	case perRow <= 1:
+		return "无主导锚件 → 全员单列(位号序)"
+	case perRow >= n:
+		return "无主导锚件 → 全员单排(位号序)"
+	}
+	return fmt.Sprintf("无主导锚件 → 货架每行 %d 件(位号序)", perRow)
+}
+
+func zfSideCN(side string) string {
+	switch side {
+	case "left":
+		return "左"
+	case "right":
+		return "右"
+	}
+	return "下"
+}
+
+// zfShelfCands:无主导锚件 → 货架族(k = 1..n)。k=1 是首版的「全员单列」。
+func zfShelfCands(gen []zfGenned) []zfShapeCand {
+	out := make([]zfShapeCand, 0, len(gen))
+	for k := 1; k <= len(gen); k++ {
+		offs, _, _ := zfShelfPack(gen, k, true)
+		gs := make([]zfPlacedGroup, len(gen))
+		for i := range gen {
+			gs[i] = zfTranslate(gen[i].g, offs[i][0], offs[i][1])
+		}
+		out = append(out, zfShapeCand{mode: zfShelfMode(k, len(gen)), groups: gs, orig: k == 1})
+	}
+	return out
+}
+
+// zfAnchorCands:锚件 + 卫星族 —— 三条贴边 × 货架每行 k 件。
+// 首版的三个候选(左/右各一列、下面一排)仍在其中,orig 标着,pref 用首版那把
+// sideCost 尺 —— 平局时选出来的还是首版那一个。
+func zfAnchorCands(gen []zfGenned, anchor zfGenned) []zfShapeCand {
+	sats := make([]zfGenned, 0, len(gen)-1)
+	for _, g := range gen {
+		if g.g.Designator != anchor.g.Designator {
+			sats = append(sats, g)
+		}
+	}
+	if len(sats) == 0 {
+		return []zfShapeCand{{mode: "单组:重生短桩,不再动", orig: true,
+			groups: []zfPlacedGroup{zfTranslate(anchor.g, -anchor.bb.MinX, -anchor.bb.MinY)}}}
+	}
+	aw := anchor.bb.MaxX - anchor.bb.MinX
+	ah := anchor.bb.MaxY - anchor.bb.MinY
+	// MultiPin 锚件的裸引脚伸出本体 bbox(见 zfPinReach)——卫星别贴进触达带。
+	aGap := float64(zfAnchorGap)
+	if anchor.multiPin {
+		aGap += zfPinReach
+	}
+	base := zfTranslate(anchor.g, -anchor.bb.MinX, -anchor.bb.MinY)
+	label := map[string]string{"left": "列(左)", "right": "列(右)", "below": "排(下,竖放平行)"}
+	// 首版代价(R2 的 argmin max(w,h),平局序 左<右<下)——**逐字保留**:它现在
+	// 是平局时的紧凑性偏好,不再是唯一判据。
+	_, colW, colH := zfShelfPack(sats, 1, false)
+	_, rowW, rowH := zfShelfPack(sats, len(sats), false)
+	legacy := map[string]float64{
+		"left":  maxF(aw+zfAnchorGap+colW, maxF(ah, colH)),
+		"right": maxF(aw+zfAnchorGap+colW, maxF(ah, colH)),
+		"below": maxF(maxF(aw, rowW), ah+zfAnchorGap+rowH),
+	}
+	origK := map[string]int{"left": 1, "right": 1, "below": len(sats)}
+	out := make([]zfShapeCand, 0, 3*len(sats))
+	for _, side := range []string{"left", "right", "below"} {
+		for k := 1; k <= len(sats); k++ {
+			offs, bw, _ := zfShelfPack(sats, k, false)
+			var bx, by float64
+			switch side {
+			case "left":
+				bx, by = -aGap-bw, ah
+			case "right":
+				bx, by = aw+aGap, ah
+			default: // below:横排一排竖立的件,顶边对齐在锚件下缘 - gap
+				bx, by = 0, -aGap
+			}
+			gs := make([]zfPlacedGroup, 0, len(gen))
+			gs = append(gs, base)
+			for i, s := range sats {
+				gs = append(gs, zfTranslate(s.g, bx+offs[i][0], by+offs[i][1]))
+			}
+			c := zfShapeCand{groups: gs, orig: k == origK[side]}
+			if c.orig {
+				c.mode = fmt.Sprintf("锚件 %s + 卫星%s", anchor.g.Designator, label[side])
+				c.pref = legacy[side]
+			} else {
+				c.mode = fmt.Sprintf("锚件 %s + 卫星货架(%s,每行 %d 件)",
+					anchor.g.Designator, zfSideCN(side), k)
+			}
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// zfShapeCands 生成本区的全部形状候选(至少一个)。分支判据(单组 / 有没有
+// 主导锚件)与首版逐字相同 —— 变的只是「每条分支给出几个候选」。
+func zfShapeCands(gen []zfGenned) []zfShapeCand {
+	switch {
+	case len(gen) == 0:
+		return []zfShapeCand{{mode: "空区(无成员)", orig: true}}
+	case len(gen) == 1:
+		return []zfShapeCand{{mode: "单组:重生短桩,不再动", orig: true,
+			groups: []zfPlacedGroup{zfTranslate(gen[0].g, -gen[0].bb.MinX, -gen[0].bb.MinY)}}}
+	}
+	byArea := append([]zfGenned(nil), gen...)
+	sort.SliceStable(byArea, func(i, j int) bool {
+		if a, b := zfGennedArea(byArea[i]), zfGennedArea(byArea[j]); a != b {
+			return a > b
+		}
+		return tidyDesignatorLess(byArea[i].g.Designator, byArea[j].g.Designator)
+	})
+	if zfGennedArea(byArea[0]) < 2*zfGennedArea(byArea[1]) {
+		return zfShelfCands(gen)
+	}
+	return zfAnchorCands(gen, byArea[0])
+}
+
+// zfFinishCand 给候选算框:内容并集 → 落地余量 → **外框的唯一函数**
+// (partitionFrameSize,区名带 + 说明带在账里)。判定与生成分离:选形比的就是
+// 这个框,不是候选自己报的尺寸。
+func zfFinishCand(c *zfShapeCand, opts partitionOpts) {
+	content, has := layoutBBox{}, false
+	for _, g := range c.groups {
+		zfGrow(&content, &has, zfGroupBBox(g))
+	}
+	if has {
+		content = zfInflate(content, zfLandSlack)
+	}
+	c.content = content
+	c.w, c.h = partitionFrameSize(content, opts.TitleBand, opts.NoteBand)
+}
+
+// zfCandOrder 是**原有紧凑性偏好序**:orig 在前,其次 pref 小者在前,最后按
+// 生成序(确定性,不依赖 map 遍历)。域感知只在这个序上做「严格更优才换」。
+func zfCandOrder(cands []zfShapeCand) []int {
+	order := make([]int, len(cands))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		x, y := cands[order[a]], cands[order[b]]
+		if x.orig != y.orig {
+			return x.orig
+		}
+		if x.pref != y.pref {
+			return x.pref < y.pref
+		}
+		return order[a] < order[b]
+	})
+	return order
+}
+
+// zfPickShape 选形:返回选中候选的下标 + 挂到 Mode 尾巴上的域感知说明。
+// **决策必须可见** —— 「为什么是这个形状」不许只活在代码里。
+func zfPickShape(cands []zfShapeCand, dom zfDomain) (int, string) {
+	order := zfCandOrder(cands)
+	first := order[0]
+	if !dom.known() {
+		return first, " · 域未知 → 按紧凑序 argmin max(w,h) 选形"
+	}
+	best := first
+	bestR, bestS := dom.shapeKeys(cands[best].w, cands[best].h)
+	for _, i := range order[1:] {
+		r, s := dom.shapeKeys(cands[i].w, cands[i].h)
+		if r > bestR || (r == bestR && s > bestS) {
+			best, bestR, bestS = i, r, s
+		}
+	}
+	tail := ""
+	if bestS == 0 {
+		// 「确实无解」也必须是**看过域之后的结论**,而且要读得出下一步。
+		tail = fmt.Sprintf(" —— %d 个候选没有一个装得进任何通道(%s),phase B 必然 blocked:拆区或 `sch page-new` 拆页",
+			len(cands), zfRankWhy(bestR))
+	}
+	if best == first {
+		return best, fmt.Sprintf(" · 域感知选形(%d 候选):原有偏好即最优 — %d 档 / %d 通道%s",
+			len(cands), bestR, bestS, tail)
+	}
+	fr, fs := dom.shapeKeys(cands[first].w, cands[first].h)
+	return best, fmt.Sprintf(" · 域感知选形(%d 候选):改选本形态 — 档 %d→%d、通道 %d→%d(原偏好「%s」%.0f×%.0f)%s",
+		len(cands), fr, bestR, fs, bestS, cands[first].mode, cands[first].w, cands[first].h, tail)
+}
+
 // planZoneFollow 是 phase A 主入口:一个区的全部 L1 组 → 收敛布置。
-// 纯函数;输入顺序无关(内部按位号自然序全序排序)。
-func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePlan, error) {
+// 纯函数;输入顺序无关(内部按位号自然序全序排序);dom 是本页可行域
+// (zfDomainFor,与 phase B 同源)—— **零值 = 域未知**,此时退回原有偏好。
+func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts, dom zfDomain) (zfZonePlan, error) {
 	gs := append([]zfGroup(nil), groups...)
 	sort.SliceStable(gs, func(i, j int) bool { return tidyDesignatorLess(gs[i].Designator, gs[j].Designator) })
 
-	type genned struct {
-		g        zfPlacedGroup
-		bb       layoutBBox
-		multiPin bool
-	}
-	gen := make([]genned, 0, len(gs))
+	gen := make([]zfGenned, 0, len(gs))
 	for _, g := range gs {
 		pg, err := zfGenGroup(g)
 		if err != nil {
 			return zfZonePlan{}, err
 		}
-		gen = append(gen, genned{pg, zfGroupBBox(pg), g.MultiPin})
+		gen = append(gen, zfGenned{pg, zfGroupBBox(pg), g.MultiPin})
 	}
-	plan := zfZonePlan{Zone: zone}
-	area := func(x genned) float64 { return (x.bb.MaxX - x.bb.MinX) * (x.bb.MaxY - x.bb.MinY) }
-	byArea := append([]genned(nil), gen...)
-	sort.SliceStable(byArea, func(i, j int) bool {
-		if a, b := area(byArea[i]), area(byArea[j]); a != b {
-			return a > b
+	cands := zfShapeCands(gen)
+	for i := range cands {
+		zfFinishCand(&cands[i], opts)
+		if !cands[i].orig {
+			cands[i].pref = maxF(cands[i].w, cands[i].h)
 		}
-		return tidyDesignatorLess(byArea[i].g.Designator, byArea[j].g.Designator)
-	})
+	}
+	pick, why := zfPickShape(cands, dom)
+	c := cands[pick]
 
-	putAt := func(g genned, dx, dy float64) {
-		plan.Groups = append(plan.Groups, zfTranslate(g.g, dx, dy))
-	}
-	switch {
-	case len(gen) == 1:
-		plan.Mode = "单组:重生短桩,不再动"
-		putAt(gen[0], -gen[0].bb.MinX, -gen[0].bb.MinY)
-	case area(byArea[0]) < 2*area(byArea[1]):
-		// 无主导锚件 → 全员单列,位号序,左缘对齐,自上而下。
-		// 相邻组任一是 MultiPin 时加 zfPinReach:MultiPin 的无端子裸引脚伸出
-		// 本体 bbox 之外(SOT-23 实测 9~15),规划器没有 pin 几何,单列 gap 20
-		// 曾让 Q1-E 与 Q2-C 端点在组间走廊物理同点(隐式短路,pin-coincidence
-		// ERROR 真机两次复现)—— 保守按最大触达补余量。
-		plan.Mode = "无主导锚件 → 全员单列(位号序)"
-		y := 0.0
-		for i, g := range gen {
-			putAt(g, -g.bb.MinX, y-g.bb.MaxY)
-			gap := float64(zfGroupGap)
-			if g.multiPin || (i+1 < len(gen) && gen[i+1].multiPin) {
-				gap += zfPinReach
-			}
-			y -= (g.bb.MaxY - g.bb.MinY) + gap
-		}
-	default:
-		anchor := byArea[0]
-		sats := make([]genned, 0, len(gen)-1)
-		for _, g := range gen {
-			if g.g.Designator != anchor.g.Designator {
-				sats = append(sats, g)
-			}
-		}
-		// R2:贴侧 = argmin max(w,h),平局序 左<右<下。
-		colW, colH, rowW, rowH := 0.0, 0.0, 0.0, 0.0
-		for i, s := range sats {
-			w, h := s.bb.MaxX-s.bb.MinX, s.bb.MaxY-s.bb.MinY
-			colW = maxF(colW, w)
-			colH += h
-			rowW += w
-			rowH = maxF(rowH, h)
-			if i > 0 {
-				colH += zfGroupGap
-				rowW += zfGroupGap
-			}
-		}
-		aw := anchor.bb.MaxX - anchor.bb.MinX
-		ah := anchor.bb.MaxY - anchor.bb.MinY
-		sideCost := map[string]float64{
-			"left":  maxF(aw+zfAnchorGap+colW, maxF(ah, colH)),
-			"right": maxF(aw+zfAnchorGap+colW, maxF(ah, colH)),
-			"below": maxF(maxF(aw, rowW), ah+zfAnchorGap+rowH),
-		}
-		best := "left"
-		for _, k := range []string{"left", "right", "below"} {
-			if sideCost[k] < sideCost[best] {
-				best = k
-			}
-		}
-		label := map[string]string{"left": "列(左)", "right": "列(右)", "below": "排(下,竖放平行)"}
-		plan.Mode = fmt.Sprintf("锚件 %s + 卫星%s · argmin max(w,h)", anchor.g.Designator, label[best])
-		putAt(anchor, -anchor.bb.MinX, -anchor.bb.MinY)
-		// MultiPin 锚件的裸引脚伸出本体 bbox(见 zfPinReach)——卫星别贴进触达带。
-		aGap := float64(zfAnchorGap)
-		if anchor.multiPin {
-			aGap += zfPinReach
-		}
-		if best == "below" {
-			// 横排一排竖立的件,顶边对齐在锚件下缘 - gap。
-			x := 0.0
-			for _, s := range sats {
-				putAt(s, x-s.bb.MinX, -aGap-s.bb.MaxY)
-				x += (s.bb.MaxX - s.bb.MinX) + zfGroupGap
-			}
-		} else {
-			dx := aw + aGap
-			if best == "left" {
-				dx = -aGap - colW
-			}
-			y := ah
-			for _, s := range sats {
-				putAt(s, dx-s.bb.MinX, y-s.bb.MaxY)
-				y -= (s.bb.MaxY - s.bb.MinY) + zfGroupGap
-			}
-		}
-	}
+	plan := zfZonePlan{Zone: zone, Mode: c.mode, Groups: c.groups, Content: c.content}
 	// 组间不重叠断言(间距由构造保证,但判定与生成分离 —— 出错要在规划期炸,
 	// 不能等落地把画布弄脏)。
 	for i := 0; i < len(plan.Groups); i++ {
@@ -646,20 +863,16 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 			}
 		}
 	}
-	has := false
-	for _, g := range plan.Groups {
-		zfGrow(&plan.Content, &has, zfGroupBBox(g))
-	}
 	// 落地余量:规划框要当**上界**用(见 zfLandSlack)。**决策必须可见** ——
 	// 「框比内容大了一圈」如果只藏在常量里,下一个人量出来的框对不上就会去改
 	// 别的地方。Mode 是人读输出与 JSON(zones[].mode)都带的字段。
-	plan.Content = zfInflate(plan.Content, zfLandSlack)
 	plan.Slack = zfLandSlack
 	plan.Mode += fmt.Sprintf(" · 落地余量 %g(桩端点 5 网格吸附;上界只在同一份 pin 坐标+桩长的模型内成立,见 zfLandSlack)", float64(zfLandSlack))
+	plan.Mode += why
 	// 收敛后的框走**外框的唯一函数**(partitionFrameSize):收紧时区名带 + 说明带
 	// 就在账里,收紧完再画框 —— 而不是「按常量带收紧 → 画框 → 再放 note 装不下」。
 	// opts.NoteBand 由调用方按本区已登记说明的渲染高度预置(schZoneNoteBandHeight)。
-	plan.FrameW, plan.FrameH = partitionFrameSize(plan.Content, opts.TitleBand, opts.NoteBand)
+	plan.FrameW, plan.FrameH = c.w, c.h
 	return plan, nil
 }
 
@@ -736,6 +949,38 @@ func (d zfDomain) strips() (left, right, below, above float64) {
 		(d.Keep.MinY - d.G) - d.B, d.T - (d.Keep.MaxY + d.G)
 }
 
+// stripFits 数「本页**有几条通道**装得下这个 w×h 的框」—— 落点自由度的离散度量。
+//
+// 它与 fits 是**同一把尺的两个投影**(fits = stripFits > 0,下面就是这么写的):
+// 通道算术只有这一份,与 phase B 的 zaFrame 同源。两个判据一旦各算各的,就会
+// 再出一次「判定与生成两把尺」的老账。
+//
+// 为什么选形需要「几条」而不只是「有没有」:两个区可以各自 fitRank=2(都有
+// 落点)却都只进得了**同一条**通道,于是必然互相挤掉一个 —— 真机 MCU_IO 的
+// wroom-core(325×556.5)与 wroom-passives(152×696)就是这一对。掉档判据在
+// 那一局面上结构性失明。
+//
+// 对 (w,h) 单调:w、h 变小绝不会让某条通道从装得下变成装不下。
+func (d zfDomain) stripFits(w, h float64) int {
+	const eps = 1e-9
+	if !d.fitsBare(w, h) {
+		return 0
+	}
+	if d.Keep == nil {
+		return 1 // 本页不设防 → 整个可用域就是一条通道
+	}
+	left, right, below, above := d.strips()
+	n := 0
+	for _, s := range [4]struct{ avail, need float64 }{
+		{left, w}, {right, w}, {below, h}, {above, h},
+	} {
+		if s.avail > 0 && s.need <= s.avail+eps {
+			n++
+		}
+	}
+	return n
+}
+
 // fits 判「一个 w×h 的区框在本页上**还存不存在任何落点**」——
 // 即 phase B 归因里那句「纸面放不下」(zaEdgeProbe.Cands == 0)的纯几何形式。
 //
@@ -743,16 +988,15 @@ func (d zfDomain) strips() (left, right, below, above float64) {
 // 通道、要么右侧、要么下方、要么上方,四条都塞不下就真的没有落点。
 // 对 (w,h) 单调:w,h 变小绝不会从可排变成不可排 —— 门靠这条性质省掉
 // 「任一维度变大」的显式判断。
-func (d zfDomain) fits(w, h float64) bool {
-	const eps = 1e-9
-	if !d.fitsBare(w, h) {
-		return false
-	}
-	if d.Keep == nil {
-		return true
-	}
-	left, right, below, above := d.strips()
-	return w <= left+eps || w <= right+eps || h <= below+eps || h <= above+eps
+func (d zfDomain) fits(w, h float64) bool { return d.stripFits(w, h) > 0 }
+
+// known 判「调用方到底给没给域」。零值 zfDomain(纯几何单测、老调用点)必须
+// 退化成「不做域感知」,而不是被当成一张零面积的纸把所有候选都判成 0 档。
+func (d zfDomain) known() bool { return d.R-d.L > 0 && d.T-d.B > 0 }
+
+// shapeKeys 是选形的两把钥匙(字典序比较):可排布档位 + 装得下的通道条数。
+func (d zfDomain) shapeKeys(w, h float64) (rank, strips int) {
+	return d.fitRank(w, h), d.stripFits(w, h)
 }
 
 // fitsBare 是**忽略图签**的可行域判据:框放得进页边距之内的那个矩形。
@@ -889,7 +1133,7 @@ func zfRetainPlan(zone string, groups []zfGroup, opts partitionOpts) (zfZonePlan
 // 纯函数;逐区独立判定(一个区回退不影响其它区照常收敛);判定只用算术,
 // 不依赖 map 遍历序。
 func planZoneFollowGated(zone string, groups []zfGroup, opts partitionOpts, dom zfDomain) (zfZonePlan, error) {
-	conv, err := planZoneFollow(zone, groups, opts)
+	conv, err := planZoneFollow(zone, groups, opts, dom)
 	if err != nil {
 		return conv, err // 收敛本身出错仍 fail-closed(R5 违例是缺陷,不是尺寸问题)
 	}

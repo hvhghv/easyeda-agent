@@ -203,7 +203,7 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 
 	// ── 负对照:同一份场景走**收敛**路径(不 retain),刚体断言必须失败 ──────
 	// 没有这一条,上面的断言只是在自证(收敛本来就要改几何,改不动才是缺陷)。
-	conv, err := planZoneFollow("J1_HEADER", groups, opts)
+	conv, err := planZoneFollow("J1_HEADER", groups, opts, dom)
 	if err != nil {
 		t.Fatal(err)
 	}

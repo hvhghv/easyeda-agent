@@ -249,7 +249,7 @@ func TestZoneFrameRuler_PlanAndArrangeAgreeFieldByField(t *testing.T) {
 	zopts := opts
 	zopts.NoteBand = schZoneNoteBandHeight(opts.NoteBand, noteH)
 	zp, err := planZoneFollow("Z", []zfGroup{{Designator: "R1", BodyW: 20, BodyH: 40,
-		Terms: []zfTerm{{Kind: "netflag", Net: "GND", W: 30, H: 12, Side: "down"}}}}, zopts)
+		Terms: []zfTerm{{Kind: "netflag", Net: "GND", W: 30, H: 12, Side: "down"}}}}, zopts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}

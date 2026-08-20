@@ -90,7 +90,7 @@ func zfFind(p zfZonePlan, d string) *zfPlacedGroup {
 // U 区:锚件 U3 + 卫星排(下);C7/C8 竖放平行、GND 全部归下 —— 用户裁定的
 // 「C7 C8 跟随主芯片的布局放置」正是这一幕。
 func TestPlanZoneFollow_UZone(t *testing.T) {
-	p, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts())
+	p, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestPlanZoneFollow_UZone(t *testing.T) {
 
 // Q 区:无主导锚件 → 全员单列;R5/R6 转竖(Rotated),原左端(USB_*)在上。
 func TestPlanZoneFollow_QZone(t *testing.T) {
-	p, err := planZoneFollow("Q", zfFixtureQ(), defaultPartitionOpts())
+	p, err := planZoneFollow("Q", zfFixtureQ(), defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestPlanZoneFollow_QZone(t *testing.T) {
 
 // J 区:R4 的 netport 实测朝左,R4 是无源件 → R4 统一朝右。
 func TestPlanZoneFollow_JZone_PortsUnifiedRight(t *testing.T) {
-	p, err := planZoneFollow("J_USB", zfFixtureJ(), defaultPartitionOpts())
+	p, err := planZoneFollow("J_USB", zfFixtureJ(), defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestZfCheckTermOverlap(t *testing.T) {
 		t.Fatal("重叠端子该报 R5 违例")
 	}
 	// U3 两个下旗垂直梯次 —— 同侧但不重叠,合法。
-	p, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts())
+	p, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestZfCheckTermOverlap(t *testing.T) {
 
 // 确定性:输入顺序无关。
 func TestPlanZoneFollow_OrderIndependent(t *testing.T) {
-	base, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts())
+	base, err := planZoneFollow("U", zfFixtureU(), defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestPlanZoneFollow_OrderIndependent(t *testing.T) {
 	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
 		rev[i], rev[j] = rev[j], rev[i]
 	}
-	got, err := planZoneFollow("U", rev, defaultPartitionOpts())
+	got, err := planZoneFollow("U", rev, defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestPlanZoneFollow_OrderIndependent(t *testing.T) {
 func TestPlanZoneFollow_ShrinksP3Zones(t *testing.T) {
 	rawW := map[string]float64{"U": 682, "Q": 572, "J_USB": 486}
 	for zone, fix := range map[string][]zfGroup{"U": zfFixtureU(), "Q": zfFixtureQ(), "J_USB": zfFixtureJ()} {
-		p, err := planZoneFollow(zone, fix, defaultPartitionOpts())
+		p, err := planZoneFollow(zone, fix, defaultPartitionOpts(), zfDomain{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -360,7 +360,7 @@ func TestZfLandedFrame_PredictionEqualsLanding(t *testing.T) {
 					zone, in.Designator, want, got)
 			}
 		}
-		p, err := planZoneFollow(zone, fixtures[zone], opts)
+		p, err := planZoneFollow(zone, fixtures[zone], opts, zfDomain{})
 		if err != nil {
 			t.Fatalf("%s: %v", zone, err)
 		}
@@ -411,7 +411,7 @@ func TestZfLandedFrame_PlannedStubIsUpperBound(t *testing.T) {
 	opts := defaultPartitionOpts()
 	fixtures := map[string][]zfGroup{"U": zfFixtureU(), "Q": zfFixtureQ(), "J_USB": zfFixtureJ()}
 	for _, zone := range []string{"J_USB", "Q", "U"} {
-		p, err := planZoneFollow(zone, fixtures[zone], opts)
+		p, err := planZoneFollow(zone, fixtures[zone], opts, zfDomain{})
 		if err != nil {
 			t.Fatalf("%s: %v", zone, err)
 		}

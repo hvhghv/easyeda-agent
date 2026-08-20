@@ -295,7 +295,10 @@ func bslZoneFrameOf(t *testing.T, name string, roles []string) (w, h float64) {
 		}
 		groups = append(groups, g)
 	}
-	p, err := planZoneFollow(name, groups, defaultPartitionOpts())
+	// **域传零值是有意的**:真机那个 507×712 是**域盲**的 phase A 量出来的,
+	// 这条链要复现的就是那一刻的形状。零值域 = 域未知 → 退回原有紧凑序,与
+	// 首版逐字相同(见 zfPickShape 的性质③)。
+	p, err := planZoneFollow(name, groups, defaultPartitionOpts(), zfDomain{})
 	if err != nil {
 		t.Fatalf("phase A(%s): %v", name, err)
 	}
@@ -304,6 +307,12 @@ func bslZoneFrameOf(t *testing.T, name string, roles []string) (w, h float64) {
 
 // 整块一个组 = 独占一整页也放不下(真机 blocked 的复现)。同时校准 fixture:
 // 重建出来的整组框必须与真机 507×712 同量级(±15%)。
+//
+// **口径提醒(2026-08-20 域感知选形之后)**:这条复现的是**域盲**形态。生产路径
+// 现在会域感知选形,同一批 role 会被摆成另一个形状(实测 457×688 → 645×524,
+// 装得进图签上方那条通道)—— 也就是说「整块一个组」在**排布**这一层不再必然
+// blocked。拆子群的理由因此回到它本来的那一条:**一个框里塞六件的可读性**,
+// 而不是「排不下」。要改这条验收的判据,先补真机取证。
 func TestBslSubgroups_WroomOneGroupBlocked(t *testing.T) {
 	const realW, realH = 507.0, 712.0 // 真机取证:ceshi / MCU_IO,phase A 收敛后
 	roles := []string{"U", "C_BULK", "C_VDD", "C_EN", "R_EN", "R_IO0"}
