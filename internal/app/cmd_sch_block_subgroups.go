@@ -15,6 +15,7 @@ package app
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zhoushoujianwork/easyeda-agent/internal/blocks"
@@ -35,8 +36,10 @@ type bslSubgroup struct {
 //   - **其余件**归到与它**跨接网最多**的那一级(连得最紧的就是最相关的);一条跨接网
 //     都没有(纯电源/地)时归锚件那群,保证没有孤儿。
 //
-// 块没有 flow(只有 attach/pair 的小块)时返回单个子群 —— 那种块本来就是一个功能单元,
-// 硬拆只会把去耦和它的芯片分到两个框里。
+// 没有 flow 的块走**按 attach 目标引脚**分子群(bslPinSubgroups)—— 见那里的
+// 真机取证:一律返回单群会让 WROOM 那种「锚件 + 五件贴脚」的块糊成一个
+// 507×712 的区,独占一整页也放不进 A4 的图签左侧。拆不动(件太少/全贴同一个脚)
+// 时才退回单群 —— 小块本来就是一个功能单元,硬拆只会把去耦和它的芯片分到两个框里。
 func bslFunctionalGroups(blk blocks.Block, rel bslRelations, nets [][]string, anchorRole string) []bslSubgroup {
 	roles := make([]string, 0, len(blk.Parts))
 	for r := range blk.Parts {
@@ -44,6 +47,9 @@ func bslFunctionalGroups(blk blocks.Block, rel bslRelations, nets [][]string, an
 	}
 	sort.Strings(roles) // 同输入同输出
 	if len(rel.Flow) < 2 {
+		if subs, ok := bslPinSubgroups(blk, rel, nets, anchorRole, roles); ok {
+			return subs
+		}
 		return []bslSubgroup{{Name: blockShortName(blk), Roles: roles}}
 	}
 
@@ -116,6 +122,11 @@ func bslFunctionalGroups(blk blocks.Block, rel bslRelations, nets [][]string, an
 		}
 	}
 
+	return bslFoldSubgroups(owner)
+}
+
+// bslFoldSubgroups 把 role→子群名 折成排好序的子群表(两条路共用,输出形状必须同一)。
+func bslFoldSubgroups(owner map[string]string) []bslSubgroup {
 	byName := map[string][]string{}
 	for role, name := range owner {
 		byName[name] = append(byName[name], role)
@@ -127,6 +138,265 @@ func bslFunctionalGroups(blk blocks.Block, rel bslRelations, nets [][]string, an
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// ── 无 flow 的块:按 attach 目标引脚拆(2026-08-20 真机取证)────────────────
+//
+// **缺陷**:`esp32s3_wroom1_module` 没有 flow,于是整块 6 件(U + C_BULK + C_VDD +
+// R_EN + C_EN + R_IO0)登记成一个组。phase A 收敛之后它仍是 **507×712** ——
+// A4(1170×825,页边距 28)带图签 keep-out [468,0,1170,198] 的约束是「待在图签
+// 左侧 ⇒ 宽 ≤ 438」或「绕到图签上方 ⇒ 高 ≤ 597」,两条都不满足,`zone-arrange`
+// 逐边报 blocked:**这个区独占一整页也放不下**。
+//
+// **根因**:功能划分的信息本来就在块数据里,是这段代码把它丢了 —— attach 归属
+// 只取 `role.pin` 的 role 那一半(`U.3V3` / `U.EN` / `U.IO0` 一律归约成 `U`),
+// 而「哪几件是一个功能单元」恰恰写在被丢掉的引脚那一半:
+//
+//	U.3V3 → C_VDD + C_BULK   供电去耦
+//	U.EN  → R_EN  + C_EN     EN 上电复位 RC
+//	U.IO0 → R_IO0            IO0 boot strap
+//
+// 所以规则是「**贴同一个脚的件构成一个功能单元**」—— 不需要块作者补任何声明,
+// 对所有没写 flow 的块都成立。(给 WROOM 补 flow 解决不了:补了之后这些件照样
+// 全归到 `U` 那一级,因为丢引脚的是代码。)
+//
+// **flow 路径一步不动**:CH340C 的 attach 也指着两个不同的脚(U.VCC / U.V3),
+// 按脚细分会把它现有的 `/U` 组(U + C_VCC + C_V3)拆成三份 —— 那是行为回归,
+// 不是修复。信号流上的一级本来就是比引脚更粗的功能粒度,两者不该混。
+const (
+	// 至少两个不同的目标引脚:全贴同一个脚时「按脚分」没有区分度,拆出来的
+	// 是「锚件」+「其余全部」,白得两个框。
+	bslPinSplitMinPins = 2
+	// 至少四件贴脚。拆分的真正判据是几何(区框装不装得进图纸),而拆分器手里
+	// 没有页面尺寸,只能拿「贴脚件数」当代理 —— 两端都用真块钉死:
+	//   ams1117_ldo_3v3(锚 + 3 件贴 2 个脚)整块也就锚件旁一列,拆开只是多两个
+	//   带标题的框;esp32s3_wroom1_module(锚 + 5 件贴 3 个脚)整块 507×712,
+	//   独占一页也放不下。4 是把这两块分开的标定值,不是从理论推的。
+	bslPinSplitMinAttach = 4
+)
+
+// bslPinSubgroups 按 attach 的**目标引脚**把无 flow 的块拆成功能子群。
+//
+// 规则:
+//   - 锚件自成一群,群名 = **块短名**(拆之前这块就叫这个名,拆完锚件那群继承它);
+//   - 其余 attach 件按目标引脚的完整键(`ROLE.PIN`)分群,贴同一个脚的归一群,
+//     群名 `ROLE_PIN`(如 `U_3V3`);attach 链(件贴在件上)顺着解析到根引脚,
+//     链上的件与根件同群;
+//   - pair 组整组不拆散,跟「组里已归属的多数」走;都没归属时跟跨接网最多的那群;
+//   - 其余件归跨接网最多的那群,一条都没有时归锚件那群(**不留孤儿**)。
+//
+// **锚件那群为什么不叫 role 名**:组名末段就是区名(schGroupModulesFromState),
+// 而区名在一页里必须唯一。真机那一页(ceshi/MCU_IO)同时有 CH340C —— 它的 flow
+// 路径已经登记了一个叫 `U` 的子群,WROOM 的锚件再叫 `U` 就是两区同名、后写的把
+// 先写的顶掉。块短名既避开这次碰撞,又与拆分前的组名一致(升级不改名)。
+//
+// 拆不动时返回 ok=false,由调用方退回「整块一个子群」。
+func bslPinSubgroups(blk blocks.Block, rel bslRelations, nets [][]string, anchorRole string, roles []string) ([]bslSubgroup, bool) {
+	if anchorRole == "" {
+		return nil, false
+	}
+	if _, ok := blk.Parts[anchorRole]; !ok {
+		return nil, false
+	}
+	hostPin := bslResolveAttachPins(blk, rel, anchorRole)
+	if len(hostPin) < bslPinSplitMinAttach {
+		return nil, false
+	}
+	keys := make([]string, 0, len(hostPin))
+	seen := map[string]bool{}
+	for _, k := range hostPin {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) < bslPinSplitMinPins {
+		return nil, false
+	}
+	sort.Strings(keys) // 命名与去重都按同一个序,同输入同输出
+	anchorGroup := blockShortName(blk)
+	if anchorGroup == "" {
+		anchorGroup = anchorRole
+	}
+	names := bslPinGroupNames(keys, anchorGroup)
+
+	owner := map[string]string{anchorRole: anchorGroup}
+	for role, key := range hostPin {
+		if name, ok := names[key]; ok {
+			owner[role] = name
+		}
+	}
+	// 子群名全序:pair / 兜底归属挑不出赢家时按它做 tie-break。
+	groupNames := []string{anchorGroup}
+	for _, k := range keys {
+		groupNames = append(groupNames, names[k])
+	}
+	sort.Strings(groupNames)
+
+	// seed = 按 attach 已经确定归属的成员表。pair 与兜底都拿它算跨接网,
+	// 不吃自己刚写进去的结果 —— 归属不许依赖遍历顺序。
+	seed := map[string][]string{}
+	for role, name := range owner {
+		seed[name] = append(seed[name], role)
+	}
+	for name := range seed {
+		sort.Strings(seed[name])
+	}
+
+	// pair 组整组跟随:先看组里已有归属的多数(等距并列是电路语义,不许拆散),
+	// 没有已归属成员时按跨接网选。
+	for _, group := range rel.Pair {
+		votes := map[string]int{}
+		for _, m := range group {
+			if o, ok := owner[m]; ok {
+				votes[o]++
+			}
+		}
+		best := bslTopVote(votes, groupNames)
+		if best == "" {
+			best = bslBestByCrossNets(seed, groupNames, nets, group)
+		}
+		if best == "" {
+			best = anchorGroup
+		}
+		for _, m := range group {
+			if _, ok := blk.Parts[m]; !ok {
+				continue
+			}
+			if _, taken := owner[m]; !taken {
+				owner[m] = best
+			}
+		}
+	}
+	// 其余件:跨接网最多的那群;一条都没有就归锚件那群(不留孤儿)。
+	for _, r := range roles {
+		if _, taken := owner[r]; taken {
+			continue
+		}
+		best := bslBestByCrossNets(seed, groupNames, nets, []string{r})
+		if best == "" {
+			best = anchorGroup
+		}
+		owner[r] = best
+	}
+	return bslFoldSubgroups(owner), true
+}
+
+// bslResolveAttachPins 把 attach 表解析成 role → **根引脚键**(`ROLE.PIN`)。
+//
+// 三件事在这里做掉:锚件自己排除在外(它自成一群)、指向不存在 role 的声明丢弃、
+// attach 链(件贴在件上)顺着解析到根 —— C 贴 R.2、R 贴 U.VIN 时两件同属 `U.VIN`,
+// 否则 R 与吊在它身上的 C 会被分进两个框。
+func bslResolveAttachPins(blk blocks.Block, rel bslRelations, anchorRole string) map[string]string {
+	out := map[string]string{}
+	for role := range rel.Attach {
+		if role == anchorRole {
+			continue
+		}
+		if _, ok := blk.Parts[role]; !ok {
+			continue
+		}
+		if key, ok := bslResolveAttachKey(blk, rel, role, anchorRole, len(rel.Attach)); ok {
+			out[role] = key
+		}
+	}
+	return out
+}
+
+// bslResolveAttachKey 顺着 attach 链找根引脚键。budget 是防环的步数上限
+// (成环时放弃这一条,绝不死循环);链走到**锚件就停**(锚件自己也写了 attach 时,
+// 贴在锚件脚上的件属于那只脚,不该顺着锚件再飘到别处去)。
+func bslResolveAttachKey(blk blocks.Block, rel bslRelations, role, anchorRole string, budget int) (string, bool) {
+	if budget < 0 {
+		return "", false
+	}
+	target, ok := rel.Attach[role]
+	if !ok {
+		return "", false
+	}
+	tRole, pin, ok := splitBlockPinRef(target)
+	if !ok || tRole == role {
+		return "", false
+	}
+	if _, ok := blk.Parts[tRole]; !ok {
+		return "", false
+	}
+	if _, chained := rel.Attach[tRole]; chained && tRole != anchorRole {
+		return bslResolveAttachKey(blk, rel, tRole, anchorRole, budget-1)
+	}
+	return tRole + "." + strings.TrimSuffix(strings.TrimSpace(pin), "*"), true
+}
+
+// bslPinGroupNames 给每个引脚键起子群名:`ROLE_PIN`(如 `U_3V3`)。
+//
+// 为什么带上宿主 role 而不是光用引脚名:同一块里两只芯片可能都有 `VCC` 脚,
+// 而组名要能直接当区名用(`sch note --zone <区名>` 写得回去)。非法字符
+// (含 `/` —— 组名按 `/` 分段取区名)一律折成 `_`,重名按序号消歧,保证唯一且确定。
+func bslPinGroupNames(keys []string, anchorGroup string) map[string]string {
+	taken := map[string]bool{anchorGroup: true}
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		role, pin, ok := splitBlockPinRef(k)
+		if !ok {
+			role, pin = k, ""
+		}
+		base := bslSanitizeName(role + "_" + pin)
+		if base == "" {
+			base = "PIN"
+		}
+		name := base
+		for i := 2; taken[name]; i++ {
+			name = base + "_" + strconv.Itoa(i)
+		}
+		taken[name] = true
+		out[k] = name
+	}
+	return out
+}
+
+// bslSanitizeName 把任意引脚名折成可当区名用的标识(字母/数字/`_`/`+`/`-` 保留,
+// 其余折成 `_`,首尾 `_` 去掉)。
+func bslSanitizeName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '+', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+// bslTopVote 取票数最多的子群名;平票按 order(子群名全序)取最小,零票返回空。
+func bslTopVote(votes map[string]int, order []string) string {
+	best, bestN := "", 0
+	for _, name := range order {
+		if n := votes[name]; n > bestN {
+			best, bestN = name, n
+		}
+	}
+	return best
+}
+
+// bslBestByCrossNets 挑「与这批 role 跨接网最多」的子群(members 是各子群的
+// 种子成员表)。全零返回空 —— 由调用方决定兜底去哪。
+func bslBestByCrossNets(members map[string][]string, order []string, nets [][]string, roles []string) string {
+	best, bestN := "", 0
+	for _, name := range order {
+		n := 0
+		for _, m := range members[name] {
+			for _, r := range roles {
+				n += bslCrossNets(nets, m, r)
+			}
+		}
+		if n > bestN {
+			best, bestN = name, n
+		}
+	}
+	return best
 }
 
 // blockShortName 是块 id 去掉 `block.` 前缀后的短名,用作单子群时的组名。
