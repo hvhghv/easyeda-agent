@@ -219,10 +219,10 @@ jobs:
             release-artifacts/checksums.txt
           )
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" "${files[@]}" \
+            gh release create "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
               --title "easyeda-agent $tag" \
               --generate-notes \
               --verify-tag
