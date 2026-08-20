@@ -65,7 +65,14 @@ finds it there, instead of several daemons quietly binding 49621/49622… and th
 connector churning between them. If 60832 is already held by another easyeda
 daemon it is replaced automatically; if held by a FOREIGN process the daemon asks
 (interactive terminal) or refuses with a clear message (headless) rather than
-starting a second daemon elsewhere.`,
+starting a second daemon elsewhere.
+
+The connector holds up the other end of that contract: it PINS 60832 and retries
+it with exponential backoff instead of sweeping 60832-60841 (the other nine ports
+can never hold a daemon, and every dead port costs it a full connect timeout). So
+running the daemon on a different port with --ports also needs the connector's
+escape hatch — set its "daemonPorts" extension user config (see the header of
+extension/src/transport.ts).`,
 		Args: cobra.NoArgs,
 		Example: `  easyeda daemon start
   easyeda daemon start --autosave-debounce 5s

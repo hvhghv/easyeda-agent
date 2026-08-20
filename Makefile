@@ -94,12 +94,12 @@ daemon: ## one-shot daemon (no reload) — prefer `make dev`
 	go run ./cmd/easyeda daemon
 
 # Live-reload the daemon for development (.air.toml): rebuilds + restarts on any
-# .go change; the connector auto-reconnects (it port-scans 49620-49629). Keep
+# .go change; the connector auto-reconnects (it retries 60832 with backoff). Keep
 # this running in a terminal while developing so the daemon is always up.
 dev: ## hot-reload the daemon (air) — mirrors output to tmp/daemon.log (truncated each start)
 	@command -v air >/dev/null 2>&1 || { echo "air not found — install: go install github.com/air-verse/air@latest"; exit 1; }
 	@mkdir -p tmp
-	@# Kill any leftover daemon+watcher from a prior session so we always bind 49620.
+	@# Kill any leftover daemon+watcher from a prior session so we always bind 60832.
 	@pkill -TERM -f '/easyeda daemon' 2>/dev/null || true
 	@sleep 0.4
 	air 2>&1 | tee tmp/daemon.log
