@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,6 +143,34 @@ func TestRuler_ZoneFrameSingleFunction(t *testing.T) {
 		if r != want {
 			t.Fatalf("noteH=%.0f:外框算式漂了 %+v want %+v", noteH, r, want)
 		}
+	}
+}
+
+// 「哪几个组算一个分区」也只有一个答案:**一个虚拟组 / zone 认领 = 一个分区**。
+// 画框侧(partitionGrouping → planPartitions)与排布侧(zaPartitionPlan,每个
+// 落位区一个框)必须逐字给出同一套分组 —— 2026-08-20 真机:画框侧按网格带把
+// 「同一格」的两个区并成一个分区,于是 zone-arrange 断言③ 全绿(逐区框零重叠)
+// 的 MCU_IO 页,zone-plan 报 partitionOverlap=1、zone-draw 拒绝画框,而画分区框
+// 是 SKILL 铁律 15。这里钉结构(同一批区名 → 同一套分组),真机几何的行为级
+// 正负对照见 cmd_sch_zone_partition_test.go。
+func TestRuler_ZonePartitionGroupingMatchesArrange(t *testing.T) {
+	opts := defaultPartitionOpts()
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	boxes := map[string]layoutBBox{
+		"pwr": {MinX: 100, MinY: 500, MaxX: 300, MaxY: 700},
+		"mcu": {MinX: 500, MinY: 200, MaxX: 800, MaxY: 700},
+		"usb": {MinX: 100, MinY: 150, MaxX: 300, MaxY: 300},
+	}
+	var mods []partitionModule
+	res := zaResult{OK: true}
+	for _, n := range []string{"mcu", "pwr", "usb"} {
+		mods = append(mods, partitionModule{Name: n, BBox: boxes[n], CoreBBox: boxes[n]})
+		res.Placed = append(res.Placed, zaPlaced{Name: n, Rect: boxes[n]})
+	}
+	arrange := zpPartitionNameSets(zaPartitionPlan(res, sheet, nil, opts))
+	draw := zpPartitionNameSets(planPartitions(sheet, nil, mods, opts))
+	if strings.Join(arrange, " | ") != strings.Join(draw, " | ") {
+		t.Fatalf("分区归属两把尺:排布侧 %v ≠ 画框侧 %v", arrange, draw)
 	}
 }
 

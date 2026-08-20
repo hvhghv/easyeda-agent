@@ -543,10 +543,15 @@ func zaTriedText(probe []zaEdgeProbe) string {
 	return b.String()
 }
 
-// zaValidate 用**既有的 validatePartitions**(同一把尺)验证落位框:
-// 把每个落位框折成 partitionRect(区名带在顶、说明带在底,与 zone-plan 同版式)。
-// modules 传 nil 时只验框级四项(overflow/overlap/titleHits/marginHits)。
-func zaValidate(res zaResult, sheet layoutBBox, keepout *layoutBBox, opts partitionOpts) partitionValidation {
+// zaPartitionPlan 把落位结果折成 zone-plan 口径的 partitionPlan(区名带在顶、
+// 说明带在底,与画框同版式)。
+//
+// **这里就是排布侧对「哪几个组算一个分区」的回答:一个区一个框,`Modules` 里
+// 只有它自己那一个名字。** 画框侧(partitionGrouping)必须给出同样的答案 ——
+// 两边分家过一次:画框侧曾按网格带把「同一格」的区并成一个分区,于是
+// zone-arrange 断言③ 全绿(逐区框零重叠)的页面,zone-plan 却报 partitionOverlap,
+// zone-draw 拒绝画框。配对由 TestRuler_ZonePartitionGroupingMatchesArrange 钉住。
+func zaPartitionPlan(res zaResult, sheet layoutBBox, keepout *layoutBBox, opts partitionOpts) partitionPlan {
 	plan := partitionPlan{Sheet: sheet, Keepout: keepout}
 	for _, p := range res.Placed {
 		plan.Partitions = append(plan.Partitions, partitionRect{
@@ -558,5 +563,11 @@ func zaValidate(res zaResult, sheet layoutBBox, keepout *layoutBBox, opts partit
 				MaxX: p.Rect.MaxX, MaxY: p.Rect.MinY + opts.NoteBand},
 		})
 	}
-	return validatePartitions(plan, nil, keepout)
+	return plan
+}
+
+// zaValidate 用**既有的 validatePartitions**(同一把尺)验证落位框。
+// modules 传 nil 时只验框级四项(overflow/overlap/titleHits/marginHits)。
+func zaValidate(res zaResult, sheet layoutBBox, keepout *layoutBBox, opts partitionOpts) partitionValidation {
+	return validatePartitions(zaPartitionPlan(res, sheet, keepout, opts), nil, keepout)
 }

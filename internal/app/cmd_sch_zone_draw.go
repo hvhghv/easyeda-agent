@@ -450,7 +450,7 @@ Use the global --doc <page> selector for multi-page projects.`,
 			// 韧性路径(REPORT esp32mini-round2 新 3):逐区单次 exec_js +
 			// 复核后重试 + partial 语义。见 cmd_sch_zone_draw_resilient.go。
 			return runPartitionDrawResilient(cfg, *window,
-				partitionOptsFrom(margin, gutter, titleBand, 3, 2), fontSize, color, clear, stdout, stderr)
+				partitionOptsFrom(margin, gutter, titleBand), fontSize, color, clear, stdout, stderr)
 		},
 	}
 	c.Flags().StringVar(&color, "color", "#AA00AA", "frame + label color")
@@ -462,7 +462,7 @@ Use the global --doc <page> selector for multi-page projects.`,
 	// moved to 28 — live 2026-08-11).
 	def := defaultPartitionOpts()
 	c.Flags().Float64Var(&margin, "margin", def.Margin, "--mode partition: page margin inset from the sheet edge")
-	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "--mode partition: gutter between adjacent partitions")
+	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "为说明扩边时与邻框/障碍保持的间距(分区怎么分与它无关——一区一框)")
 	c.Flags().Float64Var(&titleBand, "title-band", def.TitleBand, "--mode partition: height of each partition's title band")
 	return c
 }

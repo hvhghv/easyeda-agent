@@ -773,6 +773,24 @@ validatePartitions(同一把尺)→ 三态 verdict:
 > 「按常量带收紧 → 画框 → 再放 note 装不下 → 说明探出框外」。改任一侧,
 > `TestRuler_ZoneFrameSingleFunction` 会红。
 
+> **分区归属也只有一个答案(2026-08-20 定案):一个虚拟组 / zone 认领 = 一个分区。**
+> `zone-arrange` 一直是这么算的(phase B 每个区一个落位框,断言③ 逐区量实测框、
+> 逐对判零重叠);`zone-plan` 此前却先把整页按模块间的自然空隙切成**列带/行带**,
+> 再把落在同一格的区**并成一个分区** —— 两把尺。真机 ceshi / MCU_IO:
+> `zone-arrange --apply` 断言③ 全绿(区框零重叠),紧接着 `zone-plan` 却把
+> `led_indicator_gpio` 与 `tactile_boot_reset`(左列上下叠)并成一框,并集宽到
+> x=274,与 229 起的 `wroom-passives` 撞出 45×362 → `partitionOverlap=1` →
+> **zone-draw 拒绝画框**,而画分区框是铁律 15,交付被自己卡死。
+> 网格带是首版遗留(那时框会被 clamp 到格子里),现已删除。两条推论:
+>
+> - **`zone-arrange` 断言③ 绿的页面,`zone-draw` 一定画得出来** —— 两边算的是同一批框。
+> - **`partitionOverlap` 非 0 现在只有一个含义**:两个区的 L1 体积**真的**互相压。
+>   出路是 `sch zone-arrange --apply` 重排或 `sch group-move` 挪件,**不是**调
+>   `--gutter` / 也没有「合并成一个大框」这条退路了(合并只是把重叠藏起来)。
+>
+> 配对由 `TestRuler_ZonePartitionGroupingMatchesArrange` + 真机 fixture 的
+> `cmd_sch_zone_partition_test.go` 钉住(含首版归组的常驻变异对照)。
+
 > **桩线伸展只有一把尺(2026-08-20 定案)。** 之前同一件事有三套算法:phase A
 > 自己拼端子盒、`--apply` 未被计划覆盖的 pin 走 autoconnect 自由评分、`group-move`
 > 的重连也走自由评分。后果是**规划 pass → 落地 overlap 永不收敛**(真机连跑 4 轮,
@@ -998,7 +1016,7 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `schematic.pin.set_no_connect` — 打/清「非连接标识」(NC, X 标记),让 DRC 不再对故意悬空的引脚报"未连接"。按位号+引脚号定位:`easyeda sch no-connect --designator U1 --pin 23,24[,…]`(`--clear` 清除)。实现必须从器件实例 `getAllPins()` 取引脚,`setState_NoConnected(...)` 后逐脚 `await pin.done()` 应用到画布,再重新获取器件实例回读;只调 setter 会得到当前句柄假 `true`、实际画布不变。
 - `schematic.select`
 - ~~`schematic.snapshot`~~ — 已移除(2026-08-12,出图统一 `sch export-image`)。**产物保存在 CLI 运行目录下的隐藏目录 `<cwd>/.easyeda/artifacts/`,文件名带本地时间戳**(`<YYYYMMDD-HHMMSS>-<kind>-<短id>.png`);响应里的 `artifacts[].path` 是绝对路径。netlist/BOM 等其他产物同此规则。
-- **`easyeda sch zone-plan` 的失败分两种,别混**:①**装不下** —— 报「这一页装不下:<模块> 的框要 W×H,而可用区只有 W×H」并直接给出该换的图纸档(A3/A2…)或建议拆页;②**摆得不好** —— 报「容量是够的,是摆放/间距问题」并指向 `--gutter`/`sch group-move`。此前两者共用一句「adjust margins/gutter or the zone claims」,而对一颗 421 高的 WROOM-1 模组来说那是**做不到的建议**(A4 扣掉图签安全带只剩 541 可用高,框要 605),照着调只会白试一轮然后把整条判据当噪音。判据的价值不在报错,在报出**能执行的下一步**。容量判定刻意保守:只问单个模块自己塞不塞得进可用区,完全不管模块之间怎么排 —— 绝不会把「两个组顶在一起」误判成「该换纸」。
+- **`easyeda sch zone-plan` 的失败分两种,别混**:①**装不下** —— 报「这一页装不下:<模块> 的框要 W×H,而可用区只有 W×H」并直接给出该换的图纸档(A3/A2…)或建议拆页;②**摆得不好** —— 报「容量是够的,是摆放/间距问题」并指向 `sch zone-arrange --apply` 整页重排 / `sch group-move` 挪件 / 拆页(**不再指向 `--gutter`**:归组是「一区一框」之后 gutter 不参与分区怎么分,调它治不了重叠)。此前两者共用一句「adjust margins/gutter or the zone claims」,而对一颗 421 高的 WROOM-1 模组来说那是**做不到的建议**(A4 扣掉图签安全带只剩 541 可用高,框要 605),照着调只会白试一轮然后把整条判据当噪音。判据的价值不在报错,在报出**能执行的下一步**。容量判定刻意保守:只问单个模块自己塞不塞得进可用区,完全不管模块之间怎么排 —— 绝不会把「两个组顶在一起」误判成「该换纸」。
 
 - **`easyeda sch status`** — **原理图侧的进度权威**:S1–S6 每一格**当场从画布算**,`--all-pages` 逐页测(切页读完切回),`--gate` 顺带逐页跑 gate 填上 S5。**不落盘任何状态** —— 立项动机就是记录会撒谎:`workflow status` 把 imported/placement_ready 打成实心圆,而那块 PCB 上一个器件都没有(它记的是「某个动作被调用过」,不是「结果还在画布上」)。原理图的 S1–S6 全部机械可判,所以干脆不存,**没有记录就没有可撒的谎**。四态:`✓ done` / `◐ partial`(部分页满足) / `○ todo` / **`? unknown`——本工具判不了,不是委婉的「没做」,更不会替它打勾**。三条硬规矩:①**有页读不到 → 整张判定降级 unknown** 并指向 `health`/`doc switch`(同 gate 的 `blocked`:检查器没跑完 ≠ 板子没问题;首版正是拿读得到的 1/4 页宣布「已就绪、进 PCB」被真机打脸);②**读取失败绝不合成 0**(导线读不到 ≠ 没有导线,否则故障被渲染成「还没连线」);③S5/S6 是有意留白:S5 要跑 gate,S6 平台不暴露脏标记(只能显式 `sch save` 确认 `saved:true`)。`next` 永远给一条可照抄执行的命令(页名占位时直接带上该页 uuid)。
 

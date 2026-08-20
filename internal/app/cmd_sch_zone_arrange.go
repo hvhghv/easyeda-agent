@@ -474,7 +474,7 @@ A4-only:装不下的出路是收敛或 ` + "`sch page-new`" + ` 拆页,不建议
 			if err != nil {
 				return err
 			}
-			opts := partitionOptsFrom(margin, gutter, titleBand, 0, 0)
+			opts := partitionOptsFrom(margin, gutter, titleBand)
 			out, scene, err := computeZoneArrange(pinnedCfg, win, docUUID, opts)
 			if err != nil {
 				return err

@@ -3,15 +3,15 @@ package app
 // cmd_sch_zone_plan.go — `sch zone-plan` + `sch zone-draw --mode partition`:
 // a DATA-DRIVEN A4 functional-partition planner (issue #149).
 //
-// The legacy `zone-draw` (zones mode) resolves each claim to a FIXED 3×2 grid
-// cell (zoneRect) — it can't express "carve the whole sheet into sensible
+// The legacy `zone-draw` (zones mode) resolved each claim to a FIXED 3×2 grid
+// cell (zoneRect) — it couldn't express "carve the whole sheet into sensible
 // functional regions and leave the bottom-right title block a gap". This planner
-// instead derives partition rectangles from the LIVE geometry: usable sheet minus
-// a margin, split into columns/rows at the NATURAL gaps between module clusters
-// (not fixed fractions), each partition lifted clear of the title-block keep-out
-// and reserving a big-font title band. Pure core (planPartitions) → unit-testable
-// against the issue's real 6-module A4 page; the draw path goes through the same
-// debug.exec_js graphics hatch `zone-draw` uses, persisted per-page (documentUuid).
+// instead derives partition rectangles from the LIVE geometry: **一个虚拟组 /
+// zone 认领 = 一个分区**(partitionGrouping,与 `zone-arrange` phase B 同一把尺),
+// 框 = 成员 L1 虚拟组体积并集 + 边距 + 区名带 + 说明带,再让开图签 keep-out 与纸边。
+// Pure core (planPartitions) → unit-testable against the issue's real 6-module A4
+// page; the draw path goes through the same debug.exec_js graphics hatch
+// `zone-draw` uses, persisted per-page (documentUuid).
 
 import (
 	"encoding/json"
@@ -167,8 +167,6 @@ type partitionOpts struct {
 	// 否则说明只能挤在器件缝里,挤不下就掉到框外(实测:自动落点退到框下方 y=215,
 	// 用户一眼看出「说明跑到框外面了」)。版式是:区名左上、说明左下,**都在框内**。
 	NoteBand float64
-	MaxCols  int
-	MaxRows  int
 }
 
 // defaultNoteBandLines 是区还没登记说明时,说明带按几行文字预留。SKILL 要求
@@ -248,13 +246,13 @@ func defaultPartitionOpts() partitionOpts {
 	// edge, hugging the printed sheet frame like a double line.
 	// NoteBand 26 → requiredNoteBand(2 行):26 只装得下单行(新 1)。
 	return partitionOpts{Margin: 28, Gutter: 12, TitleBand: 30,
-		NoteBand: requiredNoteBand(defaultNoteBandLines * schNoteDefaultFontSize * 1.3),
-		MaxCols:  3, MaxRows: 2}
+		NoteBand: requiredNoteBand(defaultNoteBandLines * schNoteDefaultFontSize * 1.3)}
 }
 
-// planPartitions is the pure planner: usable sheet (minus margin) carved into
-// column/row bands at the natural gaps between module clusters, each partition
-// lifted above the title-block keep-out and given a top title band. Deterministic.
+// planPartitions is the pure planner: ONE partition per module
+// (partitionGrouping — the same answer `zone-arrange` gives), each frame grown
+// from its own members' volume, lifted clear of the title-block keep-out and the
+// sheet edge, and given a top title band. Deterministic.
 func planPartitions(sheet layoutBBox, keepout *layoutBBox, modules []partitionModule, opts partitionOpts) partitionPlan {
 	return planPartitionsWithNotes(sheet, keepout, modules, opts, nil)
 }
@@ -278,53 +276,13 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		return plan
 	}
 
-	cx := make([]float64, len(modules))
-	cy := make([]float64, len(modules))
-	colIvs := make([]axisInterval, len(modules))
-	rowIvs := make([]axisInterval, len(modules))
-	for i, m := range modules {
-		// 分割/归属判定用 CORE 口径(器件本体):模块间的结构空隙由本体决定——
-		// draw 口径的旗/说明外伸(如 U2 右侧 netport 与邻区标签交叠)不该抹掉
-		// 本体之间的真实分割空隙(live 2026-08-12:MCU/LED 因此被误合一框)。
-		// 框尺寸仍用 draw 口径(rect 段),外伸物在 cell 边界处被 clamp,微露可容。
-		core := moduleCoreBBox(m)
-		cx[i], cy[i] = bboxCenter(core)
-		colIvs[i] = axisInterval{core.MinX, core.MaxX, cx[i]}
-		rowIvs[i] = axisInterval{core.MinY, core.MaxY, cy[i]}
-	}
-	// Split at the natural EMPTY BAND between module bboxes (edge-to-edge), not the
-	// midpoint of centers — a tall module (主MCU) whose bbox straddles a center-gap
-	// split would end up outside its partition (issue #149). Require the gap to hold
-	// the gutter so adjacent partitions don't collide.
-	colBounds := boundsFrom(usable.MinX, usable.MaxX, clusterSplits(colIvs, opts.Gutter, opts.MaxCols))
-	rowBounds := boundsFrom(usable.MinY, usable.MaxY, clusterSplits(rowIvs, opts.Gutter, opts.MaxRows))
-
-	type cellKey struct{ c, r int }
-	cells := map[cellKey][]int{}
-	var order []cellKey
-	for i := range modules {
-		k := cellKey{bandIndex(cx[i], colBounds), bandIndex(cy[i], rowBounds)}
-		if _, ok := cells[k]; !ok {
-			order = append(order, k)
-		}
-		cells[k] = append(cells[k], i)
-	}
-	// Deterministic: visual top (large y, y-UP) first, then left→right.
-	sort.Slice(order, func(i, j int) bool {
-		if order[i].r != order[j].r {
-			return order[i].r > order[j].r
-		}
-		return order[i].c < order[j].c
-	})
-
 	// 图签安全带:说明带撞上它可以缩,**内容不许缩**(见 rect 后的收拢)。
 	safe := inflatedTitleKeepout(keepout)
-	// 网格只用来**决定谁跟谁同一组**(哪些模块合成一个分区),不再参与矩形的尺寸 ——
-	// 尺寸一律由成员虚拟组的并集决定(见下面 rect 的注释)。
-	noteNeeds := make([]partitionNoteNeed, 0, len(order))
-	for _, k := range order {
-		content := modules[cells[k][0]].BBox
-		for _, i := range cells[k][1:] {
+	groups := partitionGrouping(modules)
+	noteNeeds := make([]partitionNoteNeed, 0, len(groups))
+	for _, grp := range groups {
+		content := modules[grp[0]].BBox
+		for _, i := range grp[1:] {
 			b := modules[i].BBox
 			if b.MinX < content.MinX {
 				content.MinX = b.MinX
@@ -344,7 +302,7 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		// 进一步下探(向外扩),器件区(content ± pad)一寸不挤。高度来自登记记录
 		// 的文字尺寸(NoteHeight,内容+字号),不来自落点 bbox —— 不构成反馈环。
 		var noteW, noteH float64
-		for _, i := range cells[k] {
+		for _, i := range grp {
 			if h := modules[i].NoteHeight; h > noteH {
 				noteH = h
 			}
@@ -355,7 +313,7 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		noteBand := schZoneNoteBandHeight(opts.NoteBand, noteH)
 		// **框 = 成员虚拟组体积的并集 + 边距 + 上标题带 + 下说明带,不做任何裁剪。**
 		//
-		// 此前这里把矩形 clamp 到网格单元(`math.Min(cell.MaxX, …)`),于是模块的
+		// 此前这里把矩形 clamp 到网格带单元(`math.Min(cell.MaxX, …)`),于是模块的
 		// 虚拟组一旦跨过单元边界,框就被切短 —— 地旗、网络标签垂在框外(用户截图实证
 		// D1 的 GND)。「框住自己的内容」必须是**构造保证**而不是检查项:算得出来的东西
 		// 不该留给判据去发现、更不该留给人去看图。
@@ -398,8 +356,8 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 		if h := rect.MaxY - rect.MinY; band > h/2 {
 			band = h / 2
 		}
-		names := make([]string, 0, len(cells[k]))
-		for _, i := range cells[k] {
+		names := make([]string, 0, len(grp))
+		for _, i := range grp {
 			names = append(names, modules[i].Name)
 		}
 		sort.Strings(names)
@@ -468,63 +426,64 @@ func reserveNoteAreas(plan *partitionPlan, needs []partitionNoteNeed, sheet layo
 	}
 }
 
-// axisInterval is a module's extent on one axis (min, max) plus its center, used
-// to place partition splits in the EMPTY BAND between modules rather than through
-// a straddling module's body.
-type axisInterval struct{ lo, hi, center float64 }
-
-// clusterSplits returns the inner split coordinates (≤ maxK-1 of them) placed at
-// the midpoints of the LARGEST empty bands between adjacent module intervals. A
-// band smaller than minGap (the gutter) is skipped — there's no room for two
-// partitions there — and overlapping intervals (negative band) never split (the
-// modules are separable on the OTHER axis instead).
-func clusterSplits(ivs []axisInterval, minGap float64, maxK int) []float64 {
-	if len(ivs) <= 1 || maxK <= 1 {
-		return nil
+// ── 分区归属的唯一函数(2026-08-20 定案)────────────────────────────────────
+//
+// **一个模块(= 一个 L1 虚拟组 / zone 认领)就是一个分区。**
+//
+// 这与 `zone-arrange` 的答案逐字相同:phase B 每个认领折一个 zaZone
+// (planZoneArrangeScene),求解器每个 zaZone 落一个框(zonesArrange),
+// 落地复判(zaaLandedRecheck)每个区量一个实测框、逐对判零重叠。也就是说
+// **画框侧与排布侧现在问的是同一个问题、拿的是同一个答案** ——
+// TestRuler_ZonePartitionGroupingMatchesArrange 把这条配对钉住。
+//
+// ── 被删掉的那把尺:网格带归组 ─────────────────────────────────────────────
+//
+// 此前这里把整页按「模块间的自然空隙」切成列带/行带(clusterSplits +
+// bandIndex),**同一格里的模块合成一个分区**。那是 issue #149 首版的遗留:
+// 当时框会被 clamp 到格子里,格子决定几何,归组只是副产品。后来 clamp 被去掉
+// (框 = 成员并集 + 带,构造保证「框住自己的内容」),格子就只剩归组这一个作用 ——
+// 而它给出的答案与 zone-arrange 不一样,这就是本缺陷:
+//
+//	真机 ceshi / MCU_IO(A4,zone-arrange --apply 断言③全绿、区框零重叠):
+//	  行分割找不到能把 led_indicator_gpio 与 tactile_boot_reset(左列上下叠)
+//	  分开的**全局**空带(wroom-passives 的 y 区间横跨两者),于是两区被并成
+//	  一个分区,并集宽到 x=274,而 wroom-passives 从 229 起 → partitionOverlap=1
+//	  → zone-draw 拒绝画框。单看任何一个区的框,没有任何重叠。
+//
+// 网格带的表达能力(全局的一刀切)结构上装不下「同列上下叠 + 邻列横跨」这种
+// 排布,而 zone-arrange 的货架装箱恰恰经常产生它。两把尺一分家,交付就被自己
+// 卡死(画分区框是 SKILL 铁律 15)。
+//
+// 归组不再看几何,所以「没跑过 zone-arrange 的页」(手工搭的页、随手摆的件)
+// 也照样有确定的分区:每个认领一个框。这条路径没有被砍掉,它和跑过的页走的
+// 是同一段代码 —— 一个页面只有一套答案,与跑没跑过排布无关。
+//
+// 返回值是按**绘制序**排好的分组(视觉上方优先 → 左→右 → 名字),每组一个分区。
+func partitionGrouping(modules []partitionModule) [][]int {
+	idx := make([]int, len(modules))
+	for i := range modules {
+		idx[i] = i
 	}
-	s := append([]axisInterval(nil), ivs...)
-	sort.Slice(s, func(i, j int) bool { return s[i].center < s[j].center })
-	type gap struct{ size, mid float64 }
-	var gaps []gap
-	for i := 1; i < len(s); i++ {
-		band := s[i].lo - s[i-1].hi
-		if band < minGap {
-			continue
+	// 确定性:输入顺序不参与判决(与 zaOrderZones 同一条纪律)。
+	sort.SliceStable(idx, func(a, b int) bool {
+		i, j := idx[a], idx[b]
+		// 分区序用 CORE 口径(器件本体)的质心:draw 口径的旗/说明外伸会随上一轮
+		// 布线漂移,拿它排序会让「画了几个框、谁先谁后」跟着残局走。
+		ix, iy := bboxCenter(moduleCoreBBox(modules[i]))
+		jx, jy := bboxCenter(moduleCoreBBox(modules[j]))
+		if iy != jy {
+			return iy > jy // y-UP:视觉上方(大 y)在前
 		}
-		gaps = append(gaps, gap{band, (s[i].lo + s[i-1].hi) / 2})
-	}
-	sort.Slice(gaps, func(i, j int) bool {
-		if gaps[i].size != gaps[j].size {
-			return gaps[i].size > gaps[j].size
+		if ix != jx {
+			return ix < jx
 		}
-		return gaps[i].mid < gaps[j].mid
+		return modules[i].Name < modules[j].Name
 	})
-	var splits []float64
-	for _, g := range gaps {
-		if len(splits) >= maxK-1 {
-			break
-		}
-		splits = append(splits, g.mid)
+	out := make([][]int, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, []int{i})
 	}
-	sort.Float64s(splits)
-	return splits
-}
-
-func boundsFrom(lo, hi float64, splits []float64) []float64 {
-	b := make([]float64, 0, len(splits)+2)
-	b = append(b, lo)
-	b = append(b, splits...)
-	return append(b, hi)
-}
-
-// bandIndex returns the band [bounds[i],bounds[i+1]) that v falls into.
-func bandIndex(v float64, bounds []float64) int {
-	for i := 0; i+1 < len(bounds); i++ {
-		if v < bounds[i+1] {
-			return i
-		}
-	}
-	return len(bounds) - 2
+	return out
 }
 
 func bboxContains(outer, inner layoutBBox) bool {
@@ -948,14 +907,13 @@ func buildPartitionDrawJS(plan partitionPlan, fontSize float64, color string) st
 func newSchZonePlanCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *cobra.Command {
 	var asJSON bool
 	var margin, gutter, titleBand float64
-	var maxCols, maxRows int
 	c := &cobra.Command{
 		Use:   "zone-plan",
 		Short: "Plan data-driven A4 functional partitions from the live sheet + module bboxes (no mutation)",
 		Long: `Compute a whole-sheet functional partition plan (issue #149) from the LIVE
-geometry: usable sheet (minus margin) carved into columns/rows at the natural gaps
-between module clusters, each partition lifted clear of the title-block keep-out and
-given a big-font title band. Reads modules from ` + "`sch zones`" + ` claims / virtual groups.
+geometry: **一个虚拟组 / zone 认领 = 一个分区**(与 ` + "`zone-arrange`" + ` phase B 的
+落位框一一对应,同一把尺),框由该区成员的实测体积撑出来,再让开图签 keep-out
+与纸边、留出区名带。Reads modules from ` + "`sch zones`" + ` claims / virtual groups.
 
 **外框是一个纯函数**:frame = f(成员 L1 虚拟组全图元并集, 区名带, 说明带) ——
 ` + "`zone-arrange`" + ` phase A 的收紧用的是同一个函数本体、同一份带高(带高由已登记
@@ -978,7 +936,7 @@ Draw it with ` + "`sch zone-draw --mode partition`" + `.`,
 				return err
 			}
 			plan, _, err := computePartitionPlan(pinnedCfg, win, docUUID,
-				partitionOptsFrom(margin, gutter, titleBand, maxCols, maxRows))
+				partitionOptsFrom(margin, gutter, titleBand))
 			if err != nil {
 				return err
 			}
@@ -998,14 +956,12 @@ Draw it with ` + "`sch zone-draw --mode partition`" + `.`,
 	// Defaults from defaultPartitionOpts — single source, no flag/planner drift.
 	def := defaultPartitionOpts()
 	c.Flags().Float64Var(&margin, "margin", def.Margin, "page margin inset from the sheet edge")
-	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "gutter between adjacent partitions")
+	c.Flags().Float64Var(&gutter, "gutter", def.Gutter, "为说明扩边时与邻框/障碍保持的间距(容量诊断同用);**分区怎么分与它无关**——一区一框")
 	c.Flags().Float64Var(&titleBand, "title-band", def.TitleBand, "height of each partition's title band")
-	c.Flags().IntVar(&maxCols, "max-cols", 3, "maximum partition columns")
-	c.Flags().IntVar(&maxRows, "max-rows", 2, "maximum partition rows")
 	return c
 }
 
-func partitionOptsFrom(margin, gutter, titleBand float64, maxCols, maxRows int) partitionOpts {
+func partitionOptsFrom(margin, gutter, titleBand float64) partitionOpts {
 	o := defaultPartitionOpts()
 	if margin > 0 {
 		o.Margin = margin
@@ -1015,12 +971,6 @@ func partitionOptsFrom(margin, gutter, titleBand float64, maxCols, maxRows int) 
 	}
 	if titleBand > 0 {
 		o.TitleBand = titleBand
-	}
-	if maxCols > 0 {
-		o.MaxCols = maxCols
-	}
-	if maxRows > 0 {
-		o.MaxRows = maxRows
 	}
 	return o
 }
@@ -1343,8 +1293,40 @@ func renderPartitionPlan(plan partitionPlan, w io.Writer) {
 		fmt.Fprintf(w, "✗ %s\n", adv)
 		return
 	}
-	fmt.Fprintln(w, "✗ plan has violations — 容量是够的,是摆放/间距问题:收紧 --gutter、"+
-		"用 `sch group-move` 挪开互相顶住的组,或把模块拆到下一页")
+	// 归组是「一区一框」之后,--gutter 不再影响分区框怎么分,所以这里不能再建议
+	// 「收紧 --gutter」——重叠 = 两个区的体积真的互相压,只有挪件/重排/拆页三条路。
+	fmt.Fprintln(w, "✗ plan has violations — 容量是够的,是摆放/间距问题:"+
+		"`sch zone-arrange --apply` 整页重排、用 `sch group-move` 挪开互相顶住的组,"+
+		"或把模块拆到下一页")
+}
+
+// partitionDrawGate 是「这份计划能不能画」的**唯一判据**,两条画框路径
+// (runPartitionDraw 与 runPartitionDrawResilient)共用它。
+//
+// 拆出来的理由与本文件其余的「一把尺」同一条:两处各写一遍 `if !clean` 时,
+// 韧性路径的报文丢了 ModuleOutsideDetail 与降级说明,同一次拒绝在两条路径上
+// 说的话不一样(判据必须给能执行的下一步)。**判据本身一个字都不许放宽**:
+// clean() 五项全 0 才画。
+func partitionDrawGate(plan partitionPlan) error {
+	if plan.Validation.clean() {
+		return nil
+	}
+	why := ""
+	if len(plan.Validation.ModuleOutsideDetail) > 0 {
+		why = "\n  " + strings.Join(plan.Validation.ModuleOutsideDetail, "\n  ")
+	}
+	if plan.LabelScope.Degraded {
+		why += "\n  ⚠ 标签范围口径降级:" + labelScopeReason(plan.LabelScope)
+	}
+	if plan.Validation.PartitionOverlap > 0 {
+		// 分区框重叠 = 两个区的 L1 体积本身交叠(框由体积撑出来,不裁剪)。
+		// 修法是挪件,不是把框切短、更不是把判据调松。
+		why += fmt.Sprintf("\n  ⚠ %d 对分区框重叠:两个区的成员体积本身就交叠 —— "+
+			"`sch zone-arrange --apply` 重排(它按 gutter 隔开各区),或 `sch group-move` 手工挪开",
+			plan.Validation.PartitionOverlap)
+	}
+	return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations%s",
+		plan.Validation, why)
 }
 
 // runPartitionDraw draws (or clears) the partition frames, persisted per-page.
@@ -1389,16 +1371,8 @@ func runPartitionDraw(cfg *appConfig, window string, opts partitionOpts, fontSiz
 	if err != nil {
 		return err
 	}
-	if !plan.Validation.clean() {
-		why := ""
-		if len(plan.Validation.ModuleOutsideDetail) > 0 {
-			why = "\n  " + strings.Join(plan.Validation.ModuleOutsideDetail, "\n  ")
-		}
-		if plan.LabelScope.Degraded {
-			why += "\n  ⚠ 标签范围口径降级:" + labelScopeReason(plan.LabelScope)
-		}
-		return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations%s",
-			plan.Validation, why)
+	if err := partitionDrawGate(plan); err != nil {
+		return err
 	}
 	if fontSize <= 0 {
 		fontSize = defaultPartitionZoneFontSize

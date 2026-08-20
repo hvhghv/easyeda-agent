@@ -407,8 +407,10 @@ func runPartitionDrawResilient(cfg *appConfig, window string, opts partitionOpts
 	if err != nil {
 		return err
 	}
-	if !plan.Validation.clean() {
-		return fmt.Errorf("partition plan has violations %+v — refusing to draw overlapping/out-of-sheet annotations", plan.Validation)
+	// 判据与 runPartitionDraw 共用同一个函数本体(partitionDrawGate)——
+	// 此前两处各写一遍,韧性路径的报文丢了 detail 与降级说明。
+	if err := partitionDrawGate(plan); err != nil {
+		return err
 	}
 	if fontSize <= 0 {
 		fontSize = defaultPartitionZoneFontSize
