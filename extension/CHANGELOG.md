@@ -6,6 +6,67 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-21
+
+本版把 `1.0.3`–`1.0.5` 三个未发布的中间版本一并放出。**minor 而非 patch,因为下面
+第一条是行为破坏性变更** —— 升级后一批此前「能跑」的 PCB 读会开始报错。
+
+### ⚠️ BREAKING — 铁律 5 从劝告升成机械门:PCB 脏读现在被**拒绝**
+
+PCB mutation(rip-up / route / delete / via / track / pour)之后、`easyeda doc reload`
+之前的 PCB 读(list / DRC / report / nets …),会被 daemon 在 `/action` 派发层**拒绝**,
+错误码 `STALE_READ`。此前它只是一行非阻塞的 stderr 警告。
+
+**为什么升门(有实测,不是拍脑袋)**:把 49 天 / 171554 条审计记录里每条铁律的**遵守率**
+和它在 SKILL.md 里占的**篇幅**对齐,两者完全反相关 —— 有 daemon 拦截的阶段门(铁律 14)
+7 次跳步全被拦、0 漏网;而只发警告的铁律 5 被违反 **1780 次(18.1%)**。文字铁律的
+天花板约 82%,机械门是 100%。
+
+**拒绝消息自带能直接执行的下一步**,不只指路:
+
+```
+pcb.components.list —— PCB 自 pcb.line.create 后未 reload,读到的是旧引擎状态。
+下一步: easyeda doc reload --project ceshi
+(绕过: --force-reason "<理由>",入审计)
+```
+
+- **升级后要注意的**:布完线直接跑 `easyeda workflow advance` / `pcb check` /
+  `layout-score` 会撞 `STALE_READ`。**这不是命令坏了** —— 在旧引擎状态上判 check 门
+  本来就是假绿灯。先 `easyeda doc reload` 再跑。
+- **豁免**:`pcb.save` / `pcb.pour.rebuild` / 任何 `--dry-run` 预览 / 只改视图的
+  `view-side`·`layers set-current`·`layers visibility` / `pcb.snapshot`(它仍只带
+  advisory —— 截图白帧的修法是**切前台**而不是 reload,拒它等于递一条修不好问题的命令)。
+- **绕过**:`--force-reason "<理由>"`,审计里记成 `daemon.stale_read.force` 伪动作行。
+- 内部的「写后回读验证」类命令(`pcb refine` / `sync-designators` / `import-changes` /
+  `power-planes` / `power-pour` / `route-critical` / `autoroute` / `pcb clear` /
+  playbook `verify:` 块)已逐条加上**窄到一次调用**的放行位,不受影响;而 `refine`
+  下一轮开头的规划读等**仍然被拦** —— 那正是这道门要防的。
+
+### Changed — `STAGE_BLOCKED` 的拒绝消息也带上补门命令
+
+此前只说「see `easyeda workflow status`」,现在直接给出该跑哪条:
+`pcb stage confirm-tier` / `confirm-outline` / `pcb layout-lint --gate` /
+`workflow advance`,按缺的是哪道门决定。
+
+### Fixed — `copperLayerCount` 读不到时不再静默按 2 层降级
+
+板子若在命令开跑前就脏,一块 4 层板会被当成 2 层,于是走 `power-pour` 而不是
+`power-planes`,两条电源轨挤在同一层 —— 正是内电层要解决的那个冲突。现在会把降级
+明确说出来。
+
+### Changed — 连接器端口钉死 60832 + 指数退避
+
+见下方 `[1.0.5]` 条目全文。摘要:daemon 重启后的重连从「十几秒」降到 **~2-3s**;
+顺带修掉「`SLOW_RETRY_DELAY_MS = 10s` 因为看门狗每 3s 抢先调用而从未真正生效」。
+
+### Added — skill 发布链路
+
+- 适配 **Agent Skills 官方规范**:补齐 `license` / `compatibility` / `metadata`
+  三个字段,`skills-ref validate` 通过;版本号随 `make release` 自动同步。
+- **skillhub.cn 走 CI 自动发布**(订正旧结论「skillhub 无 CLI」——现在有真 CLI):
+  `release: published` → `.github/workflows/publish-skill.yml`。slug 为
+  `eda-agent-connector`,与立创插件市场的连接器条目同名。
+
 ## [1.0.5] — 2026-08-20
 
 ### Changed — 端口钉死 60832 + 指数退避重连(不再横扫 10 个口)
