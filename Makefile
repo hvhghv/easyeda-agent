@@ -249,8 +249,12 @@ endif
 # 幂等性:同 slug 同 version 重复发会被服务端拒(和 ClawHub 一样版本不可覆盖),
 #   补发请升版本号。发布后进 pending_review 审核队列,不是立刻可见。
 SKILLHUB_HOST ?= https://api.skillhub.cn
-SKILLHUB_SLUG ?= easyeda-agent
-SKILLHUB_DISPLAY_NAME ?= EasyEDA Agent
+# slug 与立创插件市场的连接器条目同名(jlc-ext 的 easyeda-agent-connector,displayName
+# "EDA Agent Connector")——品牌统一。**slug 一旦发布就锁死,改不了**,覆盖用
+# `make publish-skill-hub SKILLHUB_SLUG=…`。原 `easyeda-agent` 在 skillhub 上是
+# 发不进去又查不到的孤儿记录(publish 报 already exists / verify 报 404),故换名。
+SKILLHUB_SLUG ?= eda-agent-connector
+SKILLHUB_DISPLAY_NAME ?= EDA Agent Connector
 # SKILLHUB_DRY_RUN=1 只做本地预检(不需要 token、不发 HTTP),用来验证打包/元数据。
 SKILLHUB_DRY_RUN ?=
 # SKILLHUB_BIN=/path/to/skillhub 显式指定用哪个 CLI(仍然要过身份校验,不是后门)。
