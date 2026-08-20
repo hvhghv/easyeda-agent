@@ -88,6 +88,30 @@ func zaaTestGroups(comps []layoutComp, wires []schGroupWire) ([]zfGroup, map[str
 	return out, byDesig
 }
 
+// zaaTestRetainScene 是**必然走 retain 路径**的那一类区:一条横放的 10 脚排针
+// (本体 300×30),标签物理上就在上下两侧 —— 挂侧判定怎么改都是 up/down,
+// 不存在误判,可收敛的垂直梯次依然把它从 348×311(本页有落点)顶成
+// 369×781(连可用域都装不下),门必须回退(见 zfFixtureWideHeader)。
+//
+// 这里**不能**再用 zaaTestESP32Scene:挂侧判定改成边界语义之后,那一区的
+// 标记全判成 left/right,收敛结果 319×558 排得下 —— retain 路径根本不触发,
+// 拿它当 fixture 只会测到「收敛」那条分支(2026-08-20 挂侧修复后的订正)。
+func zaaTestRetainScene() ([]layoutComp, []schGroupWire) {
+	return zaaTestScene("J1", layoutBBox{MinX: 200, MinY: 400, MaxX: 500, MaxY: 430}, 350, 415,
+		[]zaaTestPin{
+			{"1", "D0", "netport", "down", 220, 400, 20},
+			{"2", "D1", "netport", "down", 260, 400, 20},
+			{"3", "D2", "netport", "down", 300, 400, 20},
+			{"4", "D3", "netport", "down", 340, 400, 20},
+			{"5", "D4", "netport", "down", 380, 400, 20},
+			{"6", "D5", "netport", "up", 240, 430, 20},
+			{"7", "D6", "netport", "up", 280, 430, 20},
+			{"8", "D7", "netport", "up", 320, 430, 20},
+			{"9", "D8", "netport", "up", 360, 430, 20},
+			{"10", "D9", "netport", "up", 400, 430, 20},
+		})
+}
+
 // zaaTestESP32Scene 是真机那一区的场景形态:一件 41 脚大符号(本体 71×421),
 // 8 支标签横向铺开(桩长 39~84,与真机同量级)。
 func zaaTestESP32Scene() ([]layoutComp, []schGroupWire) {
@@ -123,12 +147,12 @@ func zaaTestOut(sheet layoutBBox, zone string, plan zfZonePlan, rect layoutBBox)
 
 func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 	opts := defaultPartitionOpts()
-	comps, wires := zaaTestESP32Scene()
+	comps, wires := zaaTestRetainScene()
 	groups, byDesig := zaaTestGroups(comps, wires)
 	sheet, keepout, dom := zfGateA4Domain(opts)
 	_ = keepout
 
-	plan, err := planZoneFollowGated("esp32s3_wroom1_module", groups, opts, dom)
+	plan, err := planZoneFollowGated("J1_HEADER", groups, opts, dom)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +161,7 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 	}
 
 	rect := layoutBBox{MinX: 40, MinY: 60, MaxX: 40 + plan.FrameW, MaxY: 60 + plan.FrameH}
-	out := zaaTestOut(sheet, "esp32s3_wroom1_module", plan, rect)
+	out := zaaTestOut(sheet, "J1_HEADER", plan, rect)
 	execs, _, err := zaaBuildExec(out, &zaScene{comps: comps, wires: wires}, opts)
 	if err != nil {
 		t.Fatalf("retain 计划必须能构造执行指令(断言①含刚体门):%v", err)
@@ -159,7 +183,7 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 	if me.RetainBox == nil {
 		t.Fatal("retain 成员必须带 RetainBox(落地复判要拿它跟真机量出来的 box 比)")
 	}
-	measured := byDesig["U2"].Box
+	measured := byDesig["J1"].Box
 	wantW, wantH := measured.MaxX-measured.MinX, measured.MaxY-measured.MinY
 	gotW, gotH := me.RetainBox.MaxX-me.RetainBox.MinX, me.RetainBox.MaxY-me.RetainBox.MinY
 	if math.Abs(gotW-wantW) > 1e-6 || math.Abs(gotH-wantH) > 1e-6 {
@@ -179,7 +203,7 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 
 	// ── 负对照:同一份场景走**收敛**路径(不 retain),刚体断言必须失败 ──────
 	// 没有这一条,上面的断言只是在自证(收敛本来就要改几何,改不动才是缺陷)。
-	conv, err := planZoneFollow("esp32s3_wroom1_module", groups, opts)
+	conv, err := planZoneFollow("J1_HEADER", groups, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +211,7 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 		t.Fatal("负对照失效:planZoneFollow 不该标 retained")
 	}
 	convRect := layoutBBox{MinX: 40, MinY: 60, MaxX: 40 + conv.FrameW, MaxY: 60 + conv.FrameH}
-	convOut := zaaTestOut(sheet, "esp32s3_wroom1_module", conv, convRect)
+	convOut := zaaTestOut(sheet, "J1_HEADER", conv, convRect)
 	convExecs, _, err := zaaBuildExec(convOut, &zaScene{comps: comps, wires: wires}, opts)
 	if err != nil {
 		t.Fatalf("收敛计划该能构造执行指令:%v", err)
@@ -206,29 +230,29 @@ func TestZaaRetain_ExecutionIsARigidTranslation(t *testing.T) {
 // 而不是先改画布再靠事后复判说「哎呀胖了」。
 func TestZaaBuildExec_RetainMismatchFailsClosed(t *testing.T) {
 	opts := defaultPartitionOpts()
-	comps, wires := zaaTestESP32Scene()
+	comps, wires := zaaTestRetainScene()
 	groups, _ := zaaTestGroups(comps, wires)
 	sheet, _, dom := zfGateA4Domain(opts)
-	plan, err := planZoneFollowGated("esp32s3_wroom1_module", groups, opts, dom)
+	plan, err := planZoneFollowGated("J1_HEADER", groups, opts, dom)
 	if err != nil || !plan.Retained {
 		t.Fatalf("fixture 失效:%v retained=%v", err, plan.Retained)
 	}
-	// 把原形计划里 IO0 那支端子的桩长改短(模拟「合成端子退回默认短桩」这类
+	// 把原形计划里 D3 那支端子的桩长改长(模拟「合成端子退回默认桩长」这类
 	// 静默改几何的缺陷)——门必须拦住整页。
 	touched := false
 	for gi := range plan.Groups {
 		for ti := range plan.Groups[gi].Terms {
-			if plan.Groups[gi].Terms[ti].Net == "IO0" {
-				plan.Groups[gi].Terms[ti].Offset = zfStub
+			if plan.Groups[gi].Terms[ti].Net == "D3" {
+				plan.Groups[gi].Terms[ti].Offset = zfStub + 25
 				touched = true
 			}
 		}
 	}
 	if !touched {
-		t.Fatal("fixture 失效:没找到 IO0 端子")
+		t.Fatal("fixture 失效:没找到 D3 端子")
 	}
 	rect := layoutBBox{MinX: 40, MinY: 60, MaxX: 40 + plan.FrameW, MaxY: 60 + plan.FrameH}
-	out := zaaTestOut(sheet, "esp32s3_wroom1_module", plan, rect)
+	out := zaaTestOut(sheet, "J1_HEADER", plan, rect)
 	_, _, err = zaaBuildExec(out, &zaScene{comps: comps, wires: wires}, opts)
 	if err == nil {
 		t.Fatal("retain 计划被改了桩长却放行 —— 「原形保留」成了空话")

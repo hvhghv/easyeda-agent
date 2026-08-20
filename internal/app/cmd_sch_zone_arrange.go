@@ -84,10 +84,54 @@ func schSheetOrA4(comps []layoutComp) (*layoutBBox, bool) {
 	return &layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}, true
 }
 
+// zfSideOf 判一支端子挂在器件本体的**哪一条边** —— phase A 收敛的入口判定。
+//
+// ── 口径:边界语义,不是「相对中心的位移分量谁大」(2026-08-20 真机定案)────────
+//
+// 首版判据是 `|dx| ≥ |dy|` —— marker 中心相对**本体中心**的主轴。它隐含假设
+// 「本体近似方形」:只有方形本体上,「离中心的哪个分量大」才等价于「挂在哪条边」。
+// 高瘦符号上这个假设系统性失效:ESP32-S3-WROOM-1 本体 71×421(41 脚全在左右两侧),
+// marker 横向触达只有百来个单位,于是**贴在上下两端行引脚旁的 marker,|dy| 反而
+// 大于 |dx|**,被判成 up/down —— 它们物理上就在左右两侧。判成 up/down 就进
+// zfGenMultiPin 的垂直梯次(桩长逐支递增),真机 MCU_IO 那一区的框因此
+// 449×737 → 244×863:宽收了 205,高涨了 126,直接越过可用高 765,phase B 当场
+// 四条边全报「纸面放不下」。
+//
+// 边界语义问的是另一个问题:**marker 中心从本体 bbox 的哪条边探出去最多**。
+//
+//	outLeft = body.MinX − mcx   outRight = mcx − body.MaxX
+//	outDown = body.MinY − mcy   outUp    = mcy − body.MaxY
+//
+// 取四者的 argmax。这个式子天然把本体的长宽比算了进去(高瘦本体的上下两条边
+// 「远」,横向探出一点点就赢),而中心口径把长宽比丢了。marker 中心落在本体
+// bbox 之内时四个量全为负,argmax 退化成「离哪条边最近」—— 同一个式子,不需要
+// 特例分支。平局序 left < right < down < up(与首版一致:首版 `≥` 偏横向、
+// dx==0 取 left)。
+//
+// 判定与实测口径的配对:落地/回退侧的 zfMeasureCluster 用 tidyStubDirection
+// (pin → 标记锚的实测位移)定方向。两处判的是同一件事,必须给同一个答案 ——
+// TestZfSideOf_AgreesWithMeasuredStubDirection 把这条钉住。
+func zfSideOf(body, marker layoutBBox) string {
+	mcx, mcy := bboxCenter(marker)
+	best, bestOut := "left", body.MinX-mcx
+	for _, c := range []struct {
+		side string
+		out  float64
+	}{
+		{"right", mcx - body.MaxX},
+		{"down", body.MinY - mcy},
+		{"up", mcy - body.MaxY},
+	} {
+		if c.out > bestOut {
+			best, bestOut = c.side, c.out
+		}
+	}
+	return best
+}
+
 // zfGroupFromCluster 把一个 L1 虚拟组折成 phase A 的类型化输入。
-// 端子挂侧由 marker 中心相对器件本体中心的主轴判定(确定性,无打分)。
+// 端子挂侧由 zfSideOf(边界语义)判定 —— 确定性,无打分。
 func zfGroupFromCluster(c schCluster, pinCount int) zfGroup {
-	bcx, bcy := bboxCenter(c.Body)
 	g := zfGroup{
 		Designator: c.Designator,
 		BodyW:      c.Body.MaxX - c.Body.MinX,
@@ -104,21 +148,9 @@ func zfGroupFromCluster(c schCluster, pinCount int) zfGroup {
 		default:
 			continue // part / wire 不是端子
 		}
-		mcx, mcy := bboxCenter(m.BBox)
-		dx, dy := mcx-bcx, mcy-bcy
-		side := "left"
-		if absF(dx) >= absF(dy) {
-			if dx > 0 {
-				side = "right"
-			}
-		} else {
-			side = "down"
-			if dy > 0 {
-				side = "up"
-			}
-		}
 		g.Terms = append(g.Terms, zfTerm{Kind: kind, Net: m.Net,
-			W: m.BBox.MaxX - m.BBox.MinX, H: m.BBox.MaxY - m.BBox.MinY, Side: side})
+			W: m.BBox.MaxX - m.BBox.MinX, H: m.BBox.MaxY - m.BBox.MinY,
+			Side: zfSideOf(c.Body, m.BBox)})
 	}
 	return g
 }

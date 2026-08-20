@@ -684,13 +684,28 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 // 用在「本体已经很高、marker 天生横向」的大符号上就把高度顶爆。
 //
 // 门的口径必须是**可排布性**,不是面积/周长:这一例宽度实实在在收窄了 189,
-// 面积也小了,但高度越过域界 → 不可排。所以判据是
+// 面积也小了,但高度越过域界 → 不可排。判据是
 //
-//	原形可排(zfDomain.fits)∧ 收敛后不可排  →  回退原形
+//	收敛后的可排布档位 < 原形的档位  →  回退原形
 //
-// 「任一维度变大」不必单独写进条件:fits 对 (w,h) 单调 —— 两维都不变大就不可能
-// 从可排变不可排。回退**逐区独立**(planZoneFollowGated 每区各判各的),且必须
-// 在输出里可见(Mode 尾巴 + Retained/RetainWhy 字段),绝不静默。
+// ── 订正(2026-08-20 第二轮真机):档位必须是阶梯,不能是一个布尔 ──────────────
+//
+// 首版判据写成「原形 fits ∧ 收敛后 !fits」,漏掉了真机上真正发生的那一种变差。
+// 同一页同一区,第二轮实测 449×737 → 244×863:
+//
+//	原形 449×737   高 737 ≤ 可用高 765,但 449 > 图签左侧通道 396 → **不 fits**
+//	收敛 244×863   高 863 > 可用高 765                          → 也不 fits
+//
+// 首版门走到第二条分支(`原形本就排不下 → 收敛是唯一出路,不许拦`)当场放行,
+// 输出 retained=false —— 而这两个「都排不下」根本不是一回事:原形只是被图签挡住
+// (页面重排、拆页、挪图签都还有救),收敛后的框却连**可用域本身**都装不下,
+// 结构上没救。phase A 把一个 1 档的框做成了 0 档,门却看不见。
+//
+// 所以 fits 升格成 zfDomain.fitRank 的三档阶梯(2 有落点 / 1 只被图签挡 / 0 连
+// 可用域都装不下),门比档位。「任一维度变大」仍不必单独写进条件:三档各自对
+// (w,h) 单调 —— 两维都不变大就不可能掉档。回退**逐区独立**
+// (planZoneFollowGated 每区各判各的),且必须在输出里可见(Mode 尾巴 +
+// Retained/RetainWhy 字段),绝不静默。
 
 // zfDomain 是 phase B 的可行域,与 newZaSearch 同一把尺:页边距之内的可用矩形
 // (锚按 5 格律取整)+ 图签安全带(inflatedTitleKeepout)+ gutter。
@@ -730,7 +745,7 @@ func (d zfDomain) strips() (left, right, below, above float64) {
 // 「任一维度变大」的显式判断。
 func (d zfDomain) fits(w, h float64) bool {
 	const eps = 1e-9
-	if w > (d.R-d.L)+eps || h > (d.T-d.B)+eps {
+	if !d.fitsBare(w, h) {
 		return false
 	}
 	if d.Keep == nil {
@@ -740,19 +755,61 @@ func (d zfDomain) fits(w, h float64) bool {
 	return w <= left+eps || w <= right+eps || h <= below+eps || h <= above+eps
 }
 
+// fitsBare 是**忽略图签**的可行域判据:框放得进页边距之内的那个矩形。
+// 它比 fits 弱一档,但弱得有意义 —— 越过它就意味着「本页无论怎么挪、无论
+// 图签在不在,都装不下」,而只是 fits 不成立还只是「被图签挡住了」。
+func (d zfDomain) fitsBare(w, h float64) bool {
+	const eps = 1e-9
+	return w <= (d.R-d.L)+eps && h <= (d.T-d.B)+eps
+}
+
+// zfFitRank 是可排布性的**三档阶梯**(2 最好):
+//
+//	2  fits      本页存在落点(图签也让开了)
+//	1  fitsBare  装得进可用域,但被图签挡住 —— 页面重排/拆页还有救
+//	0  连可用域都装不下 —— 结构上没救
+//
+// 门比的是这个档位,不是 fits 这一个布尔。首版只有 `fits` 一档,于是
+// 「原形 1 档 → 收敛 0 档」这种**实打实的变差**从判据里漏了出去:
+// 真机 MCU_IO 的 esp32s3_wroom1_module,原形 449×737(高 737 ≤ 765,只是
+// 449 > 图签左侧通道 396 → 1 档)、收敛后 244×863(高 863 > 可用高 765 → 0 档)。
+// 首版门在第二条分支上直接放行(`原形本就排不下 → 收敛是唯一出路`),retained=false,
+// 结果 phase B 拿着一个**更没救**的框去撞墙。阶梯化之后这一例回退。
+//
+// 三档都对 (w,h) 单调(fits / fitsBare 各自单调),所以「两维都没变大 → 不可能
+// 掉档」这条短路仍然成立。
+func (d zfDomain) fitRank(w, h float64) int {
+	switch {
+	case d.fits(w, h):
+		return 2
+	case d.fitsBare(w, h):
+		return 1
+	}
+	return 0
+}
+
+// zfRankWhy 把档位折成一句人话(归因用)。
+func zfRankWhy(r int) string {
+	switch r {
+	case 2:
+		return "本页有落点"
+	case 1:
+		return "装得进可用域但被图签挡住"
+	}
+	return "连可用域都装不下"
+}
+
 // zfGateRegression 是「不得变差」门的判据本体(纯函数,便于单测与负对照)。
 // 返回回退理由(空 = 采纳收敛)。
 func zfGateRegression(rawW, rawH, convW, convH float64, d zfDomain) string {
 	const eps = 1e-9
 	grewW, grewH := convW > rawW+eps, convH > rawH+eps
 	if !grewW && !grewH {
-		return "" // 两维都没变大 → fits 单调,不可能变差
+		return "" // 两维都没变大 → 三档各自单调,不可能掉档
 	}
-	if !d.fits(rawW, rawH) {
-		return "" // 原形本来就排不下 —— 收敛是唯一出路,不许拦
-	}
-	if d.fits(convW, convH) {
-		return "" // 收敛后仍有落点 → 采纳(负对照:宽涨一点但高大降,必须仍收敛)
+	rawRank, convRank := d.fitRank(rawW, rawH), d.fitRank(convW, convH)
+	if convRank >= rawRank {
+		return "" // 没掉档 → 采纳收敛(负对照:宽涨一点但高大降,必须仍收敛)
 	}
 	var grew []string
 	if grewW {
@@ -762,8 +819,9 @@ func zfGateRegression(rawW, rawH, convW, convH float64, d zfDomain) string {
 		grew = append(grew, fmt.Sprintf("高 %.0f→%.0f", rawH, convH))
 	}
 	left, _, _, above := d.strips()
-	return fmt.Sprintf("收敛回退:%s 后本页无落点(可用 %.0f×%.0f;图签上方高 %.0f、左侧宽 %.0f)—— 保留原形 %.0f×%.0f",
-		joinCN(grew), d.R-d.L, d.T-d.B, above, left, rawW, rawH)
+	return fmt.Sprintf("收敛回退:%s 后从「%s」掉到「%s」(可用 %.0f×%.0f;图签上方高 %.0f、左侧宽 %.0f)—— 保留原形 %.0f×%.0f",
+		joinCN(grew), zfRankWhy(rawRank), zfRankWhy(convRank),
+		d.R-d.L, d.T-d.B, above, left, rawW, rawH)
 }
 
 // joinCN 用顿号连接归因短语(确定性:输入已定序)。
