@@ -12,8 +12,10 @@ package app
 //	   有 rail 脚的件 GND 端朝下、电源端朝上;双信号件原左脚→上(+90° 旋转约定)。
 //	R4 标签:旗顺引脚朝外(上端旗朝上、下端旗朝下);netport 恒水平(铁则4,
 //	   竖放会折叠长条标),无源件的 port 统一朝右(阅读方向),多脚件保持实测侧。
-//	R5 硬不变式:同件端子几何不得互相重叠(「同件两旗同向必自短路」的可执行形式,
-//	   真机踩过的自短路防线)—— 规划器必须**单独校验**,不能假设 R3 蕴含它。
+//	R5 硬不变式:同件端子几何不得互相重叠 + 同件两旗的桩线不得共线(「同件双脚
+//	   同向必自短路」的可执行形式,真机踩过的自短路防线;**同向本身不违规,共线
+//	   才违规** —— 见 zfCheckPassiveOpposed)。规划器必须**单独校验**,不能假设
+//	   R3 蕴含它。
 //
 // 规划是纯函数:输入 L1 组的类型化描述(本体尺寸 + 端子实测宽高/网名/挂侧),
 // 输出区内局部坐标的落位(本体 + 桩线 + 端子)与收敛后的框尺寸。**重生短桩**
@@ -297,16 +299,20 @@ func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 	}
 	if !rotated && zfAllHavePins(g.Terms) {
 		body := layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}
-		for _, t := range g.Terms {
+		// 同侧让位走**与多脚件同一个函数**(zfPlaceMeasuredTerms):两脚同在本体
+		// 一条边是合法形态(J2 = KF301-5.0-2P,两脚都在左缘、y 差 10),而引脚节距
+		// 10 < 旗的网名带高 12 —— 不让位的话两支标签必然压在一起,自己的 R5
+		// (zfCheckTermOverlap)当场把这张合法拓扑判死。首版这条支路无条件用
+		// zfStub,是因为它假定同件两支端子永远在异侧。
+		zfPlaceMeasuredTerms(&out, g.Terms, func(t zfTerm) string {
 			dir := zfPointSideOf(body, t.PinX, t.PinY)
 			// R4:netport 恒水平(竖放会折叠长条标)。引脚朝外已经是左右就照它,
 			// 否则按阅读方向朝右 —— 与首版口径一致。
 			if t.Kind == "netport" && dir != "left" && dir != "right" {
 				dir = "right"
 			}
-			zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
-				PinX: t.PinX, PinY: t.PinY, Offset: zfStub})
-		}
+			return dir
+		})
 		if err := zfCheckPassiveOpposed(out); err != nil {
 			return out, err
 		}
@@ -360,11 +366,44 @@ func zfAllHavePins(ts []zfTerm) bool {
 // 口径严格按字面:**两支都是旗(netflag)**的两脚无源件。为什么不扩到 netport ——
 // R4 让无源件的 port 一律朝右(阅读方向),同件两支 port 同向是**既有的正常形态**
 // (真机 R5:LED1_N2 与 LED_CTRL 都朝右,靠两只脚 y 不同错开),把它们也判红
-// 就是拿一条不存在的规则去毁掉正常版面。旗不一样:旗是电源/地,同向的两支旗
-// 桩线共线、当场合并成一根,GND 与 +3V3 并成一张网。
+// 就是拿一条不存在的规则去毁掉正常版面。旗的后果更重(旗是电源/地,合并一次就是
+// GND 并进 +3V3),但**判据是同一条**:两支旗只有在桩线共线时才会合并 —— 那句
+// 「两只脚 y 不同错开」对旗一字不改地成立(见下方「判据收窄」)。
 //
-// 判定与生成分离:生成侧按引脚朝外派方向,理应天然异向;真出现同向就是输入
-// 几何异常(两脚从本体同一条边探出),此时 fail-closed 好过画一张会自短路的图。
+// 判定与生成分离:生成侧按引脚朝外派方向,理应天然异向;真出现共线同向就是输入
+// 几何异常,此时 fail-closed 好过画一张会自短路的图。
+//
+// ── 判据收窄:同向 ≠ 短路,**共线**才是短路(2026-08-20 真机回归定案)──────────
+//
+// 首版拿「方向相等」当违规,把一整类物理上只能同向的合法器件挡死了。真机 ceshi /
+// 页 POWER:J2 = conn.screw_terminal_2p(KF301-5.0-2P),本体 bbox
+// x∈[59.5,80.5] y∈[664.5,695.5],两只脚**都在 x=50**(本体左缘外侧)、y 分别是
+// 685 / 675 —— 它们只能都朝 left 出桩,「异向」在这个符号上物理不可能。而两根朝
+// left 的桩线一根在 y=685、一根在 y=675,**平行不共线,永远不会合并**;这个端子
+// 在收窄之前的真机上一直是好的(`sch bridge-check` 报 0 real short、`sch nets` 里
+// +5V 与 GND 各自独立),被判红纯属本判据自己造的回归。
+//
+// 真正的短路条件是**两根桩线共线**(共线 → 相接 → 平台自动合并成一根 → 两张网并
+// 成一张;「导线自动合并」是本仓反复踩过的平台行为)。桩线的几何由 endpointFor
+// 锁死:桩只能从 pin 沿 direction 直出,**垂直于桩的那个坐标原样留在 pin 上**。
+// 于是共线的充要条件就是「同向 + 垂直坐标相等」:
+//
+//	left/right(水平桩) 桩线躺在 y = PinY 这条横线上 → 两脚 y 相等才共线;
+//	up/down(竖直桩)    桩线站在 x = PinX 这条竖线上 → 两脚 x 相等才共线。
+//
+// 两脚不同轴时同向是合法形态,必须放行。
+//
+// ── 容差:复用 schMarkerOverlapEps,不新立常数 ─────────────────────────────────
+//
+//	不用 acSchGrid(5)  5 网格吸附只作用在**沿桩方向**那一个坐标上(endpointFor:
+//	                   垂直方向 "stays exactly on the pin"),桩线所在的那条轴线
+//	                   就是引脚坐标本身,吸附根本不参与 —— 拿它当容差是张冠李戴,
+//	                   而且会把 y 差 5 的两只脚误判成共线。
+//	用 schMarkerOverlapEps(1.0) 它是本仓既有的**几何噪声地板**:`sch check` 的
+//	                   marker-overlap 与规划器让位的 zfMarkerCollides 都用它划
+//	                   「这点差算不算数」。引脚落在 5 网格上、最小节距 10,所以
+//	                   1.0 既吃得下实测浮点噪声,又离「真的是两条不同的线」有 10 倍
+//	                   余量(J2 的两脚差 10)。
 func zfCheckPassiveOpposed(g zfPlacedGroup) error {
 	if len(g.Terms) != 2 {
 		return nil
@@ -373,11 +412,29 @@ func zfCheckPassiveOpposed(g zfPlacedGroup) error {
 	if a.Kind != "netflag" || b.Kind != "netflag" {
 		return nil
 	}
-	if a.Dir == b.Dir {
-		return fmt.Errorf("%s: 两支旗同向(%s:%s / %s)—— 违反「同件两旗异向」硬不变式(自短路防线);两脚从本体同一条边探出,先核对符号引脚几何",
-			g.Designator, a.Net, a.Dir, b.Net)
+	if a.Dir != b.Dir {
+		return nil // 异向:两根桩背向而行,谈不上共线
 	}
-	return nil
+	// 垂直于桩的那个坐标 —— 它就是桩线所在的那条轴线。
+	axis, av, bv := "y", a.PinY, b.PinY
+	if a.Dir == "up" || a.Dir == "down" {
+		axis, av, bv = "x", a.PinX, b.PinX
+	}
+	// 报**差值**不报坐标:这里的 PinX/PinY 是区内局部坐标,直接印出去会跟
+	// `sch list` 的页面绝对坐标对不上,反而误导。差值两套坐标系里是同一个数。
+	d := absF(av - bv)
+	if d > schMarkerOverlapEps {
+		return nil // 同向但不同轴:两根桩平行,平台不会合并 —— 合法(J2/KF301 就是这一类)
+	}
+	return fmt.Errorf("%s: 两支旗同向**且桩线共线**(%s / %s 都朝 %s,两脚 %s 相差 %.1f ≤ 容差 %g)—— "+
+		"两根桩落在同一条直线上,平台会把相接的导线自动合并成一根,%s 与 %s 当场并成一张网(自短路);"+
+		"这是「同件两旗异向」硬不变式(自短路防线)拦下的唯一情形。**同向本身不违规**:"+
+		"两脚同在本体一条边、%s 相差 > %g 时两根桩平行、永不合并(KF301 这类两脚同侧端子正是如此)。"+
+		"下一步:用 `easyeda sch list --include-pins` 核对这两只引脚的实测坐标 —— "+
+		"若两脚确实同轴(符号引脚重合 / 同一只脚被折成了两支端子),把其中一支改派到本体另一条边"+
+		"(无源件转竖后由 R3「电源上 / GND 下」自然分开),或换用两脚不同轴的符号",
+		g.Designator, a.Net, b.Net, a.Dir, axis, d, schMarkerOverlapEps,
+		a.Net, b.Net, axis, schMarkerOverlapEps)
 }
 
 // zfAssignEnds 是 R3 本体:GND→下、电源→上、双信号原左→上。
@@ -500,20 +557,32 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 func zfGenMultiPinMeasured(g zfGroup, bw, bh float64) zfPlacedGroup {
 	out := zfPlacedGroup{Designator: g.Designator,
 		Body: layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}}
-	// 谁参与让位、跟谁比 —— **首版的参与规则逐字保留**,变的只是「按需触发」:
-	//
-	//	左/右侧  只有旗(netflag)让位,而且只跟同侧**已放的旗**比。首版明写着
-	//	         「port 恒水平、高 11 < 最小 pin pitch,保持短桩不参与梯次」——
-	//	         把 port 也拉进来会当场毁掉版面:真机 U3(SOP-16,pin pitch 10)
-	//	         左侧一支 GND 旗(含网名带 22 高)与下一只脚的 MCU_RX port 实压
-	//	         6 个单位,让 port 出让就得躲开 75 宽的相邻标签,区框从 353 撑到
-	//	         443,phase B 当场 blocked。那 6 个单位是 `sch check` 的账
-	//	         (marker-overlap WARN / `sch destagger` 的辖区),不是布局器的。
-	//	上/下侧  所有 kind 都参与、跟同侧已放的任何盒比(首版对上下侧就是无条件
-	//	         递增所有 kind —— 那一侧的标签是竖起来的,谁压谁都是真压)。
+	zfPlaceMeasuredTerms(&out, g.Terms, func(t zfTerm) string { return t.Side })
+	return out
+}
+
+// zfPlaceMeasuredTerms 是「**有实测引脚坐标**时逐支端子落位 + 同侧让位」的唯一
+// 实现 —— zfGenMultiPinMeasured 与 zfGenPassive 的实测支路共用它。两处各写一份
+// 就是又造一把尺:同一件事(同侧两支标签压上了怎么办)在多脚件上让位、在两脚件上
+// 不让位,两脚件就会被自己的 R5(zfCheckTermOverlap)判死 —— 真机 J2(KF301,
+// 两脚都在左缘、y 差 10)正是这样在 phase A 被挡住的。dirOf 是唯一的差异点
+// (多脚件保持实测侧;无源件的 netport 按 R4 强制水平)。
+//
+// 谁参与让位、跟谁比 —— **首版的参与规则逐字保留**,变的只是「按需触发」:
+//
+//	左/右侧  只有旗(netflag)让位,而且只跟同侧**已放的旗**比。首版明写着
+//	         「port 恒水平、高 11 < 最小 pin pitch,保持短桩不参与梯次」——
+//	         把 port 也拉进来会当场毁掉版面:真机 U3(SOP-16,pin pitch 10)
+//	         左侧一支 GND 旗(含网名带 22 高)与下一只脚的 MCU_RX port 实压
+//	         6 个单位,让 port 出让就得躲开 75 宽的相邻标签,区框从 353 撑到
+//	         443,phase B 当场 blocked。那 6 个单位是 `sch check` 的账
+//	         (marker-overlap WARN / `sch destagger` 的辖区),不是布局器的。
+//	上/下侧  所有 kind 都参与、跟同侧已放的任何盒比(首版对上下侧就是无条件
+//	         递增所有 kind —— 那一侧的标签是竖起来的,谁压谁都是真压)。
+func zfPlaceMeasuredTerms(out *zfPlacedGroup, terms []zfTerm, dirOf func(zfTerm) string) {
 	placedBySide := map[string][]layoutBBox{}
-	for _, t := range g.Terms {
-		dir := t.Side
+	for _, t := range terms {
+		dir := dirOf(t)
 		lateral := dir == "left" || dir == "right"
 		yields := !lateral || t.Kind == "netflag"
 		off := zfStub
@@ -532,13 +601,12 @@ func zfGenMultiPinMeasured(g zfGroup, bw, bh float64) zfPlacedGroup {
 				off += (marker.MaxY - marker.MinY) + zfFlagGap
 			}
 		}
-		zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
+		zfAppendTerm(out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
 			PinX: t.PinX, PinY: t.PinY, Offset: off})
-		if !lateral || t.Kind == "netflag" {
+		if yields {
 			placedBySide[dir] = append(placedBySide[dir], marker)
 		}
 	}
-	return out
 }
 
 // zfMarkerCollides 是「两支标签算不算撞上了」的判据 —— **与 `sch check` 的
