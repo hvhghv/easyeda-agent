@@ -369,6 +369,12 @@ print("  staged frontmatter + " + (", ".join(add) if add else "(already present,
 endef
 export SKILLHUB_INJECT_PY
 
+# staging 里删「无扩展名的文件」(那条 `! -name '*.*'`)——服务端按扩展名白名单收文件,
+# 无扩展名的一律 400。实测真发时报 `不允许的文件类型: LICENSE`。
+# **dry-run 抓不到这条**:它只做本地 metadata 校验+打包,不碰服务端的文件类型规则,
+# 所以别看 dry-run 绿了就以为能发 —— 这个坑只有真发才踩得到。
+# 删 LICENSE 不影响规范合规:frontmatter 的 `license: MIT` 是许可证**名**而非文件引用
+# (Agent Skills spec 两种都允许),repo 原件也照常带着 LICENSE,只是不进上传包。
 publish-skill-hub: ## publish skills/easyeda-agent to skillhub.cn  (VERSION=vX.Y.Z required)
 ifndef VERSION
 	$(error VERSION is required — usage: make publish-skill-hub VERSION=v1.0.3)
@@ -388,6 +394,7 @@ endif
 	cp -R $(CURDIR)/skills/easyeda-agent "$$STAGE/$(SKILLHUB_SLUG)"; \
 	find "$$STAGE/$(SKILLHUB_SLUG)" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true; \
 	find "$$STAGE/$(SKILLHUB_SLUG)" -name '*.pyc' -delete 2>/dev/null || true; \
+	find "$$STAGE/$(SKILLHUB_SLUG)" -type f ! -name '*.*' -delete 2>/dev/null || true; \
 	python3 -c "$$SKILLHUB_INJECT_PY" "$$STAGE/$(SKILLHUB_SLUG)/SKILL.md" "$(SKILLHUB_SLUG)" "$(SKILLHUB_DISPLAY_NAME)"; \
 	echo "  skillhub dry-run..."; \
 	$$SH publish "$$STAGE/$(SKILLHUB_SLUG)" --version $(VERSION:v%=%) --host $(SKILLHUB_HOST) --dry-run; \
