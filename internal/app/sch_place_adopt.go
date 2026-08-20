@@ -516,17 +516,17 @@ func schAdoptRead(cfg *appConfig, window string, known map[string]bool, probes [
 		verdict schAdoptVerdict
 		err     error
 	}
-	out, _ := settleRead(func() (readOut, bool) {
+	out, _, _ := settleRead(func() (readOut, bool, error) {
 		res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{})
 		if err != nil {
-			return readOut{err: fmt.Errorf("收编回读: %w", err)}, false
+			return readOut{err: fmt.Errorf("收编回读: %w", err)}, false, err
 		}
 		comps, perr := parseLayoutComps(res.Result)
 		if perr != nil {
-			return readOut{err: fmt.Errorf("收编回读: %w", perr)}, false
+			return readOut{err: fmt.Errorf("收编回读: %w", perr)}, false, perr
 		}
 		v := schAdoptOrphanPlacement(known, probes, schSeqEvidence{Base: base, Read: res.Seq}, comps, req)
-		return readOut{verdict: v}, len(v.Candidates) > 0 || v.Fresh
+		return readOut{verdict: v}, len(v.Candidates) > 0 || v.Fresh, nil
 	})
 	if out.err != nil {
 		return schAdoptVerdict{}, out.err

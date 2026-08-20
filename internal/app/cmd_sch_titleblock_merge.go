@@ -135,24 +135,30 @@ func warnIfSheetLost(cfg *appConfig, window string, stderr io.Writer) error {
 	// 走 settleRead:写图签会让平台重建图框,紧接着那一读常常拿不到 sheet 图元。
 	// 这条误报的代价特别大 —— 它会让人照提示去执行「整包回传写回 Border/Title
 	// Block」,而那才是唯一真能把图框写坏的操作:判据把好板子推向危险操作。
-	_, ok := settleRead(func() (bool, bool) {
+	_, ok, rerr := settleRead(func() (bool, bool, error) {
 		res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
 		if err != nil {
-			return false, false
+			return false, false, err
 		}
 		comps, perr := parseLayoutComps(res.Result)
 		if perr != nil {
-			return false, false
+			return false, false, perr
 		}
 		for _, c := range comps {
 			if c.ComponentType == "sheet" && c.BBox != nil {
-				return true, true
+				return true, true, nil
 			}
 		}
-		return false, false
+		return false, false, nil
 	})
 	if ok {
 		return nil
+	}
+	// 回读根本没跑成 ≠ 图框没了。把真因带出来,否则「读失败」会被渲染成
+	// 「图框被写坏了」,而那条提示指向的恰恰是唯一真能写坏图框的操作。
+	if rerr != nil {
+		return fmt.Errorf("写图签后无法回读本页图纸几何(%w)—— **未证实**图框是否还在,不要据此执行整包回传;"+
+			"先用 `easyeda sch sheet-geometry` 单独确认", rerr)
 	}
 	return fmt.Errorf("写图签后本页找不到图纸边框(sheet 图元的 bbox)—— 图框/明细表很可能被整包回传关掉了。" +
 		"修复:`easyeda sch titleblock --data '{\"Title Block\":{\"value\":1},\"Border\":{\"value\":1}}'`," +
@@ -188,14 +194,14 @@ func tbRequestedKeys(patch map[string]any) []string {
 func tbPatchLanded(cfg *appConfig, window string, patch map[string]any) (bool, []string) {
 	// 走 settleRead:写图签会让平台重建图签对象,首读常常还是旧值 —— 真机实测,
 	// 首次写入(值真的变了)复核不过,而幂等重写(平台不重建)一路通过,症状正好反着。
-	missing, ok := settleRead(func() ([]string, bool) {
+	missing, ok, _ := settleRead(func() ([]string, bool, error) {
 		res, err := requestAction(cfg, "schematic.titleblock.get", window, map[string]any{})
 		if err != nil {
-			return nil, false
+			return nil, false, err
 		}
 		full, _ := res.Result["titleBlockData"].(map[string]any)
 		if full == nil {
-			return nil, false
+			return nil, false, nil
 		}
 		var miss []string
 		for _, k := range tbRequestedKeys(patch) {
@@ -208,7 +214,7 @@ func tbPatchLanded(cfg *appConfig, window string, patch map[string]any) (bool, [
 				miss = append(miss, k)
 			}
 		}
-		return miss, len(miss) == 0
+		return miss, len(miss) == 0, nil
 	})
 	return ok, missing
 }

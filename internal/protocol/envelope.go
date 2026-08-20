@@ -58,10 +58,16 @@ type Response struct {
 	Artifacts []Artifact     `json:"artifacts,omitempty"`
 	Warnings  []string       `json:"warnings,omitempty"`
 	Error     *ErrorInfo     `json:"error,omitempty"`
-	// StaleRisk is a daemon-attached, non-blocking advisory set on PCB read
-	// actions (list/DRC/report …) that arrive after a PCB mutation but before a
-	// `doc reload`: the per-document engine state may serve stale data (SKILL
-	// iron rule 5). Purely additive — absent when there is no risk.
+	// StaleRisk is a daemon-attached advisory set on PCB read actions
+	// (list/DRC/report …) that arrive after a PCB mutation but before a `doc
+	// reload`: the per-document engine state may serve stale data (SKILL iron
+	// rule 5). Purely additive — absent when there is no risk.
+	//
+	// Since the rule-5 gate landed, such a read is normally REFUSED outright with
+	// error code STALE_READ (internal/daemon/stalereads.go) rather than answered
+	// with this advisory. What still carries it is the residue the gate lets
+	// through: the block-exempt reads (pcb.snapshot) and any read that bought its
+	// way past with an audited `forceReason`.
 	StaleRisk string `json:"staleRisk,omitempty"`
 	// ConcurrentWriter is a daemon-attached, non-blocking advisory set on a
 	// mutating action when a DIFFERENT client mutated the same window recently

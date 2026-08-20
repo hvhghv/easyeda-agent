@@ -280,12 +280,20 @@ func rollbackRefineMoves(cfg *appConfig, window string, attempted []refineMove, 
 		}
 	}
 
-	// 回读证实。PCB 侧读回前要注意 stale：mutation 后第一次读可能是旧值
-	// （铁律 5）。这里读的是刚写过的同一批 primitive，用 components.list 直读；
-	// 若出现大面积"未证实"，调用方应 doc reload 后重查而不是直接相信。
-	res, err := requestAction(cfg, "pcb.components.list", window, map[string]any{})
+	// 回读证实。这是**写后回读**的教科书形态:上面刚逐件发过 pcb.component.modify
+	// (回滚也是写),读的就是那同一批 primitive,判据是「读回来的坐标 == 写下去的
+	// 原位坐标」。铁律 5 的 STALE_READ 门此刻是关着的,所以必须带放行位
+	// (stale_read_optin.go)——**不带就是本函数最坏的失败形态**:回滚其实做完了,
+	// 回读被门拦下 → restored=0 + 一条 "verification read failed",报出来的是
+	// 「回滚没成功」,而真相是「没能验证」。判据把好状态报成坏状态,人会照着去手工
+	// 补一遍回滚,把件挪到第三个位置。
+	res, err := requestReadAfterWrite(cfg, "pcb.components.list", window, map[string]any{},
+		"pcb refine 精修环 · 回滚后回读证实器件已回原位")
 	if err != nil {
 		msg := fmt.Sprintf("rollback verification read failed: %v", err)
+		if isStaleRead(err) {
+			msg += " — " + staleReadNextStep("回滚的回读证实")
+		}
 		return 0, append(errs, msg)
 	}
 	byID := map[string]boardComp{}

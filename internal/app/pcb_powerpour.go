@@ -242,8 +242,15 @@ func runPowerPour(cfg *appConfig, window, gndLayersSpec, railsMode string, margi
 }
 
 // clearSameNetPours deletes every pour bound to `net` (best-effort; ignores errors).
+//
+// 写后回读放行(stale_read_optin.go):调用方按网逐条清理,**第一条轨的
+// pcb.pour.delete 就把 STALE_READ 门关上了** —— 第二条轨开头这一读必被拦,而本函数
+// 是 best-effort、吞错误的,被拦的后果是静默不清理、旧铺铜与新铺铜叠在一起。
+// 只要板上有 ≥2 条电源轨就必踩,所以这处放行不是保险起见,是必需。
+// 读的正是刚被 delete 改过的那张 pour 表,属于合法写后回读。
 func clearSameNetPours(cfg *appConfig, window, net string) {
-	lr, err := requestAction(cfg, "pcb.pour.list", window, nil)
+	lr, err := requestReadAfterWrite(cfg, "pcb.pour.list", window, nil,
+		"power-pour 写后回读:逐网清理旧铺铜时枚举剩余 pour")
 	if err != nil || lr == nil {
 		return
 	}

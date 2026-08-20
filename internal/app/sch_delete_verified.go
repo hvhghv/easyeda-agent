@@ -66,17 +66,17 @@ func settleAliveSet(ids []string, aliveSet func() (map[string]bool, error)) (map
 		alive map[string]bool
 		err   error
 	}
-	out, _ := settleRead(func() (readOut, bool) {
+	out, _, _ := settleRead(func() (readOut, bool, error) {
 		alive, err := aliveSet()
 		if err != nil {
-			return readOut{err: err}, false
+			return readOut{err: err}, false, err
 		}
 		for _, id := range ids {
 			if alive[id] {
-				return readOut{alive: alive}, false // 还有活着的 → 可能是没落定的快照
+				return readOut{alive: alive}, false, nil // 还有活着的 → 可能是没落定的快照
 			}
 		}
-		return readOut{alive: alive}, true
+		return readOut{alive: alive}, true, nil
 	})
 	if out.err != nil {
 		return nil, out.err

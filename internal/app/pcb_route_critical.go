@@ -334,10 +334,13 @@ and identifies without mutating.`,
 			out := map[string]any{"ok": true, "dryRun": dryRun}
 
 			// ── 1. power ───────────────────────────────────────────────────
+			// powerWrote 记「第 1 步真的往板上写了铜吗」—— 第 2 步那批读要不要带
+			// 写后回读放行位,完全由它决定(见下面 rcAfterPower 的注释)。
+			powerWrote := false
 			if skipPower {
 				out["power"] = "skipped (--skip-power)"
 			} else {
-				copper := copperLayerCount(cfg, *window)
+				copper := copperLayerCount(cfg, *window, stderr)
 				if copper >= 4 {
 					out["power"] = "power-planes (4-layer)"
 					if err := runPowerPlanes(cfg, *window, 15, 16, true, dryRun, stderr, stderr); err != nil {
@@ -349,6 +352,27 @@ and identifies without mutating.`,
 						return fmt.Errorf("power step (power-pour): %w", err)
 					}
 				}
+				powerWrote = !dryRun
+			}
+
+			// rcAfterPower 是第 2 步各处读的**条件**放行理由(stale_read_optin.go)。
+			//
+			// 为什么是条件的:第 1 步的两条配方都以 pcb.pour.rebuild 收尾,而
+			// rebuild 会**清掉** STALE_READ 门(daemon/stalereads.go pcbStaleClears)
+			// —— 所以顺风路径上第 2 步本来就读得到。但 rebuild 只是 best-effort:
+			// power-planes 里它失败只打一行警告,power-pour 里 created==0 干脆不调用。
+			// 那两条岔路上门是关着的,而第 2 步是**整块**被拦(components.list 一失败
+			// 就 return err),整条命令死在自己刚写的铜上。
+			//
+			// 为什么不无条件放行:--skip-power / --dry-run 时第 1 步一个字节都没写,
+			// 此刻若还带着放行位,读到的就不是「本命令刚写下的东西」,而是把一块**开跑
+			// 前就脏**的板子的旧状态放进来当规划输入 —— 那正是铁律 5 要防的。
+			// 空理由 = staleReadOptIn 原样返回 cfg = 不放行。
+			rcAfterPower := func(what string) string {
+				if !powerWrote {
+					return ""
+				}
+				return "route-critical 写后回读:电源步刚画完铜,差分规划要看含它在内的板面 · " + what
 			}
 
 			// ── 2. diff pairs ──────────────────────────────────────────────
@@ -357,8 +381,12 @@ and identifies without mutating.`,
 			if skipDiff {
 				out["diff"] = "skipped (--skip-diff)"
 			} else {
-				res, err := requestAction(cfg, "pcb.components.list", *window, map[string]any{"includePads": true})
+				res, err := requestAction(staleReadOptIn(cfg, rcAfterPower("引脚网表")),
+					"pcb.components.list", *window, map[string]any{"includePads": true})
 				if err != nil {
+					if isStaleRead(err) {
+						return fmt.Errorf("%w —— %s", err, staleReadNextStep("route-critical 差分步的引脚读"))
+					}
 					return err
 				}
 				comps := parseApComps(res.Result)
@@ -378,10 +406,11 @@ and identifies without mutating.`,
 				pairs := identifyDiffPairs(netList)
 
 				routed := map[string]bool{}
-				if lr, err := requestAction(cfg, "pcb.line.list", *window, nil); err == nil {
+				if lr, err := requestAction(staleReadOptIn(cfg, rcAfterPower("已布网统计")),
+					"pcb.line.list", *window, nil); err == nil {
 					routed = parseRoutedNets(lr.Result)
 				}
-				rules := fetchPcbRules(cfg, *window)
+				rules := fetchPcbRules(staleReadOptIn(cfg, rcAfterPower("线宽/间距规则")), *window)
 				opt := defaultRtOptions()
 				opt.signalWidth = rules.clampWidth(rules.trackWidthMil)
 				opt.netClassWidths = netClassWidthTable(rules)
@@ -390,17 +419,19 @@ and identifies without mutating.`,
 				opt.skipPower = true
 				opt.avoid = true
 				opt.clearance = rules.clearanceMil
-				if bt, err := fetchPcbTracks(cfg, *window); err == nil {
+				// 障碍集三读同样条件放行:差分对必须绕开电源步刚画的缝合过孔/桩线,
+				// 拿 reload 前的旧障碍集规划 = 直接压在自己刚画的铜上。
+				if bt, err := fetchPcbTracks(staleReadOptIn(cfg, rcAfterPower("走线障碍集")), *window); err == nil {
 					for _, t := range bt {
 						opt.existing = append(opt.existing, rtSeg{Net: t.Net, X1: t.X1, Y1: t.Y1, X2: t.X2, Y2: t.Y2, Layer: t.Layer, Width: t.Width})
 					}
 				}
-				if bv, err := fetchPcbVias(cfg, *window); err == nil {
+				if bv, err := fetchPcbVias(staleReadOptIn(cfg, rcAfterPower("过孔障碍集")), *window); err == nil {
 					for _, v := range bv {
 						opt.existingVias = append(opt.existingVias, obVia{net: v.Net, x: v.X, y: v.Y, r: v.Dia / 2})
 					}
 				}
-				if sl, err := fetchPcbSlots(cfg, *window); err == nil {
+				if sl, err := fetchPcbSlots(staleReadOptIn(cfg, rcAfterPower("板面开槽")), *window); err == nil {
 					opt.slots = sl
 				}
 
@@ -488,9 +519,21 @@ func dedupeStrings(in []string) []string {
 
 // copperLayerCount counts copper layers from pcb.layers.list (SIGNAL/PLANE
 // types on copper layer ids); falls back to 2 when unreadable.
-func copperLayerCount(cfg *appConfig, window string) int {
+//
+// 这个「读不到就当 2 层」的兜底在 STALE_READ 门下变得危险:板子若在本命令开跑前
+// 就脏(上一条命令写完没 reload),这一读会被门拒掉,于是一块 4 层板被静默当成 2
+// 层 —— 走的是 power-pour 而不是 power-planes,两条电源轨挤同一层,正是内电层要
+// 解决的那个冲突。**这一读按设计不放行**(它是命令入口的规划读,不是写后回读),
+// 所以唯一负责任的做法是把兜底说出来,别让分档决策静默走偏。
+func copperLayerCount(cfg *appConfig, window string, stderr io.Writer) int {
 	res, err := requestAction(cfg, "pcb.layers.list", window, nil)
 	if err != nil {
+		if isStaleRead(err) {
+			fmt.Fprintf(stderr, "⚠ route-critical: 读不到叠层 —— %s\n   现在按 2 层降级(将走 power-pour 而不是 power-planes);若这是 4 层板,先 reload 再重跑\n",
+				staleReadNextStep("route-critical 的叠层入口读"))
+		} else {
+			fmt.Fprintf(stderr, "⚠ route-critical: 读不到叠层(%v)—— 按 2 层降级(将走 power-pour 而不是 power-planes)\n", err)
+		}
 		return 2
 	}
 	raw, _ := res.Result["layers"].([]any)

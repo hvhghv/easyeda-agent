@@ -164,6 +164,22 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
      (框的几何与电路实际位置无关:单模块页铺满整纸时框套不住电路、框里大半是空的)。
   3. 认领与框都**按页(documentUuid)持久化**,多页工程逐页 `--doc <页>` 画,
      绝不把 MCU 页的认领套到 Power 页。
+  4. **`--mode partition`** 按真实 bbox 把整纸切开,并给右下角图签留缺口。
+  5. **单页小板也要画区框** —— 「最小 / 单页」不是省略分区的借口。可以不分页,
+     但区名框和电路说明照画。
+- **⚠️ 只有 `sch autolayout --apply` 会自动画框** —— 手工 `sch block-apply` / `sch place`
+  路径**不会**,必须显式补「画框 + 写说明」两步,否则等于没分区(最常见的漏)。
+- **每模块配 1~3 行电路说明**(`sch note`):写**作用 + 关键参数**,例如
+  「LDO: 5V→3V3 1A」「BOOT: GPIO0 拉低进烧录」。区名框只负责命名,说明才让人读懂;
+  文字放模块框下/旁,别压电路(放完 `sch layout-lint` 复核)。**摆放没画框 + 没写说明
+  = 布局未完成**,别当成品交付。
+- **`zone-draw` 报 `partitionOverlap` 时怎么办**:一个虚拟组 / 一次认领 = 一个框
+  (与 `zone-arrange` 同一把尺,不靠合并遮掩),非 0 就是**两个区的体积真的互相压**
+  —— 跑 `sch zone-arrange --apply` 重排,或 `sch group-move` 挪件;调 `--gutter` 治不了。
+  反过来:`zone-arrange` 断言③绿的页,一定画得出来。
+- **机械兜底(别靠记忆)**:`sch check` 有 **`missing-partition`** 检查项——多器件页
+  (parts ≥ 6)若 `sch text.list` == 0(既没区名框也没说明)报 WARN,
+  `sch gate --strict` 会因此 FAIL,挡下未分区的板。看到它就补「画框 + 写说明」再交付。
 - **过门条件**:每个组有明确的目标矩形(已认领),组间预留通道(分区不重叠);
   模块太多就拆到下一页,而不是挤压本页。
 
@@ -472,6 +488,15 @@ P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → 
   **精修**:tidy 类低分交 `pcb refine`(打分驱动、默认 dry-run、逐步回滚;唯一变换器 grid-snap,
   其余维和全部 blocking 报告会明确指回 place-constrained/手工)。
   **门禁的机械强制面(#97 后续,2026-07-12)**:① 状态**全局持久化**在 `~/.easyeda-agent/workflow/<project>.json`(换 cwd 跑 CLI 骗不过门;`EASYEDA_WORKFLOW_DIR` 可覆写);② **daemon 在 /action 派发层同样拦截** `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`(raw HTTP 调用也绕不过),且任何摆放/板框类 action(component.modify/move/arrange/align/add/delete/import_changes/outline.set/clear)成功后**自动失效下游确认**并在响应 warning 里报 `workflow stage invalidated`;③ `confirm-layout`/`confirm-outline` 会把签核**指纹绑定**到当时的器件坐标/旋转/层与板框几何——GUI 拖动、`debug.exec_js`、其它 agent 的门外改动,会在下一次 gate 时指纹失配 → 自动失效并指回该重确认的阶段。
+
+  **④ force 是分级的(#132)——别把 `--force` 当万能钥匙**:
+  - `--force <理由>` 只放行**软缺口**(典型:布局已签、板框已签,只是 `pre_route_passed` 没重跑)。
+  - **机械骨架全未确认**时(`placement_confirmed` 与 `outline_confirmed` **双缺**,或 state 读不出来)`--force` 会被**拒绝**——#116 实测:零确认板强行布线产出 257 条 track + 92 个 via,全部返工。真要在这种板上布线,用更高摩擦的 `--force-unsafe <理由>` 显式升级。
+  - 两者都**只对本次调用有效**(不落任何确认,下一条无 force 的命令照样被拦),且**全部入审计**——连被拒的 `--force` 尝试也记一条 `force-refused`。
+
+  **⑤ 被拦时不用猜下一步**:daemon 的 `STAGE_BLOCKED` 拒绝消息里直接带**该跑的那条命令**(最早未满足的那道门:tier 梯子 → `confirm-layout` → `confirm-outline` → `layout-lint --gate`),照抄执行即可;要看全局状态才用 `easyeda workflow status`。
+
+  **⑥ 布完还有一道门**:布线不是终点,`post_route_checked`(布完必查)见 **P10** —— `workflow advance` 自动跑 `pcb check`,ERROR / power-not-poured / width-under-spec 必须清零才放行 P9 丝印与交付;任何布线类 mutation(track/via/pour/fill/beautify/import_autoroute)会自动把这道门重新关上。
 - **任意阶段切入 / 会话恢复(workflow 命令族)**:换了模型、丢了上下文、或用户手改了板子,都不需要重走流程——
   1. `easyeda workflow status --reconcile`:拉实况(器件数/板框/已布线数)+ 校验指纹,自动失效漂移的确认,报告不一致(如「有走线但从未过门」);
   2. `easyeda workflow advance`:幂等推进——机械验收(layout-lint gate)直接代跑,人工签核点(confirm-layout/outline)停下并打印**下一条该执行的命令**(非零退出,脚本循环天然停在签核点);
