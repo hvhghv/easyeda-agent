@@ -393,6 +393,44 @@ func TestZfLandedFrame_PredictionEqualsLanding(t *testing.T) {
 	}
 }
 
+// ── 上界不变式:它到底成立在哪一层 ──────────────────────────────────────────
+//
+// zaaRecheckFindings 是**单边**判据(只有「落地比规划胖」才红),这个设计只有在
+// 「规划框 ≥ 落地框」成立时才站得住。这条测试把这句话的**适用范围**钉死:
+//
+//	成立:同一份 pin 坐标 + 同一份桩长(zfStubPlanned)—— 只剩 5 网格相位差,
+//	      而 zfLandSlack 已经把它算进内容盒;
+//	不成立:真机(2026-08-20 MCU_IO 六区实测偏差 +141/+126/+82/+56/+26/+10)——
+//	      规划对 pin 落点的假定、marker profile 的标定、以及「计划没覆盖的 pin
+//	      走自由落点」三处都会让落地更胖。
+//
+// 所以断言③ **不是**「上界成立」的断言,而是「上界不成立时如实报出来」的机制。
+// 这条测试只证前半句;后半句由 TestZaaRecheckFindings_MCUIORealMachineSixZones
+// 用真机数据钉住(那六个数字里五个都超 gutter)。
+func TestZfLandedFrame_PlannedStubIsUpperBound(t *testing.T) {
+	opts := defaultPartitionOpts()
+	fixtures := map[string][]zfGroup{"U": zfFixtureU(), "Q": zfFixtureQ(), "J_USB": zfFixtureJ()}
+	for _, zone := range []string{"J_USB", "Q", "U"} {
+		p, err := planZoneFollow(zone, fixtures[zone], opts)
+		if err != nil {
+			t.Fatalf("%s: %v", zone, err)
+		}
+		lw, lh := zfLandedFrame(p, opts, zfStubPlanned)
+		if lw > p.FrameW || lh > p.FrameH {
+			t.Errorf("%s 上界破了:落地(计划桩)%.0f×%.0f > 规划 %.0f×%.0f —— 断言③的单边判据失去依据",
+				zone, lw, lh, p.FrameW, p.FrameH)
+		}
+		// 负对照:换成旧的自由 offset 策略,上界必须破 —— 否则这条判据钉不住任何东西。
+		fw, fh := zfLandedFrame(p, opts, zfStubFreeAutoconnect)
+		if fw <= p.FrameW && fh <= p.FrameH {
+			t.Errorf("%s 负对照失效:自由 offset 策略下落地框 %.0f×%.0f 仍不超规划 %.0f×%.0f",
+				zone, fw, fh, p.FrameW, p.FrameH)
+		}
+		t.Logf("%s 规划 %.0f×%.0f ≥ 落地(计划桩)%.0f×%.0f;自由 offset 则 %.0f×%.0f",
+			zone, p.FrameW, p.FrameH, lw, lh, fw, fh)
+	}
+}
+
 // 端子几何必须走落地侧那条链:marker 本体从端点起空出 Near 才开始画(首版把盒子
 // 贴在端点上,每支端子少算 9.5 —— 两侧就是 19,已经超过 gutter 12)。
 func TestZfTermGeom_MatchesLandingChain(t *testing.T) {

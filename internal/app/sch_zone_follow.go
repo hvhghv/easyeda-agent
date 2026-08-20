@@ -73,10 +73,20 @@ const (
 	//
 	// 规划在**区内局部坐标**上算,落地在**页面绝对坐标**上算,而 connect_pin 的桩
 	// 端点按 5 网格吸附(endpointFor/acSchGrid)—— 两边网格相位不同,单边最多差一格。
-	// 判据要求「偏差超过 gutter 就如实报告」,而这一格是**结构性的、可上界的**:
-	// 与其让它去撞 gutter,不如把它算进框里,让规划框成为落地框的**上界**而不是估计。
-	// 它是框自己的属性(哪个区端子多,哪个区的余量就真的用得上),所以放在这里,
-	// 不写进全局 gutter。
+	// 与其让这一格去撞 gutter,不如把它算进框里。它是框自己的属性(哪个区端子多,
+	// 哪个区的余量就真的用得上),所以放在这里,不写进全局 gutter。
+	//
+	// **上界的适用范围**(2026-08-20 真机订正,别再写成无条件的「规划框=落地框上界」):
+	// 这一格只封住**同一份 pin 坐标 + 同一份桩长**下的网格相位差 —— 它是
+	// `zfLandedFrame(plan, opts, zfStubPlanned) ≤ 规划框` 这条**模型内**性质的余量
+	// (TestZfLandedFrame_PlannedStubIsUpperBound 钉住)。它不承诺、也承诺不了真机:
+	//   ① 规划把无源件的 pin 假定在本体 bbox 的上下缘中线上(zfGenPassive),真符号
+	//      的 pin 未必在那里;转竖后的实测 bbox 也不是简单转置;
+	//   ② markerBBoxProfile 是 2026-06 的实测标定,不是平台契约;
+	//   ③ 计划没覆盖到的 pin 会走 autoconnect **自由方向**落点(内核 rest / 恢复段),
+	//      那已经不是「同一份桩长」了 —— moveReport.FreeConnected 会点名它们。
+	// 真机 MCU_IO 六区实测偏差 +141/+126/+82/+56/+26/+10,上界在真机上**不成立**;
+	// 断言③(zaaRecheckFindings)存在的理由正是把不成立的那几次如实报出来。
 	zfLandSlack = acSchGrid
 )
 
@@ -203,14 +213,23 @@ func zfCanonKind(kind, net string) string {
 // (marker 本体 ∪ 网名带,与 `sch check` 的 flagTextBand 严格对称)。
 //
 // 返回桩线段与 marker 包络两个盒子(都在传入坐标系里)。spreadX 见
-// zfPlacedTerm.SpreadX。
+// zfPlacedTerm.SpreadX。kind 是**规划口径**(netflag/netport);已经是 connect_pin
+// canonical kind 的调用方走 zfTermGeomCanon(别再过一遍 zfCanonKind —— 它会把
+// `net_port_bi` 当成 netflag 折成 power 盒,预测的就是另一个家族的几何)。
 func zfTermGeom(pinX, pinY, offset float64, dir, kind, net string, spreadX float64) (wire, marker layoutBBox) {
+	return zfTermGeomCanon(pinX, pinY, offset, dir, zfCanonKind(kind, net), net, spreadX)
+}
+
+// zfTermGeomCanon 是同一把尺的 canonical-kind 入口:落地侧(connect_pin 的
+// kind / zaaTermExec.Kind / moveConnTerm.Kind / tidyRestoreKind)手里拿的都是
+// canonical kind,再折一次就错了。
+func zfTermGeomCanon(pinX, pinY, offset float64, dir, canonKind, net string, spreadX float64) (wire, marker layoutBBox) {
 	ex, ey := endpointFor(pinX, pinY, offset, dir)
 	wire = layoutBBox{
 		MinX: minF(pinX, ex), MinY: minF(pinY, ey),
 		MaxX: maxF(pinX, ex), MaxY: maxF(pinY, ey),
 	}
-	marker = predictedMarkerBBox(ex, ey, zfCanonKind(kind, net), dir, net)
+	marker = predictedMarkerBBox(ex, ey, canonKind, dir, net)
 	marker.MinX -= spreadX
 	marker.MaxX += spreadX
 	return wire, marker
@@ -463,8 +482,14 @@ func zfLandedGroupBBox(g zfPlacedGroup, stub zfStubPolicy) layoutBBox {
 	return b
 }
 
-// zfLandedFrame 用给定桩线策略重算整个区的框尺寸(口径与 planZoneFollow 完全
-// 一致:内容并集 + 落地余量 → partitionFrameSize)。
+// zfLandedFrame 用给定桩线策略重算整个区的框尺寸。**口径必须是落地复判那一侧**
+// (zaaLandedRecheck):实测内容并集 → partitionFrameSize,**不加落地余量**。
+//
+// 首版在这里也 `zfInflate(content, plan.Slack)` —— 于是余量在两边同时出现、当场
+// 抵消,「规划框是落地框的上界」这句话在模型里都成立不了(实测:三个 fixture
+// 全部 +1~+3 越界)。而真机侧的 zaaLandedRecheck 是不加余量的:模型与它对不上,
+// 就等于拿一把不存在的尺子去证明一条不存在的性质。余量只属于**规划框**,它存在
+// 的全部意义就是让规划框比落地框大出那一格。
 func zfLandedFrame(plan zfZonePlan, opts partitionOpts, stub zfStubPolicy) (w, h float64) {
 	content, has := layoutBBox{}, false
 	for _, g := range plan.Groups {
@@ -473,7 +498,7 @@ func zfLandedFrame(plan zfZonePlan, opts partitionOpts, stub zfStubPolicy) (w, h
 	if !has {
 		return 0, 0
 	}
-	return partitionFrameSize(zfInflate(content, plan.Slack), opts.TitleBand, opts.NoteBand)
+	return partitionFrameSize(content, opts.TitleBand, opts.NoteBand)
 }
 
 // zfTranslate 平移一个组(局部 → 区内布置)。
@@ -630,7 +655,7 @@ func planZoneFollow(zone string, groups []zfGroup, opts partitionOpts) (zfZonePl
 	// 别的地方。Mode 是人读输出与 JSON(zones[].mode)都带的字段。
 	plan.Content = zfInflate(plan.Content, zfLandSlack)
 	plan.Slack = zfLandSlack
-	plan.Mode += fmt.Sprintf(" · 落地余量 %g(桩端点 5 网格吸附,规划框=落地框上界)", float64(zfLandSlack))
+	plan.Mode += fmt.Sprintf(" · 落地余量 %g(桩端点 5 网格吸附;上界只在同一份 pin 坐标+桩长的模型内成立,见 zfLandSlack)", float64(zfLandSlack))
 	// 收敛后的框走**外框的唯一函数**(partitionFrameSize):收紧时区名带 + 说明带
 	// 就在账里,收紧完再画框 —— 而不是「按常量带收紧 → 画框 → 再放 note 装不下」。
 	// opts.NoteBand 由调用方按本区已登记说明的渲染高度预置(schZoneNoteBandHeight)。
