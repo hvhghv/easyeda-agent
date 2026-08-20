@@ -75,9 +75,13 @@ default is: one short note per module, parked just below/beside its zone frame.
 
   - **省略 --x/--y = 自动落点(推荐)**:说明文字和器件、marker、已有文字、图签
     keep-out 是**同级的布局对象**,一起进同一张碰撞表求解。给了 --zone 时,说明
-    的家是该区分区框底部的**说明带**:先按框宽折行,框装不下就把框**横向扩边**
-    (窄框扩到最小可读宽度),带内被邻区桩线占住就把框底**下探**到占用之下 ——
-    **框为说明扩边,而不是把说明踢出框**。扩过边要重跑
+    的家是该区分区框底部的**说明带**,并且**贴着框底**落:
+    note.y = 分区框.minY + 16 —— 文字锚点是块的左下角(块向上生长),所以离框底
+    的距离与行数/字号无关,同一页所有说明底边齐平。
+    带内放不下时:先按框宽折行,框装不下就把框**横向扩边**(窄框扩到最小可读
+    宽度),带底被邻区桩线占住就把框底**下探**到占用之下、说明仍贴着新的框底 ——
+    **框为说明扩边,而不是把说明踢出框**,更不会为了贴底压到器件上(真装不下
+    会如实报告并说清是哪一维不够)。扩过边要重跑
     sch zone-draw --mode partition 让画布上的框跟上(命令会在 stderr 提示)。
   - 区里实在装不下(可扩边界被纸边/图签/邻框顶死)才退到区外走廊/整页扫描,
     并明确警告;整页都放不下就报错**拒绝画**,不把说明糊在电路上。
@@ -173,7 +177,7 @@ default is: one short note per module, parked just below/beside its zone frame.
 	c.Flags().Float64Var(&y, "y", 0, "text anchor y (schematic units, y-UP) — 省略即自动落点")
 	c.Flags().Float64Var(&fontSize, "font-size", schNoteDefaultFontSize, "font size")
 	c.Flags().StringVar(&color, "color", schNoteDefaultColor, "text color")
-	c.Flags().StringVar(&zoneRef, "zone", "", "把说明登记到一个布局对象(模块认领/块组/子组统一命名空间,全名/末段短名/组 id/唯一前缀均可,`sch zones status` 看全表)—— 自动落点优先落进该区分区框内的说明带,`sch zone move` 无条件带走它")
+	c.Flags().StringVar(&zoneRef, "zone", "", "把说明登记到一个布局对象(模块认领/块组/子组统一命名空间,全名/末段短名/组 id/唯一前缀均可,`sch zones status` 看全表)—— 自动落点**贴着该区分区框底边**落进框内说明带(离框底恒 16,与行数/字号无关),`sch zone move` 无条件带走它")
 	c.Flags().BoolVar(&asJSON, "json", false, "以 JSON 输出结果(textId/x/y/zoneMatched 等)")
 	_ = c.MarkFlagRequired("text")
 	return c

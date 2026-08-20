@@ -234,12 +234,12 @@ func TestPartitionPlanStableAfterNotePlacedInBand(t *testing.T) {
 		t.Fatalf("want 1 partition, got %d", len(plan1.Partitions))
 	}
 	p := plan1.Partitions[0]
-	// 说明按求解器的带内锚点落进说明带(锚点=左上角,y-UP 向下排行)。
+	// 说明按求解器的**贴底**锚点落进说明带(锚点=左下角,块向上生长)。
 	_, h := noteSizeOf("带内说明", 10)
-	note := zoneMoveText{ID: "n1", X: p.NoteBBox.MinX + noteGap, Y: p.NoteBBox.MinY + h + noteGap, Content: "带内说明", FontSize: 10}
+	note := zoneMoveText{ID: "n1", X: p.NoteBBox.MinX + noteGap, Y: noteFlushAnchorY(p.NoteBBox, h), Content: "带内说明", FontSize: 10}
 	noteBB := schNoteBBoxEstimate(note)
-	if !bboxContains(p.BBox, noteBB) {
-		t.Fatalf("带内说明应在框内: frame=%+v note=%+v", p.BBox, noteBB)
+	if !bboxContains(p.NoteBBox, noteBB) || !bboxContains(p.BBox, noteBB) {
+		t.Fatalf("带内说明应在带内(进而在框内): frame=%+v band=%+v note=%+v", p.BBox, p.NoteBBox, noteBB)
 	}
 
 	// 反馈环已断:已登记的 note 不参与内容 bbox,重算后框与说明带逐字段不变,

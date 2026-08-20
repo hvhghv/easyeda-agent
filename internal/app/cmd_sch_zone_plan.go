@@ -372,7 +372,9 @@ func planPartitionsWithNotes(sheet layoutBBox, keepout *layoutBBox, modules []pa
 			// Title band at the visual TOP (large y).
 			TitleBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MaxY - band, MaxX: rect.MaxX, MaxY: rect.MaxY},
 			// Note band at the visual BOTTOM (small y) —— 说明就放这儿,框内左下。
-			NoteBBox: layoutBBox{MinX: rect.MinX, MinY: rect.MinY, MaxX: rect.MaxX, MaxY: bandTop},
+			// **带的定义只有 zoneNoteBand 一个函数**(落点求解与 note-outside-zone
+			// 判据读的是同一条带),这里不许再写一遍字面量。
+			NoteBBox: zoneNoteBand(rect, bandTop),
 		})
 		noteNeeds = append(noteNeeds, partitionNoteNeed{W: noteW, H: noteH, BandTop: bandTop})
 	}
@@ -1098,8 +1100,11 @@ func buildPartitionJudge(zones map[string]*schZoneClaim, comps []layoutComp,
 	return j
 }
 
-// schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左上(y-UP 向下排行),
+// schNoteBBoxEstimate 估算一条文本的渲染 bbox:锚点为左**下**(y-UP,块向上生长,
+// 2026-08-20 getPrimitivesBBox 实测定案,见 noteAnchorBBox),
 // 行高 ≈ fontSize×1.3,宽 ≈ 最长行字符宽(CJK ≈ fontSize,ASCII ≈ 0.55×fontSize)。
+// 行高系数偏保守:同一次实测量到的真实行高 ≈ fontSize×1.0,估高约 30%,方向是
+// 「多留、不擦碰」——收紧它会连带改变所有分区框的说明带高,属另一件事。
 // 尺寸口径由 noteSizeOf 独家提供 —— `sch note` 的自动落点求解器用同一个函数
 // 估算候选 bbox。两套估算一旦分家,就会出现"求解时说不撞、画框时说撞"。
 func schNoteBBoxEstimate(t zoneMoveText) layoutBBox {

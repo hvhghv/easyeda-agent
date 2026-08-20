@@ -147,8 +147,10 @@ func TestPartitionGrouping_OneModuleOnePartition(t *testing.T) {
 // 估算 bbox 并入模块画框口径;CoreBBox 不动(说明不参与图签/区名硬校验)。
 func TestZoneNoteFoldEstimate(t *testing.T) {
 	nb := schNoteBBoxEstimate(zoneMoveText{X: 330, Y: 640, Content: "AMS1117: 5V→3V3\nC2入/C3出/C1旁路", FontSize: 10})
-	if nb.MinX != 330 || nb.MaxY != 640 {
-		t.Fatalf("anchor must be top-left: %+v", nb)
+	// 锚点 = 左**下**角,块向上生长(2026-08-20 getPrimitivesBBox 实测 5/5:
+	// bbox.minY == 锚点 y)。此前这里断言的 top-left 是没有实测背书的臆断。
+	if nb.MinX != 330 || nb.MinY != 640 {
+		t.Fatalf("anchor must be bottom-left: %+v", nb)
 	}
 	if nb.MaxX <= 330+80 { // 两行 CJK 混排,最长行应显著宽于 80
 		t.Fatalf("width estimate too small: %+v", nb)

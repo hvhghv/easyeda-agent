@@ -904,8 +904,12 @@ func noteOutsideZoneMessage(zone string, t zoneMoveText, frame, band layoutBBox)
 	head := fmt.Sprintf("区 %q 的说明 %s @(%.0f,%.0f) 在分区框 (%.0f,%.0f)..(%.0f,%.0f) 外",
 		zone, t.ID, t.X, t.Y, frame.MinX, frame.MinY, frame.MaxX, frame.MaxY)
 	w, h := noteSizeOf(t.Content, t.FontSize)
-	tx, ty := snapNote(band.MinX+noteGap), snapNote(band.MinY+h+noteGap)
-	if bboxContains(frame, noteAnchorBBox(tx, ty, w, h)) {
+	// 处方坐标必须**逐字等于**落点求解会给出的贴底坐标(noteFlushAnchorY),而且
+	// 必须落在**带内**——此前按 `band.MinY+h+noteGap` 算并只判框内,于是出现过
+	// 「带 (36,12)..(204,70),处方却给 --y 80」这种把说明放到带外的报文(带的定义
+	// 与处方两把尺)。装不进带就走下面那档「装不下」,不许开一张自己都装不下的方子。
+	tx, ty := snapNote(band.MinX+noteGap), noteFlushAnchorY(band, h)
+	if box := noteAnchorBBox(tx, ty, w, h); bboxContains(band, box) && bboxContains(frame, box) {
 		return fmt.Sprintf("%s — 修法:`sch note --zone %s --text … --x %g --y %g`(说明带 (%.0f,%.0f)..(%.0f,%.0f) 已为它留好位置),"+
 			"或 `sch prim-delete --ids %s` 后重跑不带 --x/--y 的 `sch note --zone %s`;框几何变过就再跑一次 `sch zone-draw --mode partition`",
 			head, zone, tx, ty, band.MinX, band.MinY, band.MaxX, band.MaxY, t.ID, zone)

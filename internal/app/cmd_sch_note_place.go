@@ -29,6 +29,16 @@ import (
 // 重叠阈值大得多:贴着边不算重叠,但读起来仍然是"糊在一起"。
 const noteGap = 16.0
 
+// noteBottomInset 是说明块**底边**与它所属分区框底边之间的**固定**内缩 ——
+// 「贴底」的那个常量(用户裁定 2026-08-20:「note 的位置还是不行,能直接排到
+// 框选 zone 的置底吗?」)。
+//
+// 与 noteGap 同值不是随手取的:说明带高就是 requiredNoteBand(h) = h + noteGap,
+// 贴底放进去正好把带填满(带底留 noteBottomInset,带顶顶到器件区下沿)。
+// TestRuler_NoteBandExactlyFitsFlushNote 把这条配对钉住 —— 两个常数一分家,
+// 带就要么装不下贴底的说明、要么白留一条空隙。
+const noteBottomInset = noteGap
+
 // noteAnchorStep 是候选锚点的扫描步长(落在 5 格连接网格上)。
 const noteAnchorStep = 20.0
 
@@ -107,7 +117,10 @@ func wrapNoteContent(content string, fontSize, maxWidth float64) string {
 }
 
 // noteSizeOf 估算一段说明文字的渲染尺寸。schNoteBBoxEstimate 是它的 bbox 版本
-// (锚点=左上角,y-UP 向下排行) —— 两者共用同一套字宽/行高口径。
+// (锚点=左**下**角,y-UP 块向上生长,见 noteAnchorBBox)—— 两者共用同一套
+// 字宽/行高口径。行高系数 1.3 偏保守:2026-08-20 getPrimitivesBBox 实测真实行高
+// ≈ fontSize×1.0(字号 10 → 每行 10;字号 9 → 27/3 = 9),我们估高约 30%,方向是
+// 「多留、不擦碰」。收紧它会连带改变所有分区框的说明带高,是另一件事。
 func noteSizeOf(content string, fontSize float64) (w, h float64) {
 	if fontSize <= 0 {
 		fontSize = schNoteDefaultFontSize
@@ -129,9 +142,59 @@ func noteSizeOf(content string, fontSize float64) (w, h float64) {
 	return w, float64(len(lines)) * fontSize * 1.3
 }
 
-// noteAnchorBBox 把「锚点 + 尺寸」还原成 bbox(锚点=左上角,文字向下排行)。
+// ── 文字图元的 y 锚点语义(唯一实现)──────────────────────────────────────
+//
+// **`eda.sch_PrimitiveText.create(x, y, …)` 的 (x,y) 是文字块的左下角,块沿 +y
+// 向上生长**(画布 y-UP)。2026-08-20 真机实测定案:拿
+// `eda.sch_Primitive.getPrimitivesBBox` 量了 5 条已落地的说明,5/5 例
+// `bbox.minY == 锚点 y`、`bbox.maxY == y + 块高`:
+//
+//	锚点 y=290 → 实测 290..310(2 行 @10)   锚点 y=510 → 510..540(3 行 @10)
+//	锚点 y=635 → 635..675(4 行 @10)         锚点 y=80  → 80..100 (2 行 @10)
+//	锚点 y=425 → 425..452(3 行 @9)
+//
+// 与 PCB 侧同源(#155,`extension/src/actions.ts` 的 pcbSilkList:「the stored
+// x/y is the BOTTOM-LEFT anchor」,同样是 getPrimitivesBBox 实测),也与原理图
+// 区名标签一直以来的放法一致(`buildPartitionDrawJS` 把标题锚点压到
+// `TitleBBox.MaxY - fontSize`,#163 时代的注释写作「anchored bottom-left and
+// grows upward by fontSize」)。
+//
+// 此前 `sch note` 这一路把锚点当**左上角**(2026-08-13 引入,无实测背书),而同
+// 一个仓库的 zone-draw 用的是左下角 —— 又一次「两把尺」,症状就是本次修的
+// 「说明偏上、离框底 42~67 不等、下面白空一大块」:落点侧按 `y = 带底 + 块高 +
+// gap` 写坐标,以为把**顶**放在那儿,画布上落下去的却是**底**,块高于是整个变成
+// 了离框底的距离,行数越多飘得越高。
+//
+// 换算只许经这一对函数走(noteAnchorBBox 与它的逆 noteAnchorYForBottom):真机
+// 若哪天推翻这个语义,改这两个函数,所有落点/判据/告警文案自动跟随。
 func noteAnchorBBox(x, y, w, h float64) layoutBBox {
-	return layoutBBox{MinX: x, MinY: y - h, MaxX: x + w, MaxY: y}
+	return layoutBBox{MinX: x, MinY: y, MaxX: x + w, MaxY: y + h}
+}
+
+// noteAnchorYForBottom 是 noteAnchorBBox 的逆:想让说明块的**底边**落在 bottom,
+// 锚点 y 该给多少。锚点即底边,所以块高 h 不参与 —— 但它**留在签名里**:它是
+// 「锚点语义换算」的完整输入,语义一旦改判(顶/基线),只有这里要动。
+func noteAnchorYForBottom(bottom, _ float64) float64 { return bottom }
+
+// noteFlushAnchorY 是**贴底落点的唯一换算式**:块底边 = 带底 + noteBottomInset。
+// 与行数/字号无关 —— 4 行说明和 2 行说明因此给出**同一个** y 偏移(这正是这次
+// 要根治的:旧式 `band.MinY + h + noteGap` 把块高写进了离框底的距离)。
+func noteFlushAnchorY(band layoutBBox, h float64) float64 {
+	return noteAnchorYForBottom(band.MinY+noteBottomInset, h)
+}
+
+// zoneNoteBand 是「说明带在哪」的**唯一函数**(用户要求 2026-08-20:带的定义、
+// `sch check` 的 note-outside-zone、落点求解三者必须同源)。带 = 分区框底部、
+// 以器件区下沿 bandTop 封顶的那一条。三个消费者都走它:
+//
+//   - `planPartitions` / `reserveNoteAreas` 给每个分区填 NoteBBox;
+//   - `reserveZoneNoteArea` 的逐档下探;
+//   - `sch check` 的 note-outside-zone(读的就是那个 NoteBBox)与它的告警处方。
+//
+// 各处再写一遍 `{rect.MinX, rect.MinY, rect.MaxX, bandTop}` 是本仓的复发病。
+func zoneNoteBand(rect layoutBBox, bandTop float64) layoutBBox {
+	return layoutBBox{MinX: rect.MinX, MinY: rect.MinY, MaxX: rect.MaxX,
+		MaxY: math.Min(rect.MaxY, math.Max(rect.MinY, bandTop))}
 }
 
 // planNoteAnchor 求一个不与任何障碍碰撞的说明锚点。
@@ -147,10 +210,14 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 	}
 	// try 先把候选吸到网格再判碰:**判定坐标必须 = 落地坐标**。吸附后再判,才不会
 	// 出现「按原始候选算不撞、按吸附后的落点画出来擦上」的半格假阴性。
+	//
+	// **只吸 x,不吸 y**:y 吸格会把「离框底的固定内缩」打散成 ±destaggerGrid/2
+	// (±2.5)的抖动 —— 而说明根本不落在电气网格上,没有任何理由为它牺牲齐平。
+	// 判定用的仍然是落地坐标本身(判定坐标 = 落地坐标)。
 	try := func(bx, by float64) (float64, float64, bool) {
-		sx, sy := snapNote(bx), snapNote(by)
-		if free(sx, sy) {
-			return sx, sy, true
+		sx := snapNote(bx)
+		if free(sx, by) {
+			return sx, by, true
 		}
 		return 0, 0, false
 	}
@@ -169,17 +236,20 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 	}
 	if zoneRect != nil {
 		z := *zoneRect
-		// ① 区内容下沿之下(区内);② 区内上沿之下;③ 区左/右外侧同高;④ 区正下方。
-		for _, dy := range []float64{0, -noteAnchorStep, -2 * noteAnchorStep} {
-			cands = append(cands, [2]float64{z.MinX + noteGap, z.MinY + h + noteGap + dy})
-		}
+		// ① 区内**贴底**(与说明带同一把尺:noteFlushAnchorY)。没有说明带可用时
+		//    也按「框底 + noteBottomInset」贴底 —— 齐平是位置约束,不因缺带而放弃。
+		//    此前这里是 `z.MinY + h + noteGap` 再往下退两档(-20/-40):按左上角锚点
+		//    写的式子,落到左下角锚点的画布上就是「离框底 = 块高 + gap」,而退档
+		//    反而把说明推到框**外**。两个毛病一起去掉。
+		// ② 区内上沿之下(标题带之下);③ 区正下方;④ 区左/右外侧同高。
+		cands = append(cands, [2]float64{z.MinX + noteGap, noteFlushAnchorY(z, h)})
 		for _, dy := range []float64{0, noteAnchorStep} {
-			cands = append(cands, [2]float64{z.MinX + noteGap, z.MaxY - noteGap - dy})
+			cands = append(cands, [2]float64{z.MinX + noteGap, z.MaxY - noteGap - h - dy})
 		}
 		cands = append(cands,
-			[2]float64{z.MinX + noteGap, z.MinY - noteGap},
-			[2]float64{z.MaxX + noteGap, z.MaxY - noteGap},
-			[2]float64{z.MinX - w - noteGap, z.MaxY - noteGap},
+			[2]float64{z.MinX + noteGap, z.MinY - noteGap - h},
+			[2]float64{z.MaxX + noteGap, z.MaxY - noteGap - h},
+			[2]float64{z.MinX - w - noteGap, z.MaxY - noteGap - h},
 		)
 		// ⑤ 区外走廊多档扫描:框内(和上面那几个单点)全满时,先沿「正下方 → 正上方
 		//   → 右侧 → 左侧」四条走廊逐档找位置,而不是直接跌进整页扫描把说明甩到页角
@@ -196,7 +266,7 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 	// 中心的距离升序试**:说明属于它那个区,兜底也该落在尽量近的地方,而不是按扫描
 	// 序落到图纸左下角(真机症状:框内无空位 → 说明跑到页角)。
 	var pageCands [][2]float64
-	for by := sheet.MinY + h + noteGap; by <= sheet.MaxY-noteGap; by += noteAnchorStep {
+	for by := sheet.MinY + noteGap; by <= sheet.MaxY-noteGap-h; by += noteAnchorStep {
 		for bx := sheet.MinX + noteGap; bx <= sheet.MaxX-w-noteGap; bx += noteAnchorStep {
 			pageCands = append(pageCands, [2]float64{bx, by})
 		}
@@ -205,9 +275,9 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 		cx := (zoneRect.MinX + zoneRect.MaxX) / 2
 		cy := (zoneRect.MinY + zoneRect.MaxY) / 2
 		dist2 := func(c [2]float64) float64 {
-			// 候选 bbox 中心到区中心的平方距离(锚点=左上角,文字向下排行)。
+			// 候选 bbox 中心到区中心的平方距离(锚点=左**下**角,块向上生长)。
 			dx := (c[0] + w/2) - cx
-			dy := (c[1] - h/2) - cy
+			dy := (c[1] + h/2) - cy
 			return dx*dx + dy*dy
 		}
 		sort.SliceStable(pageCands, func(i, j int) bool { return dist2(pageCands[i]) < dist2(pageCands[j]) })
@@ -222,22 +292,22 @@ func planNoteAnchor(w, h float64, obstacles []layoutBBox, zoneRect, noteBand *la
 
 // noteCorridorCandidates 生成区框四周走廊的多档候选锚点,按「正下方 → 正上方 →
 // 右侧 → 左侧」的优先序;每个方向 noteCorridorTiers 档,逐档远离区框一个
-// noteAnchorStep,同档内沿走廊按离区起点近的方向步进。锚点=bbox 左上角(y-UP,
-// 文字向下排行),越界/压图元由调用方的 free() 统一裁决。
+// noteAnchorStep,同档内沿走廊按离区起点近的方向步进。锚点=bbox 左**下**角
+// (y-UP,块向上生长),越界/压图元由调用方的 free() 统一裁决。
 func noteCorridorCandidates(z layoutBBox, w, h float64) [][2]float64 {
 	var out [][2]float64
 	// 走廊横向扫到「说明右沿不超出区右沿」为止;区比说明还窄时只试左对齐一列。
 	xEnd := math.Max(z.MinX+noteGap, z.MaxX-w)
-	// 正下方走廊:说明整体在区下沿之下(bbox 顶 = 锚点 y)。
+	// 正下方走廊:说明整体在区下沿之下(bbox 顶 = y+h ≤ z.MinY-noteGap)。
 	for k := 0; k < noteCorridorTiers; k++ {
-		y := z.MinY - noteGap - float64(k)*noteAnchorStep
+		y := z.MinY - noteGap - h - float64(k)*noteAnchorStep
 		for x := z.MinX + noteGap; x <= xEnd+acOverlapEps; x += noteAnchorStep {
 			out = append(out, [2]float64{x, y})
 		}
 	}
-	// 正上方走廊:说明整体在区上沿之上(bbox 底 = y-h ≥ z.MaxY+noteGap)。
+	// 正上方走廊:说明整体在区上沿之上(bbox 底 = 锚点 y ≥ z.MaxY+noteGap)。
 	for k := 0; k < noteCorridorTiers; k++ {
-		y := z.MaxY + noteGap + h + float64(k)*noteAnchorStep
+		y := z.MaxY + noteGap + float64(k)*noteAnchorStep
 		for x := z.MinX + noteGap; x <= xEnd+acOverlapEps; x += noteAnchorStep {
 			out = append(out, [2]float64{x, y})
 		}
@@ -245,14 +315,14 @@ func noteCorridorCandidates(z layoutBBox, w, h float64) [][2]float64 {
 	// 右侧走廊:从区上沿往下扫(与 ③ 的右侧单点同一读图习惯)。
 	for k := 0; k < noteCorridorTiers; k++ {
 		x := z.MaxX + noteGap + float64(k)*noteAnchorStep
-		for y := z.MaxY - noteGap; y >= z.MinY+h-acOverlapEps; y -= noteAnchorStep {
+		for y := z.MaxY - noteGap - h; y >= z.MinY-acOverlapEps; y -= noteAnchorStep {
 			out = append(out, [2]float64{x, y})
 		}
 	}
 	// 左侧走廊。
 	for k := 0; k < noteCorridorTiers; k++ {
 		x := z.MinX - w - noteGap - float64(k)*noteAnchorStep
-		for y := z.MaxY - noteGap; y >= z.MinY+h-acOverlapEps; y -= noteAnchorStep {
+		for y := z.MaxY - noteGap - h; y >= z.MinY-acOverlapEps; y -= noteAnchorStep {
 			out = append(out, [2]float64{x, y})
 		}
 	}
@@ -277,24 +347,31 @@ func noteSpotFree(b layoutBBox, obstacles []layoutBBox, sheet layoutBBox, keepou
 	return true
 }
 
-// scanNoteBand 在说明带里从左往右扫一个可用落点,**并要求落点整体落在框内**。
+// scanNoteBand 在说明带里**贴着带底**从左往右扫一个可用落点,并要求落点整体
+// 落在**带内**(带⊆框,所以框内包含随之成立)。
 //
-// 框内包含此前不是构造保证:带内候选只判纸边/图签/图元,不判框。于是「说明宽
-// 435、框宽 435」的真机场景里,带内唯一候选算出来的 bbox 右沿本来就探出框外,
-// 再叠上吸格右移 2.5,画出来必然框外 —— 而 note-outside-zone 判的正是框包含。
-// 判定与生成同一把尺:能用的落点必须先在框里。
+// 两条约束的来历,都是被真机咬过的:
+//
+//   - **贴底**(y = noteFlushAnchorY,横向才扫):此前 y = `band.MinY + h + noteGap`,
+//     那是照「锚点=左上角」写的式子;画布上锚点是左**下**角,于是块高整个变成了
+//     离框底的距离(2 行 42、3 行 55、4 行 68),说明一条比一条飘得高,下面白空
+//     一大截。现在离框底恒为 noteBottomInset,行数/字号都改不动它。
+//   - **带内包含**:此前只判「框内」。带顶就是器件区下沿,poke 出带顶 = 探进
+//     器件区;而 `sch check` 的处方 `--x/--y` 也是按同一个式子算的,于是出现过
+//     「带 (36,12)..(204,70),处方却给 --y 80」这种自己把说明放到带外的报文。
+//     带的定义(zoneNoteBand)、落点、处方现在共用同一条判据。
 func scanNoteBand(band, frame layoutBBox, w, h float64, obstacles []layoutBBox,
 	sheet layoutBBox, keepout *layoutBBox) (x, y float64, ok bool) {
-	by := band.MinY + h + noteGap
+	by := noteFlushAnchorY(band, h)
 	xEnd := math.Max(band.MinX+noteGap, band.MaxX-w-noteGap)
 	for bx := band.MinX + noteGap; bx <= xEnd+acOverlapEps; bx += noteAnchorStep {
-		sx, sy := snapNote(bx), snapNote(by)
-		b := noteAnchorBBox(sx, sy, w, h)
-		if !bboxContains(frame, b) {
+		sx := snapNote(bx) // y 不吸格:吸格会把固定内缩打散成 ±2.5 的抖动
+		b := noteAnchorBBox(sx, by, w, h)
+		if !bboxContains(band, b) || !bboxContains(frame, b) {
 			continue
 		}
 		if noteSpotFree(b, obstacles, sheet, keepout) {
-			return sx, sy, true
+			return sx, by, true
 		}
 	}
 	return 0, 0, false
@@ -384,10 +461,19 @@ func reserveZoneNoteArea(rect layoutBBox, bandTop, w, h float64, obstacles []lay
 	// ② 纵向:带高 ≥ requiredNoteBand(h),带内有占用就逐档下探。
 	floor := noteExpandFloorY(outRect, blockers, sheet, gutter)
 	base := math.Min(outRect.MinY, bandTop-requiredNoteBand(h))
-	bandOf := func(r layoutBBox) layoutBBox {
-		return layoutBBox{MinX: r.MinX, MinY: r.MinY, MaxX: r.MaxX,
-			MaxY: math.Min(r.MaxY, math.Max(r.MinY, bandTop))}
+	// 带底压到底线为止,**不是放弃**:此前 base 可以算到 floor 之下,循环第一档就
+	// `break`,于是「框底被纸边/图签/邻框顶住」的区一次带内扫描都没跑过,直接跌进
+	// 区外走廊 —— 真机 tactile_boot_reset(框底 28,贴着纸边)就是这么落到离框底 52
+	// 的地方的。压到 floor 之后:装得下就贴底落在带内,真装不下由 scanNoteBand 的
+	// 带内包含判据挡下来、走 ok=false 那条如实报告的路。
+	// 顺带把两侧对齐:`sch note`(登记前的计划)与 planner(登记后重算)从此在
+	// 「带底 = max(带顶-带高, floor)」上给出同一个答案。
+	if base < floor {
+		base = floor
 	}
+	// 带的定义走**唯一函数**(zoneNoteBand)—— planner 填 NoteBBox、这里下探、
+	// `sch check` 判归属,三处必须是同一条带。
+	bandOf := func(r layoutBBox) layoutBBox { return zoneNoteBand(r, bandTop) }
 	for k := 0; k <= noteBandDepthSteps; k++ {
 		r := outRect
 		r.MinY = base - float64(k)*noteAnchorStep
