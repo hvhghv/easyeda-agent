@@ -17,6 +17,7 @@
  * one port bind was the result — see docs/ecosystem-survey.md).
  */
 
+import { ActionQueue, isBypassAction } from './action-queue';
 import { buildContextFrame, readEasyEdaVersion } from './eda-context';
 import { runAction } from './actions';
 import { createWebSocketId } from './transport-identity';
@@ -716,6 +717,12 @@ async function handleMessage(msg: InboundFrame): Promise<void> {
 	}
 }
 
+/**
+ * 本激活的**唯一咽喉**:所有动作都从这条 FIFO 链上过(旁路名单除外)。
+ * 每个窗口/激活一条队列 —— 一次只跑一个 handler。见 action-queue.ts 的文件头。
+ */
+const actionQueue = new ActionQueue();
+
 async function handleRequest(request: RequestFrame): Promise<void> {
 	const base = {
 		type: 'response' as const,
@@ -723,32 +730,74 @@ async function handleRequest(request: RequestFrame): Promise<void> {
 		version: request.version ?? PROTOCOL_VERSION,
 	};
 
+	// 入队是**同步**发生的(submit 在第一个 await 之前就把任务挂上了链),
+	// 所以入队顺序 === 消息到达顺序。这一点是整个 happens-before 的地基:
+	// 换成先 await 再入队,FIFO 立刻退化回原来的并发。
+	const outcome = await actionQueue.submit({
+		id: request.id,
+		timeoutMs: request.timeoutMs,
+		bypass: isBypassAction(request.action),
+		run: () => runAction(request.action, request.payload),
+	});
+
 	let response: ResponseFrame;
-	try {
-		const result = await runAction(request.action, request.payload);
-		response = {
-			...base,
-			ok: true,
-		};
-		if (result.result !== undefined) {
-			response.result = result.result;
+	switch (outcome.status) {
+		case 'ok': {
+			const result = outcome.value;
+			response = { ...base, ok: true };
+			if (result.result !== undefined) {
+				response.result = result.result;
+			}
+			if (result.context !== undefined) {
+				response.context = result.context;
+			}
+			if (result.artifacts !== undefined && result.artifacts.length > 0) {
+				response.artifacts = result.artifacts;
+			}
+			if (result.warnings !== undefined && result.warnings.length > 0) {
+				response.warnings = result.warnings;
+			}
+			break;
 		}
-		if (result.context !== undefined) {
-			response.context = result.context;
-		}
-		if (result.artifacts !== undefined && result.artifacts.length > 0) {
-			response.artifacts = result.artifacts;
-		}
-		if (result.warnings !== undefined && result.warnings.length > 0) {
-			response.warnings = result.warnings;
-		}
+		case 'error':
+			response = { ...base, ok: false, error: toResponseError(outcome.error) };
+			break;
+		case 'abandoned':
+			// daemon 多半已经在 (timeoutMs - 2s) 就超时了,所以这条回执往往落不到
+			// 任何等待者手上 —— 那不要紧:它的价值在于**下一条**响应上递增了的
+			// seqAbandoned。措辞必须停在可证边界内:我们只知道「不再等它了」,
+			// 不知道它到底做没做成。
+			response = {
+				...base,
+				ok: false,
+				error: {
+					code: ErrorCodes.ACTION_ABANDONED,
+					message: `action "${request.action}" was abandoned after ${outcome.waitedMs}ms so the queue could keep flowing`,
+					detail: 'the handler is still running; its effect may land later — treat any conclusion about this write as unproven (seqAbandoned was incremented)',
+				},
+			};
+			break;
+		case 'overflow':
+			response = {
+				...base,
+				ok: false,
+				error: {
+					code: ErrorCodes.QUEUE_OVERFLOW,
+					message: `connector action queue is full (${outcome.depth} waiting) — this action was NOT executed`,
+					detail: 'the editor is not draining actions; wait for the backlog to settle (each head is abandoned after its own timeoutMs) or restart EasyEDA',
+				},
+			};
+			break;
 	}
-	catch (err) {
-		response = {
-			...base,
-			ok: false,
-			error: toResponseError(err),
-		};
+
+	// 顺序证据挂在**每一条**响应上,包括失败与旁路的。
+	response.seq = outcome.stamp.seq;
+	response.seqAbandoned = outcome.stamp.seqAbandoned;
+	if (outcome.stamp.unordered) {
+		response.unordered = true;
+	}
+	if (outcome.stamp.abandonedIds !== undefined && outcome.stamp.abandonedIds.length > 0) {
+		response.abandonedIds = outcome.stamp.abandonedIds;
 	}
 
 	sendFrame(response);

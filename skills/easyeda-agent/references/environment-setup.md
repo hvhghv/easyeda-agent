@@ -53,7 +53,7 @@ easyeda update --version 0.25.0      # 钉版本(离线场景也可用它跳过 
 | `cli` | `skipped (dev build)` | 开发环境的 git-describe 版本,**故意不覆盖**(air 下一次改 `.go` 就重建);要强升才 `--force`。 |
 | `skill:<client>` | `behind` | `easyeda update` 一并同步(daemon 启动时也会自动同步);本地改过 skill 想保留加 `--preserve`。 |
 | `skill:<client>` | `not-installed` | 该客户端没装过 → `easyeda update --create-missing`。 |
-| `connector` | `behind` | **只能人工重装**——侧载 `.eext` 没有原地更新。按提示 URL 下载 → 扩展管理里**先卸载旧的**(平台按 uuid 去重,不卸载则导入静默失败)→ 导入新的 → **完全退出并重启 EasyEDA**(已开窗口会继续跑旧连接器代码并抢 daemon)。市场版可自动更新但滞后 CLI。 |
+| `connector` | `behind` | **只能人工重装**——侧载 `.eext` 没有原地更新。按提示 URL 下载 → 扩展管理里**先卸载旧的**(平台按 uuid 去重,不卸载则导入静默失败)→ 导入新的 → **完全退出并重启 EasyEDA**(已开窗口会继续跑旧连接器代码并抢 daemon)。市场版可自动更新但滞后 CLI。**旧连接器不只是缺新动作**:它不带 `seq`/`seqAbandoned` 顺序证据,于是「写超时了到底落没落地」这类判定会**降级成弱证据**(报文里写着 `证据档:弱(探针启发式)`),而且动作在连接器里是**并发**跑的 —— 一个卡死的调用会静默吞掉后续的 `place`/`delete`/`document.open`。看到弱证据档就该升级。 |
 | `connector` | `no-daemon` / `no-window` | 不是版本问题,是环境没起来 → 回 §0。 |
 
 > `--check` 从不写盘;非 `--check` 形态只碰 CLI 二进制和 skill 目录,**永不动 EasyEDA 工程**。

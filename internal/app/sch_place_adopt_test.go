@@ -22,7 +22,7 @@ func TestSchAdoptOrphanPlacementAdoptsTheNewPartAtTheRequestedSpot(t *testing.T)
 		adoptComp("old-1", "R9", "part", 400, 300),
 		adoptComp("ghost-1", "U2", "part", 400, 300),
 	}
-	v := schAdoptOrphanPlacement(known, nil, live, schAdoptRequest{Designator: "U2", X: 400, Y: 300})
+	v := schAdoptOrphanPlacement(known, nil, schSeqEvidence{}, live, schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted == nil || v.Adopted.ID != "ghost-1" {
 		t.Fatalf("adopted=%+v, want ghost-1", v.Adopted)
 	}
@@ -43,7 +43,7 @@ func TestSchAdoptOrphanPlacementNeverInventsAnIDWhenNothingLanded(t *testing.T) 
 		adoptComp("old-1", "R9", "part", 400, 300),
 		adoptComp("placed-1", "U1", "part", 700, 460), // 本命令此前落地的件 = 探针
 	}
-	v := schAdoptOrphanPlacement(known, []string{"placed-1"}, live,
+	v := schAdoptOrphanPlacement(known, []string{"placed-1"}, schSeqEvidence{}, live,
 		schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted != nil || len(v.Candidates) != 0 {
 		t.Fatalf("verdict=%+v, want nothing adopted and nothing named", v)
@@ -63,7 +63,7 @@ func TestSchAdoptOrphanPlacementNeverAdoptsAPreexistingTwin(t *testing.T) {
 	twin := adoptComp("preexisting", "U2", "part", 400, 300)
 	probe := adoptComp("placed-1", "U1", "part", 700, 460)
 	known := map[string]bool{"preexisting": true, "placed-1": true}
-	v := schAdoptOrphanPlacement(known, []string{"placed-1"}, []layoutComp{twin, probe},
+	v := schAdoptOrphanPlacement(known, []string{"placed-1"}, schSeqEvidence{}, []layoutComp{twin, probe},
 		schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted != nil || len(v.Candidates) != 0 {
 		t.Fatalf("verdict=%+v, want the pre-existing twin left alone", v)
@@ -76,7 +76,7 @@ func TestSchAdoptOrphanPlacementNeverAdoptsAPreexistingTwin(t *testing.T) {
 // 负对照 C:快照缺失时上层必须整个关掉收编。这里钉的是「known 为空集 ≠ 快照缺失」
 // —— 空集是合法的空白页快照,缺失由调用方用 nil 表达(见 bapAdoptAfterPlaceFailure)。
 func TestSchAdoptOrphanPlacementEmptySnapshotStillMeansEverythingIsNew(t *testing.T) {
-	v := schAdoptOrphanPlacement(map[string]bool{}, nil,
+	v := schAdoptOrphanPlacement(map[string]bool{}, nil, schSeqEvidence{},
 		[]layoutComp{adoptComp("ghost-1", "U2", "part", 400, 300)},
 		schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted == nil || v.Adopted.ID != "ghost-1" {
@@ -92,7 +92,7 @@ func TestSchAdoptOrphanPlacementRejectsNonPartsAndDistantParts(t *testing.T) {
 		{ID: "noxy-1", ComponentType: "part"},         // 无可信坐标 → 不猜
 		adoptComp("placed-1", "U1", "part", 700, 460), // 探针到齐 → 回读新鲜
 	}
-	v := schAdoptOrphanPlacement(map[string]bool{}, []string{"placed-1"}, live,
+	v := schAdoptOrphanPlacement(map[string]bool{}, []string{"placed-1"}, schSeqEvidence{}, live,
 		schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted != nil || len(v.Candidates) != 0 {
 		t.Fatalf("verdict=%+v, want no adoption", v)
@@ -107,7 +107,7 @@ func TestSchAdoptOrphanPlacementNamesEveryCandidateWhenAmbiguous(t *testing.T) {
 		adoptComp("ghost-b", "U2", "part", 402, 301),
 		adoptComp("ghost-a", "U2", "part", 400, 300),
 	}
-	v := schAdoptOrphanPlacement(map[string]bool{}, nil, live, schAdoptRequest{Designator: "U2", X: 400, Y: 300})
+	v := schAdoptOrphanPlacement(map[string]bool{}, nil, schSeqEvidence{}, live, schAdoptRequest{Designator: "U2", X: 400, Y: 300})
 	if v.Adopted != nil {
 		t.Fatalf("ambiguous match must not be adopted: %+v", v.Adopted)
 	}
@@ -119,11 +119,11 @@ func TestSchAdoptOrphanPlacementNamesEveryCandidateWhenAmbiguous(t *testing.T) {
 func TestSchAdoptOrphanPlacementToleranceIsOneGridStep(t *testing.T) {
 	inside := adoptComp("in", "U2", "part", 400+schAdoptTolerance, 300)
 	outside := adoptComp("out", "U2", "part", 400+schAdoptTolerance+0.5, 300)
-	if v := schAdoptOrphanPlacement(map[string]bool{}, nil, []layoutComp{inside},
+	if v := schAdoptOrphanPlacement(map[string]bool{}, nil, schSeqEvidence{}, []layoutComp{inside},
 		schAdoptRequest{X: 400, Y: 300}); v.Adopted == nil {
 		t.Fatal("a part exactly at the tolerance edge must be adopted")
 	}
-	if v := schAdoptOrphanPlacement(map[string]bool{}, nil, []layoutComp{outside},
+	if v := schAdoptOrphanPlacement(map[string]bool{}, nil, schSeqEvidence{}, []layoutComp{outside},
 		schAdoptRequest{X: 400, Y: 300}); v.Adopted != nil {
 		t.Fatal("a part past the tolerance must not be adopted")
 	}
@@ -150,7 +150,7 @@ func TestSchAdoptOrphanPlacementRefusesToConcludeFromAStaleRead(t *testing.T) {
 	// 地面真相:C8 已经落在 (440,535)(测完由用户清残件时读到 5e5803d829b1985d)。
 	// 但这次回读是 stale 的:既没有 C8,也丢了本命令此前落地的 U3。
 	stale := []layoutComp{adoptComp("old-1", "R9", "part", 100, 100)}
-	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, []string{"u3-id"}, stale,
+	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, []string{"u3-id"}, schSeqEvidence{}, stale,
 		schAdoptRequest{Designator: "C8", X: 440, Y: 535})
 
 	if !v.Uncertain {
@@ -181,7 +181,7 @@ func TestSchAdoptOrphanPlacementRefusesToConcludeFromAStaleRead(t *testing.T) {
 // 等于放弃唯一能拿到的残件句柄。
 func TestSchAdoptOrphanPlacementStillAdoptsAHitEvenIfProbesAreMissing(t *testing.T) {
 	live := []layoutComp{adoptComp("ghost-1", "C8", "part", 440, 535)}
-	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, []string{"u3-id"}, live,
+	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, []string{"u3-id"}, schSeqEvidence{}, live,
 		schAdoptRequest{Designator: "C8", X: 440, Y: 535})
 	if v.Adopted == nil || v.Adopted.ID != "ghost-1" {
 		t.Fatalf("verdict=%+v, want the visible orphan adopted regardless of probe bookkeeping", v)
@@ -196,7 +196,7 @@ func TestSchAdoptOrphanPlacementStillAdoptsAHitEvenIfProbesAreMissing(t *testing
 // 当探针来假装能证明:下面这次回读把快照件 old-1 完整带回来了,它依然不算新鲜。
 func TestSchAdoptOrphanPlacementAnchorFirstFailureIsUncertainNotProven(t *testing.T) {
 	live := []layoutComp{adoptComp("old-1", "R9", "part", 100, 100)}
-	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, nil, live,
+	v := schAdoptOrphanPlacement(map[string]bool{"old-1": true}, nil, schSeqEvidence{}, live,
 		schAdoptRequest{Designator: "U3", X: 690, Y: 460})
 	if !v.Uncertain || v.Fresh {
 		t.Fatalf("verdict=%+v, want uncertain: a pre-command snapshot id can never prove freshness", v)
@@ -214,7 +214,7 @@ func TestSchAdoptOrphanPlacementAnchorFirstFailureIsUncertainNotProven(t *testin
 
 // 空白页 + 第一件超时也走同一条路:没有探针就是没有证据。
 func TestSchAdoptOrphanPlacementEmptyPageFirstPlaceIsUncertain(t *testing.T) {
-	v := schAdoptOrphanPlacement(map[string]bool{}, nil, nil,
+	v := schAdoptOrphanPlacement(map[string]bool{}, nil, schSeqEvidence{}, nil,
 		schAdoptRequest{Designator: "U1", X: 400, Y: 300})
 	if !v.Uncertain || v.Fresh {
 		t.Fatalf("verdict=%+v, want uncertain on an empty page with no probe", v)

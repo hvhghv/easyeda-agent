@@ -560,6 +560,11 @@ func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]b
 	created []bapPlacement, p bapPlacement, stderr io.Writer) (*bapPlacement, []string, []string) {
 
 	req := schAdoptRequest{Designator: p.Designator, X: p.X, Y: p.Y}
+	// 顺序证据的基线:**在发出任何回读之前**取。失败那次 place 的响应从没回来
+	// (或者回来了但没带 id),所以此刻记录里最新的那条,就是「W 下发之前」那一刻
+	// 的计数器 —— 正是算术判定要的那个基线。取晚一步(比如放到回读之后)会拿回读
+	// 自己当基线,算术当场退化成恒等式。
+	base := connSeqSnapshot(window, cfg.project)
 	if known == nil {
 		msg := p.Designator + ": 没有落地前的器件快照,无法证明画布上多出来的是不是本次 place 的产物 —— " +
 			"拒绝按坐标猜测(那会误删页面上原有的同型器件)"
@@ -584,7 +589,7 @@ func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]b
 		}
 	}
 
-	verdict, err := schAdoptRead(cfg, window, scope, probes, req)
+	verdict, err := schAdoptRead(cfg, window, scope, probes, base, req)
 	if err != nil {
 		msg := fmt.Sprintf("%s: 收编回读失败(%v)—— 无法判断这次 place 是否已经落地", p.Designator, err)
 		fmt.Fprintf(stderr, "adopt ✗ %s\n", msg)
@@ -605,17 +610,20 @@ func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]b
 		schAdoptResidueGuidance(stderr, ids)
 		return nil, nil, ids
 	}
-	// 门⓪没过:回读什么也没证明。**必须**在「证实没落地」之前拦截 —— 这两条分支
-	// 的输入长得一模一样(都是「那里没有新器件」),区别只在这次回读可不可信。
+	// 新鲜度门没过:回读什么也没证明。**必须**在「证实没落地」之前拦截 —— 这两条
+	// 分支的输入长得一模一样(都是「那里没有新器件」),区别只在这次回读可不可信。
 	if verdict.Uncertain {
 		msg := p.Designator + ": " + verdict.Reason
 		fmt.Fprintf(stderr, "adopt ? %s\n", msg)
+		schAdoptTierNotice(stderr, verdict)
 		schAdoptUncertainGuidance(stderr, req, verdict.MissingProbes)
 		return nil, []string{msg}, nil
 	}
 	// 证实没落地 —— 这是好消息,说出来。旧文案无条件吓唬"可能建了个 untracked
-	// 器件",于是每次超时都要人肉去页面上找,找不到也不敢确定。
+	// 器件",于是每次超时都要人肉去页面上找,找不到也不敢确定。证据档跟着一起报:
+	// 算术档是可证的,探针档只是弱证据,两者绝不能在报文里长得一样。
 	fmt.Fprintf(stderr, "adopt ✓ %s\n", verdict.Reason)
+	schAdoptTierNotice(stderr, verdict)
 	return nil, nil, nil
 }
 

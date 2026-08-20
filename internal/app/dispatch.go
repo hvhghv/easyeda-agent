@@ -185,7 +185,12 @@ type actionResult struct {
 	Result    map[string]any `json:"result"`
 	Artifacts []artifactRef  `json:"artifacts"`
 	Context   *actionContext `json:"context"`
-	errorMsg  string
+	// Seq is the connector's FIFO ordering evidence carried on this response
+	// (connector ≥ 1.0.3). Known=false means the connector is older and sent no
+	// such fields — callers MUST then fall back to a weaker judgement rather
+	// than assume anything. See conn_seq.go / sch_place_adopt.go.
+	Seq      schSeqCounters
+	errorMsg string
 }
 
 // requestAction POSTs a typed action and returns the parsed response without
@@ -218,7 +223,7 @@ func requestActionTimed(cfg *appConfig, action, window string, payload any, time
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("decode %s response: %w", action, err)
 	}
-	res := &actionResult{ID: parsed.ID, Type: parsed.Type, Version: parsed.Version, OK: parsed.OK, Result: parsed.Result, Artifacts: parsed.Artifacts, Context: parsed.Context}
+	res := &actionResult{ID: parsed.ID, Type: parsed.Type, Version: parsed.Version, OK: parsed.OK, Result: parsed.Result, Artifacts: parsed.Artifacts, Context: parsed.Context, Seq: parseSeqCounters(respBody)}
 	if !parsed.OK {
 		msg := "ok=false"
 		if parsed.Error != nil && parsed.Error.Message != "" {
@@ -806,6 +811,10 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 	// And for connector-attached warnings (partial property application #151,
 	// rebind re-place advisory, …) — visible without per-command wiring.
 	warnResponseWarnings(respBody, os.Stderr)
+	// Record the connector's FIFO ordering counters at the SAME choke point, so
+	// any later judgement has a baseline without every command threading one
+	// through by hand (conn_seq.go). Read-only bookkeeping; never fails a call.
+	connSeqObserve(window, cfg.project, respBody)
 	return respBody, nil
 }
 

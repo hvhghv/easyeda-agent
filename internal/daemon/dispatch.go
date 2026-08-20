@@ -54,6 +54,31 @@ func requestTimeout(req *protocol.Request) time.Duration {
 // the first is still grinding (worst on a background window, where it NEVER
 // finishes — optimization-loop.md A4); retries therefore make the hang worse,
 // not better. The guard turns that into an immediate, explainable rejection.
+//
+// ── Does the connector's FIFO queue make this redundant? NO — keep it. ─────
+//
+// Connector 1.0.3 runs every action through one FIFO queue per window
+// (extension/src/action-queue.ts), so two DRCs can no longer overlap on the
+// webview. That removes the *overlap*, not the reason this guard exists:
+//
+//   - **Queuing and refusing are different answers.** A FIFO can only DELAY;
+//     it has no way to decline. A second DRC would sit behind a 60s+ recompute
+//     and then run a second full-canvas recompute on a webview that just
+//     finished one — the caller waits minutes to learn what this guard says
+//     immediately ("one is already running; if it never settles, foreground
+//     the window"). The whole point is to stop the ask, not to sequence it.
+//   - **Only the daemon can see the second asker.** The guard is what makes a
+//     retry loop — or a second client/agent driving the same board — fail
+//     loudly instead of silently stacking work.
+//   - **A queued long action would burn its whole budget waiting.** With the
+//     connector abandoning a head past its own timeoutMs, a DRC that queued
+//     behind another DRC could be abandoned before it ever started, which is
+//     both wasteful and reports as an ambiguous failure.
+//
+// And the converse: the daemon deliberately adds NO general per-window
+// ordering beyond this. Serialization belongs at the connector, the only place
+// that can serialize the *handlers* — a daemon-side queue would order the
+// dispatches while the handlers still raced, i.e. cost without the guarantee.
 var nonReentrant = map[string]bool{
 	"pcb.drc.check":       true,
 	"schematic.drc.check": true,

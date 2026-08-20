@@ -28,6 +28,12 @@ export interface RequestFrame {
 	action: string;
 	payload?: Record<string, unknown>;
 	windowId?: string;
+	/**
+	 * 调用方的往返预算(毫秒),由 daemon 下发(protocol.Request.TimeoutMs)。
+	 * 连接器用它当**放弃队首**的截止时间 —— 绝不写死常数:`sch check` / DRC
+	 * 这类合法长操作能跑 60 秒以上。缺省 → ABANDON_FALLBACK_MS。
+	 */
+	timeoutMs?: number;
 }
 
 export interface PingFrame {
@@ -101,6 +107,24 @@ export interface ResponseFrame {
 	artifacts?: Array<ResponseArtifact>;
 	warnings?: Array<string>;
 	error?: ResponseError;
+
+	// ── 顺序证据(v1.0.3+,见 action-queue.ts) ───────────────────────────
+	// 每一个 response frame 都带。Go 侧镜像在 internal/protocol/envelope.go,
+	// **两侧形状必须一致**。老 daemon 收到多余字段会忽略;新 daemon 收不到这
+	// 三个字段时退回弱证据档,绝不默认「新鲜」。
+
+	/**
+	 * 已完成的动作数(每个 FIFO handler settle 之后 +1,单调递增、永不回退)。
+	 * 响应上带的是「本动作完成之后」的值。**它证明的是 handler 边界的先后,
+	 * 不是「文档已提交」**。
+	 */
+	seq?: number;
+	/** 累计被放弃的动作数。变化 = 那段时间的顺序证据作废。 */
+	seqAbandoned?: number;
+	/** true = 这条响应走了旁路通道,它的 seq 不构成任何顺序证据。 */
+	unordered?: boolean;
+	/** 最近被放弃的 request id(最多 32 条),供判定点名而不只是数数。 */
+	abandonedIds?: Array<string>;
 }
 
 // ─── Stable error codes ──────────────────────────────────────────────
@@ -112,6 +136,13 @@ export const ErrorCodes = {
 	EDA_CALL_FAILED: 'EDA_CALL_FAILED',
 	INVALID_STATE: 'INVALID_STATE',
 	INTERNAL_ERROR: 'INTERNAL_ERROR',
+	/**
+	 * 队首超过它自己的 timeoutMs 仍未 settle,被放弃以让队列继续流动。
+	 * **它的效果可能稍后才落地** —— 收到这个码 = 关于这次写的任何结论都不成立。
+	 */
+	ACTION_ABANDONED: 'ACTION_ABANDONED',
+	/** 队列积压到上限,这次提交被明确拒绝(而不是无限堆积)。它**没有执行**。 */
+	QUEUE_OVERFLOW: 'QUEUE_OVERFLOW',
 } as const;
 
 /**
