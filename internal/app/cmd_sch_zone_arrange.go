@@ -113,14 +113,25 @@ func schSheetOrA4(comps []layoutComp) (*layoutBBox, bool) {
 // TestZfSideOf_AgreesWithMeasuredStubDirection 把这条钉住。
 func zfSideOf(body, marker layoutBBox) string {
 	mcx, mcy := bboxCenter(marker)
-	best, bestOut := "left", body.MinX-mcx
+	return zfPointSideOf(body, mcx, mcy)
+}
+
+// zfPointSideOf 是同一条边界语义的**点版本**:一只引脚(或一个标记锚)从本体
+// bbox 的哪条边探出去最多。zfSideOf 就是它在 marker 中心上的特化 —— 两处判的是
+// 同一件事,必须是同一个函数本体(各写一份就是又造一把尺)。
+//
+// 引脚版是 phase A 端子朝向的**唯一真值来源**:引脚坐标是符号锁死的事实,而
+// marker 位置只是上一轮布线的结果 —— 拿 marker 定朝向会让收敛跟着上一轮的残局
+// 走(真机三轮不收敛的一半原因)。
+func zfPointSideOf(body layoutBBox, px, py float64) string {
+	best, bestOut := "left", body.MinX-px
 	for _, c := range []struct {
 		side string
 		out  float64
 	}{
-		{"right", mcx - body.MaxX},
-		{"down", body.MinY - mcy},
-		{"up", mcy - body.MaxY},
+		{"right", px - body.MaxX},
+		{"down", body.MinY - py},
+		{"up", py - body.MaxY},
 	} {
 		if c.out > bestOut {
 			best, bestOut = c.side, c.out
@@ -130,17 +141,50 @@ func zfSideOf(body, marker layoutBBox) string {
 }
 
 // zfGroupFromCluster 把一个 L1 虚拟组折成 phase A 的类型化输入。
-// 端子挂侧由 zfSideOf(边界语义)判定 —— 确定性,无打分。
-func zfGroupFromCluster(c schCluster, pinCount int) zfGroup {
+//
+// ── 端子必须逐 **pin** 折,而且必须带上引脚坐标(2026-08-20 真机定案)────────────
+//
+// 首版逐 **marker** 折(c.Typed),只给类型/网名/挂侧,不给引脚位置。两处结构性
+// 后果,真机 MCU_IO 连跑三轮都在同一处踩:
+//
+//	① **覆盖面**:cluster 的「专属 marker」规则不把共树 marker 算给本组
+//	   (buildSchClusters ③:触到多个器件的导线连通块不属于任何一组),于是共树
+//	   pin 在计划里根本没有端子 —— 而 --apply 是逐 pin 重建的(groupRebuildConnSpecs
+//	   按活体网表出规格)。计划漏掉的那几只 pin 落地时走 autoconnect 自由评分,
+//	   区框凭空胖一档,断言③ 只能如实报红。zfMeasureCluster 早就是逐 pin 折的
+//	   (它的注释写着为什么),规划侧却没跟上。
+//	② **朝向**:没有引脚坐标,zfGenPassive 只能**假定**两只脚在本体上下缘中线上,
+//	   再按 R3 把 GND 派到下端。真机 C4/C6(rot 90,pin1=+3V3 在本体下方、
+//	   pin2=GND 在本体上方)正好是反的 —— 计划把 GND 端子派给了物理上在**上面**
+//	   的那只脚却给它 direction=down,把 +3V3 派给下面那只脚却给 direction=up,
+//	   两根桩线双双钻进本体、当场合并 → **GND 整张网并进 +3V3**。页级网表一旦
+//	   串,对账红 → 恢复段把全页 9 只地脚按自由评分重连 → 落地几何与计划无关,
+//	   报文那句「计划未覆盖」其实是这条路径的产物。
+//
+// 所以:有实测几何(Measured,逐 pin 从活体折出)时一律按它折端子,引脚坐标折成
+// **本体局部坐标**带进计划;挂侧改用引脚自己的边界语义(zfPointSideOf)。没有
+// 实测(纯几何单测 / 老调用点)才退回逐 marker 的首版口径。
+func zfGroupFromCluster(c schCluster, pinCount int, m *zfMeasured) zfGroup {
 	g := zfGroup{
 		Designator: c.Designator,
 		BodyW:      c.Body.MaxX - c.Body.MinX,
 		BodyH:      c.Body.MaxY - c.Body.MinY,
 		MultiPin:   pinCount > 2,
 	}
-	for _, m := range c.Typed {
+	if m != nil {
+		// 逐 pin:落地会重建的端子集合 = 这一份(与 groupRebuildConnSpecs 同源)。
+		for _, t := range m.Terms {
+			g.Terms = append(g.Terms, zfTerm{Kind: t.Kind, Net: t.Net,
+				Side:   zfPointSideOf(c.Body, t.PinX, t.PinY),
+				PinX:   t.PinX - c.Body.MinX,
+				PinY:   t.PinY - c.Body.MinY,
+				HasPin: true})
+		}
+		return g
+	}
+	for _, tm := range c.Typed {
 		var kind string
-		switch m.Kind {
+		switch tm.Kind {
 		case "netport":
 			kind = "netport"
 		case "netflag", "netlabel":
@@ -148,9 +192,9 @@ func zfGroupFromCluster(c schCluster, pinCount int) zfGroup {
 		default:
 			continue // part / wire 不是端子
 		}
-		g.Terms = append(g.Terms, zfTerm{Kind: kind, Net: m.Net,
-			W: m.BBox.MaxX - m.BBox.MinX, H: m.BBox.MaxY - m.BBox.MinY,
-			Side: zfSideOf(c.Body, m.BBox)})
+		g.Terms = append(g.Terms, zfTerm{Kind: kind, Net: tm.Net,
+			W: tm.BBox.MaxX - tm.BBox.MinX, H: tm.BBox.MaxY - tm.BBox.MinY,
+			Side: zfSideOf(c.Body, tm.BBox)})
 	}
 	return g
 }
@@ -233,13 +277,32 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	if perr != nil {
 		return nil, nil, perr
 	}
-	sheet, sheetAssumed := schSheetOrA4(comps)
-	keepout, _ := titleBlockKeepout(sheet)
 	// 标签入框是硬约束:导线是端子归属的唯一可靠来源,读不到就不规划。
 	wires, werr := fetchSchWirePolylines(cfg, window, docUUID)
 	if werr != nil {
 		return nil, nil, fmt.Errorf("zone-arrange 需要导线数据做端子归属(标签入框是硬约束,距离启发式必错):%w", werr)
 	}
+	// **收紧必须把区名带 + 说明带一起算进去,收紧完再画框**(用户裁定 2026-08-20)。
+	// 此前 phase A 用的是常量 `opts.NoteBand`,而 zone-plan 侧的带高按**已登记说明
+	// 的实际渲染高度**算 —— 两套带账。按常量带收紧出来的框,画完再放 note 就装不下,
+	// 说明探出框外(9ee3e13 自己挂的那笔账)。尺寸只由内容+字号推导,与落点无关。
+	noteSizes := zoneNoteSizes(zones, fetchZoneNoteTexts(cfg, window, docUUID, zones))
+	out, perr := planZoneArrangeScene(zones, comps, wires, noteSizes, opts)
+	if perr != nil {
+		return nil, nil, perr
+	}
+	return out, &zaScene{comps: comps, wires: wires}, nil
+}
+
+// planZoneArrangeScene 是 zone-arrange 规划的**纯函数核心**:一份场景快照
+// (器件 + 导线 + 认领表 + 说明带高)进,两段规划出。I/O 全部留在 computeZoneArrange
+// 里 —— 这样「计划覆盖了哪些 pin」这类判据可以在离线 fixture 上机械验收,
+// 不必开着 EasyEDA 才敢改规划器。
+func planZoneArrangeScene(zones map[string]*schZoneClaim, comps []layoutComp, wires []schGroupWire,
+	noteSizes map[string]zoneNoteSize, opts partitionOpts) (*zoneArrangeOut, error) {
+
+	sheet, sheetAssumed := schSheetOrA4(comps)
+	keepout, _ := titleBlockKeepout(sheet)
 	clusters, _ := buildSchClusters(comps, wires)
 	byDesig := map[string]schCluster{}
 	for _, c := range clusters {
@@ -267,12 +330,6 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	}
 	sort.Strings(names)
 
-	// **收紧必须把区名带 + 说明带一起算进去,收紧完再画框**(用户裁定 2026-08-20)。
-	// 此前 phase A 用的是常量 `opts.NoteBand`,而 zone-plan 侧的带高按**已登记说明
-	// 的实际渲染高度**算 —— 两套带账。按常量带收紧出来的框,画完再放 note 就装不下,
-	// 说明探出框外(9ee3e13 自己挂的那笔账)。尺寸只由内容+字号推导,与落点无关。
-	noteSizes := zoneNoteSizes(zones, fetchZoneNoteTexts(cfg, window, docUUID, zones))
-
 	out := &zoneArrangeOut{Sheet: *sheet, Keepout: keepout, SheetAssumed: sheetAssumed}
 	var zaZones []zaZone
 	for _, name := range names {
@@ -288,8 +345,11 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 			if !ok {
 				continue
 			}
-			g := zfGroupFromCluster(c, pinCount[strings.ToUpper(d)])
-			g.Measured = zfMeasureCluster(c, partOf[strings.ToUpper(d)], wires, roots, markers)
+			// 实测先算:它既是「不得变差」门的回退原料,**也是计划端子的来源**
+			// (逐 pin + 引脚坐标)—— 顺序反了就等于又回到逐 marker 的首版口径。
+			measured := zfMeasureCluster(c, partOf[strings.ToUpper(d)], wires, roots, markers)
+			g := zfGroupFromCluster(c, pinCount[strings.ToUpper(d)], measured)
+			g.Measured = measured
 			groups = append(groups, g)
 			zfGrow(&raw, &hasRaw, c.Box)
 		}
@@ -312,7 +372,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		// 是与 phase B(newZaSearch)同源的那一份域,选形与门共用它。
 		plan, ferr := planZoneFollowGated(name, groups, zopts, zfDomainFor(*sheet, keepout, opts))
 		if ferr != nil {
-			return nil, nil, fmt.Errorf("phase A(%s): %w", name, ferr)
+			return nil, fmt.Errorf("phase A(%s): %w", name, ferr)
 		}
 		rawW, rawH := zoneArrangeRawFrame(raw, opts, noteSizes[name].H)
 		home := [2]float64{(raw.MinX + raw.MaxX) / 2, (raw.MinY + raw.MaxY) / 2}
@@ -324,7 +384,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 		zaZones = append(zaZones, zaZone{Name: name, W: plan.FrameW, H: plan.FrameH, Home: home})
 	}
 	if len(zaZones) == 0 {
-		return nil, nil, fmt.Errorf("no zone resolved any parts on this page — 认领的件不在本页(place / `doc switch`)")
+		return nil, fmt.Errorf("no zone resolved any parts on this page — 认领的件不在本页(place / `doc switch`)")
 	}
 	out.Arrange = zonesArrange(zaZones, *sheet, keepout, opts)
 	if out.Arrange.OK {
@@ -338,7 +398,7 @@ func computeZoneArrange(cfg *appConfig, window, docUUID string, opts partitionOp
 	} else {
 		out.Verdict = "blocked"
 	}
-	return out, &zaScene{comps: comps, wires: wires}, nil
+	return out, nil
 }
 
 func renderZoneArrange(out *zoneArrangeOut, w io.Writer) {

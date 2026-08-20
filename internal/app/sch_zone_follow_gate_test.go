@@ -71,8 +71,9 @@ func zfGateBuild(desig string, body layoutBBox, pinCount int, mks []zfGateMarker
 	if box != nil {
 		c.Box = *box
 	}
-	g := zfGroupFromCluster(c, pinCount)
-	g.Measured = zfMeasureCluster(c, part, wires, tidyWireRoots(wires), markers)
+	measured := zfMeasureCluster(c, part, wires, tidyWireRoots(wires), markers)
+	g := zfGroupFromCluster(c, pinCount, measured)
+	g.Measured = measured
 	return g, c
 }
 
@@ -97,17 +98,21 @@ func zfGateLegacySide(body, marker layoutBBox) string {
 }
 
 // zfGateLegacyGroup 用首版判据重算挂侧(其余一切与生产路径相同)。
-func zfGateLegacyGroup(c schCluster, pinCount int) zfGroup {
-	g := zfGroupFromCluster(c, pinCount)
-	i := 0
-	for _, m := range c.Typed {
-		switch m.Kind {
+// 端子已改成逐 pin 折(顺序与 c.Typed 不再一一对应),所以按**网名**回填 ——
+// fixture 里网名唯一。
+func zfGateLegacyGroup(c schCluster, pinCount int, m *zfMeasured) zfGroup {
+	g := zfGroupFromCluster(c, pinCount, m)
+	legacy := map[string]string{}
+	for _, tm := range c.Typed {
+		switch tm.Kind {
 		case "netport", "netflag", "netlabel":
-		default:
-			continue
+			legacy[tm.Net] = zfGateLegacySide(c.Body, tm.BBox)
 		}
-		g.Terms[i].Side = zfGateLegacySide(c.Body, m.BBox)
-		i++
+	}
+	for i := range g.Terms {
+		if s, ok := legacy[g.Terms[i].Net]; ok {
+			g.Terms[i].Side = s
+		}
 	}
 	return g
 }
@@ -152,13 +157,14 @@ func zfFixtureWroom6() (zfGroup, schCluster) {
 		}, nil)
 }
 
-// zfFixtureWideHeader 是**门的正样本**:一条横放的 10 脚排针(本体 300×30),
-// 标签物理上就在上下两侧 —— 挂侧判定怎么改都是 up/down,不存在误判。收敛在这里
-// 依然是负优化:垂直梯次让每支竖起来的 netport 占 63 高,五支摞成一列。
+// zfFixtureWideHeader 是一条横放的 10 脚排针(本体 300×30),引脚在上下两条边、
+// 间距 40。它曾经是「门的正样本」:首版规划器不知道引脚的 x,只好把同侧每一支
+// 标签沿桩长**无条件**摞成垂直梯次(每支 63 高),348×311 当场被顶成 369×781。
 //
-//	现状 348×311(本页有落点)→ 收敛 369×781(连可用域都装不下)
-//
-// 门必须回退。它与根因修复正交:这就是「①修好了②仍然必要」的那个证据。
+// 引脚坐标进了计划之后它反而成了**本次修复的见证**:标签各自贴在自己那只脚旁边,
+// 只在预测盒真的相撞时才让开一档 —— 348×311 → 358×321,门不再需要出手
+// (TestZfGate_WideHeaderNoLongerExplodes 钉住这个数)。门的正样本另见
+// zfFixtureTallBottomPins。
 func zfFixtureWideHeader() (zfGroup, schCluster) {
 	return zfGateBuild("J1", layoutBBox{MinX: 200, MinY: 400, MaxX: 500, MaxY: 430}, 20,
 		[]zfGateMarker{
@@ -175,24 +181,44 @@ func zfFixtureWideHeader() (zfGroup, schCluster) {
 		}, nil)
 }
 
-// zfFixtureWideHeaderStaged 是同一条排针**已经被前一轮竖向梯次撑开**之后的现状
-// (桩长 380/390,标签甩到上下老远):现状 348×1031 连可用域都装不下,收敛 369×781
-// 同样装不下 —— **两个形状都没救**。门在这里不许拦(拦了也没用,而且会把一个
-// 更小的框换成更大的),phase B 照常报 blocked,归因必须读得出来。
-func zfFixtureWideHeaderStaged() (zfGroup, schCluster) {
-	return zfGateBuild("J2", layoutBBox{MinX: 200, MinY: 400, MaxX: 500, MaxY: 430}, 20,
-		[]zfGateMarker{
-			{"D0", "netport", "down", 220, 400, 220, 20},
-			{"D1", "netport", "down", 260, 400, 260, 20},
-			{"D2", "netport", "down", 300, 400, 300, 20},
-			{"D3", "netport", "down", 340, 400, 340, 20},
-			{"D4", "netport", "down", 380, 400, 380, 20},
-			{"D5", "netport", "up", 240, 430, 240, 810},
-			{"D6", "netport", "up", 280, 430, 280, 810},
-			{"D7", "netport", "up", 320, 430, 320, 810},
-			{"D8", "netport", "up", 360, 430, 360, 810},
-			{"D9", "netport", "up", 400, 430, 400, 810},
-		}, nil)
+// zfDenseBottomPins 造「一件高本体 + n 只**密到标签真的压在一起**的下缘引脚」的
+// 实测:引脚间距 **5**,竖起来的 netport 标签宽 11 —— 相邻两支实打实压 6 个单位,
+// 让位判据(zfMarkerCollides = `sch check` 的 marker-overlap 那把尺)必然出手,
+// 于是同侧要多开一条 lane、每条 lane 让开一个标签高。本体越高,那条 lane 越容易
+// 把框顶出可用域。**这是引脚坐标进计划之后仍然存在的那一类负优化**:收敛该做的事
+// (重生短桩)做了,可让位省不掉。
+//
+// 为什么是 5 而不是 10:节距 10 时相邻标签只擦过 1 个单位 —— schMarkerOverlapEps
+// 明写着那是字体现实、换 lane 也消不掉,判据不报、规划器也就不该为它付一条 lane
+// 的代价(2026-08-20 把让位改成与判据同一把尺之后,节距 10 的旧 fixture 当场
+// 失去判别力,这条注释就是那次订正的账)。
+func zfDenseBottomPins(desig string, bodyH float64, n int) (zfGroup, schCluster) {
+	body := layoutBBox{MinX: 200, MinY: 100, MaxX: 500, MaxY: 100 + bodyH}
+	var mks []zfGateMarker
+	for i := 0; i < n; i++ {
+		x := 220 + float64(i)*5
+		mks = append(mks, zfGateMarker{fmt.Sprintf("D%d", i), "netport", "down", x, 100, x, 80})
+	}
+	return zfGateBuild(desig, body, 2*n, mks, nil)
+}
+
+// zfFixtureTallBottomPins 是**门的正样本**(2026-08-20 引脚坐标进计划后重挑):
+// 本体 300×560、8 只下缘引脚间距 5。
+//
+//	现状 348×760.5(本页有落点)→ 收敛 358×825.5(连可用域都装不下,可用高 765)
+//
+// 门必须回退。它与「引脚坐标进计划」正交 —— 那条修复消灭的是**假定**带来的负优化,
+// 消灭不了 R5 让位在高本体上要的那点高度,所以门仍然必要。
+func zfFixtureTallBottomPins() (zfGroup, schCluster) {
+	return zfDenseBottomPins("J1", 560, 8)
+}
+
+// zfFixtureTallBottomPinsHopeless 是同型但**本体再高 40**的那一件:现状 348×800.5(0 档)
+// 就已经连可用域都装不下,收敛 358×865.5 同样装不下 —— **两个形状都没救**。
+// 门在这里不许拦(拦了也没用,而且会把一个更小的框换成更大的),phase B 照常报
+// blocked,归因必须读得出来。
+func zfFixtureTallBottomPinsHopeless() (zfGroup, schCluster) {
+	return zfDenseBottomPins("J2", 600, 8)
 }
 
 // zfFixtureU3V3 是**收敛确实有益**的那一类区(真机 U_3V3 同型):一件竖立的
@@ -301,8 +327,8 @@ func TestZfSide_TallBodyMarkersHangSideways(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conv.FrameW != 325 || conv.FrameH != 556.5 {
-		t.Fatalf("收敛框该是 325×556.5,得到 %g×%g —— 数字变了先确认是改好了还是改坏了",
+	if conv.FrameW != 325 || conv.FrameH != 550 {
+		t.Fatalf("收敛框该是 325×550,得到 %g×%g —— 数字变了先确认是改好了还是改坏了",
 			conv.FrameW, conv.FrameH)
 	}
 	if !dom.fits(conv.FrameW, conv.FrameH) {
@@ -321,7 +347,7 @@ func TestZfSide_TallBodyMarkersHangSideways(t *testing.T) {
 	}
 
 	// C:常驻变异对照 —— 首版判据下同一组几何必须仍然排不下。
-	leg := zfGateLegacyGroup(c, 41)
+	leg := zfGateLegacyGroup(c, 41, g.Measured)
 	legSides := map[string]string{}
 	for _, tm := range leg.Terms {
 		legSides[tm.Net] = tm.Side
@@ -335,8 +361,8 @@ func TestZfSide_TallBodyMarkersHangSideways(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legConv.FrameW != 230 || legConv.FrameH != 897 {
-		t.Fatalf("变异对照该产出 230×897(与真机 244×863 同型),得到 %.0f×%.0f",
+	if legConv.FrameW != 175 || legConv.FrameH != 907 {
+		t.Fatalf("变异对照该产出 175×907(与真机 244×863 同型),得到 %.0f×%.0f",
 			legConv.FrameW, legConv.FrameH)
 	}
 	if dom.fitRank(legConv.FrameW, legConv.FrameH) != 0 {
@@ -357,6 +383,7 @@ func TestZfSideOf_AgreesWithMeasuredStubDirection(t *testing.T) {
 		{"wroom6", zfFixtureWroom6},
 		{"esp32-8", zfFixtureESP32Module},
 		{"wide-header", zfFixtureWideHeader},
+		{"tall-bottom-pins", zfFixtureTallBottomPins},
 		{"u3v3", zfFixtureU3V3},
 	} {
 		g, _ := tc.mk()
@@ -405,7 +432,7 @@ func TestZfGate_PhaseBPlacesWroomZoneAfterFix(t *testing.T) {
 	}
 
 	// 变异对照:首版判据下同一页必须 blocked 在这一区(缺陷可复现,修复才算数)。
-	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{zfGateLegacyGroup(c, 41)}, opts, zfDomain{})
+	legConv, err := planZoneFollow("esp32s3_wroom1_module", []zfGroup{zfGateLegacyGroup(c, 41, g.Measured)}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,22 +480,60 @@ func TestZfGateRegression_RealMachineNumbers(t *testing.T) {
 	t.Logf("%s", why)
 }
 
-// 端到端:门在**真实几何**上把回退兑现成一份完整的原形计划。
-func TestZfGate_ConvergenceRegressionRetained(t *testing.T) {
+// 「引脚坐标进计划」的**见证**:同一条 10 脚排针,首版规划器不知道引脚的 x,
+// 只好把同侧每支标签沿桩长无条件摞成垂直梯次 —— 348×311 被顶成 369×781,门不得不
+// 回退。知道引脚在哪之后标签各自贴各自的脚,收敛终于是**收敛**:358×321,
+// 两维都没胀出一条 lane,门也就不必出手。
+//
+// 这一条与门的正样本(zfFixtureTallBottomPins)是同一枚硬币的两面:让位只在判据
+// 真会报重叠时付代价,付不付得起才轮到门去判。
+func TestZfGate_WideHeaderNoLongerExplodes(t *testing.T) {
 	opts := defaultPartitionOpts()
 	_, _, dom := zfGateA4Domain(opts)
 	g, c := zfFixtureWideHeader()
 
 	rawW, rawH := zoneArrangeRawFrame(c.Box, opts, 0)
 	if rawW != 348 || rawH != 311 {
-		t.Fatalf("现状口径框该是 348×311,得到 %.0f×%.0f", rawW, rawH)
+		t.Fatalf("现状口径框该是 348×311,得到 %g×%g", rawW, rawH)
 	}
 	conv, err := planZoneFollow("J1_HEADER", []zfGroup{g}, opts, zfDomain{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conv.FrameW != 369 || conv.FrameH != 781 {
-		t.Fatalf("未加门的收敛框该是 369×781,得到 %.0f×%.0f", conv.FrameW, conv.FrameH)
+	if conv.FrameW != 358 || conv.FrameH != 321 {
+		t.Fatalf("收敛框该是 358×321(首版是 369×781),得到 %g×%g", conv.FrameW, conv.FrameH)
+	}
+	// 一条 lane 的高度是 65(见 zfFixtureTallBottomPins 的 760.5→825.5):收敛后的
+	// 高度必须离「多开一条 lane」远远的,否则这条见证只是撞运气。
+	if conv.FrameH > rawH+zfLandSlack*2 {
+		t.Errorf("收敛把高度撑开了 %.0f —— 不止落地余量那一圈", conv.FrameH-rawH)
+	}
+	got, err := planZoneFollowGated("J1_HEADER", []zfGroup{g}, opts, dom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Retained {
+		t.Errorf("门不该出手:%s", got.RetainWhy)
+	}
+	t.Logf("见证:现状 %.0f×%.0f → 收敛 %g×%g(首版 369×781,门必须回退)", rawW, rawH, conv.FrameW, conv.FrameH)
+}
+
+// 端到端:门在**真实几何**上把回退兑现成一份完整的原形计划。
+func TestZfGate_ConvergenceRegressionRetained(t *testing.T) {
+	opts := defaultPartitionOpts()
+	_, _, dom := zfGateA4Domain(opts)
+	g, c := zfFixtureTallBottomPins()
+
+	rawW, rawH := zoneArrangeRawFrame(c.Box, opts, 0)
+	if rawW != 348 || rawH != 760.5 {
+		t.Fatalf("现状口径框该是 348×760.5,得到 %g×%g", rawW, rawH)
+	}
+	conv, err := planZoneFollow("J1_HEADER", []zfGroup{g}, opts, zfDomain{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.FrameW != 358 || conv.FrameH != 825.5 {
+		t.Fatalf("未加门的收敛框该是 358×825.5,得到 %g×%g", conv.FrameW, conv.FrameH)
 	}
 	if dom.fitRank(rawW, rawH) != 2 || dom.fitRank(conv.FrameW, conv.FrameH) != 0 {
 		t.Fatalf("fixture 失去判别力:现状 %d 档、收敛 %d 档",
@@ -487,7 +552,7 @@ func TestZfGate_ConvergenceRegressionRetained(t *testing.T) {
 	}
 	// 回退必须可见:人读(Mode)与机器读(RetainWhy)同一句话,且带得出「哪一维、
 	// 从多少涨到多少、掉了哪一档」——否则下一个人只会看到框莫名其妙没收敛。
-	for _, s := range []string{"收敛回退", "311", "781", "765"} {
+	for _, s := range []string{"收敛回退", "高 760→826", "765"} {
 		if !strings.Contains(got.Mode, s) {
 			t.Errorf("Mode 里读不到 %q:%q", s, got.Mode)
 		}
@@ -510,6 +575,7 @@ func TestZfRetainPlan_TermsCoverEveryConnectedPin(t *testing.T) {
 		mk   func() (zfGroup, schCluster)
 	}{
 		{"wide-header", zfFixtureWideHeader},
+		{"tall-bottom-pins", zfFixtureTallBottomPins},
 		{"wroom6", zfFixtureWroom6},
 	} {
 		g, _ := tc.mk()
@@ -613,11 +679,11 @@ func TestZfGate_ConvergenceStillAdoptedWhenItHelps(t *testing.T) {
 func TestZfGate_BothShapesUnplaceableStaysBlockedWithReadableReason(t *testing.T) {
 	opts := defaultPartitionOpts()
 	sheet, keepout, dom := zfGateA4Domain(opts)
-	g, c := zfFixtureWideHeaderStaged()
+	g, c := zfFixtureTallBottomPinsHopeless()
 
 	rawW, rawH := zoneArrangeRawFrame(c.Box, opts, 0)
-	if rawW != 348 || rawH != 1031 {
-		t.Fatalf("现状口径框该是 348×1031,得到 %.0f×%.0f", rawW, rawH)
+	if rawW != 348 || rawH != 800.5 {
+		t.Fatalf("现状口径框该是 348×800.5,得到 %g×%g", rawW, rawH)
 	}
 	got, err := planZoneFollowGated("J2_HEADER", []zfGroup{g}, opts, dom)
 	if err != nil {
@@ -754,7 +820,7 @@ func TestZfFitRank_MatchesSolverOutcome(t *testing.T) {
 func TestZfGate_PerZoneIndependent(t *testing.T) {
 	opts := defaultPartitionOpts()
 	_, _, dom := zfGateA4Domain(opts)
-	big, _ := zfFixtureWideHeader()
+	big, _ := zfFixtureTallBottomPins()
 	small, _ := zfGateBuild("C9", layoutBBox{MinX: 100, MinY: 100, MaxX: 118, MaxY: 122}, 2,
 		[]zfGateMarker{
 			{"3V3", "netflag", "up", 109, 122, 109, 162},

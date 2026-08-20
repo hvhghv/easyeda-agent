@@ -81,35 +81,33 @@ func zaaTestGroups(comps []layoutComp, wires []schGroupWire) ([]zfGroup, map[str
 	var out []zfGroup
 	for _, c := range clusters {
 		d := strings.ToUpper(c.Designator)
-		g := zfGroupFromCluster(c, pinCount[d])
-		g.Measured = zfMeasureCluster(c, partOf[d], wires, roots, markers)
+		measured := zfMeasureCluster(c, partOf[d], wires, roots, markers)
+		g := zfGroupFromCluster(c, pinCount[d], measured)
+		g.Measured = measured
 		out = append(out, g)
 	}
 	return out, byDesig
 }
 
-// zaaTestRetainScene 是**必然走 retain 路径**的那一类区:一条横放的 10 脚排针
-// (本体 300×30),标签物理上就在上下两侧 —— 挂侧判定怎么改都是 up/down,
-// 不存在误判,可收敛的垂直梯次依然把它从 348×311(本页有落点)顶成
-// 369×781(连可用域都装不下),门必须回退(见 zfFixtureWideHeader)。
+// zaaTestRetainScene 是**必然走 retain 路径**的那一类区:一件高本体(300×560)
+// 加 8 只**密到标签真的压在一起**的下缘引脚(节距 5,竖起来的 netport 标签宽 11,
+// 相邻两支实压 6 个单位)。收敛该做的事都做了(重生短桩),可让位省不掉 ——
+// 多开的那条 lane 把框顶出可用域:348×760.5(本页有落点)→ 358×825.5
+// (连可用域都装不下,可用高 765),门必须回退(与 zfFixtureTallBottomPins 同型)。
 //
-// 这里**不能**再用 zaaTestESP32Scene:挂侧判定改成边界语义之后,那一区的
-// 标记全判成 left/right,收敛结果 319×558 排得下 —— retain 路径根本不触发,
-// 拿它当 fixture 只会测到「收敛」那条分支(2026-08-20 挂侧修复后的订正)。
+// **两次订正史**:①最早用 zaaTestESP32Scene,挂侧改成边界语义后那一区排得下,
+// retain 根本不触发;②接着用横放 10 脚排针(引脚节距 40),引脚坐标进计划之后
+// 标签各贴各的脚,348×311 → 358×321 也排得下 —— 于是换成这一件。fixture 失去
+// 判别力时测试会自己喊出来(下面每个用例第一句就断言 plan.Retained)。
 func zaaTestRetainScene() ([]layoutComp, []schGroupWire) {
-	return zaaTestScene("J1", layoutBBox{MinX: 200, MinY: 400, MaxX: 500, MaxY: 430}, 350, 415,
-		[]zaaTestPin{
-			{"1", "D0", "netport", "down", 220, 400, 20},
-			{"2", "D1", "netport", "down", 260, 400, 20},
-			{"3", "D2", "netport", "down", 300, 400, 20},
-			{"4", "D3", "netport", "down", 340, 400, 20},
-			{"5", "D4", "netport", "down", 380, 400, 20},
-			{"6", "D5", "netport", "up", 240, 430, 20},
-			{"7", "D6", "netport", "up", 280, 430, 20},
-			{"8", "D7", "netport", "up", 320, 430, 20},
-			{"9", "D8", "netport", "up", 360, 430, 20},
-			{"10", "D9", "netport", "up", 400, 430, 20},
+	pins := make([]zaaTestPin, 0, 8)
+	for i := 0; i < 8; i++ {
+		pins = append(pins, zaaTestPin{
+			pin: fmt.Sprint(i + 1), net: fmt.Sprintf("D%d", i), kind: "netport", dir: "down",
+			pinX: 220 + float64(i)*5, pinY: 100, offset: 20,
 		})
+	}
+	return zaaTestScene("J1", layoutBBox{MinX: 200, MinY: 100, MaxX: 500, MaxY: 660}, 350, 380, pins)
 }
 
 // zaaTestESP32Scene 是真机那一区的场景形态:一件 41 脚大符号(本体 71×421),

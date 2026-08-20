@@ -92,12 +92,22 @@ const (
 	zfLandSlack = acSchGrid
 )
 
-// zfTerm 是一个端子的类型化描述(从 schCluster 的归属 marker 折出)。
+// zfTerm 是一个端子的类型化描述(逐 pin 从活体折出,见 zfGroupFromCluster)。
 type zfTerm struct {
 	Kind string  // "netflag" | "netport"
 	Net  string  //
-	W, H float64 // 标签实测尺寸(netflag 用;netport 高一律 zfPortH)
-	Side string  // 实测挂侧:"left"|"right"|"up"|"down"(相对器件本体)
+	W, H float64 // 标签实测尺寸(只在无实测的老路径上填;规划几何一律走 zfTermGeom)
+	Side string  // 挂侧:"left"|"right"|"up"|"down"(引脚相对器件本体的边界语义)
+	// PinX/PinY 是这只引脚在**本体局部坐标**(相对 body 的 min 角)里的位置,
+	// HasPin=false 表示调用方没喂引脚几何(纯几何单测 / 老调用点)。
+	//
+	// **为什么规划非要知道引脚在哪**:connect_pin 的桩只能从 pin 沿 direction 直出,
+	// 所以「端子落在哪」= f(pin 坐标, direction, offset)。规划器过去假定两脚在本体
+	// 上下缘中线上,真符号只要不是那样(C4/C6 的 rot 90 电容:+3V3 在下、GND 在上;
+	// LED1 的两脚干脆是左右),预测的盒子就在错误的位置,而且派下去的 direction
+	// 会让桩线钻进本体 —— 同件两支桩当场合并,GND 整张网并进 +3V3。
+	PinX, PinY float64
+	HasPin     bool
 }
 
 // zfGroup 是 phase A 的一个输入 L1 组。
@@ -256,6 +266,23 @@ func zfGenGroup(g zfGroup) (zfPlacedGroup, error) {
 }
 
 // zfGenPassive:R1 竖放 + R3 上下端推导 + R4 端子几何。
+//
+// ── 两条支路(2026-08-20 真机定案)──────────────────────────────────────────────
+//
+//	转竖(rotated)  件会被执行侧转 ±90°,转完两脚必然落在本体上下缘中线上 ——
+//	                实测引脚坐标此刻已经过期,按 R3 派上下端才是对的(执行侧
+//	                zaaVerticalOrderOK 用 ExpectUpper 从两个候选里挑出兑现 R3
+//	                的那一个,所以「电源上 / GND 下」在这条支路上是**可执行的**)。
+//	不转(已竖立)  件原样不动,两脚**就在它们现在所在的地方**。此时 R3 的
+//	                「GND 派到下端」不是选择而是幻觉:真机 C4/C6(rot 90)的
+//	                +3V3 脚在本体下方、GND 脚在本体上方,派下去就是让 GND 的桩
+//	                朝下、+3V3 的桩朝上 —— 两根桩线双双钻进本体并合并,GND 整张
+//	                网并进 +3V3,页级对账当场红。
+//
+// 所以不转的件一律**按引脚自己的朝外方向**出桩(zfPointSideOf,与挂侧同一把尺)。
+// 这不是放弃 R3:用户 2026-08-16 的裁定里,「电源上 / GND 下」本来就是**推论**
+// (竖放 + 旗顺引脚朝外 + rail 归位),硬不变式是「同件两旗异向」——
+// 后者由 zfCheckTermOverlap + zfCheckPassiveOpposed 两条一起守住。
 func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 	bw, bh := g.BodyW, g.BodyH
 	rotated := false
@@ -267,6 +294,23 @@ func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 		Body: layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}}
 	if len(g.Terms) > 2 {
 		return out, fmt.Errorf("%s: 无源件端子数 %d > 2 —— MultiPin 标错了?", g.Designator, len(g.Terms))
+	}
+	if !rotated && zfAllHavePins(g.Terms) {
+		body := layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}
+		for _, t := range g.Terms {
+			dir := zfPointSideOf(body, t.PinX, t.PinY)
+			// R4:netport 恒水平(竖放会折叠长条标)。引脚朝外已经是左右就照它,
+			// 否则按阅读方向朝右 —— 与首版口径一致。
+			if t.Kind == "netport" && dir != "left" && dir != "right" {
+				dir = "right"
+			}
+			zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
+				PinX: t.PinX, PinY: t.PinY, Offset: zfStub})
+		}
+		if err := zfCheckPassiveOpposed(out); err != nil {
+			return out, err
+		}
+		return out, zfCheckTermOverlap(out)
 	}
 	top, bot := zfAssignEnds(g.Terms)
 	cx := bw / 2
@@ -290,7 +334,50 @@ func zfGenPassive(g zfGroup) (zfPlacedGroup, error) {
 	}
 	place(top, true)
 	place(bot, false)
+	if err := zfCheckPassiveOpposed(out); err != nil {
+		return out, err
+	}
 	return out, zfCheckTermOverlap(out)
+}
+
+// zfAllHavePins:这一组的端子是不是全都带实测引脚坐标。**全有才用** ——
+// 半份引脚几何比没有更危险(一支按真坐标、一支按假定,两把尺当场分家)。
+func zfAllHavePins(ts []zfTerm) bool {
+	if len(ts) == 0 {
+		return false
+	}
+	for _, t := range ts {
+		if !t.HasPin {
+			return false
+		}
+	}
+	return true
+}
+
+// zfCheckPassiveOpposed 是「**同件两旗**异向」硬不变式的可执行形式(用户裁定;
+// 真机「同件双脚同向必自短路」的防线)。
+//
+// 口径严格按字面:**两支都是旗(netflag)**的两脚无源件。为什么不扩到 netport ——
+// R4 让无源件的 port 一律朝右(阅读方向),同件两支 port 同向是**既有的正常形态**
+// (真机 R5:LED1_N2 与 LED_CTRL 都朝右,靠两只脚 y 不同错开),把它们也判红
+// 就是拿一条不存在的规则去毁掉正常版面。旗不一样:旗是电源/地,同向的两支旗
+// 桩线共线、当场合并成一根,GND 与 +3V3 并成一张网。
+//
+// 判定与生成分离:生成侧按引脚朝外派方向,理应天然异向;真出现同向就是输入
+// 几何异常(两脚从本体同一条边探出),此时 fail-closed 好过画一张会自短路的图。
+func zfCheckPassiveOpposed(g zfPlacedGroup) error {
+	if len(g.Terms) != 2 {
+		return nil
+	}
+	a, b := g.Terms[0], g.Terms[1]
+	if a.Kind != "netflag" || b.Kind != "netflag" {
+		return nil
+	}
+	if a.Dir == b.Dir {
+		return fmt.Errorf("%s: 两支旗同向(%s:%s / %s)—— 违反「同件两旗异向」硬不变式(自短路防线);两脚从本体同一条边探出,先核对符号引脚几何",
+			g.Designator, a.Net, a.Dir, b.Net)
+	}
+	return nil
 }
 
 // zfAssignEnds 是 R3 本体:GND→下、电源→上、双信号原左→上。
@@ -332,6 +419,9 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 	bw, bh := g.BodyW, g.BodyH
 	out := zfPlacedGroup{Designator: g.Designator,
 		Body: layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}}
+	if zfAllHavePins(g.Terms) {
+		return zfGenMultiPinMeasured(g, bw, bh)
+	}
 	bySide := map[string][]zfTerm{}
 	for _, t := range g.Terms {
 		bySide[t.Side] = append(bySide[t.Side], t)
@@ -386,6 +476,87 @@ func zfGenMultiPin(g zfGroup) zfPlacedGroup {
 		}
 	}
 	return out
+}
+
+// zfGenMultiPinMeasured 是**有实测引脚坐标**时的多脚件布置:桩线从引脚真实所在的
+// 地方出,方向就是引脚的朝外方向(zfPointSideOf 已在 zfGroupFromCluster 里算好并
+// 存进 Side)。与首版(zfGenMultiPin 的兜底支路)的三处区别都来自「知道 pin 在哪」:
+//
+//	① 落点真实   首版把左右侧端子按 zfPitch 从本体顶端往下**排**、上下侧端子一律
+//	   画在本体中线,那是「pin 在哪不知道,先摆个样子」。真机 U2 的三只地脚在本体
+//	   下段(y=320/350/360,本体高 421),首版预测的盒子却在本体顶端 —— 规划框与
+//	   落地框谈不上任何对应关系,断言③ 只能红。
+//	② 不确定带消失 SpreadX 是「pin 可能落在本体任意 x」的展宽(bw/2),知道 x 之后
+//	   它就是纯虚胖,直接归零。
+//	③ 梯次按需  首版对同侧每一支旗**无条件**递增桩长;真实 pin 间距够开(U2 的
+//	   320 与 350 差 30 > 旗高)时那是白白把区框推宽。改成「只在预测盒真的与已放
+//	   的同侧盒相撞时才让开一档」,而「算不算相撞」用的是 `sch check` 的
+//	   marker-overlap 那把尺(zfMarkerCollides / schMarkerOverlapEps)——
+//	   引脚节距 10 而标签高 11,同侧相邻两支标签**必然**竖向擦过 1 个单位,那是字体
+//	   现实、换 lane 也消不掉,却要付 65 个单位的宽度。让位只对判据真会报的重叠出手。
+//
+// 确定性:端子按调用方给的全序(zfGroupFromCluster 逐 pin 折时已按 y 降序、x 升序、
+// 网名定序)逐支放,不依赖 map 遍历序。
+func zfGenMultiPinMeasured(g zfGroup, bw, bh float64) zfPlacedGroup {
+	out := zfPlacedGroup{Designator: g.Designator,
+		Body: layoutBBox{MinX: 0, MinY: 0, MaxX: bw, MaxY: bh}}
+	// 谁参与让位、跟谁比 —— **首版的参与规则逐字保留**,变的只是「按需触发」:
+	//
+	//	左/右侧  只有旗(netflag)让位,而且只跟同侧**已放的旗**比。首版明写着
+	//	         「port 恒水平、高 11 < 最小 pin pitch,保持短桩不参与梯次」——
+	//	         把 port 也拉进来会当场毁掉版面:真机 U3(SOP-16,pin pitch 10)
+	//	         左侧一支 GND 旗(含网名带 22 高)与下一只脚的 MCU_RX port 实压
+	//	         6 个单位,让 port 出让就得躲开 75 宽的相邻标签,区框从 353 撑到
+	//	         443,phase B 当场 blocked。那 6 个单位是 `sch check` 的账
+	//	         (marker-overlap WARN / `sch destagger` 的辖区),不是布局器的。
+	//	上/下侧  所有 kind 都参与、跟同侧已放的任何盒比(首版对上下侧就是无条件
+	//	         递增所有 kind —— 那一侧的标签是竖起来的,谁压谁都是真压)。
+	placedBySide := map[string][]layoutBBox{}
+	for _, t := range g.Terms {
+		dir := t.Side
+		lateral := dir == "left" || dir == "right"
+		yields := !lateral || t.Kind == "netflag"
+		off := zfStub
+		var marker layoutBBox
+		// 让位循环:撞上同侧已放的盒就沿桩线方向让开「自己这一支的占地 + gap」。
+		// 上限 32 档是防呆(每档至少让开一个盒宽,正常一两档就散开);到顶按当前
+		// 档收下,不静默循环 —— 组间重叠断言(planZoneFollow 尾)仍会兜住画布。
+		for i := 0; i < 32; i++ {
+			_, marker = zfTermGeom(t.PinX, t.PinY, off, dir, t.Kind, t.Net, 0)
+			if !yields || !zfOverlapsAny(marker, placedBySide[dir]) {
+				break
+			}
+			if lateral {
+				off += (marker.MaxX - marker.MinX) + zfFlagGap
+			} else {
+				off += (marker.MaxY - marker.MinY) + zfFlagGap
+			}
+		}
+		zfAppendTerm(&out, zfPlacedTerm{Kind: t.Kind, Net: t.Net, Dir: dir,
+			PinX: t.PinX, PinY: t.PinY, Offset: off})
+		if !lateral || t.Kind == "netflag" {
+			placedBySide[dir] = append(placedBySide[dir], marker)
+		}
+	}
+	return out
+}
+
+// zfMarkerCollides 是「两支标签算不算撞上了」的判据 —— **与 `sch check` 的
+// marker-overlap 逐字同源**(overlapExtent + schMarkerOverlapEps)。规划器让位
+// 的门槛必须就是判据会报的那条线:低于它,让位换不来任何一条 finding 消失,
+// 只换来一条 lane 的宽度;高于它,判据会报而规划器装作没看见。
+func zfMarkerCollides(a, b layoutBBox) bool {
+	ox, oy, overlap := overlapExtent(a, b)
+	return overlap && minF(ox, oy) > schMarkerOverlapEps
+}
+
+func zfOverlapsAny(b layoutBBox, others []layoutBBox) bool {
+	for _, o := range others {
+		if zfMarkerCollides(b, o) {
+			return true
+		}
+	}
+	return false
 }
 
 // zfCheckTermOverlap 是 R5 的可执行形式:同件端子几何互不重叠。

@@ -97,13 +97,37 @@ func zfShapeSwitchGroups() []zfGroup {
 	}
 }
 
+// zfShapeCoreGroup 是这一页的主控区(单件大模组)。
+//
+// **2026-08-20 订正**:原来直接用 zfFixtureWroom6(本体 72×420)。引脚坐标进计划
+// 之后那一区收敛成 325×550 —— 550 ≤ 图签上方那条 555 的通道,于是它同时进得了
+// 左、上两条道,「两个区抢同一条通道」这个前提在它身上不再成立(那正是本次修复
+// 的战果:主控区不再被垂直梯次顶高)。域感知选形本身仍然必要,只是要用一件**真的
+// 只进得了一条通道**的主控区来验。
+//
+// 这里按真机那一区**修复前**的实测框(349×609)同型重建:本体 72×479 —— 内容
+// 489 + 2·pad 48 + 区名带 30 + 说明带 42 = 609。宽度仍在 396 的左通道之内,
+// 高度 609 > 555 → 只进得了左通道,与 152×696 的无源件柱子正面相撞。
+func zfShapeCoreGroup() zfGroup {
+	g, _ := zfGateBuild("U2", layoutBBox{MinX: 500, MinY: 200, MaxX: 572, MaxY: 679}, 41,
+		[]zfGateMarker{
+			{"VDD3V3", "netflag", "left", 500, 500, 455, 500},
+			{"GND", "netflag", "left", 500, 460, 455, 460},
+			{"TXD0", "netport", "right", 572, 659, 617, 659},
+			{"RXD0", "netport", "right", 572, 639, 617, 639},
+			{"USB_DP", "netport", "left", 500, 240, 437, 240},
+			{"USB_DM", "netport", "left", 500, 220, 437, 220},
+		}, nil)
+	return g
+}
+
 // zfShapeZones 是那一页的四个区(名字 + 成员 + 现状质心,顺序固定)。
 func zfShapeZones() []struct {
 	name   string
 	groups []zfGroup
 	home   [2]float64
 } {
-	core, _ := zfFixtureWroom6()
+	core := zfShapeCoreGroup()
 	return []struct {
 		name   string
 		groups []zfGroup
