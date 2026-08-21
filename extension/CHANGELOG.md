@@ -6,6 +6,17 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-08-21
+
+### Fixed — native N-label persistence and checker visibility
+
+EasyEDA 3.2 can leave a placement-preview netlabel in the document model after
+`verify()`, and its native labels are absent from the public component list.
+This release pins the label model to the verified adsorption point, removes the
+preview model before success, and feeds native labels into schematic and bridge
+checks with the required y-axis conversion. Duplicate preview labels are now
+rejected instead of being silently accepted.
+
 ## [1.1.1] — 2026-08-21
 
 ### Fixed — EasyEDA 3.2 普通 N 型网络标签

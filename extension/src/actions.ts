@@ -2734,6 +2734,13 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 			}
 			const model = placer.model;
 			if (!model) return { ok: false, error: '原生网络标签放置控制器没有创建候选标签。' };
+			const previewId = typeof model.id === 'string' ? model.id : '';
+			// placeNetLabel keeps the previous text origin when it is only fed a
+			// synthetic pointer move. Pin the text model to the verified adsorption
+			// point before commit so the visible N label and its parent wire agree.
+			if (typeof model.translateToXY === 'function') {
+				model.translateToXY(adsorption.point.x, adsorption.point.y);
+			}
 			model.value = request.net;
 			await placer.verify(adsorption.point);
 			await placer.end();
@@ -2750,6 +2757,17 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 				return { ok: false, error: '原生网络标签提交后无法唯一读回持久化标签。' };
 			}
 			const [primitiveId, saved] = created[0];
+			// verify() creates a persistent label but can leave the placement-preview
+			// model in idMap. It later becomes a visible duplicate when its parent
+			// wire changes, so remove it before returning success.
+			if (previewId && previewId !== primitiveId && doc.idManager.idMap.has(previewId)) {
+				try { await sch.doCommand('delete', { selectedIds: [previewId] }); } catch (_) { /* verified below */ }
+				await sleep(80);
+				if (doc.idManager.idMap.has(previewId)) {
+					try { await sch.doCommand('delete', { selectedIds: [primitiveId] }); } catch (_) { /* fail closed below */ }
+					return { ok: false, error: '原生网络标签预览模型无法删除，已回滚本次标签。' };
+				}
+			}
 			const parentSegments = Array.isArray(saved.parent.points) ? saved.parent.points : [];
 			const parentContainsPoint = parentSegments.some(segment => Array.isArray(segment) && segment.length >= 2 && pointOnSegment(adsorption.point, segment[0], segment[1]));
 			if (!parentContainsPoint) {
@@ -3549,6 +3567,45 @@ function interiorOnSegment(px: number, py: number, s: Seg): boolean {
 	return Math.hypot(px - s[0], py - s[1]) > endTol && Math.hypot(px - s[2], py - s[3]) > endTol;
 }
 
+interface NativeNetlabelMarker {
+	x: number;
+	y: number;
+	net: string;
+	primitiveId: string;
+	componentType: 'netlabel';
+}
+
+// EasyEDA 3.2 native N labels live in SCH's document model rather than the
+// public component collection. Their parent points use y-UP coordinates while
+// the typed schematic APIs expose y-DOWN, hence the explicit inversion here.
+export function nativeNetlabelMarkersFromIdMap(idMap: Map<unknown, unknown>): NativeNetlabelMarker[] {
+	const markers: NativeNetlabelMarker[] = [];
+	for (const [rawId, rawModel] of idMap.entries()) {
+		const model = rawModel as {
+			cmdKey?: unknown;
+			value?: unknown;
+			isConnected?: unknown;
+			parent?: { points?: unknown };
+		};
+		if (model?.cmdKey !== 'netlabel' || model.isConnected === false) continue;
+		const firstSegment = Array.isArray(model.parent?.points) ? model.parent?.points[0] : undefined;
+		const firstPoint = Array.isArray(firstSegment) ? firstSegment[0] as { x?: unknown; y?: unknown } : undefined;
+		const x = Number(firstPoint?.x);
+		const sourceY = Number(firstPoint?.y);
+		const net = typeof model.value === 'string' ? model.value : '';
+		const primitiveId = String(rawId ?? '');
+		if (!Number.isFinite(x) || !Number.isFinite(sourceY) || !net || !primitiveId) continue;
+		markers.push({ x, y: -sourceY, net, primitiveId, componentType: 'netlabel' });
+	}
+	return markers;
+}
+
+function collectNativeNetlabelMarkers(): NativeNetlabelMarker[] {
+	const doc = (globalThis as { SCH?: { docMemoryManager?: { getActiveDoc?: () => { idManager?: { idMap?: Map<unknown, unknown> } } } } }).SCH
+		?.docMemoryManager?.getActiveDoc?.();
+	return doc?.idManager?.idMap instanceof Map ? nativeNetlabelMarkersFromIdMap(doc.idManager.idMap) : [];
+}
+
 const schematicCheck: Handler = async (payload) => {
 	const allPages = optionalBoolean(payload, 'allPages') === true;
 	let components, wires;
@@ -3585,6 +3642,11 @@ const schematicCheck: Handler = async (payload) => {
 			});
 		}
 		catch { /* marker without coords — skip */ }
+	}
+	for (const marker of collectNativeNetlabelMarkers()) {
+		if (!connectionMarkers.some(existing => existing.primitiveId === marker.primitiveId)) {
+			connectionMarkers.push(marker);
+		}
 	}
 	// Every wire vertex (segment endpoint). A pin coincident with a wire endpoint is
 	// a legitimate termination/junction even if a merged collinear wire also runs
@@ -3987,6 +4049,11 @@ const schematicBridgeCheck: Handler = async (payload) => {
 		for (const p of compPins) {
 			try { pins.push({ designator, number: String(p.getState_PinNumber?.() ?? ''), x: p.getState_X(), y: p.getState_Y() }); }
 			catch { /* pin without coords */ }
+		}
+	}
+	for (const marker of collectNativeNetlabelMarkers()) {
+		if (!markers.some(existing => existing.primitiveId === marker.primitiveId)) {
+			markers.push(marker);
 		}
 	}
 

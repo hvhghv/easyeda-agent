@@ -15,6 +15,7 @@ import {
 	connectPinEndpoint,
 	getComponentOrThrow,
 	netlabelCreateBackend,
+	nativeNetlabelMarkersFromIdMap,
 	normalizeDeviceRef,
 	runAction,
 	schematicComponentsList,
@@ -2039,6 +2040,22 @@ test('netlabel.create routes EasyEDA 3.x to native UI simulation', () => {
 	assert.equal(netlabelCreateBackend('3.0.0'), 'native-ui-simulation');
 	assert.equal(netlabelCreateBackend(''), 'native-ui-simulation');
 	assert.equal(netlabelCreateBackend('4.0.0'), 'official-api');
+});
+
+test('native EasyEDA 3.2 labels become wire anchors with y-axis conversion', () => {
+	const labels = new Map<unknown, unknown>([
+		['label-1', {
+			cmdKey: 'netlabel', value: '+3V3', isConnected: true,
+			parent: { points: [[{ x: 310, y: -220 }, { x: 310, y: -250 }]] },
+		}],
+		['preview', {
+			cmdKey: 'netlabel', value: 'GND', isConnected: false,
+			parent: { points: [[{ x: 480, y: -300 }, { x: 440, y: -300 }]] },
+		}],
+	]);
+	assert.deepEqual(nativeNetlabelMarkersFromIdMap(labels), [{
+		x: 310, y: 220, net: '+3V3', primitiveId: 'label-1', componentType: 'netlabel',
+	}]);
 });
 
 test('netlabel.create uses and verifies a non-3.x public API when one is available', async () => {
