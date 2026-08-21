@@ -78,15 +78,22 @@ func (s *Server) checkStageGate(req *protocol.Request) *protocol.Response {
 	candidates := s.stageKeyCandidates(req)
 	if len(candidates) == 0 && !force {
 		resp := errorResponse(req.ID, "STAGE_BLOCKED",
-			fmt.Sprintf("%s requires the %q gate but the target window has no project identity", req.Action, gate),
+			fmt.Sprintf("%s requires the %q gate but the target window has no project identity\n下一步: 重跑本命令并带上 --project <name>(见 `easyeda health`);确需放行用 --force-reason \"<理由>\"(入审计)", req.Action, gate),
 			"pass --project (or a forceReason for an audited override)")
 		return &resp
 	}
 	st, err := workflow.LoadAny(candidates...)
 	if err != nil {
 		// Fail-closed: a corrupt/unreadable state file must not read as "un-gated".
+		// LoadAny only errors while READING an existing file, so a key is known —
+		// name the file, because "unreadable" without a path is not a next step.
+		next := "easyeda workflow status"
+		if key := s.projectHint(req); key != "" {
+			next = fmt.Sprintf("修好或删掉 %s,再 easyeda workflow init --project %s", workflow.Path(key), key)
+		}
 		resp := errorResponse(req.ID, "STAGE_BLOCKED",
-			fmt.Sprintf("%s: workflow stage state unreadable — refusing gated action", req.Action), err.Error())
+			fmt.Sprintf("%s: workflow stage state unreadable — refusing gated action\n下一步: %s", req.Action, next),
+			err.Error())
 		return &resp
 	}
 	verdict := workflow.CheckRouteGate(st, force, req.ForceUnsafe, strings.TrimSpace(req.ForceReason))
@@ -100,15 +107,78 @@ func (s *Server) checkStageGate(req *protocol.Request) *protocol.Response {
 		}
 	}
 	if !verdict.Allowed {
+		next := stageNextStep(st, verdict.Missing, s.projectHint(req))
 		resp := errorResponse(req.ID, "STAGE_BLOCKED",
-			fmt.Sprintf("%s: %s", req.Action, verdict.Message),
-			"see `easyeda workflow status` for the project's stage state")
+			fmt.Sprintf("%s: %s\n下一步: %s", req.Action, verdict.Message, next),
+			next+"  (全局状态: `easyeda workflow status`)")
 		return &resp
 	}
 	if verdict.Forced {
 		s.logf("stage gate: %s FORCED past %s (unsafe=%v, reason: %s)", req.Action, strings.Join(verdict.Missing, ", "), req.ForceUnsafe, req.ForceReason)
 	}
 	return nil
+}
+
+// ── refusal messages that name a runnable next step ────────────────────────
+//
+// A refusal that only points at a status command ("see `easyeda workflow
+// status`") makes the caller run one more read to learn what it must do; the
+// 49-day audit review found that the rules agents actually obey are the ones
+// whose refusal hands back the repair command itself. So every STAGE_BLOCKED
+// carries the concrete command for the EARLIEST unmet gate — the one that has
+// to run first — in the message (the CLI surfaces `error.message`; `detail`
+// only reaches raw/JSON callers).
+
+// stageCommandFor maps one unmet workflow stage to the command that satisfies
+// it. Kept in step with the CLI's own ladder (internal/app/cmd_workflow.go
+// workflowNext) and the subcommands in internal/app/cmd_pcb_stage.go.
+func stageCommandFor(stage workflow.Stage, projectFlag string) string {
+	switch stage {
+	case workflow.StagePlacementConfirmed:
+		// confirm-layout refuses until all four placement tiers are signed off,
+		// so the tier ladder is the real first step.
+		return "easyeda pcb stage confirm-tier <1|2|3|4> --parts …" + projectFlag +
+			" (四档签完) → easyeda pcb stage confirm-layout" + projectFlag + " --note \"...\""
+	case workflow.StageOutlineConfirmed:
+		return "easyeda pcb stage confirm-outline" + projectFlag + " --note \"...\""
+	case workflow.StagePreRoutePassed:
+		return "easyeda pcb layout-lint --gate" + projectFlag
+	case workflow.StagePostRouteChecked:
+		return "easyeda workflow advance" + projectFlag + " (跑 pcb-check 门)"
+	default:
+		return "easyeda workflow status" + projectFlag
+	}
+}
+
+// stageNextStep picks WHICH unmet gate to name.
+//
+// Normally that is the lowest-ranked entry of verdict.Missing — the ladder is
+// ordered, so the earliest gap must close first. The exception is the #132 hard
+// tier: when NEITHER placement_confirmed nor outline_confirmed is live, the
+// mechanical skeleton is entirely unconfirmed and a plain --force is refused;
+// placement_confirmed is not in Missing (CheckRouteGate does not require it) yet
+// it is what the caller has to do first, so name it explicitly.
+func stageNextStep(st *workflow.State, missing []string, project string) string {
+	projectFlag := ""
+	if p := strings.TrimSpace(project); p != "" {
+		projectFlag = " --project " + p
+	}
+	if st != nil && !st.Has(workflow.StagePlacementConfirmed) && !st.Has(workflow.StageOutlineConfirmed) {
+		return stageCommandFor(workflow.StagePlacementConfirmed, projectFlag)
+	}
+	earliest := workflow.Stage("")
+	rank := -1
+	for _, m := range missing {
+		stg := workflow.Stage(m)
+		r := workflow.Rank(stg)
+		if r < 0 {
+			continue
+		}
+		if rank < 0 || r < rank {
+			earliest, rank = stg, r
+		}
+	}
+	return stageCommandFor(earliest, projectFlag)
 }
 
 // maybeInvalidateStage clears downstream workflow confirmations after a

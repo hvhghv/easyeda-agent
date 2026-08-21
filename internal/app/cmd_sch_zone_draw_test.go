@@ -98,6 +98,15 @@ func TestBuildZoneClearJS(t *testing.T) {
 			t.Errorf("clear script missing verification %q:\n%s", want, js)
 		}
 	}
+	// 缺陷 3:删除必须逐个(delete([id]))+ 幸存者重试一次,不允许回到批量 delete。
+	for _, want := range []string{"delOne", ".delete([id])", "retried"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("clear script lost the one-by-one+retry delete semantics (%q missing):\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, "delete(all)") {
+		t.Errorf("clear script regressed to a batch delete:\n%s", js)
+	}
 }
 
 func TestValidateZoneDrawResultRequiresExactUniqueIds(t *testing.T) {

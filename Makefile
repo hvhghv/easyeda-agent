@@ -1,4 +1,4 @@
-.PHONY: help test mcp-test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test blocks-audit layout-calibrate release publish-skill replay demo-replay replay-sch replay-pcb
+.PHONY: help test mcp-test fmt actions api-index build install dev-build daemon dev eext eext-fresh connector lint-test blocks-audit layout-calibrate release publish-skill publish-skill-hub skillhub-check replay demo-replay replay-sch replay-pcb
 
 DIST := dist
 
@@ -94,12 +94,12 @@ daemon: ## one-shot daemon (no reload) — prefer `make dev`
 	go run ./cmd/easyeda daemon
 
 # Live-reload the daemon for development (.air.toml): rebuilds + restarts on any
-# .go change; the connector auto-reconnects (it port-scans 49620-49629). Keep
+# .go change; the connector auto-reconnects (it retries 60832 with backoff). Keep
 # this running in a terminal while developing so the daemon is always up.
 dev: ## hot-reload the daemon (air) — mirrors output to tmp/daemon.log (truncated each start)
 	@command -v air >/dev/null 2>&1 || { echo "air not found — install: go install github.com/air-verse/air@latest"; exit 1; }
 	@mkdir -p tmp
-	@# Kill any leftover daemon+watcher from a prior session so we always bind 49620.
+	@# Kill any leftover daemon+watcher from a prior session so we always bind 60832.
 	@pkill -TERM -f '/easyeda daemon' 2>/dev/null || true
 	@sleep 0.4
 	air 2>&1 | tee tmp/daemon.log
@@ -152,6 +152,9 @@ endif
 	rm -rf $(DIST) && mkdir -p $(DIST)
 	@echo "  syncing connector version to $(VERSION)..."
 	node extension/scripts/bump.mjs $(VERSION:v%=%) --require-changelog
+	@echo "  syncing skill version to $(VERSION)..."
+	@# SKILL.md 的 metadata.version 不会被 clawhub/gh 自动更新 —— 不同步就漂移。
+	python3 scripts/sync-skill-version.py $(VERSION:v%=%)
 	npm --prefix extension run typecheck
 	npm --prefix extension run build
 	@echo "  compiling CLI..."
@@ -220,4 +223,186 @@ endif
 		find $(CURDIR)/skills/easyeda-agent -name '*.pyc' -delete 2>/dev/null; true
 	clawhub publish $(CURDIR)/skills/easyeda-agent --slug easyeda-agent --version $(VERSION:v%=%) \
 		--tags "$(CLAWHUB_TAGS)" \
+		--changelog "easyeda-agent $(VERSION) — https://github.com/zhoushoujianwork/easyeda-agent/releases/tag/$(VERSION)"
+
+# ── skillhub.cn ───────────────────────────────────────────────────────────────
+# 正常路径是 CI 自动发:`gh release create`(make release 的一步)发出 release →
+# .github/workflows/publish-skill.yml 的 `release: published` 触发 → 跑本目标。
+# 本目标存在的意义是**手动补发**(CI 挂了 / 后补版本),本地跑法:
+#     export SKILLHUB_TOKEN=skh_xxx        # 别写进任何文件,别 echo
+#     make publish-skill-hub VERSION=v1.0.3
+#
+# 为什么要 staging 副本而不是直接发 skills/easyeda-agent:
+#   两套规范**互斥**,同一个 SKILL.md 不可能同时满足 ——
+#     • skillhub 硬性要求 frontmatter 顶层有 slug + displayName(缺一个 die)
+#     • 官方 Agent Skills 规范(npx skills-ref validate)**明确拒绝**这两个字段
+#       (Unexpected fields in frontmatter: displayName, slug)
+#   所以:repo 里的 SKILL.md 保持 spec 干净(给 skills-ref / Claude Code 用),
+#   发布前拷一份到临时目录、只往副本的 frontmatter 里注入这两个键。
+#   注入是**幂等**的 —— 哪天 SKILL.md 自己带了 slug/displayName,这步自动跳过。
+#
+# 版本号:走 CLI 的 `--version` 覆盖(实测存在,官网教程没写),所以不依赖
+# SKILL.md 的 metadata.version,tag 就是唯一版本源。必须是合法 SemVer(去 v 前缀)。
+# 认证:skillhub CLI **原生读 SKILLHUB_TOKEN 环境变量**
+#   (优先级 --token > SKILLHUB_TOKEN > ~/.skillhub/credentials.json),
+#   所以 CI 里不需要跑 `skillhub login`,更不用把 token 落到磁盘。
+# 幂等性:同 slug 同 version 重复发会被服务端拒(和 ClawHub 一样版本不可覆盖),
+#   补发请升版本号。发布后进 pending_review 审核队列,不是立刻可见。
+SKILLHUB_HOST ?= https://api.skillhub.cn
+# slug 与立创插件市场的连接器条目同名(jlc-ext 的 easyeda-agent-connector,displayName
+# "EDA Agent Connector")——品牌统一。**slug 一旦发布就锁死,改不了**,覆盖用
+# `make publish-skill-hub SKILLHUB_SLUG=…`。原 `easyeda-agent` 在 skillhub 上是
+# 发不进去又查不到的孤儿记录(publish 报 already exists / verify 报 404),故换名。
+SKILLHUB_SLUG ?= eda-agent-connector
+SKILLHUB_DISPLAY_NAME ?= EDA Agent Connector
+# SKILLHUB_DRY_RUN=1 只做本地预检(不需要 token、不发 HTTP),用来验证打包/元数据。
+SKILLHUB_DRY_RUN ?=
+# SKILLHUB_BIN=/path/to/skillhub 显式指定用哪个 CLI(仍然要过身份校验,不是后门)。
+SKILLHUB_BIN ?=
+
+# ── skillhub CLI 身份校验(机械检查,不是注释)──────────────────────────────
+# 为什么非做不可:`skillhub` 这个 bin 名被**两个不同项目**占用,而且都可能同时
+# 在 PATH 上 ——
+#   A) npm/homebrew 的 `skillhub`(skills.palebluedot.live,Node):publish 只有
+#      --namespace/--visibility/--registry,**没有** --version/--host。
+#   B) skillhub.cn 官方(Python,~/.local/bin/skillhub → ~/.skillhub/skills_store_cli.py)。
+# 实测这台开发机上 A 在 PATH 里**排在 B 前面**,只做 `command -v skillhub`
+# 存在性检查会静默选中 A,然后炸在 `unknown flag: --version`。更坏的情况是
+# 参数恰好兼容 —— 那就会**静默发布到错误的 registry**,比报错危险得多。
+#
+# 判据:探 `<bin> publish --help`,要求同时暴露我们**真正会传的**那几个 flag。
+# 把判据绑定到「用得上的能力」而不是版本号字符串:将来官方改签名会在这里硬失败,
+# 而不是静默降级成少传一个 --changelog 就发出去了。
+# 不靠路径判断 —— 用户机器布局会变。
+define SKILLHUB_RESOLVE_PY
+import os, pathlib, shlex, subprocess, sys
+
+REQUIRED = ("--version", "--host", "--changelog", "--dry-run")
+
+def argv_for(raw):
+    p = pathlib.Path(raw).expanduser()
+    if not p.is_file():
+        return None
+    if p.suffix == ".py":
+        return [sys.executable or "python3", str(p)]
+    if os.access(str(p), os.X_OK):
+        return [str(p)]
+    return None
+
+def probe(argv):
+    env = dict(os.environ, SKILLHUB_SKIP_SELF_UPGRADE="1")
+    try:
+        r = subprocess.run(argv + ["publish", "--help"],
+                           capture_output=True, text=True, timeout=90, env=env)
+    except Exception as exc:
+        return False, "探测失败: " + str(exc)
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        first = next((l.strip() for l in out.splitlines() if l.strip()), "(无输出)")
+        return False, "跑不起来 (rc=" + str(r.returncode) + "): " + first
+    missing = [f for f in REQUIRED if f not in out]
+    if missing:
+        return False, "publish 不支持 " + " ".join(missing) + " -> 是同名的另一个项目,不是 skillhub.cn 官方 CLI"
+    return True, ""
+
+explicit = os.environ.get("SKILLHUB_BIN", "").strip()
+if explicit:
+    candidates = [explicit]
+else:
+    candidates = ["~/.local/bin/skillhub", "~/.skillhub/skills_store_cli.py"]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d:
+            c = os.path.join(d, "skillhub")
+            if c not in candidates:
+                candidates.append(c)
+
+report = []
+for cand in candidates:
+    argv = argv_for(cand)
+    if argv is None:
+        report.append((cand, "不存在或不可执行"))
+        continue
+    ok, why = probe(argv)
+    if ok:
+        wrapper = pathlib.Path(sys.argv[1])
+        wrapper.write_text("exec " + " ".join(shlex.quote(a) for a in argv) + ' "$$@"\n',
+                           encoding="utf-8")
+        print("  skillhub CLI: " + " ".join(argv) + "  (identity OK)")
+        raise SystemExit(0)
+    report.append((cand, why))
+
+sys.stderr.write("error: 没找到 skillhub.cn 官方 CLI。\n")
+sys.stderr.write("  判据: publish 必须同时支持 " + " ".join(REQUIRED) + "\n")
+for cand, why in report:
+    sys.stderr.write("  探测 " + cand + "\n           -> " + why + "\n")
+if explicit:
+    sys.stderr.write("\n你显式设了 SKILLHUB_BIN=" + explicit + ",但它没通过身份校验。\n")
+    sys.stderr.write("下一步: unset SKILLHUB_BIN,或把它指向官方 CLI。\n")
+else:
+    sys.stderr.write("\n下一步: curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only\n")
+sys.stderr.write("然后: export SKILLHUB_BIN=$$HOME/.local/bin/skillhub\n")
+sys.stderr.write("(注意 npm/homebrew 上的 'skillhub' 是同名的另一个项目,装它没用)\n")
+raise SystemExit(1)
+endef
+export SKILLHUB_RESOLVE_PY
+
+# 解析出的 CLI 会被写成一个无 shebang 的 bash 包装脚本(所以用 `bash <wrapper>`
+# 调用)——这样 `python3 xxx.py` 这种两段式 argv 不用在 shell 里做引号杂技。
+skillhub-check: ## 检查 PATH 上的 skillhub 是不是 skillhub.cn 官方 CLI(机械校验)
+	@W=$$(mktemp -t skillhub-bin.XXXXXX); \
+	trap 'rm -f "$$W"' EXIT; \
+	python3 -c "$$SKILLHUB_RESOLVE_PY" "$$W"
+
+# frontmatter 注入脚本。用 `define` + `export` 走环境变量传给 python3 -c ——
+# **不能用 heredoc**:recipe 里的反斜杠续行会被 make 拼成一行,heredoc 当场失效。
+define SKILLHUB_INJECT_PY
+import sys, pathlib
+path, slug, display = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = path.read_text(encoding="utf-8").split("\n")
+if not lines or lines[0].strip() != "---":
+    sys.exit("error: SKILL.md 首行不是 ---(没有 frontmatter,skillhub 发不了)")
+end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), -1)
+if end < 0:
+    sys.exit("error: SKILL.md frontmatter 缺少结束标记 ---")
+have = {l.partition(":")[0].strip() for l in lines[1:end] if ":" in l}
+add = [k + ": " + v for k, v in (("slug", slug), ("displayName", display)) if k not in have]
+if add:
+    lines[1:1] = add
+    path.write_text("\n".join(lines), encoding="utf-8")
+print("  staged frontmatter + " + (", ".join(add) if add else "(already present, skipped)"))
+endef
+export SKILLHUB_INJECT_PY
+
+# staging 里删「无扩展名的文件」(那条 `! -name '*.*'`)——服务端按扩展名白名单收文件,
+# 无扩展名的一律 400。实测真发时报 `不允许的文件类型: LICENSE`。
+# **dry-run 抓不到这条**:它只做本地 metadata 校验+打包,不碰服务端的文件类型规则,
+# 所以别看 dry-run 绿了就以为能发 —— 这个坑只有真发才踩得到。
+# 删 LICENSE 不影响规范合规:frontmatter 的 `license: MIT` 是许可证**名**而非文件引用
+# (Agent Skills spec 两种都允许),repo 原件也照常带着 LICENSE,只是不进上传包。
+publish-skill-hub: ## publish skills/easyeda-agent to skillhub.cn  (VERSION=vX.Y.Z required)
+ifndef VERSION
+	$(error VERSION is required — usage: make publish-skill-hub VERSION=v1.0.3)
+endif
+	@if [ -z "$(SKILLHUB_DRY_RUN)" ] && [ -z "$$SKILLHUB_TOKEN" ]; then \
+		echo "error: SKILLHUB_TOKEN 未设置(skh_ 开头的 API Token)。"; \
+		echo "  建 token: https://skillhub.cn/dashboard/keys"; \
+		echo "  用法: export SKILLHUB_TOKEN=skh_xxx && make publish-skill-hub VERSION=$(VERSION)"; \
+		echo "  (绝不要把 token 写进文件或 echo 出来)"; \
+		exit 1; \
+	fi
+	@set -e; \
+	STAGE=$$(mktemp -d -t skillhub-pkg.XXXXXX); \
+	trap 'rm -rf "$$STAGE"' EXIT; \
+	python3 -c "$$SKILLHUB_RESOLVE_PY" "$$STAGE/skillhub-bin"; \
+	SH="bash $$STAGE/skillhub-bin"; \
+	cp -R $(CURDIR)/skills/easyeda-agent "$$STAGE/$(SKILLHUB_SLUG)"; \
+	find "$$STAGE/$(SKILLHUB_SLUG)" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true; \
+	find "$$STAGE/$(SKILLHUB_SLUG)" -name '*.pyc' -delete 2>/dev/null || true; \
+	find "$$STAGE/$(SKILLHUB_SLUG)" -type f ! -name '*.*' -delete 2>/dev/null || true; \
+	python3 -c "$$SKILLHUB_INJECT_PY" "$$STAGE/$(SKILLHUB_SLUG)/SKILL.md" "$(SKILLHUB_SLUG)" "$(SKILLHUB_DISPLAY_NAME)"; \
+	echo "  skillhub dry-run..."; \
+	$$SH publish "$$STAGE/$(SKILLHUB_SLUG)" --version $(VERSION:v%=%) --host $(SKILLHUB_HOST) --dry-run; \
+	if [ -n "$(SKILLHUB_DRY_RUN)" ]; then echo "  SKILLHUB_DRY_RUN=1 — 到此为止,未发布"; exit 0; fi; \
+	echo "  publishing to $(SKILLHUB_HOST)..."; \
+	$$SH publish "$$STAGE/$(SKILLHUB_SLUG)" --version $(VERSION:v%=%) --host $(SKILLHUB_HOST) \
 		--changelog "easyeda-agent $(VERSION) — https://github.com/zhoushoujianwork/easyeda-agent/releases/tag/$(VERSION)"

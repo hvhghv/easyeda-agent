@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,11 +120,104 @@ func TestRuler_TidyLabelRotationMatchesFrozenTable(t *testing.T) {
 	}
 }
 
+// 外框只有**一个**函数:zone-plan 第一遍的框、zone-arrange phase A 的现状框、
+// phase A 收敛后的框,三者必须逐字段同源(2026-08-20 用户裁定)。此前 phase A 自己
+// 拿常量 NoteBand 拼了一份,而 zone-plan 按已登记说明的实际渲染高算 —— 两套带账,
+// 收紧出来的框装不下后放的 note。详细正负对照见 cmd_sch_zone_frame_test.go。
+func TestRuler_ZoneFrameSingleFunction(t *testing.T) {
+	opts := defaultPartitionOpts()
+	content := layoutBBox{100, 200, 500, 640}
+	for _, noteH := range []float64{0, 13, 39, 91} {
+		r := partitionFirstPassRect(content, opts, noteH)
+		w, h := zoneArrangeRawFrame(content, opts, noteH)
+		if r.MaxX-r.MinX != w || r.MaxY-r.MinY != h {
+			t.Fatalf("noteH=%.0f:zone-plan 框 %.0f×%.0f ≠ phase A 框 %.0f×%.0f(两把尺!)",
+				noteH, r.MaxX-r.MinX, r.MaxY-r.MinY, w, h)
+		}
+		// 带高只由「已登记说明的内容+字号」推导 —— 读落点就会造出自增长反馈环。
+		band := schZoneNoteBandHeight(opts.NoteBand, noteH)
+		want := layoutBBox{
+			MinX: content.MinX - partitionContentPad, MinY: content.MinY - partitionContentPad - band,
+			MaxX: content.MaxX + partitionContentPad, MaxY: content.MaxY + partitionContentPad + opts.TitleBand,
+		}
+		if r != want {
+			t.Fatalf("noteH=%.0f:外框算式漂了 %+v want %+v", noteH, r, want)
+		}
+	}
+}
+
+// 「哪几个组算一个分区」也只有一个答案:**一个虚拟组 / zone 认领 = 一个分区**。
+// 画框侧(partitionGrouping → planPartitions)与排布侧(zaPartitionPlan,每个
+// 落位区一个框)必须逐字给出同一套分组 —— 2026-08-20 真机:画框侧按网格带把
+// 「同一格」的两个区并成一个分区,于是 zone-arrange 断言③ 全绿(逐区框零重叠)
+// 的 MCU_IO 页,zone-plan 报 partitionOverlap=1、zone-draw 拒绝画框,而画分区框
+// 是 SKILL 铁律 15。这里钉结构(同一批区名 → 同一套分组),真机几何的行为级
+// 正负对照见 cmd_sch_zone_partition_test.go。
+func TestRuler_ZonePartitionGroupingMatchesArrange(t *testing.T) {
+	opts := defaultPartitionOpts()
+	sheet := layoutBBox{MinX: 0, MinY: 0, MaxX: 1170, MaxY: 825}
+	boxes := map[string]layoutBBox{
+		"pwr": {MinX: 100, MinY: 500, MaxX: 300, MaxY: 700},
+		"mcu": {MinX: 500, MinY: 200, MaxX: 800, MaxY: 700},
+		"usb": {MinX: 100, MinY: 150, MaxX: 300, MaxY: 300},
+	}
+	var mods []partitionModule
+	res := zaResult{OK: true}
+	for _, n := range []string{"mcu", "pwr", "usb"} {
+		mods = append(mods, partitionModule{Name: n, BBox: boxes[n], CoreBBox: boxes[n]})
+		res.Placed = append(res.Placed, zaPlaced{Name: n, Rect: boxes[n]})
+	}
+	arrange := zpPartitionNameSets(zaPartitionPlan(res, sheet, nil, opts))
+	draw := zpPartitionNameSets(planPartitions(sheet, nil, mods, opts))
+	if strings.Join(arrange, " | ") != strings.Join(draw, " | ") {
+		t.Fatalf("分区归属两把尺:排布侧 %v ≠ 画框侧 %v", arrange, draw)
+	}
+}
+
 // gate 的 check 段与 `sch check` 必须用同一个 marker-overlap 阈值:2026-08-17
 // 真机上 check 报 0、gate --strict 报 9,根因是 gateDefaultOverlapEps 手抄了 0.5。
 func TestRuler_GateOverlapEpsMatchesCheck(t *testing.T) {
 	if gateDefaultOverlapEps != schMarkerOverlapEps {
 		t.Fatalf("gate overlap eps %g ≠ check 的 schMarkerOverlapEps %g(两把尺!)",
 			gateDefaultOverlapEps, schMarkerOverlapEps)
+	}
+}
+
+// 「桩线伸展」也只有一把尺。2026-08-20 真机 4 轮取证:同一件事有三套算法
+// (phase A 自拼端子盒 / --apply 未覆盖 pin 走自由 autoconnect / group-move 刚体
+// 平移也走自由 autoconnect),于是 dry-run 每轮 pass、落地每轮重叠,而且不收敛。
+// 钉住三条配对:
+//
+//	① kind 映射:规划侧 zfCanonKind == 落地侧 zaaConnectKind;
+//	② 端子几何:zfTermGeom 的 marker 盒 == 落点评分器/`sch check` 的
+//	   predictedMarkerBBox(**同一个函数**,不是"近似相等");
+//	③ 桩端点:走 endpointFor(连接器 connect_pin 的 5 网格吸附),不许另算。
+func TestRuler_StubGeometrySingleFunction(t *testing.T) {
+	cases := []struct{ kind, net, dir string }{
+		{"netflag", "GND", "down"}, {"netflag", "GND", "up"},
+		{"netflag", "+3V3", "up"}, {"netflag", "5V", "left"},
+		{"netport", "USB_DTR", "right"}, {"netport", "MCU_TX", "left"},
+	}
+	for _, c := range cases {
+		// ① 两侧的 canonical kind 必须逐字相同。
+		if got, want := zfCanonKind(c.kind, c.net), zaaConnectKind(zfPlacedTerm{Kind: c.kind, Net: c.net}); got != want {
+			t.Fatalf("%s/%s:规划侧 kind %q ≠ 落地侧 kind %q(两把尺!)", c.kind, c.net, got, want)
+		}
+		// ②③ 几何必须是落地那条链本身。
+		const px, py, off = 100.0, 200.0, 30.0
+		ex, ey := endpointFor(px, py, off, c.dir)
+		wire, marker := zfTermGeom(px, py, off, c.dir, c.kind, c.net, 0)
+		if want := predictedMarkerBBox(ex, ey, zfCanonKind(c.kind, c.net), c.dir, c.net); marker != want {
+			t.Fatalf("%s/%s/%s:规划的 marker 盒 %+v ≠ predictedMarkerBBox %+v(两把尺!)",
+				c.kind, c.net, c.dir, marker, want)
+		}
+		if wire.MinX > ex || wire.MaxX < ex || wire.MinY > ey || wire.MaxY < ey {
+			t.Fatalf("%s/%s/%s:桩线段没盖住 endpointFor 的端点(%g,%g):%+v", c.kind, c.net, c.dir, ex, ey, wire)
+		}
+	}
+	// 落地余量必须就是桩端点吸附的那一格 —— 它是规划框成为**上界**的依据。
+	if zfLandSlack != acSchGrid {
+		t.Fatalf("zfLandSlack=%v ≠ acSchGrid=%v —— 余量与吸附网格分家,规划框不再是落地框的上界",
+			float64(zfLandSlack), float64(acSchGrid))
 	}
 }

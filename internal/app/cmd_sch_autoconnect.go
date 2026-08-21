@@ -34,6 +34,20 @@ type autoconnectRules struct {
 	OffsetMax       float64 `json:"offsetMax"`
 	OffsetStep      float64 `json:"offsetStep"`
 	MinLabelGap     float64 `json:"minLabelGap"`
+	// OffsetCap 是桩长的**硬上限**(0 = 不设限,保持既有行为)。
+	//
+	// 为什么需要它:OffsetMax 只封住细档(6 一跳那一串),而 candidateOffsets 还
+	// **常驻**「标准档位」min+k·laneStepFor(netport 一档 ~89,三档铺到 ~285),
+	// extendedOffsets 更能铺到 3×OffsetMax 甚至跟着 laneFloor 无上界。对**自由
+	// 落点**的场景这是对的(躲不开就得走远);但对「刚体平移后把原样重连回去」
+	// 和「按 phase A 的收敛计划落地」这两类场景,桩长是**被规划定死的量**,
+	// 评分器多走一档就等于把区框撑胖一档 —— 真机实测:group-move 一次 --dx 40
+	// 把 U 组框从 315×389 撑到 523×406(+208 ≈ 两个 netport 档),phase A 的
+	// 区内收敛被一次「微调」撤销大半。
+	//
+	// 所以调用方能给出上界时就给:枚举一律不越过它(细档 / 标准档 / 扩展档三处
+	// 都夹),评分器仍在剩下的档位里自由选方向和深浅。
+	OffsetCap float64 `json:"offsetCap,omitempty"`
 }
 
 // defaultAutoconnectRules matches the spec defaults documented in issue #24.
@@ -735,8 +749,15 @@ func candidateOffsets(rules autoconnectRules, canonicalKind, net string) []float
 			out = append(out, round2(min+float64(k)*lane))
 		}
 	}
+	out = acCapOffsets(out, rules.OffsetCap)
 	if len(out) == 0 {
-		out = []float64{min}
+		// 上界比 OffsetMin 还紧:仍要给一个可选档(夹到上界),否则这一脚**无候选**
+		// 可评 —— 连不上比连得深还糟。
+		if rules.OffsetCap > 0 && rules.OffsetCap < min {
+			out = []float64{round2(rules.OffsetCap)}
+		} else {
+			out = []float64{min}
+		}
 	}
 	sort.Float64s(out)
 	dedup := out[:0]
@@ -840,6 +861,21 @@ func extendedOffsets(rules autoconnectRules, laneFloor float64) []float64 {
 	var out []float64
 	for o := rules.OffsetMax + step; o <= upper+acOverlapEps; o += step {
 		out = append(out, round2(o))
+	}
+	return acCapOffsets(out, rules.OffsetCap)
+}
+
+// acCapOffsets 丢掉越过硬上限的档位(cap ≤ 0 = 不设限)。三处枚举共用一把闸,
+// 不许各自 if —— 漏一处就等于没有上限(扩展档正是最容易漏的那处)。
+func acCapOffsets(offs []float64, cap float64) []float64 {
+	if cap <= 0 {
+		return offs
+	}
+	out := offs[:0]
+	for _, o := range offs {
+		if o <= cap+acOverlapEps {
+			out = append(out, o)
+		}
 	}
 	return out
 }

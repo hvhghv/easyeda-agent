@@ -82,8 +82,13 @@ type pcbDesignatorRow struct {
 // **不**在这里因为缺 uniqueId 就丢弃器件：占位符的判定只需要位号，而「这块板到底
 // 有没有活要干」应该先于「连接器够不够新」回答 —— 否则一块位号本来就正常的板，
 // 在旧连接器上会被误报成错误。
-func fetchPcbDesignators(cfg *appConfig, window string) ([]pcbDesignatorRow, error) {
-	res, err := requestAction(cfg, "pcb.components.list", window, nil)
+//
+// afterWrite 是**写后回读放行理由**(stale_read_optin.go)。本函数的两处调用都跑在
+// 一次 PCB 写之后 —— 规划读跟在 import_changes 后面(读的正是刚导进来的那批件)，
+// 复核读跟在 component.modify 后面(读的正是刚写的那批位号) —— 所以两处都必须
+// 显式带理由,否则会被 daemon 的 STALE_READ 门拦死。留空 = 不放行。
+func fetchPcbDesignators(cfg *appConfig, window, afterWrite string) ([]pcbDesignatorRow, error) {
+	res, err := requestReadAfterWrite(cfg, "pcb.components.list", window, nil, afterWrite)
 	if err != nil {
 		return nil, fmt.Errorf("list PCB components: %w", err)
 	}
@@ -155,7 +160,10 @@ func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Wr
 	var rep syncDesignatorsResult
 	rep.DryRun = dryRun
 
-	rows, err := fetchPcbDesignators(cfg, window)
+	// 规划读也要放行:本命令的常规入口是 `pcb import-changes` 的收尾步
+	// (cmd_pcb.go import-changes → runSyncDesignators),此刻 import_changes 刚写完
+	// 板面,门是关着的。读的正是刚导进来的那批件,属于合法写后回读。
+	rows, err := fetchPcbDesignators(cfg, window, "sync-designators 规划读:枚举刚导入/刚落地的器件位号")
 	if err != nil {
 		return rep, err
 	}
@@ -247,9 +255,12 @@ func runSyncDesignators(cfg *appConfig, window string, dryRun bool, stderr io.Wr
 	// 回读验证：平台的写 API 有「返回成功但没落」的前科（delete 静默 no-op、
 	// 位号唯一性避让都可能改写结果）。只有读回一致的才算修好。
 	if len(written) > 0 {
-		verify, verr := fetchPcbDesignators(cfg, window)
+		verify, verr := fetchPcbDesignators(cfg, window, "sync-designators 写后回读:核对刚写下的位号是否落地")
 		if verr != nil {
 			// 读失败不равно写失败：如实报出去，别把 Repaired 归零冤枉写入。
+			if isStaleRead(verr) {
+				fmt.Fprintf(stderr, "⚠ %s\n", staleReadNextStep("sync-designators 的写后复核读"))
+			}
 			fmt.Fprintf(stderr, "⚠ post-write verification read failed: %v — repairs were issued but are unverified\n", verr)
 			rep.Repaired = len(written)
 		} else {

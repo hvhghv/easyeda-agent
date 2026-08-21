@@ -61,9 +61,10 @@ type Server struct {
 	// (concurrentwrites.go, issue #108).
 	concurrentWrites *concurrentGuard
 
-	// windowTransactions serializes complete CLI commands per EasyEDA window,
-	// including their multi-action --doc guard sequences.
-	windowTransactions *windowTransactionGuard
+	// writeHealth tracks a rolling per-window failure window so /health can
+	// expose connector load degradation and failed writes can carry a
+	// structured degraded advisory (writehealth.go, REPORT round2 新 3).
+	writeHealth *writeHealthTracker
 
 	// inflight tracks non-reentrant actions currently forwarded, keyed
 	// "<action>|<windowId>" — see acquireExclusive / nonReentrant.
@@ -95,12 +96,12 @@ func (s *Server) logf(format string, args ...any) {
 // New builds a Server. It does not bind a port until Run is called.
 func New(opts Options) *Server {
 	s := &Server{
-		opts:               opts,
-		hub:                newHub(),
-		audit:              newAuditWriter(opts.AuditDir),
-		staleReads:         newStaleGuard(),
-		concurrentWrites:   newConcurrentGuard(),
-		windowTransactions: newWindowTransactionGuard(),
+		opts:             opts,
+		hub:              newHub(),
+		audit:            newAuditWriter(opts.AuditDir),
+		staleReads:       newStaleGuard(),
+		concurrentWrites: newConcurrentGuard(),
+		writeHealth:      newWriteHealthTracker(),
 	}
 	if opts.AutosaveDebounce > 0 {
 		s.autosave = newAutosaver(opts.AutosaveDebounce, s.dispatchSave)
@@ -114,6 +115,14 @@ type health struct {
 	Status  string   `json:"status"`
 	Port    int      `json:"port"`
 	Windows []Window `json:"windows"`
+	// WriteHealth is the rolling per-window forwarded-action failure window
+	// (writehealth.go): degraded=true flags a connector that is failing under
+	// load (REPORT round2 新 3 — clients should insert light reads and verify
+	// before any retry of a write). Rates are EFFECT-level — a call that
+	// returned ok but was proven not to have landed counts as a failure — and
+	// per-action buckets (actions / degradedActions) keep one broken road from
+	// being averaged away. Omitted while no action has been forwarded.
+	WriteHealth map[string]WindowWriteHealth `json:"writeHealth,omitempty"`
 }
 
 // routes builds the HTTP handlers. port is the bound port, reported in /health
@@ -130,15 +139,22 @@ func (s *Server) routes(port int) *http.ServeMux {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(health{
-			Service: Service,
-			Version: s.opts.Version,
-			Status:  "ok",
-			Port:    port,
-			Windows: s.hub.listAnnotated(s.opts.Version),
+			Service:     Service,
+			Version:     s.opts.Version,
+			Status:      "ok",
+			Port:        port,
+			Windows:     s.hub.listAnnotated(s.opts.Version),
+			WriteHealth: s.writeHealth.all(),
 		})
 	})
 	mux.HandleFunc("/eda", s.handleConnect)
 	mux.HandleFunc("/action", s.handleAction)
+	// /writeverify is 通道 B of the write-health metric (writehealth.go): a
+	// command that VERIFIED a write by reading the canvas back posts its verdict
+	// here. Not a typed action on purpose — the verdict arrives after (and often
+	// covers many of) the calls it judges, and keeping it daemon-local means the
+	// connector never needs a rebuild for it.
+	mux.HandleFunc("/writeverify", s.handleWriteVerify)
 	return mux
 }
 

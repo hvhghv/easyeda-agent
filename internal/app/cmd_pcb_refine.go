@@ -112,6 +112,17 @@ func newPcbRefineCmd(cfg *appConfig, window *string, stdout, stderr io.Writer) *
 	return c
 }
 
+// refineReadReason 统一精修环各处写后回读的放行理由文案(stale_read_optin.go)。
+//
+// 收成一个函数,是为了让审计里的 daemon.stale_read.force 行一眼归得了类:精修环
+// 一轮就会放行三四次,散着写迟早写成四种口径,那时审计只剩噪声。
+//
+// **注意环的入口读(runRefineLoop 开头那次 fetchBoardSnapshot)不放行**:那是规划
+// 读,不是写后回读 —— 板子若在本命令开跑前就脏,该 `doc reload` 而不是绕过。它同时
+// 也是环内放行位的守门人:入口读能过,就证明进环时门是干净的,环内的放行位只会
+// 放行**本命令自己刚写下**的那些变更。
+func refineReadReason(what string) string { return "pcb refine 精修环 · " + what }
+
 // runRefineLoop 是环本体。
 func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts, gridMil float64, stderr io.Writer) (refineReport, error) {
 	rep := refineReport{DryRun: opts.DryRun}
@@ -120,8 +131,14 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 		defer setDispatchDryRun(true)()
 	}
 
+	// 入口读**不放行**(见 refineReadReason 的注释:它是规划读,也是环内放行位的
+	// 守门人)。但被门拦下时要说清是哪一读撞的 —— 否则用户看到的只是一句
+	// "pcb.components.list failed",分不清是板子脏了还是连接器坏了。
 	snap, err := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{withSilk: true, withRules: true, withLayers: true})
 	if err != nil {
+		if isStaleRead(err) {
+			return rep, fmt.Errorf("%w —— %s", err, staleReadNextStep("refine 的入口板面快照(进环前的规划读,按设计不放行)"))
+		}
 		return rep, err
 	}
 	if len(snap.Components) == 0 {
@@ -199,7 +216,11 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 		}
 
 		// 复核基线：变换前的 check finding 数。
-		beforeFindings := countGateableFindings(cfg, window, stderr)
+		//
+		// 第 2 轮起,这一读跟在上一轮的 component.modify 后面,同样要放行 —— 否则
+		// 第 2 轮的 FindingsBefore 恒为 -1,下面那条「读不到就保守回滚」的护栏会把
+		// 每一轮都判成回滚,整条命令退化成必然报失败的 no-op。
+		beforeFindings := countGateableFindings(cfg, window, refineReadReason("变换前的 check 基线"), stderr)
 		step.FindingsBefore = beforeFindings
 
 		attempted, applied, aerr := applyRefineMoves(cfg, window, step.Moves, stderr)
@@ -213,8 +234,19 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 		}
 
 		// 复核：重新拉快照 + 打分 + 数 finding。
-		newSnap, ferr := fetchBoardSnapshot(cfg, window, boardSnapshotOpts{withSilk: true, withRules: true, withLayers: true})
+		//
+		// 写后回读放行(stale_read_optin.go)。这是本仓里被 STALE_READ 门伤得最重的
+		// 一处:上一行的 applyRefineMoves 刚发了一批 component.modify,门就关上了;
+		// 而这里读的**正是刚被挪动的那批件**。不放行 → ferr 非空 → 每一步都走
+		// 「post-step re-read failed → 保守回滚」→ `pcb refine --apply` 变成一条
+		// 必然报失败的空转命令。放行位就地生成,只覆盖这一次快照。
+		newSnap, ferr := fetchBoardSnapshot(
+			staleReadOptIn(cfg, refineReadReason("变换后重新拉板面快照")),
+			window, boardSnapshotOpts{withSilk: true, withRules: true, withLayers: true})
 		if ferr != nil {
+			if isStaleRead(ferr) {
+				fmt.Fprintf(stderr, "refine: %s\n", staleReadNextStep("变换后的复核快照"))
+			}
 			step.Reason = "post-step re-read failed: " + ferr.Error()
 			step.RolledBack = true
 			step.Restored, step.Errors = rollbackRefineMoves(cfg, window, attempted, stderr)
@@ -223,7 +255,7 @@ func runRefineLoop(cfg *appConfig, window string, s0 *spec.Spec, opts refineOpts
 		}
 		after := analyzeLayoutScore(newSnap, s0, scoreOpts)
 		step.ScoreAfter = after.Overall
-		step.FindingsAfter = countGateableFindings(cfg, window, stderr)
+		step.FindingsAfter = countGateableFindings(cfg, window, refineReadReason("变换后的 check 复核"), stderr)
 
 		// #153 的硬护栏：新增 finding 就回滚，哪怕分数涨了。
 		// 分数是启发式，check finding 是会进 Gerber 的真问题。
@@ -293,9 +325,17 @@ func planStepFor(d scoreDimension, snap *boardSnapshot, immovable map[string]str
 // width-under-spec），而不是 --strict 那套「Warnings>0 全灭」—— 精修只该对
 // **它自己可能制造的**问题负责，不该被板上早已存在的告警绑架。
 // 读失败返回 -1，调用方视作"无法复核"并保守回滚。
-func countGateableFindings(cfg *appConfig, window string, stderr io.Writer) int {
-	rep, err := gatherPcbCheckReport(cfg, window, 0, nil, stderr)
+//
+// afterWrite 是写后回读放行理由(stale_read_optin.go)。精修环里这两次计数一次跟在
+// 上一轮的 modify 之后、一次跟在本轮的 modify 之后 —— 都在 STALE_READ 门后面。
+// 一旦被拦,返回值是 -1,而 -1 会触发「无法复核 → 保守回滚」,于是**门本身**变成了
+// 让每一步都回滚的原因。留空 = 不放行(第一轮的基线读用得上)。
+func countGateableFindings(cfg *appConfig, window, afterWrite string, stderr io.Writer) int {
+	rep, err := gatherPcbCheckReport(staleReadOptIn(cfg, afterWrite), window, 0, nil, stderr)
 	if err != nil || rep == nil {
+		if isStaleRead(err) {
+			fmt.Fprintf(stderr, "refine: %s\n", staleReadNextStep("pcb check 复核读"))
+		}
 		return -1
 	}
 	return rep.Summary.Errors + rep.Summary.PowerNotPoured + rep.Summary.WidthUnderSpec + rep.Summary.SilkOverPad

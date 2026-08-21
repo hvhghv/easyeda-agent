@@ -646,6 +646,38 @@ Operational order:
 
 **Key corrections from review** (see the conventions doc): decoupling effectiveness is governed by the cap's **mounting-loop inductance** (pad→via→plane), not raw distance; **default a single solid ground plane** partitioned by placement (do *not* split-ground by default); all hard thresholds are **conditioned on stackup / fab / enclosure** context.
 
+## PCB mutation → `doc reload` 门(铁律 5,daemon 机械强制)
+
+改完铜再读,读到的是**旧引擎状态**:每个 PCB 文档有自己的枚举缓存,
+rip-up / route / delete / via / track / pour 这类 mutation 之后,
+`pcb list` / `line.list` / `via.list` / `pour.list` / `nets.list` / `drc.check` / `report`
+都可能返回 mutation 之前的画面,直到文档被真正关闭重开。
+
+**这条现在是机械门,不是提醒。** daemon 在 `/action` 派发层直接**拒绝**这种读,
+返回错误码 **`STALE_READ`**,消息里带着该跑的下一条命令:
+
+```
+STALE_READ: pcb.components.list —— PCB 自 pcb.line.create 后未 reload,读到的是旧引擎状态。
+下一步: easyeda doc reload --project <name>
+(绕过: --force-reason "<理由>",入审计)
+```
+
+- **修法就一条**:`easyeda doc reload --project <name>`(它自己会先 save,不丢改动)。
+  确定性复位 = `rip-up → save → reload`。
+- **`pcb pour-rebuild` 也解锁**:它本来就是「铺铜连通性 stale」的修法。
+  DRC 手术后同网(多为 GND)Connection Error 暴增,先跑它,那不是真断。
+- **不会误伤的**:`pcb save`、`pcb pour-rebuild`、任何 `--dry-run` 预览(issue #112),
+  以及只改视图的 `view-side` / `layers set-current` / `layers visibility`
+  —— 这些不脏化枚举,不会 arm 这道门。
+- **`pcb snapshot` 不被拦**(它是画布的照片,不是枚举),但仍会带 `staleRisk` 提示。
+  注意:截图发白/发旧的修法是**把窗口切前台**,不是 reload——两回事。
+- **绕过**:`--force-reason "<理由>"`。只授权本次调用,**入审计**
+  (审计里记成 `daemon.stale_read.force`),窗口仍然是脏的,下一条无 force 的读照样被拒。
+
+> 为什么升成硬门:49 天 171554 条审计记录里,这条规则此前只发一句非阻塞警告,
+> 结果 **1780 次脏读、18.1% 违反率**——agent 看见警告照读。被机器拒绝的规则不漏,
+> 靠记忆的规则漏。
+
 ## Guardrails
 
 - Do not run two window-touching commands concurrently against the same EasyEDA window. The daemon

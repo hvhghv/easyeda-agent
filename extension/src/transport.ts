@@ -8,15 +8,29 @@
  *
  *   ┌──────────────┐   WebSocket    ┌──────────────────┐
  *   │ easyeda-agent │ ◄───────────► │  this connector   │
- *   │  Go daemon    │  60832-60841  │  (EasyEDA Pro)    │
+ *   │  Go daemon    │ 127.0.0.1     │  (EasyEDA Pro)    │
+ *   │               │      :60832   │                   │
  *   └──────────────┘                └──────────────────┘
  *
- * Port range is 0xEDA0-0xEDA9 (60832-60841) — "EDA" spelled in hex, and
- * deliberately far from 49620-49629, which the OFFICIAL eext-run-api-gateway
- * scans (we originally copied that convention; two ecosystems fighting over
- * one port bind was the result — see docs/ecosystem-survey.md).
+ * **One pinned port, not a sweep.** The daemon binds a SINGLE fixed port, 60832
+ * (0xEDA0 — "EDA" spelled in hex), and never spills to the next one: a second
+ * daemon on 60832 is replaced, a foreign holder is refused (see
+ * `internal/app/cmd_daemon.go`). So 60833-60841 can never hold a daemon, and
+ * probing them is pure idling — every dead port burns a full
+ * CONNECTION_TIMEOUT_MS because `eda.sys_WebSocket.register()` never reports a
+ * refused connection. Real logs showed ~7s spent walking dead ports on every
+ * reconnect, which under `make dev` (air rebuilds the daemon on each .go edit)
+ * is paid over and over. This transport therefore tries 60832 ONLY, with
+ * exponential backoff (see BACKOFF_*).
+ *
+ * The rest of 0xEDA0-0xEDA9 (60832-60841) stays RESERVED for us — deliberately
+ * far from 49620-49629, which the OFFICIAL eext-run-api-gateway scans (we
+ * originally copied that convention; two ecosystems fighting over one port bind
+ * was the result — see docs/ecosystem-survey.md). A non-standard deployment can
+ * still reach it through the `daemonPorts` escape hatch below.
  */
 
+import { ActionQueue, isBypassAction } from './action-queue';
 import { buildContextFrame, readEasyEdaVersion } from './eda-context';
 import { runAction } from './actions';
 import { createWebSocketId } from './transport-identity';
@@ -48,19 +62,55 @@ const WS_ID_BASE = createWebSocketId();
 // 60832 上持续报 "closed before the connection is established"。activation-scoped
 // 解决的是「多激活互踢」,解决不了「本激活自己的 id 被 EasyEDA 判为 active 后
 // register() 被静默忽略」。连续整轮扫描失败后换一个全新 id 才是逃生口。
-const WS_ID_ROTATE_AFTER_FAILED_SCANS = 2;
+// 阈值从 2 提到 4:一"轮失败"过去是整段 10 端口扫描(~18s),现在是一次 1.7s 的
+// 尝试。沿用 2 会把换 id 的节奏从 ~40s 一次压到 ~4s 一次,在 EasyEDA 共享的 socket
+// 表里堆一串死 id —— 那正是这段逻辑当初要躲的race。4 次失败 + 退避 ≈ 十几秒起,
+// 之后每 4 次 ≈ 40s 一换,和改动前的墙钟压力同量级。
+const WS_ID_ROTATE_AFTER_FAILED_SCANS = 4;
 let wsId: string = WS_ID_BASE;
 let wsIdGeneration = 0;
-const PORT_START = 0xeda0; // 60832 — "EDA0" in hex; own range, no official-gateway conflict
-const PORT_END = 0xeda9; // 60841
-const RETRY_DELAY_MS = 3000;
-// After MAX_RETRIES fast attempts we DON'T give up — we fall back to this slow
-// background poll so a daemon started/restarted later auto-reconnects with no
-// manual Reconnect. The daemon is almost always launched AFTER the editor (and
-// `make build` compiles first), so a terminal give-up would strand every fresh
-// `bin/easyeda daemon`.
-const SLOW_RETRY_DELAY_MS = 10000;
-const MAX_RETRIES = 5;
+// The one port the daemon binds. Not a range start — the daemon never spills
+// (see the file header).
+export const DAEMON_PORT = 0xeda0; // 60832 — "EDA0" in hex
+// End of the range we reserve for ourselves. Nothing scans it by default; it is
+// here as the documented bound for the `daemonPorts` override and as the marker
+// that 60833-60841 stay ours (no official-gateway conflict).
+export const RESERVED_PORT_END = 0xeda9; // 60841
+// ─ Escape hatch ─
+// Pinning is right for the shipped topology (one daemon, one port), NOT a law of
+// physics. A non-standard deployment (several daemons side by side, a port
+// already taken by something else, `easyeda daemon start --ports …`) can point
+// the connector elsewhere by setting this extension user-config key:
+//
+//   eda.sys_Storage.setExtensionUserConfig('daemonPorts', '60832-60841')
+//   eda.sys_Storage.setExtensionUserConfig('daemonPorts', '60840,60832')
+//   eda.sys_Storage.setExtensionUserConfig('daemonPorts', 60900)
+//
+// (run it from `debug.exec_js`, or from the editor's script console). It is read
+// at the START of every attempt, so it takes effect on the next retry — no
+// re-import, no EasyEDA restart. Unset/garbage → the pinned default.
+const STORAGE_KEY_DAEMON_PORTS = 'daemonPorts';
+// Hard cap on an override list: a typo like "1-65535" must not turn reconnect
+// into an unbounded sweep that never comes back. 12 × ~1.7s stays inside the
+// STUCK_CONNECTING_TICKS watchdog bound (~24s), so even a maxed-out override
+// can't be mistaken for a wedged connect flow.
+const MAX_OVERRIDE_PORTS = 12;
+// ─ Backoff ─
+// Retry cadence when nobody answers on the pinned port. The first attempt is
+// immediate; then 0.5s → 1s → 2s → 4s → 8s (capped), each ±25% jitter.
+//
+// Why these numbers: one attempt now costs REGISTER_DELAY_MS + CONNECTION_TIMEOUT_MS
+// ≈ 1.7s (one port, not ten), so the common case this change targets — the daemon
+// restarting under `make dev` — reconnects in ~2-3s: the daemon is back within a
+// second or two and the 0.5s/1s steps land right on top of it. The cap exists for
+// the OTHER case (daemon deliberately stopped for minutes): at 8s the socket
+// churn against EasyEDA's shared id table is ~3x gentler than the old flat 3s,
+// while a daemon started later still auto-connects within ~8s — better than the
+// old 10s slow poll it replaces. Jitter keeps several activations/windows from
+// re-registering in lockstep.
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_MAX_MS = 8000;
+const BACKOFF_JITTER = 0.25;
 // EasyEDA's eda.sys_WebSocket closes idle connections after ~5s of silence.
 // Ping more often than that to keep the socket alive between actions, which
 // otherwise causes a register -> 5s silence -> close -> reconnect storm.
@@ -70,21 +120,23 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 // load (canvas redraw, GC). Only give up after this many pings go unanswered in
 // a row (~9s of true silence).
 const MAX_MISSED_PONGS = 3;
-// Per-port attempt budget. Every dead port burns this in full — register() never
-// reports a refused connection, so only the timeout ends the attempt.
+// Per-attempt budget. A dead port burns this in full — register() never reports
+// a refused connection, so only the timeout ends the attempt. With the port
+// pinned this is paid ONCE per attempt (~1.7s with REGISTER_DELAY_MS) instead of
+// ten times per sweep; the pacing between attempts is BACKOFF_*, not this value.
 //
-// It is tempting to shrink this (10 dead ports ≈ 18s here), and 600ms was tried:
+// It is tempting to shrink this (back when 10 dead ports ≈ 18s), and 600ms was tried:
 // **it made recovery strictly worse** (soak 2026-08-04: 45s ✅ / 60s ❌ / 75s ❌
 // vs 45s ✅ / 60s ✅ / 75s ❌ at 1500ms; one run reached scan session=58 without
 // ever reconnecting). A faster sweep doubles the rate of close()/register()
 // cycles against EasyEDA's shared socket table, and REGISTER_DELAY_MS's 200ms
 // release window stops being enough — the real bottleneck is that id state
 // machine, not latency, so speeding the loop up feeds the very race it loses.
-// The sweep cost is instead removed by scanOrder(): a reconnect normally probes
-// ONE port, not ten.
+// The sweep cost is instead removed by pinning: a reconnect probes ONE port.
 const CONNECTION_TIMEOUT_MS = 1500;
-// A full 10-port scan (each up to CONNECTION_TIMEOUT_MS + REGISTER_DELAY_MS) settles
-// in well under 20s. If `isConnecting` stays true longer than this many watchdog
+// A pinned attempt settles in ~1.7s; even a MAX_OVERRIDE_PORTS-wide override
+// sweep (each port up to CONNECTION_TIMEOUT_MS + REGISTER_DELAY_MS) stays under
+// this bound. If `isConnecting` stays true longer than this many watchdog
 // ticks, the flow is wedged (a session invalidated mid-scan, or a renderer that was
 // suspended while backgrounded, can leak isConnecting=true) — and a wedged
 // isConnecting freezes EVERY reconnect (watchdogTick, scanAndConnect, AND the wake
@@ -121,6 +173,13 @@ let watchdogTicks = 0;
 let connectingSinceTick = 0;
 let missedPongs = 0;
 let retryCount = 0;
+// Earliest wall-clock time the next attempt may start (0 = right now). This is
+// what makes the backoff REAL: the watchdog ticks every HEARTBEAT_INTERVAL_MS and
+// calls scanAndConnect() whenever we are not connected, so a retry timer alone
+// could never pace attempts slower than 3s (the old SLOW_RETRY_DELAY_MS was
+// silently defeated that way). Every non-forced entry into scanAndConnect checks
+// this gate.
+let nextAttemptAt = 0;
 let windowId: string | null = null;
 // Signature of the last context frame pushed to the daemon, so the heartbeat can
 // re-send context ONLY when the active project/document actually changed (e.g.
@@ -170,30 +229,106 @@ function isConnectionSessionActive(sessionId: number): boolean {
 }
 
 /**
- * Port order for one scan: the last port that worked first, then the rest.
+ * Parse a `daemonPorts` override into a bounded, de-duplicated port list.
  *
- * Measured on a live editor (2026-08-04, first offline log capture): a full
- * sweep costs ~18s because every dead port burns the whole
- * CONNECTION_TIMEOUT_MS — `eda.sys_WebSocket.register()` never reports a
- * refused connection, so only the timeout ends the attempt. With the daemon on
- * 60832 (the range's first port) that was survivable; the moment it sits later
- * in the range, every reconnect pays for all the dead ports before it.
+ * Accepts what a human would plausibly type into the config: a number, a
+ * `"60832"` / `"60832-60841"` / `"60840,60832"` string, or an array of those.
+ * Anything unparseable is dropped rather than throwing — this runs on the
+ * reconnect path, where a bad config must degrade to the pinned default, never
+ * break the transport.
  *
- * A restarted daemon re-binds the same port in practice (it scans the range in
- * order and takes the first free one), so trying the last known-good port first
- * turns the common reconnect from a sweep into a single attempt.
+ * @param raw - the raw user-config value
+ * @returns the ports to try, in the order given (empty = no usable override)
  */
-export function scanOrder(lastGood: number | null, start = PORT_START, end = PORT_END): number[] {
+export function parsePorts(raw: unknown): number[] {
 	const ports: number[] = [];
-	if (lastGood !== null && lastGood >= start && lastGood <= end) {
-		ports.push(lastGood);
-	}
-	for (let port = start; port <= end; port++) {
-		if (port !== lastGood) {
+	const push = (port: number): void => {
+		if (Number.isInteger(port) && port >= 1 && port <= 65535
+			&& !ports.includes(port) && ports.length < MAX_OVERRIDE_PORTS) {
 			ports.push(port);
+		}
+	};
+
+	const items: unknown[] = Array.isArray(raw)
+		? raw
+		: typeof raw === 'string' ? raw.split(',') : [raw];
+
+	for (const item of items) {
+		if (typeof item === 'number') {
+			push(item);
+			continue;
+		}
+		if (typeof item !== 'string') {
+			continue;
+		}
+		const token = item.trim();
+		const range = /^(\d+)\s*-\s*(\d+)$/.exec(token);
+		if (range) {
+			const lo = Number(range[1]);
+			const hi = Number(range[2]);
+			for (let port = lo; port <= hi && ports.length < MAX_OVERRIDE_PORTS; port++) {
+				push(port);
+			}
+			continue;
+		}
+		if (/^\d+$/.test(token)) {
+			push(Number(token));
 		}
 	}
 	return ports;
+}
+
+/**
+ * The ports this attempt will try, most-likely first.
+ *
+ * Normally exactly `[DAEMON_PORT]` — the daemon binds one fixed port and never
+ * spills, so there is nothing else to look at. With a `daemonPorts` override the
+ * list can be longer, and then the last port that completed a handshake goes
+ * first: a restarted daemon re-binds the same port in practice, so the hint
+ * turns the common reconnect back into a single attempt.
+ *
+ * @param override - the raw `daemonPorts` user-config value (undefined = pinned)
+ * @param lastGood - the last port that completed a handshake, if any
+ * @returns the ordered ports to try
+ */
+export function resolvePorts(override: unknown, lastGood: number | null): number[] {
+	const configured = parsePorts(override);
+	const ports = configured.length > 0 ? configured : [DAEMON_PORT];
+	if (lastGood !== null && ports.length > 1 && ports.includes(lastGood)) {
+		return [lastGood, ...ports.filter((port) => port !== lastGood)];
+	}
+	return ports;
+}
+
+/**
+ * Read the configured ports for this attempt (pinned default on any failure).
+ *
+ * @returns the ordered ports to try
+ */
+function attemptPorts(): number[] {
+	let override: unknown;
+	try {
+		override = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_DAEMON_PORTS);
+	}
+	catch {
+		return [DAEMON_PORT];
+	}
+	return resolvePorts(override, lastGoodPort);
+}
+
+/**
+ * Delay before the Nth consecutive failed attempt is retried.
+ *
+ * Exponential from BACKOFF_BASE_MS, capped at BACKOFF_MAX_MS, ±BACKOFF_JITTER.
+ *
+ * @param failures - consecutive failed attempts so far (1 = the first failure)
+ * @param rand - random source in [0,1) (injectable for tests)
+ * @returns the delay in milliseconds
+ */
+export function backoffDelayMs(failures: number, rand: () => number = Math.random): number {
+	const n = Math.max(1, Math.floor(failures));
+	const base = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (n - 1));
+	return Math.round(base * (1 + (rand() * 2 - 1) * BACKOFF_JITTER));
 }
 
 function rotateWsId(): void {
@@ -220,6 +355,7 @@ function cancelConnectionFlow(resetRetryCount = true): void {
 	windowId = null;
 	if (resetRetryCount) {
 		retryCount = 0;
+		nextAttemptAt = 0; // a fresh outage starts at the fast end of the backoff
 	}
 	closeWebSocket();
 }
@@ -227,14 +363,14 @@ function cancelConnectionFlow(resetRetryCount = true): void {
 // ─── Public control ───────────────────────────────────────────────────
 
 /**
- * Force a reconnect: cancel any active flow and rescan the port range.
+ * Force a reconnect: cancel any active flow and retry the daemon port now.
  */
 export function reconnect(): void {
 	eda.sys_Message.showToastMessage(eda.sys_I18n.text('Reconnecting...'));
 	connectionAnnounced = false;
 	suspended = false;
 	cancelConnectionFlow();
-	void scanAndConnect();
+	void scanAndConnect(true); // explicit user action — never sit out the backoff
 }
 
 /**
@@ -262,24 +398,34 @@ export function start(): void {
 	}
 }
 
-// ─── Port scan & connect ──────────────────────────────────────────────
+// ─── Connect (pinned port) ────────────────────────────────────────────
 
 /**
- * Scan the port range, register a WebSocket for each, and keep the one whose
- * daemon sends a valid `handshake` (service === "easyeda-agent").
+ * Try the daemon port(s), register a WebSocket, and keep the one whose daemon
+ * sends a valid `handshake` (service === "easyeda-agent").
+ *
+ * @param force - bypass the backoff gate (explicit reconnect, window wake, or a
+ *   retry timer firing at its own deadline)
  */
-async function scanAndConnect(): Promise<void> {
+async function scanAndConnect(force = false): Promise<void> {
 	if (isConnecting) {
+		return;
+	}
+	// Backoff gate. The watchdog calls us every HEARTBEAT_INTERVAL_MS while
+	// disconnected, so without this check the retry cadence would be pinned at 3s
+	// no matter what scheduleRetry asked for.
+	if (!force && nextAttemptAt > 0 && Date.now() < nextAttemptAt) {
 		return;
 	}
 
 	const sessionId = nextConnectionSessionId();
 	isConnecting = true;
 	clearRetryTimer();
-	diag(`scan start session=${sessionId} retryCount=${retryCount} wsId=${wsId}`);
+	const ports = attemptPorts();
+	diag(`connect attempt session=${sessionId} ports=${ports.join(',')} retryCount=${retryCount} wsId=${wsId}`);
 
 	try {
-		for (const port of scanOrder(lastGoodPort)) {
+		for (const port of ports) {
 			if (!isConnectionSessionActive(sessionId)) {
 				return;
 			}
@@ -291,39 +437,46 @@ async function scanAndConnect(): Promise<void> {
 
 			if (found) {
 				currentPort = port;
-				// Remember it: a daemon that restarts almost always re-binds the
-				// same port, so this is what turns a reconnect from a full sweep
-				// into a single attempt (see scanOrder).
+				// Remember it: only matters under a multi-port `daemonPorts`
+				// override, where it keeps the reconnect a single attempt
+				// (see resolvePorts).
 				lastGoodPort = port;
 				retryCount = 0;
+				nextAttemptAt = 0;
 				startHeartbeat();
 				return;
 			}
 		}
 
 		retryCount++;
-		// 整轮扫完无人应答 = daemon 不在,或我们的 id 已被焊死、register 全被忽略。
-		// 从连接器视角这两者不可分辨,所以扫失败够两轮就换 id:daemon 真不在时换了
+		// 无人应答 = daemon 不在,或我们的 id 已被焊死、register 全被忽略。
+		// 从连接器视角这两者不可分辨,所以连续失败够 N 次就换 id:daemon 真不在时换了
 		// 也无副作用,id 被焊死时这是唯一的出路。
 		if (retryCount % WS_ID_ROTATE_AFTER_FAILED_SCANS === 0) {
 			rotateWsId();
 		}
 		// Daemon is genuinely gone — let the next successful connect announce again.
 		connectionAnnounced = false;
-		// Toast ONCE per outage (on the first failed scan), then retry SILENTLY.
-		// Previously every fast retry toasted "(n/MAX)" every RETRY_DELAY_MS — at a
-		// 3s cadence the toasts stacked and obscured the UI ("one starts before the
-		// last ends"). The retry cadence is unchanged (fast recovery); only the
-		// notification is deduped to a single background-retry notice per outage. The
-		// eventual reconnect announces once via connectionAnnounced.
+		// Toast ONCE per outage (on the first failed attempt), then retry SILENTLY.
+		// Previously every fast retry toasted "(n/MAX)" on each retry — at a 3s
+		// cadence the toasts stacked and obscured the UI ("one starts before the
+		// last ends"). Retries stay fast; only the notification is deduped to a
+		// single background-retry notice per outage. The eventual reconnect
+		// announces once via connectionAnnounced. This matters MORE now that the
+		// first retries are sub-second.
 		if (retryCount === 1) {
 			eda.sys_Message.showToastMessage(
 				eda.sys_I18n.text('Daemon not found — retrying in the background; just start the daemon.'),
 			);
 		}
-		// Fast retries first (quick recovery from a daemon restart), then fall back to
-		// a quiet slow poll so a daemon started much later still auto-connects.
-		scheduleRetry(sessionId, retryCount <= MAX_RETRIES ? RETRY_DELAY_MS : SLOW_RETRY_DELAY_MS);
+		// Exponential backoff: sub-second at first (a daemon restarting under `make
+		// dev` is back within a second or two), settling at BACKOFF_MAX_MS so a
+		// genuinely absent daemon is polled quietly instead of hammered. We never
+		// give up — the daemon is usually started AFTER the editor, so a terminal
+		// give-up would strand every fresh `bin/easyeda daemon`.
+		const delay = backoffDelayMs(retryCount);
+		nextAttemptAt = Date.now() + delay;
+		scheduleRetry(sessionId, delay);
 	}
 	finally {
 		if (isConnectionSessionActive(sessionId)) {
@@ -666,7 +819,9 @@ function startWatchdog(): void {
 			return;
 		}
 		cancelConnectionFlow(false);
-		void scanAndConnect();
+		// force: the user just came back to this window — retry now rather than
+		// sitting out the remainder of a backoff step.
+		void scanAndConnect(true);
 	};
 	try {
 		globalThis.addEventListener?.('focus', wake);
@@ -684,7 +839,10 @@ function scheduleRetry(sessionId: number, delayMs: number): void {
 		if (!isConnectionSessionActive(sessionId) || isConnecting) {
 			return;
 		}
-		void scanAndConnect();
+		// force: this timer IS the backoff deadline. Without it, timer/clock skew
+		// of a millisecond would bounce off the nextAttemptAt gate and hand the
+		// retry to the next watchdog tick instead.
+		void scanAndConnect(true);
 	}, delayMs);
 }
 
@@ -716,6 +874,12 @@ async function handleMessage(msg: InboundFrame): Promise<void> {
 	}
 }
 
+/**
+ * 本激活的**唯一咽喉**:所有动作都从这条 FIFO 链上过(旁路名单除外)。
+ * 每个窗口/激活一条队列 —— 一次只跑一个 handler。见 action-queue.ts 的文件头。
+ */
+const actionQueue = new ActionQueue();
+
 async function handleRequest(request: RequestFrame): Promise<void> {
 	const base = {
 		type: 'response' as const,
@@ -723,32 +887,74 @@ async function handleRequest(request: RequestFrame): Promise<void> {
 		version: request.version ?? PROTOCOL_VERSION,
 	};
 
+	// 入队是**同步**发生的(submit 在第一个 await 之前就把任务挂上了链),
+	// 所以入队顺序 === 消息到达顺序。这一点是整个 happens-before 的地基:
+	// 换成先 await 再入队,FIFO 立刻退化回原来的并发。
+	const outcome = await actionQueue.submit({
+		id: request.id,
+		timeoutMs: request.timeoutMs,
+		bypass: isBypassAction(request.action),
+		run: () => runAction(request.action, request.payload),
+	});
+
 	let response: ResponseFrame;
-	try {
-		const result = await runAction(request.action, request.payload);
-		response = {
-			...base,
-			ok: true,
-		};
-		if (result.result !== undefined) {
-			response.result = result.result;
+	switch (outcome.status) {
+		case 'ok': {
+			const result = outcome.value;
+			response = { ...base, ok: true };
+			if (result.result !== undefined) {
+				response.result = result.result;
+			}
+			if (result.context !== undefined) {
+				response.context = result.context;
+			}
+			if (result.artifacts !== undefined && result.artifacts.length > 0) {
+				response.artifacts = result.artifacts;
+			}
+			if (result.warnings !== undefined && result.warnings.length > 0) {
+				response.warnings = result.warnings;
+			}
+			break;
 		}
-		if (result.context !== undefined) {
-			response.context = result.context;
-		}
-		if (result.artifacts !== undefined && result.artifacts.length > 0) {
-			response.artifacts = result.artifacts;
-		}
-		if (result.warnings !== undefined && result.warnings.length > 0) {
-			response.warnings = result.warnings;
-		}
+		case 'error':
+			response = { ...base, ok: false, error: toResponseError(outcome.error) };
+			break;
+		case 'abandoned':
+			// daemon 多半已经在 (timeoutMs - 2s) 就超时了,所以这条回执往往落不到
+			// 任何等待者手上 —— 那不要紧:它的价值在于**下一条**响应上递增了的
+			// seqAbandoned。措辞必须停在可证边界内:我们只知道「不再等它了」,
+			// 不知道它到底做没做成。
+			response = {
+				...base,
+				ok: false,
+				error: {
+					code: ErrorCodes.ACTION_ABANDONED,
+					message: `action "${request.action}" was abandoned after ${outcome.waitedMs}ms so the queue could keep flowing`,
+					detail: 'the handler is still running; its effect may land later — treat any conclusion about this write as unproven (seqAbandoned was incremented)',
+				},
+			};
+			break;
+		case 'overflow':
+			response = {
+				...base,
+				ok: false,
+				error: {
+					code: ErrorCodes.QUEUE_OVERFLOW,
+					message: `connector action queue is full (${outcome.depth} waiting) — this action was NOT executed`,
+					detail: 'the editor is not draining actions; wait for the backlog to settle (each head is abandoned after its own timeoutMs) or restart EasyEDA',
+				},
+			};
+			break;
 	}
-	catch (err) {
-		response = {
-			...base,
-			ok: false,
-			error: toResponseError(err),
-		};
+
+	// 顺序证据挂在**每一条**响应上,包括失败与旁路的。
+	response.seq = outcome.stamp.seq;
+	response.seqAbandoned = outcome.stamp.seqAbandoned;
+	if (outcome.stamp.unordered) {
+		response.unordered = true;
+	}
+	if (outcome.stamp.abandonedIds !== undefined && outcome.stamp.abandonedIds.length > 0) {
+		response.abandonedIds = outcome.stamp.abandonedIds;
 	}
 
 	sendFrame(response);

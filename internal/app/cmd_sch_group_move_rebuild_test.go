@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -202,6 +203,112 @@ func TestClampDeltaAvoidingKeepout(t *testing.T) {
 		_, dy := clampDeltaAvoidingKeepout(box, 0, -200, bounds, nil)
 		if dy != -200 {
 			t.Errorf("无 keepout 时应原样通过: %v", dy)
+		}
+	})
+}
+
+// ── 钳位可见性(#151:esp32Mini round2 新 4)──────────────────────────────────
+//
+// 真机实录:--dy -110 撞图纸下沿被钳成 -2,命令仍打「✓ 平移 0 件 Δ=(0,-2)」退出 0。
+// 判据:钳位必须结构化可见(requested vs applied),钳到接近 0(任一被请求轴
+// |applied| < |requested|·10% 且 |applied| ≤ 5)= 位移意图丢失 → 拒绝执行。
+func TestEvalGroupMoveClamp(t *testing.T) {
+	cases := []struct {
+		name             string
+		reqDX, reqDY     float64
+		appDX, appDY     float64
+		clamped, refused bool
+		axisMustContain  string // 任一 Axes 行须含此子串("" = 不检查)
+	}{
+		{"足额位移零钳位", 100, -80, 100, -80, false, false, ""},
+		{"零请求零钳位", 0, 0, 0, 0, false, false, ""},
+		{"部分钳位仍执行:钳掉一半", 0, -80, 0, -40, true, false, "图纸下沿"},
+		{"真机案例:-110 钳成 -2 拒绝", 0, -110, 0, -2, true, true, "图纸下沿"},
+		{"钳成全 0 拒绝", 40, 60, 0, 0, true, true, ""},
+		{"边界:恰 10% 不算接近 0", 0, -50, 0, -5, true, false, ""}, // 5 == 50*0.1,不满足 <
+		{"边界:|applied|=5 且 <10% 拒绝", 0, -110, 0, -5, true, true, ""},
+		{"边界:<10% 但 |applied|>5 仍执行", 0, -110, 0, -10, true, false, ""},
+		{"小位移大比例钳位不触发绝对档", -8, 0, -2, 0, true, false, "图纸左沿"},
+		{"正向 x 撞右沿钳到近 0 拒绝", 300, 0, 4, 0, true, true, "图纸右沿"},
+		{"正向 x 大幅钳位但仍 >5 执行", 300, 0, 20, 0, true, false, "图纸右沿"},
+		{"正向 y 撞上沿", 0, 200, 0, 190, true, false, "图纸上沿"},
+		{"一轴足额一轴钳到 0 整体拒绝", 100, -110, 100, 0, true, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := evalGroupMoveClamp(tc.reqDX, tc.reqDY, tc.appDX, tc.appDY)
+			if rep.Clamped != tc.clamped || rep.Refused != tc.refused {
+				t.Fatalf("clamped=%v refused=%v, want %v/%v (axes: %v)",
+					rep.Clamped, rep.Refused, tc.clamped, tc.refused, rep.Axes)
+			}
+			if rep.RequestedDX != tc.reqDX || rep.RequestedDY != tc.reqDY ||
+				rep.AppliedDX != tc.appDX || rep.AppliedDY != tc.appDY {
+				t.Fatalf("requested/applied 字段没有原样带出: %+v", rep)
+			}
+			if tc.clamped && len(rep.Axes) == 0 {
+				t.Fatal("钳位发生却没有逐轴描述")
+			}
+			if tc.axisMustContain != "" {
+				found := false
+				for _, a := range rep.Axes {
+					if strings.Contains(a, tc.axisMustContain) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("Axes %v 缺撞边归因 %q", rep.Axes, tc.axisMustContain)
+				}
+			}
+		})
+	}
+}
+
+// 收尾输出:足额位移与历史输出逐字节一致(别惊扰现有调用方);钳位时
+// requested/applied 两个都印且给机器可读 partial 行;0 件被移动不许打绿勾。
+func TestGroupMoveResultLines(t *testing.T) {
+	t.Run("足额位移输出与历史一致", func(t *testing.T) {
+		lines := groupMoveResultLines("g1", 5, groupMoveClampReport{
+			RequestedDX: 100, RequestedDY: -80, AppliedDX: 100, AppliedDY: -80})
+		if len(lines) != 1 {
+			t.Fatalf("足额位移只该有一行: %v", lines)
+		}
+		want := "✓ 组 g1 平移 5 件 Δ=(100,-80);内核对账绿(网表逐引脚一致,无新增 bridge)"
+		if lines[0] != want {
+			t.Errorf("历史输出被改动:\n got %q\nwant %q", lines[0], want)
+		}
+	})
+	t.Run("钳位时两个 Δ 都印且有 partial JSON 行", func(t *testing.T) {
+		lines := groupMoveResultLines("g1", 5, groupMoveClampReport{
+			RequestedDX: 0, RequestedDY: -110, AppliedDX: 0, AppliedDY: -40, Clamped: true})
+		if len(lines) != 2 {
+			t.Fatalf("钳位时该有 partial 行 + 绿勾行: %v", lines)
+		}
+		var payload struct {
+			Requested struct{ Dx, Dy float64 } `json:"requestedDelta"`
+			Applied   struct{ Dx, Dy float64 } `json:"appliedDelta"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[0], "partial: ")), &payload); err != nil {
+			t.Fatalf("partial 行不是合法 JSON: %q (%v)", lines[0], err)
+		}
+		if payload.Requested.Dy != -110 || payload.Applied.Dy != -40 {
+			t.Errorf("requestedDelta/appliedDelta 数值不对: %+v", payload)
+		}
+		if !strings.Contains(lines[1], "requestedΔ=(0,-110)") || !strings.Contains(lines[1], "appliedΔ=(0,-40)") {
+			t.Errorf("文本行没同时印两个 Δ: %q", lines[1])
+		}
+	})
+	t.Run("0 件被移动是明确 no-op 不是绿勾", func(t *testing.T) {
+		lines := groupMoveResultLines("g1", 0, groupMoveClampReport{
+			RequestedDX: 0, RequestedDY: -4, AppliedDX: 0, AppliedDY: -2, Clamped: true})
+		joined := strings.Join(lines, "\n")
+		if strings.Contains(joined, "✓") {
+			t.Errorf("0 件被移动不该打绿勾: %q", joined)
+		}
+		if !strings.Contains(joined, "no-op") || !strings.Contains(joined, "0 件") {
+			t.Errorf("缺明确 no-op 提示: %q", joined)
+		}
+		if !strings.Contains(joined, `"requestedDelta"`) {
+			t.Errorf("钳位过的 no-op 也要带 partial 结构化行: %q", joined)
 		}
 	})
 }

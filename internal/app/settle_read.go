@@ -36,19 +36,46 @@ const settleAttempts = 2
 // 例如图签回读里,调用成功但值还是旧的 → ok=false → 值得再读一次。
 // 这样调用方不必各自写重试循环,也不会再有人忘记写。
 //
-// 返回最后一次的结果与它是否满足条件 —— 失败时也把值给出来,让调用方能报出
-// 「读到的是什么」而不只是「没读到」。
-func settleRead[T any](read func() (T, bool)) (T, bool) {
-	var last T
+// read 的第三个返回值是**这次调用的原始错误**,settleRead 靠它区分「还没稳定」
+// 和「重试也没用」。签名里必须有它,而不是另开一个「安全版」入口:两个入口意味着
+// 有人会挑错的那个,而挑错的代价正是下面这条 ——
+//
+// ── 为什么非加不可:STALE_READ ─────────────────────────────────────────
+//
+// daemon 现在会**拒绝** PCB mutation 之后、doc reload 之前的 PCB 读
+// (internal/daemon/stalereads.go,错误码 STALE_READ)。这种拒绝是**确定性**的:
+// 门的状态不会因为等 400ms 就变。旧签名看不见错误,只能把它当成「没落地」,重试
+// 两次再报「写没落地」—— 正好是本文件开头警告的那种误诊,而且更毒:真因是
+// 「你该先 reload」,报出来的却是「你的写入丢了」,把人推向重写/回滚。
+//
+// 所以 settleRead 认得这个码,并**当场收手**:不睡、不重试,原样把 STALE_READ
+// 交回去,让调用方报真因。判据只认 error.code,不做文本匹配。
+//
+// 目前 PCB 侧的写后回读走的是 requestReadAfterWrite 放行位(stale_read_optin.go),
+// 本不该撞上这道门;这里的处理是给「有人漏了放行位」留的诚实失败路径 ——
+// 定时炸弹的正确拆法是让它爆得清楚,不是假装它不存在。
+//
+// 返回最后一次的结果、它是否满足条件、以及最后一次的错误 —— 失败时也把值给出来,
+// 让调用方能报出「读到的是什么」而不只是「没读到」。
+func settleRead[T any](read func() (T, bool, error)) (T, bool, error) {
+	var (
+		last    T
+		lastErr error
+	)
 	for attempt := 0; attempt < settleAttempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(settleDelay)
 		}
-		v, ok := read()
-		last = v
+		v, ok, err := read()
+		last, lastErr = v, err
 		if ok {
-			return v, true
+			return v, true, nil
+		}
+		if isStaleRead(err) {
+			// 确定性拒绝:再读一次只会再被拒一次,而每多睡一拍就多一分把真因
+			// 埋进"超时/没落地"的机会。
+			return v, false, err
 		}
 	}
-	return last, false
+	return last, false, lastErr
 }

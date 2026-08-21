@@ -1073,3 +1073,41 @@ func TestPlanConnection_ExtendsWhenLaneFloorExceedsRegularRange(t *testing.T) {
 		t.Errorf("lane 要求 248 时,候选最远只到 %v", maxOff)
 	}
 }
+
+// ── 桩长硬上限(OffsetCap)───────────────────────────────────────────────────
+//
+// 2026-08-20 收敛性缺陷:OffsetMax 只封住细档,而 candidateOffsets **常驻**
+// laneStepFor 的标准档位(netport 一档 ~89、三档 ~285)、extendedOffsets 更是
+// 跟着 laneFloor 无上界。对「刚体平移复现」「按收敛计划落地」这两类桩长被规划
+// 定死的场景,评分器多走一档就等于把区框撑胖一档(真机 +208)。
+func TestCandidateOffsets_HonorsOffsetCap(t *testing.T) {
+	rules := defaultAutoconnectRules()
+	lane := laneStepFor("net_port_bi", "USB_DTR")
+	// 无上限:标准档位必须在(这是既有行为,别把它当上限的副作用删掉)。
+	free := candidateOffsets(rules, "net_port_bi", "USB_DTR")
+	if free[len(free)-1] < rules.OffsetMin+lane {
+		t.Fatalf("无上限时该铺到 laneStepFor 档位(≥%.0f),got %v", rules.OffsetMin+lane, free[len(free)-1])
+	}
+	// 有上限:一档都不许越过。
+	rules.OffsetCap = 48
+	capped := candidateOffsets(rules, "net_port_bi", "USB_DTR")
+	if len(capped) == 0 {
+		t.Fatal("有上限也必须留下可选档位 —— 连不上比连得深还糟")
+	}
+	for _, o := range capped {
+		if o > rules.OffsetCap {
+			t.Fatalf("档位 %v 越过硬上限 %v:%v", o, rules.OffsetCap, capped)
+		}
+	}
+	// 扩展档同样要夹(最容易漏的那一处:noCleanCandidate 时才铺,平时看不见)。
+	for _, o := range extendedOffsets(rules, 400) {
+		if o > rules.OffsetCap {
+			t.Fatalf("扩展档 %v 越过硬上限 %v", o, rules.OffsetCap)
+		}
+	}
+	// 上限比 OffsetMin 还紧:仍要给一档(夹到上限),不能返回空。
+	rules.OffsetCap = 10
+	if tight := candidateOffsets(rules, "ground", "GND"); len(tight) != 1 || tight[0] != 10 {
+		t.Fatalf("上限紧于 OffsetMin 时该给夹到上限的单档 [10],got %v", tight)
+	}
+}

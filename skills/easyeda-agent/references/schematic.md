@@ -63,6 +63,17 @@ Use `easyeda-agent` typed actions. Do not write raw EasyEDA JavaScript unless a 
 > 日志把算术写全了,照着判断即可:`relational: left 侧 6 个 marker 需 276,与 D1 只有 120
 > —— D1 让 155、J1 让 55(通道 → 274)`;推不动时会说被谁顶住(可用区边界 / 页面上已有图元),
 > 那就是**该换更大图纸或拆页**的信号,不是重跑一次能解决的。
+> **落完自动按「功能子群」登记虚拟组**(不是整块一个组):有 `flow` 的块按**信号流每一级**
+> 一群(CH340C → `/J_USB`(Type-C + CC 下拉)/ `/D_ESD` / `/U`(桥芯片 + 去耦));
+> **没有 flow 的块按 `attach` 的目标引脚**分群 —— **贴同一个脚的件就是一个功能单元**,
+> 锚件自成一群(群名 = 块短名)、其余按 `ROLE_PIN` 命名(2026-08-20 修复:此前归属只
+> 取 `role.pin` 的 role 那一半,`U.3V3`/`U.EN`/`U.IO0` 一律归约成 `U`,于是
+> `esp32s3_wroom1_module` 6 件糊成一个 507×712 的区,**独占一整页也放不进 A4**,
+> `zone-arrange` 四条边逐条报「被图签挡」;现在拆成
+> `esp32s3_wroom1_module`(U)/ `U_3V3`(C_VDD+C_BULK)/ `U_EN`(R_EN+C_EN)/
+> `U_IO0`(R_IO0)四群,离线判据实测同页排得下)。**件太少或 attach 全指同一个脚就不拆**
+> (小块本来就是一个功能单元,硬拆只是多两个空框)。子群 = `sch group-move --group <id>`
+> 的抓手,也是 `zone-plan` 的分区粒度 —— 组名末段就是区名。
 > **legacy 形态**(`roles` 绝对偏移)
 > 仍受支持但已废弃:块作者写模板时不知道实例会落在页面哪里、图纸多大,手算必踩
 > 出界/顶标题带。原点自动避开已有器件真实 bbox 且**不出图纸**(显式 `--at` 优先);
@@ -72,6 +83,67 @@ Use `easyeda-agent` typed actions. Do not write raw EasyEDA JavaScript unless a 
 > 或异件引脚重合都会在 autoconnect 前失败。命令只按本次返回的 ID 补偿删除并再次读回;
 > 能证明删净报 `failed-rolled-back`,否则报 `failed-partial` + `PARTIAL STATE`,绝不把独立 autosave
 > 的多次变异伪装成事务。优先用 `block-apply` 而不是逐件手放。
+>
+> 🩹 **place 超时收编(假失败定律在 place 上的缺口,2026-08-19 修)**:`place` 报
+> `connector did not respond` **不等于没落地** —— 连接器侧 `create` 通常已经建好了件,丢的
+> 只是回执。以前 Go 侧拿不到 `primitiveId`,回滚无从下手,那个件就永远留在页上(真机一轮
+> 留下 `U2`/`U2`/`U3` 三件,**每次重试再生一个**)。现在 block-apply 在放置前快照本页全部
+> 器件 id;place 超时(或成功但没回 id)时做一次 **settle 回读**,把**同时满足「不在快照里」
+> 「componentType == part」「落在下发坐标 ±5」**的那个件认回来(`rollback.adoptedPrimitiveIds`),
+> 它随后走和正常件一样的逐个删+回读证实。**绝不凭空造 id**;页面上原有的同型同坐标器件
+> 天生在快照里,永远不会被收编或误删;快照读不到就**整个关掉收编**并如实报 PARTIAL STATE。
+> 命中 ≥2 个则不收编但**逐一点名**,并打印可直接跑的 `sch prim-delete --ids …`。
+>
+> 🩹 **命中 0 个要先证明「回读是新鲜的」才算数(2026-08-20 修)**:`adopt ✓ …确实没有落地`
+> 这句话曾在**它唯一该起作用的场景里系统性说反话** —— 真机上 place C8 超时,收编回读报
+> 「(440,535) 附近没有新器件」,而 C8 就在 (440,535)。根因不是判据错,是**回读本身不成立**:
+> 让 place 超时的连接器 wedge 同时让这一读没反映当前页面(旧快照 / create 还堵在队列里),
+> 两者都只是**读得太早**。现在多一道门⓪:**本命令此前已成功放置并拿到 id 的器件必须一个不缺
+> 地出现在这次回读里**,否则这一读什么都不算,判定降级为 `adopt ?`(uncertain)并进
+> `PARTIAL STATE`,同时打印可执行处方(`sch save` → 完全退出重启 EasyEDA → `sch list` 查坐标 →
+> 有就 `prim-delete`)。**读它的口径**:
+>
+> | 报文 | 含义 | 你要做什么 |
+> |---|---|---|
+> | `adopt ✓ …按 id … 收编` | 件已落地,句柄认回来了 | 无 —— 回滚/后续照常 |
+> | `adopt ✓ …确实没有落地(强证据:…)` | **顺序可证**:那里确实没有新器件 | 无 —— 可以直接重跑 |
+> | `adopt ✓ …确实没有落地(**弱证据**:…)` | 只有探针启发式支撑(连接器旧) | 可以重跑,但先看一眼报文里的升级提示 |
+> | `adopt ? …无法判断` | **回读不可信**,落没落地都有可能 | 照处方去页面上查一眼,别盲重跑(会造重复件) |
+> | `adopt ✗ …` | 没快照 / 回读失败 | 同上 |
+>
+> 🔒 **两级判定:算术优先,探针兜底(2026-08-20,连接器 FIFO 上线后)**。上面那道门⓪
+> 之所以只能是启发式,根因是**写和随后的读之间原本没有 happens-before 关系**:连接器把
+> 每条消息交给各自的回调,`await` 不跨回调排队,两条动作可以同时在飞(用真 transport
+> 跑的探针实测:写还没 settle,读的 handler 已经开跑,响应也先发了出去)。连接器现在把
+> 动作串成**一条 FIFO 链**,并在每条响应上带 `seq` / `seqAbandoned` / `unordered`,于是:
+>
+> - **算术档(强证据)** —— 比较「失败那次 place 之前观测到的 `seqAbandoned`」与
+>   「收编回读响应上的 `seqAbandoned`」。**没变** = 这中间没有动作被放弃 = FIFO 保证这次
+>   回读的 handler 在那次 place 的 handler settle 之后才开跑 → 「那里没有新器件」是真的。
+>   **变了** = 有 handler 被丢下且**仍在跑、效果可能稍后才落地** → 一律 uncertain。
+>   报文打 `证据档:可证(连接器 FIFO 顺序序号)`。
+> - **探针档(弱证据)** —— 连接器比 CLI 旧、响应不带这些字段时,退回原来的探针启发式,
+>   报文打 `证据档:弱(探针启发式)` 并给出升级连接器的步骤。**绝不会因为缺字段就默认
+>   「新鲜」**。
+> - **`unordered: true` 的响应永远不算证据** —— 那是连接器旁路通道(wedge 期仍可观测的
+>   纯诊断读)的响应,它的 seq 与 FIFO 无关。
+>
+> 边界移动了:**第一件(anchor)就超时、没有任何探针**的场景,探针档结构上无解(那一刻
+> 「没落地」与「读得太早」在观测上完全等价),但**算术档能出结论** —— 这正是它最大的收益。
+>
+> ⚠️ **`seq` 证明的是 handler 边界,不是「文档已提交」**。`eda.*` 可能在 handler 返回之后
+> 才把改动写进文档模型,那一层没有任何观测点。所以「确实没有落地」的准确含义始终是
+> **「在可证的最新一刻,那里没有新器件」**——报文原文就是这么写的,别在转述时把它说满。
+>
+> ⚠️ **残件删不掉 ≠ 未提交 ≠ 回读 stale**:同一份失败报文里**有回执的**器件也会
+> `survived`——那是**连接器 action 队列 wedge**(某个重调用的 promise 永不 resolve)。
+> 连接器 FIFO 上线后这件事有两个变化:(1) wedge **会自愈** —— 队首超过它自己的
+> `timeoutMs` 就被放弃,队列继续流动(而不是像以前那样静默吞掉接下来几分钟的
+> `place`/`delete`/`document.open`);(2) 被放弃过会体现在后续响应的 `seqAbandoned` 上,
+> 所以那段时间的写**判定为 uncertain 而不是失败**。收到 `ACTION_ABANDONED` 错误码 =
+> 这次写**没有已知的完成时刻**,盲重发就是在造重复件。处方不变:`sch save` → **完全退出
+> 并重启 EasyEDA** → 再删。另见 `QUEUE_OVERFLOW`(队列积压到上限):那个动作**根本没有
+> 执行**,等积压消化后重发是安全的。
 >
 > 🔢 **多页工程的位号真相(#144):** EasyEDA **页数据懒加载**——`getAll(_, allPages)` 只返回
 > **本会话打开过**的页,没访问过的页对我们隐形,却照样参与平台自己的位号避让。曾因此规划 `C1`
@@ -330,10 +402,31 @@ easyeda sch sheet tidy --apply                  # Sheet 层:全部区当刚体�
 
 **统一挪动内核(ADR-0004)**:上面所有挪动/重排命令(zone move / zone tidy /
 zone relayout,以及 `sch group-move`、`zone-arrange --apply`、`destagger --apply`)
-共用同一个安全 move 内核 —— 快照 → 整树删证回读 → 移动 → 快照重连 →
-netlist+bridge 增量对账,**任一步失败自动恢复到快照重连**,输出结构化
-`moveReport`(moved/recovered/stillBroken/partial),**判据是电气对账不是坐标**。
-不再存在「半途失败需手工重连」的形态;仅 `stillBroken` 非空才需要手修。
+共用同一个安全 move 内核 —— 快照 → 整树删证回读 → 移动 → **合并早检**(删桩线
+是共线合并的触发时刻,重连前就查一次全页网表,被合并吞掉的第三方 pin 当场修回)
+→ 快照重连 → netlist+bridge 增量对账,**任一步失败自动恢复到快照重连**,输出
+结构化 `moveReport`(moved/recovered/stillBroken/partial),**判据是电气对账不是
+坐标**。恢复段辖区是**全页**而非移动集合:凡快照里有网名、现在断连或网名不符的
+pin(包括共线合并吞掉的**第三方**器件的脚,esp32Mini P2 的 P0 缺陷),一律按
+快照网名重连;灌错网的(如地脚被灌进 +3V3)走 replace(带回读验证的 disconnect
+后重连)。不再存在「半途失败需手工重连」的形态;仅 `stillBroken` 非空才需要
+手修 —— 条目格式 `REF→期望网`,可直接喂 `sch connect --pin REF --net 期望网`;
+标注 `sch disconnect` 的(快照浮空却被灌进网)先手工拆。
+
+**内核重连默认 preserve 桩线(2026-08-20)**:第 4 步对「调用方没给显式端子」的
+pin,**先按移动前实测的桩方向/长度原样重建**(刚体平移的语义是几何不变),复现
+不了的才退回 autoconnect 评分,而且带**桩长硬上限**(封住 `laneStepFor` 的标准
+档位 —— netport 一档 ~89、三档 ~285)。此前一律走自由评分,于是 `sch group-move`
+一次「挪一下让开」就把短桩换成长桩、把区框撑胖(真机 315×389 → 523×406,+208 ≈
+两档),用户/agent 的直觉操作反而破坏收敛成果。
+
+**恢复段也按已知几何重建(2026-08-20)**:桩线快照现在是**全页**的(不只移动集合),
+恢复段/合并早检先用「计划端子 ∪ 移动前实测桩几何」把**单纯断连**的 pin 原样连回来,
+复现不了的、以及被灌进别的网需要 replace 的才走自由评分。此前恢复段一律自由评分 ——
+连接救回来了,几何却换了一套,一次火警就把 phase A 的收敛撤销大半,连**邻区**
+(第三方 pin)一起变形。**恢复段仍有意不夹桩长上限**:那是火警现场,把连接接回来
+优先于把框收窄。凡是最终仍走了自由落点的 pin,内核逐条点名进 `moveReport.FreeConnected`,
+由 `zone-arrange --apply` 的断言③ 报出来 —— **偏差可以有,但必须可见**。
 
 **`--zone`/`--group` 统一命名空间(ADR-0004 Decision 3)**:所有吃
 `--zone`/`--group` 的命令(zone move/tidy/relayout、group-move、group tidy、
@@ -362,8 +455,45 @@ netlist+bridge 增量对账,**任一步失败自动恢复到快照重连**,输�
 - **方位词**支持跨两列:`left-center` / `center-right` / `any`(超高主控锚+侧排
   外围的宽区,1/3 网格词罩不住)。方位词现在只影响 `sch autolayout` 的**落位目标格**
   —— 分区框的几何一律由活体模块 bbox 反推,与方位词无关。
-- **说明文字必须 `sch note --zone <区名>` 登记**成区成员——分区框才会包住它、
-  zone/sheet move 才带它走;裸 `sch note` 放的文字在区移动后原地掉队。
+- **说明文字必须 `sch note --zone <区名>` 登记**成区成员——自动落点才会瞄准该区
+  说明带、zone/sheet move 才带它走;裸 `sch note` 放的文字在区移动后原地掉队。
+  区名全名/末段短名/组 id/唯一前缀均可;区不在本页分区计划时 stderr 有 warning、
+  输出带 `zoneMatched=false`(绝不静默整页兜底)。注意:登记的说明**不反哺分区框
+  几何**(框由器件内容反推;说明住在框内说明带)——不会出现"框每重画一次向下
+  长一截"的自增长。
+  - **落点是"贴着框底"的,而且是一句算式**:`note.y = 分区框.minY + 16`。
+    文字图元的锚点 `(x,y)` 是**块的左下角**、块向上生长(2026-08-20
+    `getPrimitivesBBox` 实测 5/5 例 `bbox.minY == y`),所以贴底与行数、字号
+    **无关** —— 4 行说明和 2 行说明给出同一个 y 偏移,同页所有说明底边齐平。
+    (旧行为按"锚点=左上角"算 `y = 带底 + 块高 + 16`,块高整个变成了离框底的
+    距离:2 行 42、3 行 55、4 行 68,行数越多飘得越高、下面白空一大截。)
+    y **不吸格**(吸格会把固定内缩打散成 ±2.5 的抖动);x 仍吸 5 格。
+  - **说明位置的预留是二维的,而且框会为说明扩边**:
+    - **高**:带高按已登记说明的实际渲染高度预留(旧版写死单行 26,2~3 行说明
+      结构上塞不进带、被踢到框外)。带高 = 底边内缩 16 + 块高,贴底放进去正好
+      把带填满 —— 所以"贴底"永远不会顶穿带顶探进器件区。
+    - **宽**:说明先按**框宽**折行(按它自己的 `--font-size` 量,与尺寸回读同一把
+      尺),折完还比框宽就把框**横向扩边**。**窄框(如区里只有一个 2 脚接线端子,
+      框宽 68)一律扩到最小可读宽度 120** —— 而不是"既装不进又永远报警"。
+    - **带内占用**:邻区桩线/marker 伸进说明带时,框底**下探**到占用之下,说明
+      **仍然贴着(新的)框底**——位置约束不因避让而放弃,代价由框承担(旧行为
+      是把说明踢到"区外走廊",落在框外下方)。
+    - 扩边/下探不越过纸边 / 图签安全带 / **邻区的基础框**(留一个 gutter),所以
+      为说明扩边不会自己撑出 `partitionOverlap` 让 `zone-draw` 拒画。**顶到底线
+      仍装不下时如实失败**(stderr 说清是哪一维不够 + 可执行的下一步),
+      绝不为了贴底压到器件/marker 上。
+  尺寸只从内容+字号推导(**不读落点 bbox**),幂等;规划器与 `sch note` 落点共用
+  同一个预留函数,所以"planner 算的框"必然包住"note 落的点"。
+  **放完说明要重跑 `sch zone-draw --mode partition`** —— 框可能已为说明扩边/下探,
+  画布上的框是旧的;`sch note` 扩了边会在 stderr 明确提示。
+  配套判据 **`note-outside-zone`**(`sch check`,WARN,`--strict` 阻塞):登记说明
+  的 bbox 不在自己分区框内即报。文案分两档、**都可执行**:带装得下 → 直接给算好的
+  贴底 `--x/--y` 坐标(**与自动落点求解器逐字相同**,而且保证落在**带内**;照抄
+  即可,不会再落回原处);可扩边界内确实装不下 → 明说"别原样重跑",改为缩短文字/
+  减小 `--font-size`,或 `sch group-move` 给这个区腾地方。
+  > 处方曾经和带的定义分家过:带 `(36,12)..(204,70)`,处方却给 `--y 80`(80 >
+  > 带顶 70),自己就把说明放到了带外。现在带的定义(`zoneNoteBand`)、落点求解、
+  > note-outside-zone 的处方**是同一个函数链**,配对测试钉住。
 - pin 号 ≠ 坐标序:`disconnect --pin X:2` 按**引脚号**解析(LED1 的 pin1 可能在
   右侧)。删桩前先 `autoconnect --dry-run` 核对该 pin 当前网名,防拆错脚。
 - **tidy 流水线跑完必须 `sch export-image` 做一次视觉复查**——机械门(gate/
@@ -404,7 +534,7 @@ easyeda sch autolayout --spec p1-layout.json --dry-run
 
 # pin one page, move parts, read back complete geometry, then save
 # safety gate: zero wires/buses/net markers + proven bbox/pins
-easyeda sch autolayout --spec p1-layout.json --doc P1_MCU_USB_STORAGE --apply
+easyeda sch autolayout --spec p1-layout.json --doc MCU_USB_STORAGE --apply
 
 # structured report
 easyeda sch autolayout --spec p1-layout.json --json
@@ -459,7 +589,7 @@ Spec JSON (`--spec`):
 
 ```json
 {
-  "page": "P1_MCU_USB_STORAGE", "sheet": "A4",
+  "page": "MCU_USB_STORAGE", "sheet": "A4",
   "modules": [
     {"name":"USB_HUB","zone":"left-top","core":"U10","parts":["J2","U10","X1","C30","R15"]},
     {"name":"MCU","zone":"center","core":"U1","parts":["U1","C18","C19","R6"]},
@@ -496,23 +626,238 @@ easyeda sch zone-arrange --project <p> --doc <page> --json   # 机器
 ```
 
 两段流水线:**phase A 区内收敛**(跟随规则 R1-R5:卫星无源件竖放平行跟随锚件、
-GND 下/电源上由 rail 推导不查固定表、netport 恒水平、同件端子互不重叠是硬不变式)
-→ **phase B 区间求解**(边归属 = 声明 > 质心回退 + 回退链;货架扫描只沿边轴,
-5 格律)→ 复用 zone-plan 的 validatePartitions(同一把尺)→ 三态 verdict:
+**端子朝向跟随实测引脚的朝外方向**、netport 恒水平、同件两旗**不得共线** + 同件
+端子互不重叠是硬不变式)
+→ **phase B 区间求解**(边归属 = 声明 > 质心回退 + 回退链;**每条边可开多层
+货架**,回退链整轮走完还放不下才整体往里开第二层/第三层;放不下会**回溯**换上
+一个区的候选,不是当场判死;5 格律、无随机)→ 复用 zone-plan 的
+validatePartitions(同一把尺)→ 三态 verdict:
 
-- `pass`:每区给出目标框 + 区内成员落位;
-- `blocked`:报出是谁、回退链每条边距离 —— 出路是进一步收敛或 `sch page-new`
-  拆页。**A4-only:永不建议换纸。**
+- `pass`:每区给出目标框 + 区内成员落位;人读输出里 `(第2层货架)` 表示这个区
+  没贴到边、退到了本边第二列/第二行(正常,不是告警)。
+- `blocked`:报出**是谁**排不下、**每条边各卡在谁身上**(`S(230)被U挡→
+  W(266)被图签挡→…`)—— 出路是进一步收敛或 `sch page-new` 拆页。
+  **A4-only:永不建议换纸。**
+- `blocked` 且 JSON 里 `arrange.exhausted=true`:搜索预算跑满,**没有证明无解**,
+  只是这一轮没搜到 —— 出路一样,但别把它当成「几何上不可能」。
+
+> **phase A 不是优化,是 phase B 的前置条件。**排不下的往往是**形状**不是面积:
+> 真机 P3_USB_DL 四区收敛后总面积只占可用面积 46% 却曾报 blocked,根因是老求解器
+> 「一条边只能开一列 + 贪心不回头」(2026-08-19 已修)。所以看到 blocked 先回头看
+> phase A 那一栏的 `框 A×B → C×D`:收敛没收下来,后面怎么排都白搭。
+
+> **端子挂侧按「边界语义」判,不是「离本体中心哪个分量大」(2026-08-20 根因修复)。**
+> phase A 判一支标签挂在器件的哪条边,首版用的是 marker 中心相对**本体中心**的
+> 主轴(`|dx| ≥ |dy|` 才算左右)。那条判据隐含假设「本体近似方形」,在**高瘦符号**
+> 上系统性翻车:ESP32-S3-WROOM-1 本体 71×421、41 脚**全在左右两条长边**,而标签
+> 横向只探出百来个单位 —— 贴在上下两端行的标签 `|dy|` 反而更大,被判成 up/down,
+> 于是进了「垂直梯次」(一支竖起来的 netport 就占 63 高,两支摞下来 161.5),
+> 框当场从 `449×737` 变成 `244×863`,越过可用高 765,phase B 四条边全报「纸面放不下」。
+>
+> 现在的口径是 **marker 中心从本体 bbox 的哪条边探出去最多**
+> (`outLeft = body.MinX − mcx` … 取四者 argmax;中心落在本体之内时退化成
+> 「离哪条边最近」,同一个式子无特例)。它天然把本体长宽比算进去了。同一组几何:
+> 首版 `230×897`(排不下)→ 边界语义 `325×556.5`(有落点,phase B 六区全落位)。
+> **落地/回退侧的方向来自 `tidyStubDirection`(pin → 标记锚的实测位移),两把尺
+> 必须给同一个答案** —— `TestZfSideOf_AgreesWithMeasuredStubDirection` 钉住。
+
+> **计划端子逐 pin 折 + 引脚坐标进计划(2026-08-20 根因修复)。**
+> 断言③(落地复判)曾在 `MCU_IO` / `USB_DEBUG` **每一页恒红**,报文点名的
+> 「计划未覆盖」清单**全部是 GND 侧引脚**(`C4:2 C5:2 C6:2 LED1:2 SW1:2 SW2:2
+> U2:1 U2:40 U2:41` / `C7:2 C8:2 D1:3 J1:8…U3:1`),连跑三轮 apply 区框重叠只从
+> 29 收到 19、到不了 0。两条根因都在「规划器手里没有引脚坐标」:
+>
+> 1. **覆盖面**:端子首版逐 **marker** 折,而 L1 组的「专属 marker」规则不把
+>    **共树** marker 算给本组 —— 共树 pin 在计划里根本不存在,而 `--apply` 是
+>    逐 **pin** 重建的,漏掉的那几只落地走 autoconnect 自由落点,区框凭空胖一档。
+> 2. **朝向**:两脚无源件的引脚位置靠**假定**(本体上下缘中线)+ R3(GND 派到
+>    下端)。真机 `C4`/`C6` 是 rot 90 的电容,`+3V3` 脚在本体**下方**、`GND` 脚在
+>    **上方**,正好反过来 —— 计划把 GND 端子映到物理上在上面的脚却给 `direction=down`,
+>    把 +3V3 映到下面的脚却给 `direction=up`,两根桩线双双钻进本体、共线合并,
+>    **GND 整张网并进 +3V3**(日志逐条 `[replaced net "+3V3"]`)。对账当场红 →
+>    恢复段把全页地脚自由重连 → 报文那句「计划未覆盖」其实是这条路径的**产物**。
+>
+> 现在:端子一律**逐 pin** 从活体折出(与 `--apply` 的重建规格 `groupRebuildConnSpecs`
+> 同源,计划集合 ⊇ 落地集合),并把引脚坐标折成本体局部坐标带进计划;桩线从**引脚
+> 真实所在的地方**出,方向 = 引脚的朝外方向(与挂侧判定同一个函数)。
+> 「电源上 / GND 下」回到它本来的身份 —— **推论**(竖放 + 旗顺引脚朝外 + rail 归位),
+> 只在**要转竖的件**上仍然可执行(执行侧从 ±90° 两个候选里挑兑现它的那个);
+> 已经竖着、不转的件按事实出桩。**硬不变式是「同件两旗异向」**,规划器单独校验
+> (`zfCheckPassiveOpposed`,两支 netport 同朝右是 R4 的正常形态,不在此列)。
+
+> **「同件两旗异向」判的是共线,不是同向(2026-08-20 回归修复)。**
+> 首版拿「方向相等」当违规,`sch zone-arrange --apply` 因此在页 `POWER` 当场拒绝
+> 执行:`J2`(`conn.screw_terminal_2p` / KF301-5.0-2P)两只脚**都在本体左缘外侧**
+> (同为 x=50,y 分别 685 / 675),物理上只能都朝 `left` 出桩 —— 「异向」在这个符号上
+> 做不到。而两根朝左的桩线一根躺在 y=685、一根躺在 y=675,**平行不共线,永远不会
+> 合并**(该端子此前真机 `sch bridge-check` 0 real short、`sch nets` 里 `+5V` 与 `GND`
+> 各自独立)。
+>
+> 真正的短路条件是**两根桩线共线** —— 共线 → 相接 → 平台把导线自动合并成一根 →
+> 两张网并成一张。桩只能从 pin 沿 direction 直出、垂直于桩的那个坐标原样留在 pin 上,
+> 所以判据是「同向 **且** 同轴」:
+>
+> | 出桩方向 | 桩线所在的轴 | 共线条件 |
+> |---|---|---|
+> | `left` / `right` | `y = PinY` | 两脚 **y** 相同 |
+> | `up` / `down` | `x = PinX` | 两脚 **x** 相同 |
+>
+> 同轴容差直接用 `schMarkerOverlapEps=1`(仓库既有的几何噪声地板),**不用 5 网格**:
+> 吸附只作用在沿桩方向那个坐标上,桩线所在的轴就是引脚坐标本身。引脚最小节距 10,
+> 1 个单位既吃得下浮点噪声又留了 10 倍余量。
+>
+> 顺带修掉它背后的第二层:两脚同侧时两支标签必然压在一起(节距 10 < 网名带高 12),
+> 会被同件端子重叠那条硬不变式判死。**同侧让位**因此从多脚件推广到两脚件 ——
+> 两条路径共用同一个函数(`zfPlaceMeasuredTerms`),参与规则一字未改。
+>
+> **给 agent 的判读法**:看到 `两支旗同向且桩线共线` 别急着换符号,先照报文用
+> `sch list --include-pins` 核对两只脚的实测坐标 —— 只有真同轴(符号引脚重合、
+> 或同一只脚被折成了两支端子)才需要动;两脚同边但坐标错开是**合法形态**。
+>
+> 同侧多支标签的**让位**也从「无条件梯次」改成「按需」:撞不撞用的是 `sch check`
+> 的 marker-overlap 那把尺(`schMarkerOverlapEps=1`,引脚节距 10 而标签高 11 时
+> 必然擦过的那 1 个单位不算撞)。**参与规则沿用首版**:左右侧只有旗让位、且只跟
+> 同侧的旗比(port 恒水平、保持短桩);上下侧所有 kind 都参与。
+>
+> 真机验收(ceshi,两页各一轮 apply):对账**首轮即绿**(无恢复段)、
+> `FreeConnected` 为空(报文里那句「计划未覆盖」不再出现)、
+> **断言③ 绿** —— 逐区实测框比规划框各小 10(= 落地余量 2×5),区框零重叠;
+> 再跑一轮 9/10 件 no-op(收敛)。
+
+> **域感知选形:phase A 选形状时要看空地长什么样(2026-08-20 真机取证)。**
+> 收敛不是「把区做方」,是「把区做成这一页塞得进去的样子」。首版两条支路都域盲:
+> 「无主导锚件」那条**连候选都没有**(全员单列是硬编码的),锚件那条只会
+> `argmin max(w,h)`(求方)。真机 `MCU_IO`(可用域 `1110×765`,图签把它切成
+> **左通道 396×765** + **上通道 1110×555**)因此排不下:
+>
+> - `wroom-passives` 5 个 0402/0805 小无源件被排成 `152×696` 的柱子 —— 高 696 > 555,
+>   **只**进得了左通道;
+> - `wroom-core` 单件 WROOM 模组 `325×556.5` —— 高 556.5 > 555,**也**只进得了左通道;
+> - 两个区抢同一条 396 宽的道:并排 `325+152+12 > 396`、上下叠 `556+696+12 > 765`
+>   → phase B `blocked`。而那 5 个小件排成 3+2 的货架只有 `261×352`,上通道轻松吃下。
+>
+> **注意两个区各自的 `fitRank` 都是 2**(都有落点)—— 「不得变差」门的掉档判据
+> 结构上看不见这种病:病在**落点自由度**,不在「有没有落点」。所以选形用两把钥匙
+> (都是同一份通道算术的投影,与 phase B 同源):
+>
+> 1. `fitRank` 三档可排布性;
+> 2. `stripFits` = **本页有几条通道装得下这个框**。
+>
+> 规则:候选里存在装得进通道的形状时**绝不选装不进的**;两把钥匙平局时回到
+> **原有紧凑性偏好**(首版会选中的那个形态排最前)—— 所以「本来就排得下、也已经
+> 很紧凑」的区一个单位都不会动,不存在「永远选最扁」的退化。`zones[].mode` 尾巴
+> 必带这句决策:`域感知选形(5 候选):改选本形态 — 档 2→2、通道 1→2(原偏好
+> 「无主导锚件 → 全员单列(位号序)」152×696)`;一个候选都装不进通道时它会直说
+> `没有一个装得进任何通道 …… phase B 必然 blocked:拆区或 sch page-new 拆页` ——
+> **`blocked` 也是看过域之后的结论**,照着这句去拆,别去调纸张/带高。
+
+> **「不得变差」门:收敛使本区更难排时保留原形(2026-08-20 真机两轮取证)。**
+> phase A 对**大符号单件组 / 标签真的挂在上下两侧的宽体连接器**是负优化 ——
+> 真机 `MCU_IO` 的 `esp32s3_wroom1_module` 第一轮 `433×541 → 244×767`(宽收 189、
+> **高涨 226**,可用高只有 765)。现在 phase A 逐区加一道门:
+>
+> - 判据是**可排布性**,不是面积/周长 —— 上例宽度和面积都变小了,照样是负优化;
+> - 可排布性是**三档阶梯**(`fitRank`),不是一个布尔:
+>   `2` 本页有落点(图签也让开了)/ `1` 装得进可用域但被图签挡住(重排、拆页还有救)/
+>   `0` 连可用域都装不下(结构上没救)。三档与 phase B 的逐边归因同源:
+>   `2` ⟺ 单独放在空页上一定放得下,`0` ⟹ 四条边全报「纸面放不下」,
+>   `1` ⟹ 报「被图签挡」。
+> - **收敛后掉档 → 保留原形**(不重排、不重生桩,刚体平移到落位框);同档或升档
+>   一律放行;两维都没变大时结构上不会掉档。
+>   > 首版判据只有 `fits` 一个布尔,于是第二轮真机
+>   > `449×737`(1 档:高 737 ≤ 765,只是 449 > 图签左侧通道 396)
+>   > `→ 244×863`(0 档:高 863 > 可用高 765)**从门里漏了出去** ——
+>   > 它走的是「原形本就排不下 → 收敛是唯一出路」那条放行分支,`retained=false`,
+>   > phase B 拿着一个更没救的框去撞墙。别再把这两个「排不下」当成一回事。
+> - **逐区独立**:一个区回退不影响其它区照常收敛;
+> - **绝不静默**:人读输出该区行首是 `↩`,`zones[].mode` 尾巴与 JSON 的
+>   `zones[].retained` / `zones[].retainWhy` 都带这句 ——
+>   `收敛回退:高 737→863 后从「装得进可用域但被图签挡住」掉到「连可用域都装不下」(可用 1110×765;图签上方高 555、左侧宽 396)—— 保留原形 449×737`。
+>
+> 看到 `↩` 时**不要**去调 A4 尺寸/带高绕开它(那会毁掉「框 = L1 全图元并集 + 带」
+> 这条不变式);正确的下一步是把这一区拆小(`sch zones set` 重新分组)或
+> `sch page-new` 拆页。**两个形状都是 0 档时门不拦**(拦了只是把小框换成大框),
+> 这时 phase B 照常 blocked,归因是「纸面放不下」—— 那是真的要拆。
 
 区框口径 = 成员 L1 虚拟组**全图元并集**(标签必在框内)。导线读不到会直接报错
 (端子归属靠导线,距离启发式必错)。
 
+> **外框只有一个函数(2026-08-20 用户裁定)**:`frame = f(成员 L1 虚拟组全图元并集,
+> 区名带, 说明带)`。`zone-plan` 的框、`zone-arrange` phase A 的现状框与收敛后框
+> 走的是**同一个函数本体**。带高由**已登记说明的内容 + 字号**推导(不是常量、更
+> 不读 note 的落点坐标)—— 所以 **phase A 收紧时 title/note 就已经在账里**,不再是
+> 「按常量带收紧 → 画框 → 再放 note 装不下 → 说明探出框外」。改任一侧,
+> `TestRuler_ZoneFrameSingleFunction` 会红。
+
+> **分区归属也只有一个答案(2026-08-20 定案):一个虚拟组 / zone 认领 = 一个分区。**
+> `zone-arrange` 一直是这么算的(phase B 每个区一个落位框,断言③ 逐区量实测框、
+> 逐对判零重叠);`zone-plan` 此前却先把整页按模块间的自然空隙切成**列带/行带**,
+> 再把落在同一格的区**并成一个分区** —— 两把尺。真机 ceshi / MCU_IO:
+> `zone-arrange --apply` 断言③ 全绿(区框零重叠),紧接着 `zone-plan` 却把
+> `led_indicator_gpio` 与 `tactile_boot_reset`(左列上下叠)并成一框,并集宽到
+> x=274,与 229 起的 `wroom-passives` 撞出 45×362 → `partitionOverlap=1` →
+> **zone-draw 拒绝画框**,而画分区框是铁律 15,交付被自己卡死。
+> 网格带是首版遗留(那时框会被 clamp 到格子里),现已删除。两条推论:
+>
+> - **`zone-arrange` 断言③ 绿的页面,`zone-draw` 一定画得出来** —— 两边算的是同一批框。
+> - **`partitionOverlap` 非 0 现在只有一个含义**:两个区的 L1 体积**真的**互相压。
+>   出路是 `sch zone-arrange --apply` 重排或 `sch group-move` 挪件,**不是**调
+>   `--gutter` / 也没有「合并成一个大框」这条退路了(合并只是把重叠藏起来)。
+>
+> 配对由 `TestRuler_ZonePartitionGroupingMatchesArrange` + 真机 fixture 的
+> `cmd_sch_zone_partition_test.go` 钉住(含首版归组的常驻变异对照)。
+
+> **桩线伸展只有一把尺(2026-08-20 定案)。** 之前同一件事有三套算法:phase A
+> 自己拼端子盒、`--apply` 未被计划覆盖的 pin 走 autoconnect 自由评分、`group-move`
+> 的重连也走自由评分。后果是**规划 pass → 落地 overlap 永不收敛**(真机连跑 4 轮,
+> 每轮 dry-run 都 `verdict: pass`、validation 四项全 0,落地实测重叠 2/1/2 处;
+> 规划 315×351 → 落地 353×382,而 gutter 只有 12)。现在三处共用落地那条真实链
+> `connect_pin(direction, offset) → endpointFor(5 网格吸附) → predictedMarkerBBox
+> (本体 ∪ 网名带)`,规划框里还含一格落地余量(桩端点的 5 网格吸附)。
+>
+> **但「规划框 = 落地框的上界」只在模型内成立,别当成真机保证**(2026-08-20 订正):
+> 它成立的前提是「同一份 pin 坐标 + 同一份桩长」。真机上三处会打破它 ——
+> ① 规划把无源件的 pin 假定在本体 bbox 上下缘中线(真符号未必);
+> ② `markerBBoxProfile` 是 2026-06 的实测标定,不是平台契约;
+> ③ 计划没覆盖到的 pin 会走 autoconnect **自由方向**落点。
+> 真机 MCU_IO 六区实测偏差 `+141 / +126 / +82 / +56 / +26 / +10`,五个区超 gutter。
+> 所以断言③ **不是「上界成立」的断言,而是「上界不成立时如实报出来」的机制**;
+> 复判只判「落地比规划**胖**」这一边。三条推论:
+>
+> - **不要靠「多跑几遍」收敛** —— 已实测 4 轮不收敛(第 3 轮落位整体重排,J_USB
+>   从 E 边跳到 N 边),那是追尾不是收敛。看 `断言③` 的复判表定位。
+> - **`sch group-move` 是刚体平移,不再撑胖区框**:重连按移动前实测的桩方向/长度
+>   原样重建(此前一次 `--dx 40` 把 U 组从 315×389 撑到 523×406,重叠从 1 处变 3 处)。
+> - **`sch autoconnect` 仍是自由评分**(它的职责就是挑落点),所以在已收敛的区里
+>   对单脚补连可能拉出更长的桩 —— 补完看一眼 `sch zone-plan` 的 `partitionOverlap`。
+
 `--apply` 落地执行(断言① 删除集=重建集 → 页级深度清扫 → 逐件落位重连 →
 断言② 曾连接 pin 仍连接 → 对账修复循环 → **假失败清创**(自动删同位重复/
 同树冗余标记,复用 check 的 suggestDeleteIds 判据)→ bridge-check 红才整体
-回滚 → save)。落地执行统一走 ADR-0004 move 内核(失败自动恢复到快照重连,
-结构化 `moveReport`,判据是电气对账)。同侧多旗按**垂直梯次**桩长错开(规划的
-offset 直达 connect_pin;pin 再密也不竖叠)。
+回滚 → save → **断言③ 落地复判**)。落地执行统一走 ADR-0004 move 内核(失败自动
+恢复到快照重连,结构化 `moveReport`,判据是电气对账)。同侧多旗按**垂直梯次**
+桩长错开(规划的 offset 直达 connect_pin;pin 再密也不竖叠);计划没覆盖到的 pin
+走内核的 **preserve 桩线策略**(原样复现移动前的桩),兜底 autoconnect 带**桩长
+硬上限** = 计划里最长的桩。
+
+**断言①的几何形式(retain 刚体不变式,2026-08-20)**:phase A 行首打 `↩ 原形保留`
+的区,`--apply` 在**执行前**逐 pin 比对执行指令与移动前快照的 `(方向, 桩长, 类型)`
+—— 不一致就**拒绝整页、画布零改动**。「不动的东西真的没动」不依赖任何预测模型,
+是本命令最强的可验证不变式;此前它只是一句输出文案:真机 U2 标着「不重排、不重生桩」,
+落地后 L1 组却从 391×421 变成 391×562(宽度分毫不差、高度凭空 +141)。报错点名到
+pin 与偏差量(`pin4 方向 right→up、桩长 84→20`),那是计划/映射缺陷不是画布问题。
+
+**断言③(落地复判)**:save 之后重读一次真几何,按同一个外框函数算每区**实测框**,
+与规划框逐区比。输出形如 `复判 U:实测框 353×382 / 规划框 315×351`。四类红:
+① 偏差 > `--gutter`;② 实测区框互相重叠;③ **成员探出图纸可用区**(与
+`sch clusters` 的 out-of-sheet 同一个常量,不必再等下一条命令来发现);
+④ retain 区落地几何与「原形平移」不符(行尾打 `↩✗ 原形被改动`)。
+另有一条独立条目:**走了自由落点的 pin**(计划没覆盖、内核也复现不出原桩,只能
+让 autoconnect 挑方向和桩长)—— 它是「规划 pass → 落地胖一档」的唯一结构性来源,
+逐条点名。任一条红 → **如实报并以非零退出**(电气与位姿仍已落地保存,不回滚)。
+断言①②看电气、内核对账看网表、layout-lint 看器件两两重叠 —— 没有一条看得见
+「区框胖了撞邻区」,断言③补的就是这条。**成员读不到时也判红**(unknown 不算过,
+不许让一次读故障伪装成完美收敛)。
 **真机注意**:连接器在持续变更负载下会停摆,停摆期「报失败的写可能已落地」
 (假失败)——apply 已内置重试+对账+清创,但若结束仍报缺口,先用
 `sch autoconnect --pin 位号:脚 --kind … --net …` 逐脚补(它幂等,already-connected
@@ -541,7 +886,21 @@ frame down by one height and pushes it past the sheet/title-block edge.
 
 Before drawing a partition, require all five `zone-plan` validation counters
 (`sheetOverflow`, `partitionOverlap`, `titleBlockHits`, `moduleOutsideZone`,
-`labelCollisions`) to be zero. Frames are **always data-driven**: whole-sheet partitions derived from live module
+`labelCollisions`) to be zero.
+
+> **`moduleOutsideZone` 判的是 L1 虚拟组,而且判定侧独立重算(2026-08-20)。**
+> 此前它复用生成侧那份模块 bbox —— 而那份 bbox 已被上游削过,于是「生成漏掉的
+> 标签,判定也看不见」,判据结构上恒报 0(真机 POWER 页:8 个 L1 组里 5 个探出
+> 框外,六项全绿)。现在判定侧从活体的 `sch clusters` 口径重算每个位号的 L1 组
+> 体积再与框做包含判定,并逐条给出**是谁、超了多少、往哪超**。
+>
+> **降级恒定可见 + fail-closed**:JSON 里 `labelScopeDegraded` 与 `labelScope`
+> **永远出现**(不再被 omitempty 抹掉)。归属做不成时(读不到导线 / 某件没有
+> 引脚几何 / 某件没有 L1 组记录)`labelScope.degraded=true` 并点名位号,
+> `moduleOutsideZone` 按「不可信」计数 —— **验不了就不许报绿**。看到降级先跑
+> `easyeda sch clusters --members` 核对,别去调 `--gutter`。
+
+Frames are **always data-driven**: whole-sheet partitions derived from live module
 bboxes, 22pt titles by default. The old fixed nine-grid mode (`--mode zones`) is
 **retired** — its rectangles had nothing to do with where the parts actually are,
 so on a single-module page spanning the sheet the frame missed the circuit entirely.
@@ -553,6 +912,45 @@ fail-closed: exact rectangle/text IDs are re-read after delete, survivors retain
 their recovery record, draw counts must match 1:1, and partial creation is
 compensated. Every successful draw or clear explicitly requires
 `schematic.save` → `saved:true`.
+
+**连接器负载退化下的韧性(2026-08 round2 新 3 修复)**:`zone-draw` 的创建路径
+现在是**逐区推进**的:每个区的框线+区名合并成**单次 exec_js**(要么全成要么
+全败,失败时 JS 内自清理),单区失败**不回滚**已画成的区。行为要点:
+
+- **幂等重跑**:画前先轻读 survey 画布,已画好且与当前 plan 完全吻合的框
+  (标题内容+锚点+配对矩形都在)直接保留 —— 重跑只补缺的区,一页已达标的
+  框重跑是**零写操作**;plan 变了(模块挪过)才清旧重画。旧的「先清光旧框、
+  再一次画全部」没有了,也就不再有「清旧成功+画新失败=页面从有框变无框」
+  的净损失窗口。
+- **假失败定律内建**:写报失败后先轻读复核 —— 复核出「其实已落地」就直接
+  收编 id、绝不重发;确认没落地才 settle(~400ms)后重发一次;**复核不出来
+  (读也失败/落地状态歧义)一律不重发**,可证的半成品 id 记入本页 frame
+  record,`--clear` 或下次重画会回收。
+- **partial 语义(#151)**:部分区画成时**exit 0**,stdout 报
+  `partial: N/M zone(s) not applied` + 每区原因;全部区都失败且画布零变化才
+  非零退出。看到 partial 就**重跑同一条命令**补缺,不要手工 exec_js 补框。
+- daemon 侧配套:`easyeda health` 的 `writeHealth` 按窗口报最近 20 次转发动作的
+  **效果失败率**(不是返回码失败率,见下条)+ 连败数 + 逐 action 分桶,
+  `degraded:true` = 连接器在负载下劣化;此时**写**失败(以及「返回 ok 但被证明
+  没落地」)的响应会带结构化 `result.degraded` + 「先轻读复核再考虑重试」的告诫。
+  daemon 只对幂等导航动作(`document.open`/`schematic.page.open`)自动
+  「轻读探测→settle→重发一次」,内容写永不 daemon 级重发。
+- **writeHealth 读的是「写的效果」,不是「调用的返回码」**(2026-08-19 口径修订)。
+  真机跑完一整场端到端时它曾全程 `failureRate 0.05 / degraded:false`,而同期画布
+  上大面积的写根本没生效 —— 因为主要故障形态是**返回成功但画布没变**。现在:
+  - 返回成功 + 回读证实没生效 → 计 failure,并记进 `fakeSuccesses`;
+  - 返回失败 + 回读证实已落地 → **不**计 failure,单独记 `fakeFailures`
+    (同样是不健康信号,但处置相反:假成功要补写,假失败绝不能重发);
+  - `verified` = 有回读证据的样本数。**`verified` 很低而 `failureRate` 很绿,
+    只能读成「没人核对过」,不是「全都好」**;
+  - `actions{}` / `degradedActions[]` 是逐 action 分桶 —— 混合流量里
+    「connect_pin 这一批 40% 失败」不会再被 20 样本的均值稀释成 5%,
+    哪条路没在工作会被点名。
+  证据两个来源:连接器在 result 里自带的回读结论(`partial` / `survivedTotal` /
+  `notApplied`)由 daemon 直接内省;命令自己做的回读(block-apply 落地回读、
+  `sch connect` 的 slow-landed 复核、zone-draw 的 landed-check)走
+  `POST /writeverify` 回传。**新写带回读的命令时,把结论也回传一次**
+  (`reportWriteVerified`),否则健康度看不见这条路的真实成色。
 
 ## Zone-less packing — `sch autoplace-free`
 
@@ -595,6 +993,7 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `easyeda doc ls` 聚合了 `schematic.pages.list` + `pcb.documents.list` + `document.current`,一条命令看全貌;`--json` 给机器读。
 - `easyeda doc switch` 按名字解析 → `document.open` → `document.current` 回读确认。**同名页(多个 P1)会报歧义并列出 uuid,改传 uuid**。跨类型也行(PCB ↔ 原理图)。
 - **多窗口时必须 `--project`(或 `--window`)**:`doc ls`/`doc switch` 不带目标时,只有「恰好一个窗口」才能自动命中;两个及以上窗口会报 `no EasyEDA connector is available`。同理,某窗口连接器正在重连(churn)的瞬间也可能瞬时报这个,重试即可。
+- **`doc reload` 后必须先 `doc switch <uuid>` 重钉 context 再写(2026-08-19 真机实锤)**:reload(saved→closed→reopened)后 exec_js 的 JS context 仍挂在**已关闭的旧 tab**上,紧接的写(`prim-delete`/create/modify)会打进旧文档——**静默 no-op 但回执照样 ok**(同 4 个 id 逐个删、回执全 ok、复检原样;插一条 `doc switch` 后同样命令立即生效)。这是「exec_js context 不跟切页走」的 reload 变体,`--doc` guard 拦不住(guard 核对的是 daemon 视角的 document.current,名义上已是新 tab)。同病还有**读侧 stale**:mutation 后 `bridge-check`/`clusters`/`check` 可能读到旧几何——orphan-tree 判据在 mutation 后不 reload 就跑,会把刚建的合法桩线误判成孤儿树**引导误删**(真机踩过:删掉了 C7:1 刚补的连接)。口诀:**写完要判,先 reload;reload 完要写,先 switch**。
 
 底层 action(需要细控时再用):
 
@@ -624,9 +1023,9 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `schematic.component.modify` — 位置/位号/BOM 标志/自定义属性。`customAttributes` 是 SDK `otherProperty` 的兼容别名(二选一,不能同传);属性补丁与现有值**合并**后写入(不清空其他元数据),未知顶层键**前置拒绝**(SDK 会静默丢弃)。写后用新句柄回读,**分级语义(#151)**:全部生效=ok;**部分生效=ok + `result.{partial,applied,alreadySet,notApplied,addedKeys,propertiesBefore}` + warnings**(已应用子集留画布并照常 autosave;`sch modify` 子命令与 playbook 重放此时**按失败处理**,但裸 `easyeda call` 只有 stderr 警告、退出码仍 0,需自查 `result.partial`)。恢复注意:**重放 `propertiesBefore` 只能恢复被覆盖键的原值,本次新增键(`addedKeys`)merge 语义下删不掉**,要删须编辑器手工操作;`applied` 只计回读可证明的写入,期望值与原值本就相同的键归 `alreadySet`(写入不可证)。纯属性补丁无一可证明写入=报错(画布未变)。回读通道本身失败会降级 `verified:false` + warning 而非报错(报错会让 daemon 跳过 autosave,丢已落画布的变更)。**merge 语义对只含顶层字段的补丁同样成立(#175)**:平台 modify 对 `otherProperty` 是**整体重写**语义,曾导致 `{"supplierId":...}` 这类顶层补丁把全部自定义属性静默清空;连接器现在会回读现有自定义属性并在同一次 modify 里原样写回 —— 全保住时 `result.propertiesPreserved` 列出被连带重写但保留的键(+`propertiesBefore` 快照),平台仍丢的键进 `result.notApplied`(`partial:true`,CLI 非零退出),没有静默面。
 - `schematic.component.delete` — **级联清理独占桩线/flag(ADR-0004 Decision 5)**:只挂在被删件引脚上的桩线树连同其上的旗随件删净,**共享树只断不删**(树还触别的器件就留下),结果带 `cascaded` 字段(回读证实的 wire/flag id 明细);payload `cascade:false` 退回旧行为。不再留「删器件不清理桩线」的幽灵连接。⚠️ 级联只针对被删件的附着物——与该件无关的导线/总线/图形不动,要真正清页仍用 `schematic.page.clear`。
 - `schematic.page.clear` — **一键清空当前页**:删除所有页级 primitive(组件、网络标志/端口/标签、导线、总线、图形),默认保留图框 sheet(`--no-preserve-sheet` 连图框一起删)。`--dry-run` 只统计不删。返回各类型删除计数 `{deleted:{...}, total, deletedIds}`。**无 undo**,确认门控。生成→检测→清页→重试闭环用这个。生产流程必须先 dry-run、报告、等用户确认;清完再读回确认 sheet 仍在。CLI:`easyeda sch clear [--dry-run] [--no-preserve-sheet]`。
-- `schematic.primitives.delete` — 按 id **跨类型**删除(组件/标志/导线/总线/图形都行),省略 `--ids` 则删当前选区(配合 `schematic.select` 做"全选→删除")。无 undo,确认门控。CLI:`easyeda sch prim-delete [--ids id1,id2]`(CSV,重复 id 自动去重——平台对含重复 id 的批次整批静默拒)。**图框守卫(2026-08-17 误删实锤)**:sheet 图元在 `sch list` 里是「无位号 @(0,0)」——与 PARTIAL 残件同脸,曾被残件清理误删,而平台没有重建图框的 API(丢了只能人工 UI 重放)。`prim-delete` 发送前自动比对活画布,命中 sheet 即拒;确认要删图框加 `--allow-sheet`。**清理残件前先看 componentType,别只看「无位号 + 原点坐标」**。**计数是回读验证出来的,不是请求数(#164)**:删完重新枚举各类目,`deleted`/`total` 只计真正消失的;有图元活下来则 `result.partial:true` + `survived`(按类目列 id),CLI **非零退出**。此前它把请求数当删除数上报,于是「删旧+重画」的 zone-draw 标签每轮都报干净、实则只加不减(P5 累积到 56 个)。**删除走通用图元类(#164 已修)**:`eda.sch_PrimitiveText.delete()` 只从内存/渲染索引摘除、**从不进持久化模型** —— 删完立即读=0、`sch save` 后=0,`doc reload` 后**原 id 全部复活**(矩形/导线不受影响,只有文本;文本的 `modify` 同样被丢弃,等于一经创建就冻结)。现已统一改走 `eda.sch_PrimitiveObject.delete(ids)`(跨类型、真落盘),`sch prim-delete` 与 `sch zone-draw --clear` 都已真机验过 reload 后归零。**留下的判据教训**:立即回读**证明不了持久化**,凡是判断"删干净没有",判据是 `doc reload` 后再 `sch text-list`——这条对任何自研的 fail-closed 校验都成立(`zone-draw --clear` 当初就是这么一路报"cleared 6"、实则标签全在的)。
+- `schematic.primitives.delete` — 按 id **跨类型**删除(组件/标志/导线/总线/图形都行),省略 `--ids` 则删当前选区(配合 `schematic.select` 做"全选→删除")。无 undo,确认门控。CLI:`easyeda sch prim-delete [--ids id1,id2]`(CSV,重复 id 自动去重——平台对含重复 id 的批次整批静默拒)。**图框守卫(2026-08-17 误删实锤)**:sheet 图元在 `sch list` 里是「无位号 @(0,0)」——与 PARTIAL 残件同脸,曾被残件清理误删,而平台没有重建图框的 API(丢了只能人工 UI 重放)。`prim-delete` 发送前自动比对活画布,命中 sheet 即拒;确认要删图框加 `--allow-sheet`。**清理残件前先看 componentType,别只看「无位号 + 原点坐标」**。**计数是回读验证出来的,不是请求数(#164)**:删完重新枚举各类目,`deleted`/`total` 只计真正消失的;有图元活下来则 `result.partial:true` + `survived`(按类目列 id),CLI **非零退出**。此前它把请求数当删除数上报,于是「删旧+重画」的 zone-draw 标签每轮都报干净、实则只加不减(P5 累积到 56 个)。**批量删不可靠已在工具内兜底(缺陷 3 已修)**:平台对大批量 delete 会静默 no-op 仍返 true(真机:zone-draw 批删旧框 survived=4、block-apply 回滚 deleted=false,**逐个删 100% 成功**)——zone-draw 删旧框/绘制回滚与 block-apply 回滚现已统一为「逐个删+回读证实+幸存者重试一次」,判定只信回读;agent 手工清理大批 id 时也照此办理:分小批或逐个 `prim-delete`,非零退出(partial)就按 survived 列表重试。**删组成员自动级联清组注册(缺陷 2 已修)**:`prim-delete` 删掉的器件若登记在虚拟组里,回读证实后自动从组注册表摘除(组删净则删组),不再留陈旧注册吃掉复用位号。**删除走通用图元类(#164 已修)**:`eda.sch_PrimitiveText.delete()` 只从内存/渲染索引摘除、**从不进持久化模型** —— 删完立即读=0、`sch save` 后=0,`doc reload` 后**原 id 全部复活**(矩形/导线不受影响,只有文本;文本的 `modify` 同样被丢弃,等于一经创建就冻结)。现已统一改走 `eda.sch_PrimitiveObject.delete(ids)`(跨类型、真落盘),`sch prim-delete` 与 `sch zone-draw --clear` 都已真机验过 reload 后归零。**幸存者会先 settle 复核一轮再定案(2026-08-19)**:连接器的存活判定是删完**立刻** `getAll()` 的,那一读可能采到尚未落定的快照 → 误报 `survived`,而 CLI 据此非零退出、人再删一遍空转。现在首轮报 partial 时,CLI 等一拍(400ms)对**幸存 id**重发一次删除,用第二次回执定案:已经没了 → 归 `notFound`、命令绿;真没删掉 → 照样非零退出并给出「`sch save` + 完全重启 EasyEDA」的 wedge 处方(stdout 上留的仍是**首轮**原始回执,最终判定看 stderr 与退出码)。**留下的判据教训**:立即回读**证明不了持久化**,凡是判断"删干净没有",判据是 `doc reload` 后再 `sch text-list`——这条对任何自研的 fail-closed 校验都成立(`zone-draw --clear` 当初就是这么一路报"cleared 6"、实则标签全在的)。
 - `schematic.wire.create`
-- **`schematic.group.move`**(`easyeda sch group-move --ids id1,id2,... --dx <mil> --dy <mil>`)——把一个器件和它周边的 stub 导线/flag **当一个整体刚性平移**,内部相对布局不变,只挪外框。⚠️ **不对接 EasyEDA 原生"组合"UI 字段**(2026-07-07 查证:该字段在 `ESCH_PrimitiveType` 里没有对应类型、`sch_PrimitiveComponent` 的 47 个方法里没有任何 getter/setter 碰它、也没藏在 `OtherProperty` 里——纯 UI 内部状态,扩展 API 完全读不到写不了)。这是**无状态虚拟分组**:每次调用都要传完整成员 id 列表,不记忆跨调用状态。器件走普通 `x/y` modify(id 不变);导线没有原地 modify,走删除重建(net/color/width/lineType 保留,**id 会变**,后续操作要重新拉 id)。`--ids` 解析走 `getAll()` 本地过滤而非逐个 `.get(id)`——刚创建的图元直接 `.get(id)` 可能瞬时 404(实测踩过),同批次 `getAll()` 能看到。用于「摆放一个模块后想整体挪位置微调」的场景,S3 布局调整阶段可用。**持久编组已可用**:`easyeda sch group create --members R1,C5,U2 [--name mcu-core]` / `list [--all-pages]` / `add` / `remove` / `ungroup` —— 平台无编组 API(真机探测:`eda.*` 零编组面、组件实例零 group/parent 字段),easyeda-agent 按 documentUuid 把组关系存进 workflow state(`~/.easyeda-agent/workflow/<project>.json`,同 zones claims 模式)。成员存**位号**(页内稳定;primitiveId 会 churn),`sch group-move --group g1 --dx 100` 时解析当前 id 并**自动展开附着物**(成员 pin 上的桩线 + 远端 netflag/netport,线树粒度同 disconnect;触碰非成员脚的线树=真连线,留在原地并报告)。**`--groups g1,g2,…` 把同块的多个子组当一个刚体集合、一次内核调用整体移动**——逐子组 move 会撕裂组间共享导线的老坑已根治,同块多子组一律用它。执行走 ADR-0004 统一 move 内核(见「三层布局体系」):失败自动恢复到快照重连,结构化 `moveReport`,判据是电气对账。同一位号只属一个组;组空自动删;`list` 标 stale 成员。`sch align`/`distribute` 对**部分覆盖**某组的选集硬拒绝(`--break-group` 显式放行);autolayout/autoplace-free 检测到组时警告(不保组内相对几何)。
+- **`schematic.group.move`**(`easyeda sch group-move --ids id1,id2,... --dx <mil> --dy <mil>`)——把一个器件和它周边的 stub 导线/flag **当一个整体刚性平移**,内部相对布局不变,只挪外框。⚠️ **不对接 EasyEDA 原生"组合"UI 字段**(2026-07-07 查证:该字段在 `ESCH_PrimitiveType` 里没有对应类型、`sch_PrimitiveComponent` 的 47 个方法里没有任何 getter/setter 碰它、也没藏在 `OtherProperty` 里——纯 UI 内部状态,扩展 API 完全读不到写不了)。这是**无状态虚拟分组**:每次调用都要传完整成员 id 列表,不记忆跨调用状态。器件走普通 `x/y` modify(id 不变);导线没有原地 modify,走删除重建(net/color/width/lineType 保留,**id 会变**,后续操作要重新拉 id)。`--ids` 解析走 `getAll()` 本地过滤而非逐个 `.get(id)`——刚创建的图元直接 `.get(id)` 可能瞬时 404(实测踩过),同批次 `getAll()` 能看到。用于「摆放一个模块后想整体挪位置微调」的场景,S3 布局调整阶段可用。**持久编组已可用**:`easyeda sch group create --members R1,C5,U2 [--name mcu-core]` / `list [--all-pages]` / `add` / `remove` / `ungroup` —— 平台无编组 API(真机探测:`eda.*` 零编组面、组件实例零 group/parent 字段),easyeda-agent 按 documentUuid 把组关系存进 workflow state(`~/.easyeda-agent/workflow/<project>.json`,同 zones claims 模式)。成员存**位号**(页内稳定;primitiveId 会 churn),`sch group-move --group g1 --dx 100` 时解析当前 id 并**自动展开附着物**(成员 pin 上的桩线 + 远端 netflag/netport,线树粒度同 disconnect;触碰非成员脚的线树=真连线,留在原地并报告)。**`--groups g1,g2,…` 把同块的多个子组当一个刚体集合、一次内核调用整体移动**——逐子组 move 会撕裂组间共享导线的老坑已根治,同块多子组一律用它。执行走 ADR-0004 统一 move 内核(见「三层布局体系」):失败自动恢复到快照重连,结构化 `moveReport`,判据是电气对账。**边界钳位是可见的部分应用(#151)**:位移撞图纸边/图签 keepout 会被收拢(只减不反号),此时 stderr 逐轴 WARN(撞哪个边、被钳掉多少),stdout 给一行机器可读的 `partial: {"requestedDelta":…,"appliedDelta":…}` 且绿勾行同时印 requestedΔ/appliedΔ;**任一被请求轴被钳到接近 0(|applied| < |requested| 的 10% 且 |applied| ≤ 5)= 未执行**——命令在动画布之前就拒绝、非零退出,出路是先挪走挡路对象或减小位移;位移经 snap 5 网格后 0 件被移动时打「⚠ no-op」而非绿勾。足额位移的输出与旧版逐字节一致。同一位号只属一个组;组空自动删;`list` 标 stale 成员。**删器件自动级联清组注册(缺陷 2 已修)**:`sch prim-delete` / block-apply 回滚在**回读证实删除成功后**,把该位号从组注册表摘除(指向死位号的 role 一并摘,组删净则删组)——位号复用不会再被陈旧组吃掉;级联 fail-soft,失败只警告,可 `sch group list` 审计补清。**块溯源可手工恢复(缺陷 4 已修)**:`group create` 新增 `--block-id <块id> [--instance <实例>] [--roles ROLE=位号,…]`,写入与 block-apply 自动登记相同的溯源字段;组注册损坏(如曾被陈旧组吃掉)后手工重登即可恢复 `sch reconcile` 机械对账——**reconcile 需要 --block-id 加 --roles 两者**,只给 --block-id 记录溯源但暂不可对账(命令会提示);--roles 的位号必须是本组成员。`sch align`/`distribute` 对**部分覆盖**某组的选集硬拒绝(`--break-group` 显式放行);autolayout/autoplace-free 检测到组时警告(不保组内相对几何)。
 - `schematic.netflag.create`
 - `schematic.netlabel.create` — 创建普通 N 形网络标签。嘉立创 EDA 当前正式客户端 3.2 的公开 `createNetLabel` 为会挂起的存根，因此连接器改用**编辑器自身**的网络标签工具：按实时 SVG `viewBox` 换算坐标，模拟画布放置，提交名称属性，并读回文字与 `netlabel-cross` 验证。绝不降级成箭头网络端口或普通文本。CLI：`easyeda sch netlabel --net FB_3V3 --x 215 --y 390`
 - `schematic.power.connect_pin`
@@ -634,7 +1033,7 @@ easyeda doc switch <P2|PCB1|uuid> --project <名字>   # 切换:按页名/PCB名
 - `schematic.pin.set_no_connect` — 打/清「非连接标识」(NC, X 标记),让 DRC 不再对故意悬空的引脚报"未连接"。按位号+引脚号定位:`easyeda sch no-connect --designator U1 --pin 23,24[,…]`(`--clear` 清除)。实现必须从器件实例 `getAllPins()` 取引脚,`setState_NoConnected(...)` 后逐脚 `await pin.done()` 应用到画布,再重新获取器件实例回读;只调 setter 会得到当前句柄假 `true`、实际画布不变。
 - `schematic.select`
 - ~~`schematic.snapshot`~~ — 已移除(2026-08-12,出图统一 `sch export-image`)。**产物保存在 CLI 运行目录下的隐藏目录 `<cwd>/.easyeda/artifacts/`,文件名带本地时间戳**(`<YYYYMMDD-HHMMSS>-<kind>-<短id>.png`);响应里的 `artifacts[].path` 是绝对路径。netlist/BOM 等其他产物同此规则。
-- **`easyeda sch zone-plan` 的失败分两种,别混**:①**装不下** —— 报「这一页装不下:<模块> 的框要 W×H,而可用区只有 W×H」并直接给出该换的图纸档(A3/A2…)或建议拆页;②**摆得不好** —— 报「容量是够的,是摆放/间距问题」并指向 `--gutter`/`sch group-move`。此前两者共用一句「adjust margins/gutter or the zone claims」,而对一颗 421 高的 WROOM-1 模组来说那是**做不到的建议**(A4 扣掉图签安全带只剩 541 可用高,框要 605),照着调只会白试一轮然后把整条判据当噪音。判据的价值不在报错,在报出**能执行的下一步**。容量判定刻意保守:只问单个模块自己塞不塞得进可用区,完全不管模块之间怎么排 —— 绝不会把「两个组顶在一起」误判成「该换纸」。
+- **`easyeda sch zone-plan` 的失败分两种,别混**:①**装不下** —— 报「这一页装不下:<模块> 的框要 W×H,而可用区只有 W×H」并直接给出该换的图纸档(A3/A2…)或建议拆页;②**摆得不好** —— 报「容量是够的,是摆放/间距问题」并指向 `sch zone-arrange --apply` 整页重排 / `sch group-move` 挪件 / 拆页(**不再指向 `--gutter`**:归组是「一区一框」之后 gutter 不参与分区怎么分,调它治不了重叠)。此前两者共用一句「adjust margins/gutter or the zone claims」,而对一颗 421 高的 WROOM-1 模组来说那是**做不到的建议**(A4 扣掉图签安全带只剩 541 可用高,框要 605),照着调只会白试一轮然后把整条判据当噪音。判据的价值不在报错,在报出**能执行的下一步**。容量判定刻意保守:只问单个模块自己塞不塞得进可用区,完全不管模块之间怎么排 —— 绝不会把「两个组顶在一起」误判成「该换纸」。
 
 - **`easyeda sch status`** — **原理图侧的进度权威**:S1–S6 每一格**当场从画布算**,`--all-pages` 逐页测(切页读完切回),`--gate` 顺带逐页跑 gate 填上 S5。**不落盘任何状态** —— 立项动机就是记录会撒谎:`workflow status` 把 imported/placement_ready 打成实心圆,而那块 PCB 上一个器件都没有(它记的是「某个动作被调用过」,不是「结果还在画布上」)。原理图的 S1–S6 全部机械可判,所以干脆不存,**没有记录就没有可撒的谎**。四态:`✓ done` / `◐ partial`(部分页满足) / `○ todo` / **`? unknown`——本工具判不了,不是委婉的「没做」,更不会替它打勾**。三条硬规矩:①**有页读不到 → 整张判定降级 unknown** 并指向 `health`/`doc switch`(同 gate 的 `blocked`:检查器没跑完 ≠ 板子没问题;首版正是拿读得到的 1/4 页宣布「已就绪、进 PCB」被真机打脸);②**读取失败绝不合成 0**(导线读不到 ≠ 没有导线,否则故障被渲染成「还没连线」);③S5/S6 是有意留白:S5 要跑 gate,S6 平台不暴露脏标记(只能显式 `sch save` 确认 `saved:true`)。`next` 永远给一条可照抄执行的命令(页名占位时直接带上该页 uuid)。
 

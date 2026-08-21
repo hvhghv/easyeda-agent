@@ -40,7 +40,15 @@ type zaaPinSnap struct {
 	Net        string
 	Kind       string // connect_pin 口径(ground/power/net_port_bi);"" = netlabel 等不可重建
 	Dir        string // 原桩方向(回滚重建用)
-	Wired      bool   // 树上无标记的普通导线直连 —— apply 盖不住,预检拒绝
+	// Offset 是原桩长(pin → 标记锚的实测距离)。**曾经被丢掉**(`s.Dir, _ =
+	// tidyStubDirection(...)`),于是「原形保留」区里由 zaaPadTermsToPins 合成出来的
+	// 端子一律按默认短桩 zfStub 重建 —— 计划说「一个单位都不动」,落地却把桩换了长度。
+	// 方向与长度是同一次观测的两半,不许只取一半。
+	Offset float64
+	Wired  bool // 树上无标记的普通导线直连 —— apply 盖不住,预检拒绝
+	// PinX/PinY 是实测 pin 坐标:retain 刚体不变式(zaaGateRetainRigid)要按它
+	// 重走一遍落地那条链,算出「不动的话该长什么样」。
+	PinX, PinY float64
 }
 
 // zaaTermExec 是一条已映射到具体 pin 的重连指令。
@@ -63,17 +71,18 @@ type zaaMemberExec struct {
 	TargetCX, TargetCY float64
 	Terms              []zaaTermExec
 	Snaps              []zaaPinSnap // 本件的 pin 快照(回滚重建原料)
+	// RetainBox 是「↩ 原形保留」区成员**落地后应有的** L1 包络(移动前实测几何
+	// 刚体平移 DX/DY,按落地那条链 zfTermGeomCanon 复算)。非 retain 区为 nil。
+	// 落地复判逐组拿它跟真机量出来的 cluster.Box 比 —— 这条判据不依赖
+	// markerBBoxProfile 之外的任何规划假设,是「不动的东西真的没动」的机械形式。
+	RetainBox *layoutBBox
 }
 
-// zaaConnectKind 把规划端子折成 connect_pin 口径。
+// zaaConnectKind 把规划端子折成 connect_pin 口径。**映射本体在 zfCanonKind** ——
+// 规划侧(端子几何预测)与落地侧(connect_pin 的 kind)必须是同一个函数,各自
+// switch 会出现「预测的是 power 盒、落地的是 ground 旗」这种看不见的分家。
 func zaaConnectKind(t zfPlacedTerm) string {
-	if t.Kind == "netport" {
-		return "net_port_bi"
-	}
-	if tidyNetClass(t.Net) == "ground" {
-		return "ground"
-	}
-	return "power"
+	return zfCanonKind(t.Kind, t.Net)
 }
 
 // zaaGateSetEquality 是断言①的名单形式:sweep 集与重建集必须相等。
@@ -128,6 +137,111 @@ func zaaGatePinCoverage(desig string, pre []zaaPinSnap, terms []zfPlacedTerm) er
 	return nil
 }
 
+// ── retain 刚体不变式:「↩ 原形保留」必须兑现 ────────────────────────────────
+//
+// 真机 ceshi / 页 MCU_IO(2026-08-20):区 esp32s3_wroom1_module 走了 retain 路径,
+// 输出白纸黑字写着「↩ 原形保留(不重排、不重生桩)」,落地后 L1 组却从 391×421
+// 变成 391×562 —— 宽度分毫不差(横向复现是准的),高度凭空多了 141。
+//
+// 「不动的东西真的没动」是本命令**最强的可验证不变式**:它不依赖 markerBBoxProfile
+// 这类标定,也不依赖规划器的任何假设,只要求 (dir, offset, kind, net) 逐 pin 与
+// 移动前逐字相同 —— 落地就必然是刚体平移。所以它该是一条**执行前**的算术门
+// (断言①的几何形式),而不是事后复判:计划与实测一旦对不上,那是我们自己的
+// 计划/映射缺陷,拿画布去试错没有意义。
+//
+// 门只对 `retained` 的区开(收敛区本来就要改几何)。
+
+// zaaRetainDeviation 是一条 retain 违例的可读描述。
+type zaaRetainDeviation struct {
+	Pin               string
+	WantDir, GotDir   string
+	WantOff, GotOff   float64
+	WantKind, GotKind string
+	Note              string
+}
+
+func (d zaaRetainDeviation) String() string {
+	if d.Note != "" {
+		return fmt.Sprintf("pin%s %s", d.Pin, d.Note)
+	}
+	var parts []string
+	if d.WantDir != d.GotDir {
+		parts = append(parts, fmt.Sprintf("方向 %s→%s", d.WantDir, d.GotDir))
+	}
+	if math.Abs(d.WantOff-d.GotOff) > zaaRetainEps {
+		parts = append(parts, fmt.Sprintf("桩长 %.0f→%.0f", d.WantOff, d.GotOff))
+	}
+	if d.WantKind != d.GotKind {
+		parts = append(parts, fmt.Sprintf("类型 %s→%s", d.WantKind, d.GotKind))
+	}
+	return fmt.Sprintf("pin%s %s", d.Pin, strings.Join(parts, "、"))
+}
+
+// zaaRetainEps 是刚体判定的容差:计划端子与快照来自**同一份场景快照的同一次
+// 观测**,理论上逐字相等,半格容差只是挡浮点噪声 —— 真正的缺陷(默认短桩 20
+// 顶掉实测 40、端子被换到另一只同网 pin)都在一格以上。
+const zaaRetainEps = 0.5
+
+// zaaGateRetainRigid 逐 pin 比对「原形保留」区的执行指令与移动前快照。
+// 纯函数;返回非 nil = 计划没兑现原形,fail-closed(画布零改动)。
+func zaaGateRetainRigid(desig string, snaps []zaaPinSnap, terms []zaaTermExec) error {
+	byPin := map[string]zaaPinSnap{}
+	for _, s := range snaps {
+		byPin[s.Pin] = s
+	}
+	var bad []zaaRetainDeviation
+	seen := map[string]bool{}
+	for _, t := range terms {
+		s, ok := byPin[t.Pin]
+		if !ok {
+			bad = append(bad, zaaRetainDeviation{Pin: t.Pin, Note: "计划端子落到了移动前没有连接的 pin 上"})
+			continue
+		}
+		if seen[t.Pin] {
+			bad = append(bad, zaaRetainDeviation{Pin: t.Pin, Note: "同一只 pin 被两条计划端子占用(同网扩容把原形改胖了)"})
+			continue
+		}
+		seen[t.Pin] = true
+		if s.Dir != t.Dir || math.Abs(s.Offset-t.Offset) > zaaRetainEps || s.Kind != t.Kind {
+			bad = append(bad, zaaRetainDeviation{Pin: t.Pin,
+				WantDir: s.Dir, GotDir: t.Dir, WantOff: s.Offset, GotOff: t.Offset,
+				WantKind: s.Kind, GotKind: t.Kind})
+		}
+	}
+	for _, s := range snaps {
+		if !seen[s.Pin] {
+			bad = append(bad, zaaRetainDeviation{Pin: s.Pin, Note: "移动前有连接,计划却没有对应端子(原形会缺一支)"})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Slice(bad, func(i, j int) bool { return tidyDesignatorLess(bad[i].Pin, bad[j].Pin) })
+	msgs := make([]string, 0, len(bad))
+	for _, d := range bad {
+		msgs = append(msgs, d.String())
+	}
+	return fmt.Errorf("断言①红(retain 刚体不变式):%s 标着「原形保留」,但 %d 处执行指令与移动前几何不符 —— %s;拒绝执行,画布零改动。这是计划/映射缺陷不是画布问题:`sch zone-arrange --json` 看该区 retainWhy,单区搬运可先用 `sch group-move`(它走同一个内核的 preserve 策略)",
+		desig, len(bad), strings.Join(msgs, ";"))
+}
+
+// zaaRetainEnvelope 按落地那条链(zfTermGeomCanon)算一件在给定平移下的落地包络:
+// 本体 ∪ 每支桩线 ∪ 每支 marker。**判定与落地同一把尺** —— 复判要拿它跟真机量出来
+// 的 L1 体积比,自造第二把尺就什么也证明不了。
+func zaaRetainEnvelope(body layoutBBox, snaps []zaaPinSnap, dx, dy float64) layoutBBox {
+	out := layoutBBox{MinX: body.MinX + dx, MinY: body.MinY + dy, MaxX: body.MaxX + dx, MaxY: body.MaxY + dy}
+	has := true
+	for _, s := range snaps {
+		if s.Kind == "" || s.Dir == "" {
+			continue
+		}
+		wire, marker := zfTermGeomCanon(s.PinX+dx, s.PinY+dy, s.Offset, s.Dir, s.Kind, s.Net, 0)
+		zfGrow(&out, &has, wire)
+		zfGrow(&out, &has, marker)
+	}
+	return out
+}
+
 // zaaPadTermsToPins 把计划端子按实际已连接 pin 的网名多重集「同网扩容」:
 // 某网的实际 pin 数 > 计划端子数时,克隆该网第一个端子补齐(J2 真机:USB-C 的
 // GND 焊盘组 6 只 pin 全部接地,块计划只有 5 只 —— 同网冗余接地是合法甚至更好
@@ -170,21 +284,38 @@ func zaaPadTermsToPins(terms []zfPlacedTerm, pre []zaaPinSnap, pageNets map[stri
 			if cls := tidyNetClass(net); cls == "ground" || cls == "power" {
 				kind = "netflag"
 			}
-			dir := "right"
+			// 方向**与桩长**都取实测(同一次观测的两半):只取方向、桩长退回 zfStub,
+			// 就是「原形保留」区里最后那处偷偷改几何的地方 —— 真机 U2 高度 +141 的
+			// 一类成因。没有实测(pre 里这个网没有可复现的桩)才退默认短桩。
+			dir, off := "right", zfStub
 			for _, p := range pre {
 				if p.Net == net && p.Dir != "" {
 					dir = p.Dir
+					if p.Offset > 0 {
+						off = p.Offset
+					}
 					break
 				}
 			}
-			out = append(out, zfPlacedTerm{Kind: kind, Net: net, Dir: dir, Offset: zfStub})
+			out = append(out, zfPlacedTerm{Kind: kind, Net: net, Dir: dir, Offset: off})
 		}
 	}
 	return out
 }
 
-// zaaMapTerms 把计划端子映射到具体 pin:优先 (net, 现侧) 匹配,退 net 匹配;
-// 全确定性(pin 号自然序 × 计划序),J1 的双 U3_N4(左右各一)靠现侧区分。
+// zaaMapTerms 把计划端子映射到具体 pin。四轮由紧到松,全确定性(pin 号自然序 ×
+// 计划序):
+//
+//	① net + 实测桩方向 + 实测桩长(几何全等)—— **原形保留区靠这一轮**:
+//	   retain 计划的每个端子就是从某只 pin 量出来的,(dir,offset) 是它的指纹;
+//	② net + 实测桩方向 —— 收敛计划里方向已被规划改写,但同网多脚仍能靠方向区分;
+//	③ net + 现侧(pin 相对本体中心的主轴)—— J1 的双 U3_N4(左右各一)靠它区分;
+//	④ net。
+//
+// 为什么 ①② 必须排在「现侧」前面:**现侧 ≠ 桩方向**。本体越高瘦,两者分歧越
+// 系统性 —— 真机 U2(71×421)上下两端行的 pin,|dy| 反而大于 |dx|,现侧被判成
+// up/down,而它们的桩实际是 left/right。只有 ③ 时这些端子第一轮全落空,退到 ④
+// 按 pin 号顺序乱配,同网多脚的桩几何当场互换 → 原形保留的区照样变形。
 func zaaMapTerms(pre []zaaPinSnap, terms []zfPlacedTerm, pinSide map[string]string,
 	termUpper func(zfPlacedTerm) bool) ([]zaaTermExec, error) {
 	used := map[int]bool{}
@@ -193,13 +324,24 @@ func zaaMapTerms(pre []zaaPinSnap, terms []zfPlacedTerm, pinSide map[string]stri
 	var out []zaaTermExec
 	for _, t := range terms {
 		pick := -1
-		for pass := 0; pass < 2 && pick < 0; pass++ {
+		for pass := 0; pass < 4 && pick < 0; pass++ {
 			for i, p := range sorted {
 				if used[i] || p.Net != t.Net {
 					continue
 				}
-				if pass == 0 && pinSide[p.Pin] != t.Dir {
-					continue // 第一轮:net+现侧同时匹配
+				switch pass {
+				case 0:
+					if p.Dir == "" || p.Dir != t.Dir || math.Abs(p.Offset-t.Offset) > 1e-6 {
+						continue
+					}
+				case 1:
+					if p.Dir == "" || p.Dir != t.Dir {
+						continue
+					}
+				case 2:
+					if pinSide[p.Pin] != t.Dir {
+						continue
+					}
 				}
 				pick = i
 				break
@@ -256,7 +398,12 @@ func zaaBuildExec(out *zoneArrangeOut, scene *zaScene, opts partitionOpts) ([]za
 			return nil, nil, fmt.Errorf("区 %s 有收敛计划但无落位框(内部不一致)", z.Name)
 		}
 		offX := rect.MinX + partitionContentPad - z.Content.MinX
-		offY := rect.MinY + opts.NoteBand + partitionContentPad - z.Content.MinY
+		// 说明带高必须取**本区**的(zaaZoneNoteBand 从规划框反推,框是唯一函数),
+		// 不是全局默认 opts.NoteBand:规划给登记过说明的区留的是 42 以上的带,
+		// 执行却按 42 落位 —— 内容整体下沉进说明带,框跟着往下长,严重时直接探出
+		// 图纸下沿(真机 `C5 左沿 -34`、`U2 上沿 840` 那一类越界的帮凶)。
+		// 复判侧早就用的是反推带高,这里再用一次全局常量就是两把尺。
+		offY := rect.MinY + zaaZoneNoteBand(z, opts.TitleBand) + partitionContentPad - z.Content.MinY
 		for _, g := range z.Groups {
 			d := strings.ToUpper(g.Designator)
 			live, ok := partOf[d]
@@ -274,13 +421,13 @@ func zaaBuildExec(out *zoneArrangeOut, scene *zaScene, opts partitionOpts) ([]za
 				if !onWire {
 					continue // 本就悬空的 pin 不进快照(断言②只保「曾连接」的)
 				}
-				s := zaaPinSnap{Desig: g.Designator, Pin: p.Number}
+				s := zaaPinSnap{Desig: g.Designator, Pin: p.Number, PinX: p.X, PinY: p.Y}
 				if !hasM {
 					s.Wired = true
 				} else {
 					s.Net = m.Net
 					s.Kind = tidyRestoreKind(m.ComponentType, m.Net)
-					s.Dir, _ = tidyStubDirection(p.X, p.Y, m.X, m.Y)
+					s.Dir, s.Offset = tidyStubDirection(p.X, p.Y, m.X, m.Y)
 				}
 				snaps = append(snaps, s)
 				// 现侧(左右口径,映射优先键):按 pin 相对本体中心的主轴。
@@ -322,6 +469,18 @@ func zaaBuildExec(out *zoneArrangeOut, scene *zaScene, opts partitionOpts) ([]za
 			} else {
 				me.DX = snap5(g.Body.MinX + offX - live.BBox.MinX)
 				me.DY = snap5(g.Body.MinY + offY - live.BBox.MinY)
+			}
+			// 「↩ 原形保留」区:执行指令必须逐 pin 与移动前几何相同,否则这份计划
+			// 根本没在保留原形 —— 执行前就拒(算术判定,画布零改动)。
+			if z.Retained {
+				if g.Rotated {
+					return nil, nil, fmt.Errorf("断言①红(retain 刚体不变式):%s 标着「原形保留」却带转竖标记 —— 内部不一致,拒绝执行", g.Designator)
+				}
+				if err := zaaGateRetainRigid(g.Designator, snaps, terms); err != nil {
+					return nil, nil, err
+				}
+				box := zaaRetainEnvelope(*live.BBox, snaps, me.DX, me.DY)
+				me.RetainBox = &box
 			}
 			execs = append(execs, me)
 		}
@@ -443,9 +602,13 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	_ = sweepSet // 名单守卫已在 zaaBuildExec 落判;清扫本体归内核(同一份成员集)
 
 	// 执行只准调内核(ADR-0004):快照 → 页级一次深度清扫(删证回读)→ 逐件
-	// 落位(snap5;转竖件双候选实测消解 + pin 中点对中)→ 重连(计划端子显式
+	// 落位(snap5;转竖件双候选实测消解 + pin 中点对中)→ 合并早检(删桩线触发
+	// 的共线合并吞第三方 pin,在新桩线落地前修回)→ 重连(计划端子显式
 	// connect_pin,梯次桩长原样执行)→ 对账(网表逐 pin + bridge 增量),任一步
-	// 失败自动进入恢复段。此前散在这里的 sweep/exec/回滚逻辑全部由内核承接。
+	// 失败自动进入**全页**恢复段(esp32Mini P2 实锤:GND 树上 9 个第三方地脚被
+	// 灌进 +3V3,只救移动集合=抓到了但救不回;修不动时 kerr 自带结构化清单
+	// REF→期望网,可直接喂 `sch connect`,报告从「页面已毁」降级为「N 个 pin
+	// 待手工恢复」)。此前散在这里的 sweep/exec/回滚逻辑全部由内核承接。
 	termByPin := map[string]zaaTermExec{}
 	items := make([]moveItem, 0, len(execs))
 	for _, m := range execs {
@@ -475,8 +638,12 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 		}
 		items = append(items, it)
 	}
+	// 桩长硬上限 = 计划里最长的桩:计划端子本来就原样执行(Offset 显式喂
+	// connect_pin),没被计划覆盖的 pin 走内核 preserve/autoconnect 兜底时也不许
+	// 比规划走得更深 —— 否则区框当场比规划胖一档,而 dry-run 还在打 pass。
 	krep, kerr := schMoveKernel(cfg, win, docUUID, items,
-		moveKernelOpts{Label: "zone-arrange", Stdout: stdout, Stderr: stderr})
+		moveKernelOpts{Label: "zone-arrange", Stdout: stdout, Stderr: stderr,
+			StubPolicy: moveStubPreserve, MaxStub: zaaMaxPlannedStub(execs)})
 	if kerr != nil {
 		return kerr
 	}
@@ -553,12 +720,46 @@ func runZoneArrangeApply(cfg *appConfig, win, docUUID string, out *zoneArrangeOu
 	if _, err := requestAutolayoutAction(cfg, "schematic.save", win, nil, docUUID, "zone-arrange save"); err != nil {
 		fmt.Fprintf(stderr, "⚠ 显式保存失败(%v)—— daemon 防抖自动保存仍会兜底\n", err)
 	}
+
+	// ── 落地复判(断言③)────────────────────────────────────────────────────
+	// 「规划 pass → 落地 overlap」是本命令最贵的一类假绿:断言①②看电气、内核对账
+	// 看网表、layout-lint 看器件两两重叠,没有一条看得见「区框胖了撞邻区」。
+	// 这里重读一次真几何,按**同一个外框函数**算实测框,与规划框逐区比 ——
+	// 偏差 > gutter 或区框重叠 → 如实报,并以非零退出让它可 gate。
+	var recheck []string
+	if landed, rerr := zaaLandedRecheck(cfg, win, docUUID, out, execs, opts); rerr != nil {
+		recheck = []string{fmt.Sprintf("落地复判无法运行(%v)—— 没有证明不算过", rerr)}
+	} else {
+		recheck = zaaRecheckFindings(landed, opts.Gutter)
+		for _, z := range landed {
+			mark := ""
+			if len(z.Rigid) > 0 {
+				mark = "  ↩✗ 原形被改动"
+			}
+			fmt.Fprintf(stdout, "  复判 %s:实测框 %.0f×%.0f / 规划框 %.0f×%.0f%s\n",
+				z.Name, z.FrameW, z.FrameH, z.PlanW, z.PlanH, mark)
+		}
+	}
+	// 自由落点是「规划没覆盖到的 pin」——它的几何不在任何计划里,于是区框可以
+	// 凭空胖一档而 dry-run 毫不知情。内核把它们点名带回来(FreeConnected),这里
+	// 并进断言③:**偏差可以有,但必须可见**。
+	if len(krep.FreeConnected) > 0 {
+		recheck = append(recheck, fmt.Sprintf("%d 只 pin 走了 autoconnect 自由落点(计划未覆盖:%s)—— 它们的方向/桩长不在规划里,落地框可能凭空胖一档",
+			len(krep.FreeConnected), strings.Join(krep.FreeConnected, " ")))
+	}
+
 	if lintWarn != "" {
 		fmt.Fprintf(stdout, "△ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)绿,已保存;%s\n", executed, len(execs), lintWarn)
 	} else {
-		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)+ layout-lint 全绿,已保存\n", executed, len(execs))
+		fmt.Fprintf(stdout, "✓ zone-arrange 落地 %d/%d 件;断言①② + 内核对账(网表+bridge)+ layout-lint 绿,已保存\n", executed, len(execs))
 	}
 	fmt.Fprintln(stdout, "note: 分区框未重画 —— `sch zone-draw --mode partition` 更新;区名/说明带随框走")
+	if len(recheck) > 0 {
+		// **不回滚**:位姿与电气都是好的,回滚只会把好的也拆掉。如实报 + 非零退出。
+		return fmt.Errorf("断言③红(落地复判):%s —— 电气与位姿已落地并保存,但分区几何与规划不符;`sch zone-plan` 复核后按上表调整(收敛不了就拆页/改 --gutter)",
+			strings.Join(recheck, ";"))
+	}
+	fmt.Fprintf(stdout, "✓ 断言③绿(落地复判):实测框与规划框偏差 ≤ gutter %.0f,区框零重叠\n", opts.Gutter)
 	return nil
 }
 
@@ -615,6 +816,216 @@ func zaaBrokenPins(verr error) []string {
 		}
 	}
 	return out
+}
+
+// ── 落地复判:绿勾必须与事实相符 ─────────────────────────────────────────────
+//
+// 真机 4 轮取证:`--apply` 每轮都打「断言①② + 内核对账 + layout-lint 全绿,已保存」,
+// 而落地后 `zone-plan` 实测分区框重叠 2 / 1 / 2 处。断言①②管的是**电气**(删除集
+// = 重建集、曾连接 pin 仍连接),内核对账管的是**网表**,layout-lint 管的是**器件
+// 两两重叠** —— 三条判据没有一条看得见「区框比规划胖了、于是撞上邻区」。
+// 缺的那条判据在这里补上:落地后重读一次,按同一个外框函数算实测框,与规划框比。
+
+// zaaLandedZone 是一个区的落地实测(与规划的对照项)。
+type zaaLandedZone struct {
+	Name           string
+	Content        layoutBBox // 实测内容并集(成员 L1 簇体积)
+	Rect           layoutBBox // 实测框 = partitionFrameRect(内容, 区名带, 说明带)
+	FrameW, FrameH float64
+	PlanW, PlanH   float64
+	// Missing 是这一区**读不到**的成员。unknown 是一等公民:读不到就绝不排除出
+	// 分母、也绝不合成 0,否则一次读故障会伪装成「完美收敛」。
+	Missing []string
+	// Outside 是探出图纸可用区(图框内缩 sheetEdgeMinGap)的成员 —— 与
+	// `sch clusters` 的 out-of-sheet 同一把尺、同一个常量。真机 MCU_IO:--apply
+	// 打完绿勾,事后 `sch clusters --strict` 才报 `C5 左沿 -34 < 12`、`U2 上沿
+	// 840 > 813`。落地路径自己看得见的事,不该等下一条命令来发现。
+	Outside []string
+	// Rigid 是「↩ 原形保留」区里**落地几何与原形平移不符**的成员(逐组比,
+	// 不依赖规划模型)。空 = 这一区真的一个单位都没动。
+	Rigid []string
+}
+
+// zaaRecheckFindings 是复判的纯判据:实测框与规划框的偏差 > gutter,或实测区框
+// 两两重叠,或有成员读不到 —— 任一条成立就出条目(空 = 复判绿)。
+//
+// 为什么阈值是 gutter:排布器就是靠 gutter 把相邻区隔开的,偏差一旦大于它,
+// 「规划无重叠」就不再蕴含「落地无重叠」。这正是本次缺陷的形式化。
+func zaaRecheckFindings(zones []zaaLandedZone, gutter float64) []string {
+	var out []string
+	for _, z := range zones {
+		if len(z.Missing) > 0 {
+			out = append(out, fmt.Sprintf("区 %s 有 %d 个成员读不到(%s)—— 实测框不可信,不算过",
+				z.Name, len(z.Missing), strings.Join(z.Missing, ",")))
+			continue
+		}
+		// retain 区先判**刚体不变式**:它比框尺寸更强也更可信(不依赖任何预测
+		// 模型),而且尺寸偏差往往只是它的后果 —— 先报因,再报果。
+		if len(z.Rigid) > 0 {
+			out = append(out, fmt.Sprintf("区 %s 标着「↩ 原形保留」却动了几何:%s —— 「不重排、不重生桩」没有兑现",
+				z.Name, strings.Join(z.Rigid, ";")))
+		}
+		// **单边判据**:只有「落地比规划**胖**」才是缺陷 —— 那正是「规划无重叠却
+		// 落地重叠」的成因。落地更瘦只说明落地余量(zfLandSlack)没用满,不是问题,
+		// 更不该占掉 gutter 预算(否则结构性余量会把判据的容忍度先吃掉一半)。
+		//
+		// **注意这不是「上界成立」的断言**:规划框只在「同一份 pin 坐标 + 同一份
+		// 桩长」的模型内是上界(见 zfLandSlack 的适用范围),真机上并不成立 ——
+		// 这条判据存在的全部理由,就是把不成立的那几次如实报出来。
+		dw, dh := z.FrameW-z.PlanW, z.FrameH-z.PlanH
+		if dw > gutter || dh > gutter {
+			out = append(out, fmt.Sprintf("区 %s 落地框 %.0f×%.0f 比规划框 %.0f×%.0f 胖(超出 %+.0f/%+.0f,gutter %.0f)——「规划无重叠」不再蕴含「落地无重叠」",
+				z.Name, z.FrameW, z.FrameH, z.PlanW, z.PlanH, dw, dh, gutter))
+		}
+		if len(z.Outside) > 0 {
+			out = append(out, fmt.Sprintf("区 %s 有 %d 个成员探出图纸可用区:%s —— 落地即出图纸(`sch clusters --strict` 同一把尺)",
+				z.Name, len(z.Outside), strings.Join(z.Outside, ";")))
+		}
+	}
+	for i := 0; i < len(zones); i++ {
+		for j := i + 1; j < len(zones); j++ {
+			a, b := zones[i], zones[j]
+			if len(a.Missing) > 0 || len(b.Missing) > 0 {
+				continue
+			}
+			ox := minF(a.Rect.MaxX, b.Rect.MaxX) - maxF(a.Rect.MinX, b.Rect.MinX)
+			oy := minF(a.Rect.MaxY, b.Rect.MaxY) - maxF(a.Rect.MinY, b.Rect.MinY)
+			if ox > 0 && oy > 0 {
+				out = append(out, fmt.Sprintf("区框实测重叠 %s ↔ %s:%.0f×%.0f", a.Name, b.Name, ox, oy))
+			}
+		}
+	}
+	return out
+}
+
+// zaaZoneNoteBand 从规划输出反推这一区的说明带高 —— 框是唯一函数
+// (partitionFrameRect),带高就是它的可逆量:frameH − 内容高 − 2·pad − 区名带。
+// 这样复判用的带高与规划**逐区一致**,不必再读一遍 note(读第二遍就是第二把尺)。
+func zaaZoneNoteBand(z zoneArrangeZoneOut, titleBand float64) float64 {
+	band := z.FrameH - (z.Content.MaxY - z.Content.MinY) - 2*partitionContentPad - titleBand
+	if band < 0 {
+		return 0
+	}
+	return band
+}
+
+// zaaOutOfSheetWhy 判一个盒子探出图纸可用区多少(可用区 = 图框内缩
+// sheetEdgeMinGap,与 `sch clusters` 的 usable 逐字段同源 —— 同一个常量、同一条
+// 不等式,别在这里另立一套边距)。返回 "" = 没探出。
+func zaaOutOfSheetWhy(b, sheet layoutBBox) string {
+	if sheet.MaxX-sheet.MinX <= 0 || sheet.MaxY-sheet.MinY <= 0 {
+		return "" // 没有图框就没有可用区可判 —— 不许拿零尺寸的"图纸"把整页判成越界
+	}
+	usable := layoutBBox{
+		MinX: sheet.MinX + sheetEdgeMinGap, MinY: sheet.MinY + sheetEdgeMinGap,
+		MaxX: sheet.MaxX - sheetEdgeMinGap, MaxY: sheet.MaxY - sheetEdgeMinGap,
+	}
+	var why []string
+	if b.MinX < usable.MinX {
+		why = append(why, fmt.Sprintf("左沿 %.0f < %.0f", b.MinX, usable.MinX))
+	}
+	if b.MaxX > usable.MaxX {
+		why = append(why, fmt.Sprintf("右沿 %.0f > %.0f", b.MaxX, usable.MaxX))
+	}
+	if b.MinY < usable.MinY {
+		why = append(why, fmt.Sprintf("下沿 %.0f < %.0f", b.MinY, usable.MinY))
+	}
+	if b.MaxY > usable.MaxY {
+		why = append(why, fmt.Sprintf("上沿 %.0f > %.0f", b.MaxY, usable.MaxY))
+	}
+	return strings.Join(why, "、")
+}
+
+// zaaRigidWhy 判一个 retain 成员的落地实测 box 与「原形刚体平移后应有的包络」
+// 差多少。容差 acSchGrid(桩端点 5 网格吸附的一格);返回 "" = 真的没动。
+func zaaRigidWhy(desig string, want, got layoutBBox) string {
+	d := [4]float64{got.MinX - want.MinX, got.MinY - want.MinY, got.MaxX - want.MaxX, got.MaxY - want.MaxY}
+	worst := 0.0
+	for _, v := range d {
+		if math.Abs(v) > math.Abs(worst) {
+			worst = v
+		}
+	}
+	if math.Abs(worst) <= acSchGrid {
+		return ""
+	}
+	return fmt.Sprintf("%s 实测 %.0f×%.0f 与原形平移后应有的 %.0f×%.0f 差 %.0f(四边偏差 %.0f/%.0f/%.0f/%.0f)",
+		desig, got.MaxX-got.MinX, got.MaxY-got.MinY, want.MaxX-want.MinX, want.MaxY-want.MinY,
+		worst, d[0], d[1], d[2], d[3])
+}
+
+// zaaLandedRecheck 重读落地后的页面,按 L1 簇算每个区的实测框。纯读。
+// execs 提供 retain 区的「原形平移后应有的包络」(RetainBox);为空时只做尺寸/
+// 重叠/出图纸三条。
+func zaaLandedRecheck(cfg *appConfig, win, docUUID string, out *zoneArrangeOut,
+	execs []zaaMemberExec, opts partitionOpts) ([]zaaLandedZone, error) {
+	res, err := requestAutolayoutAction(cfg, "schematic.components.list", win,
+		map[string]any{"includeBBox": true, "includePins": true}, docUUID, "zone-arrange 落地复判")
+	if err != nil {
+		return nil, err
+	}
+	comps, perr := parseLayoutComps(res.Result)
+	if perr != nil {
+		return nil, perr
+	}
+	wires, werr := fetchSchWirePolylinesStable(cfg, win, docUUID)
+	if werr != nil {
+		return nil, fmt.Errorf("读导线:%w", werr)
+	}
+	clusters, _ := buildSchClusters(comps, wires)
+	byDesig := map[string]schCluster{}
+	for _, c := range clusters {
+		byDesig[strings.ToUpper(c.Designator)] = c
+	}
+	retainBox := map[string]layoutBBox{}
+	for _, e := range execs {
+		if e.RetainBox != nil {
+			retainBox[strings.ToUpper(e.Desig)] = *e.RetainBox
+		}
+	}
+	var zones []zaaLandedZone
+	for _, z := range out.Zones {
+		lz := zaaLandedZone{Name: z.Name, PlanW: z.FrameW, PlanH: z.FrameH}
+		has := false
+		for _, g := range z.Groups {
+			d := strings.ToUpper(g.Designator)
+			c, ok := byDesig[d]
+			if !ok {
+				lz.Missing = append(lz.Missing, g.Designator)
+				continue
+			}
+			zfGrow(&lz.Content, &has, c.Box)
+			if why := zaaOutOfSheetWhy(c.Box, out.Sheet); why != "" {
+				lz.Outside = append(lz.Outside, fmt.Sprintf("%s %s", g.Designator, why))
+			}
+			if want, isRetain := retainBox[d]; isRetain {
+				if why := zaaRigidWhy(g.Designator, want, c.Box); why != "" {
+					lz.Rigid = append(lz.Rigid, why)
+				}
+			}
+		}
+		if !has {
+			lz.Missing = append(lz.Missing, "(全区无实测几何)")
+			zones = append(zones, lz)
+			continue
+		}
+		lz.Rect = partitionFrameRect(lz.Content, opts.TitleBand, zaaZoneNoteBand(z, opts.TitleBand))
+		lz.FrameW, lz.FrameH = lz.Rect.MaxX-lz.Rect.MinX, lz.Rect.MaxY-lz.Rect.MinY
+		zones = append(zones, lz)
+	}
+	return zones, nil
+}
+
+// zaaMaxPlannedStub 是本次计划里最长的桩 —— 内核常规重连步的桩长硬上限。
+// 落地桩不越过规划桩,落地框就不越过规划框(恢复段有意不夹,见 moveKernelOpts）。
+func zaaMaxPlannedStub(execs []zaaMemberExec) float64 {
+	m := zfStub
+	for _, e := range execs {
+		for _, t := range e.Terms {
+			m = maxF(m, t.Offset)
+		}
+	}
+	return m
 }
 
 func allSnaps(execs []zaaMemberExec) []zaaPinSnap {

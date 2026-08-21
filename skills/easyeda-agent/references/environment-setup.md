@@ -53,7 +53,7 @@ easyeda update --version 0.25.0      # 钉版本(离线场景也可用它跳过 
 | `cli` | `skipped (dev build)` | 开发环境的 git-describe 版本,**故意不覆盖**(air 下一次改 `.go` 就重建);要强升才 `--force`。 |
 | `skill:<client>` | `behind` | `easyeda update` 一并同步(daemon 启动时也会自动同步);本地改过 skill 想保留加 `--preserve`。 |
 | `skill:<client>` | `not-installed` | 该客户端没装过 → `easyeda update --create-missing`。 |
-| `connector` | `behind` | **只能人工重装**——侧载 `.eext` 没有原地更新。按提示 URL 下载 → 扩展管理里**先卸载旧的**(平台按 uuid 去重,不卸载则导入静默失败)→ 导入新的 → **完全退出并重启 EasyEDA**(已开窗口会继续跑旧连接器代码并抢 daemon)。市场版可自动更新但滞后 CLI。 |
+| `connector` | `behind` | **只能人工重装**——侧载 `.eext` 没有原地更新。按提示 URL 下载 → 扩展管理里**先卸载旧的**(平台按 uuid 去重,不卸载则导入静默失败)→ 导入新的 → **完全退出并重启 EasyEDA**(已开窗口会继续跑旧连接器代码并抢 daemon)。市场版可自动更新但滞后 CLI。**旧连接器不只是缺新动作**:它不带 `seq`/`seqAbandoned` 顺序证据,于是「写超时了到底落没落地」这类判定会**降级成弱证据**(报文里写着 `证据档:弱(探针启发式)`),而且动作在连接器里是**并发**跑的 —— 一个卡死的调用会静默吞掉后续的 `place`/`delete`/`document.open`。看到弱证据档就该升级。 |
 | `connector` | `no-daemon` / `no-window` | 不是版本问题,是环境没起来 → 回 §0。 |
 
 > `--check` 从不写盘;非 `--check` 形态只碰 CLI 二进制和 skill 目录,**永不动 EasyEDA 工程**。
@@ -189,6 +189,20 @@ extensionUuid 在 `extension/extension.json`。IndexedDB 结构非官方稳定 A
   先 pour-rebuild 再判断。
 - **后台窗口 DRC 永不完成**:见 `pcb.md` DRC 条目——切前台单发,daemon 已防
   重入(`ACTION_BUSY`)。
+- **判连接器健不健康,看 `easyeda health` 的 `writeHealth`——但要按新口径读**
+  (2026-08-19 修订)。它统计的是**写的效果**,不是调用的返回码:
+  - `failureRate` 里已经含「返回 ok 但回读证明没落地」的那一类(`fakeSuccesses`);
+    首版只数返回码,那场端到端里全程 0.05/绿灯,而画布上大面积的写没生效。
+  - `fakeFailures` 是反向那一类(报失败但其实已落地)——**不**计入失败率,
+    因为处置动作相反:看到它就绝不能重发(重发造重复旗)。
+  - `verified` = 有回读证据的样本数。**`verified` 低 + `failureRate` 绿 = 没人核对过**,
+    不能读成"一切正常"。
+  - `degradedActions[]` / `actions{}` 是逐 action 分桶:某条路(如 `connect_pin`
+    一批 40% 失败)在混合流量里不会再被均值稀释,会被直接点名。
+  `degraded:true` 时的正确动作:插一次轻读 + 短暂 settle;**写**失败先轻读复核
+  「是不是其实已经落地」再决定,持续不恢复就 `easyeda doc reload`。
+  daemon 只自动重发幂等导航动作(`document.open` / `schematic.page.open`),
+  内容写永不 daemon 级重发。
 - **用户说「画面没更新」**:web 编辑器前台窗口对所有编辑类型**即时重绘**
   (2026-07-07 sha 比对实测:track/挪件/丝印/pour-rebuild 全即时,tab 切回也
   即时)——画面旧只发生在桌面客户端、OS 级最小化/遮挡恢复、或铺铜 reflow 几何

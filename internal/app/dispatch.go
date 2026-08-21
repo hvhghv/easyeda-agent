@@ -49,6 +49,13 @@ type appConfig struct {
 	// forceUnsafe escalates forceReason past a fully-unconfirmed mechanical
 	// skeleton (issue #132) — set only by --force-unsafe.
 	forceUnsafe bool
+	// staleReadReason is the ONE-CALL write-then-read opt-in past the daemon's
+	// STALE_READ gate. It is NOT bound to any flag and must never be set on the
+	// shared config: the only legal way to set it is staleReadOptIn(), which
+	// hands back a scoped COPY consumed by exactly one dispatch. See
+	// stale_read_optin.go for why this is a per-call value rather than a second
+	// process-wide force switch.
+	staleReadReason string
 	// doc, when set (--doc <uuid|name>), PINS every action — mutating AND read —
 	// to that document: the daemon-choke-point guard (ensureActiveDoc) switches
 	// to it and confirms via LIVE document.current BEFORE the action dispatches,
@@ -185,7 +192,16 @@ type actionResult struct {
 	Result    map[string]any `json:"result"`
 	Artifacts []artifactRef  `json:"artifacts"`
 	Context   *actionContext `json:"context"`
-	errorMsg  string
+	// Seq is the connector's FIFO ordering evidence carried on this response
+	// (connector ≥ 1.0.3). Known=false means the connector is older and sent no
+	// such fields — callers MUST then fall back to a weaker judgement rather
+	// than assume anything. See conn_seq.go / sch_place_adopt.go.
+	Seq      schSeqCounters
+	errorMsg string
+	// errorCode is the daemon/connector error.code that came with ok=false
+	// ("STALE_READ", "STAGE_BLOCKED", …). Callers that must branch on WHY a
+	// call failed read this instead of matching on the message text.
+	errorCode string
 }
 
 // requestAction POSTs a typed action and returns the parsed response without
@@ -212,20 +228,29 @@ func requestActionTimed(cfg *appConfig, action, window string, payload any, time
 		Artifacts []artifactRef  `json:"artifacts"`
 		Context   *actionContext `json:"context"`
 		Error     *struct {
+			Code    string `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("decode %s response: %w", action, err)
 	}
-	res := &actionResult{ID: parsed.ID, Type: parsed.Type, Version: parsed.Version, OK: parsed.OK, Result: parsed.Result, Artifacts: parsed.Artifacts, Context: parsed.Context}
+	res := &actionResult{ID: parsed.ID, Type: parsed.Type, Version: parsed.Version, OK: parsed.OK, Result: parsed.Result, Artifacts: parsed.Artifacts, Context: parsed.Context, Seq: parseSeqCounters(respBody)}
 	if !parsed.OK {
 		msg := "ok=false"
-		if parsed.Error != nil && parsed.Error.Message != "" {
-			msg = parsed.Error.Message
+		code := ""
+		if parsed.Error != nil {
+			code = parsed.Error.Code
+			if parsed.Error.Message != "" {
+				msg = parsed.Error.Message
+			}
 		}
 		res.errorMsg = msg
-		return res, fmt.Errorf("%s failed: %s", action, msg)
+		res.errorCode = code
+		// 结构化错误(actionError):文本与旧版逐字一致,额外带上 error.code,
+		// 于是调用方能把「机械门拦下的」(STALE_READ)和「真的读失败了」分开处理
+		// —— 两者的下一步完全不同。见 stale_read_optin.go。
+		return res, &actionError{Action: action, Code: code, Message: msg}
 	}
 	return res, nil
 }
@@ -763,6 +788,15 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 		if cfg.forceUnsafe {
 			body["forceUnsafe"] = true
 		}
+	} else if reason := staleReadForceReason(cfg, action, payload); reason != "" {
+		// 写后回读放行位(stale_read_optin.go)。只在这一个咽喉上落到线上,并且
+		// 只对「PCB 域 + 不改画布 + 不受布线门管辖」的动作生效 —— 所以它不可能
+		// 顺带解锁 CheckRouteGate。daemon 收到后自己写 daemon.stale_read.force
+		// 审计行,app 侧不另造格式。
+		//
+		// 显式排在 forceReason 之后:人手敲的 --force-reason 语义更强,不该被一个
+		// 自动放行位覆盖掉(也不该把 forceUnsafe 带上 —— 那是布线门的东西)。
+		body["forceReason"] = reason
 	}
 	// Tell the daemon where to drop artifacts. Anchored to the project root
 	// (nearest .git/go.mod ancestor), falling back to cwd — and NEVER a path
@@ -810,6 +844,10 @@ func postAction(cfg *appConfig, action, window string, payload any, timeout time
 	// And for connector-attached warnings (partial property application #151,
 	// rebind re-place advisory, …) — visible without per-command wiring.
 	warnResponseWarnings(respBody, os.Stderr)
+	// Record the connector's FIFO ordering counters at the SAME choke point, so
+	// any later judgement has a baseline without every command threading one
+	// through by hand (conn_seq.go). Read-only bookkeeping; never fails a call.
+	connSeqObserve(window, cfg.project, respBody)
 	return respBody, nil
 }
 

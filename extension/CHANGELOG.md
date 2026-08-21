@@ -6,61 +6,180 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.0.12] - 2026-08-21
+## [1.1.1] — 2026-08-21
 
-### Added
-- `schematic.titleblock.health` and `easyeda sch titleblock-health --reload`
-  verify the official title-block model, drawing-sheet geometry, DRC status,
-  and persistence across a real document reload.
+### Docs — SKILL.md 顶部写清「这个 skill 单独装上没用」+ 连接器下载地址
 
-### Fixed
-- Retired every automated title-block write path. CLI and connector now reject
-  `schematic.titleblock.modify` with `UNSUPPORTED_RISKY_OPERATION` before the
-  EasyEDA API is called, preventing partial model corruption on failed writes.
-- `sch check` reports unreadable official title-block data as the blocking
-  `titleblock-model-corrupt` error; sheet metadata and text can no longer hide
-  that condition. Drawing readability now uses explicit `TITLE:`, `DESIGNER:`,
-  and `DESCRIPTION:` notes outside the title-block keep-out.
+从 skill 市场(skillhub / ClawHub)装到这份 skill 的人,拿到的只是**指挥说明**——
+真正干活的是本机 `easyeda` CLI/daemon 和 EasyEDA Pro 里的**连接器插件**,两个外部件
+一个都不能少。此前顶部只在一句话里夹带了插件市场链接,没有可直接照做的安装步骤。
 
-## [1.0.11] - 2026-08-20
+现在写成三步:① 一行装 CLI;② 连接器 `.eext` **两个下载入口**——立创EDA官方插件市场
+(一键装、可原地自动更新,但**版本可能滞后** CLI)与 GitHub Release 直下(与 CLI **严格
+同版**,四件套同版以它为准),并写明「同 uuid 更新必须先卸载旧的、导入后必须完全退出重启
+EasyEDA」这两个静默失败点;③ 开「允许外部交互」并用 `easyeda health` 验证。
 
-### Fixed
-- EasyEDA 3.2 now creates ordinary N-shaped network labels through its own
-  rendered toolbar and canvas interaction. The connector maps schematic
-  coordinates through the live SVG viewBox, commits the native Name property,
-  and verifies the rendered label text plus `netlabel-cross`; it never calls
-  the 3.x `createNetLabel` stub that leaves its Promise pending.
+CLI / daemon / 连接器行为**无改动**,纯文档版本。
 
-## [1.0.10] - 2026-08-20
+## [1.1.0] — 2026-08-21
 
-### Added
-- `schematic.netlabel.create` and `easyeda sch netlabel` for native ordinary
-  N-shaped network labels. The action uses the official API and reads back the
-  created native attribute before reporting success.
+本版把 `1.0.3`–`1.0.5` 三个未发布的中间版本一并放出。**minor 而非 patch,因为下面
+第一条是行为破坏性变更** —— 升级后一批此前「能跑」的 PCB 读会开始报错。
 
-### Fixed
-- EasyEDA 3.x rejects the public `createNetLabel` stub before it can hold the
-  action queue or silently substitute a net port or plain text.
-- `schematic.read` and `schematic.check` now expose manufacture-netlist
-  unavailability explicitly. Unknown pin nets are no longer reported as every
-  pin floating when EasyEDA returns no netlist file.
+### ⚠️ BREAKING — 铁律 5 从劝告升成机械门:PCB 脏读现在被**拒绝**
 
-## [1.0.9] - 2026-08-19
+PCB mutation(rip-up / route / delete / via / track / pour)之后、`easyeda doc reload`
+之前的 PCB 读(list / DRC / report / nets …),会被 daemon 在 `/action` 派发层**拒绝**,
+错误码 `STALE_READ`。此前它只是一行非阻塞的 stderr 警告。
 
-### Added
-- Native symbol, footprint, and device authoring actions with save/readback verification.
-- Typed PCB manufacturing exports for complete manufacture packages, Gerber, pick-and-place,
-  and IPC-2581C through the official EasyEDA APIs.
-- Schematic typed graphics/wire actions and reconstructed A4/title-block handling used by
-  native redraw playbooks.
+**为什么升门(有实测,不是拍脑袋)**:把 49 天 / 171554 条审计记录里每条铁律的**遵守率**
+和它在 SKILL.md 里占的**篇幅**对齐,两者完全反相关 —— 有 daemon 拦截的阶段门(铁律 14)
+7 次跳步全被拦、0 漏网;而只发警告的铁律 5 被违反 **1780 次(18.1%)**。文字铁律的
+天花板约 82%,机械门是 100%。
 
-### Fixed
-- CLI commands now hold a per-window transaction lease for their full lifetime, preventing a
-  second process from switching the active document between a `--doc` guard and its action.
-- PCB layout lint separates blocking pad-outside findings from body overhang, and evaluates
-  concave/irregular boards against the real outline polygon instead of only its bounding box.
-- Playbook preflight validates run commands and flags before execution, migrates legacy JSON
-  `--ids` arrays with a clear CSV diagnostic, and journals structured command/action failures.
+**拒绝消息自带能直接执行的下一步**,不只指路:
+
+```
+pcb.components.list —— PCB 自 pcb.line.create 后未 reload,读到的是旧引擎状态。
+下一步: easyeda doc reload --project ceshi
+(绕过: --force-reason "<理由>",入审计)
+```
+
+- **升级后要注意的**:布完线直接跑 `easyeda workflow advance` / `pcb check` /
+  `layout-score` 会撞 `STALE_READ`。**这不是命令坏了** —— 在旧引擎状态上判 check 门
+  本来就是假绿灯。先 `easyeda doc reload` 再跑。
+- **豁免**:`pcb.save` / `pcb.pour.rebuild` / 任何 `--dry-run` 预览 / 只改视图的
+  `view-side`·`layers set-current`·`layers visibility` / `pcb.snapshot`(它仍只带
+  advisory —— 截图白帧的修法是**切前台**而不是 reload,拒它等于递一条修不好问题的命令)。
+- **绕过**:`--force-reason "<理由>"`,审计里记成 `daemon.stale_read.force` 伪动作行。
+- 内部的「写后回读验证」类命令(`pcb refine` / `sync-designators` / `import-changes` /
+  `power-planes` / `power-pour` / `route-critical` / `autoroute` / `pcb clear` /
+  playbook `verify:` 块)已逐条加上**窄到一次调用**的放行位,不受影响;而 `refine`
+  下一轮开头的规划读等**仍然被拦** —— 那正是这道门要防的。
+
+### Changed — `STAGE_BLOCKED` 的拒绝消息也带上补门命令
+
+此前只说「see `easyeda workflow status`」,现在直接给出该跑哪条:
+`pcb stage confirm-tier` / `confirm-outline` / `pcb layout-lint --gate` /
+`workflow advance`,按缺的是哪道门决定。
+
+### Fixed — `copperLayerCount` 读不到时不再静默按 2 层降级
+
+板子若在命令开跑前就脏,一块 4 层板会被当成 2 层,于是走 `power-pour` 而不是
+`power-planes`,两条电源轨挤在同一层 —— 正是内电层要解决的那个冲突。现在会把降级
+明确说出来。
+
+### Changed — 连接器端口钉死 60832 + 指数退避
+
+见下方 `[1.0.5]` 条目全文。摘要:daemon 重启后的重连从「十几秒」降到 **~2-3s**;
+顺带修掉「`SLOW_RETRY_DELAY_MS = 10s` 因为看门狗每 3s 抢先调用而从未真正生效」。
+
+### Added — skill 发布链路
+
+- 适配 **Agent Skills 官方规范**:补齐 `license` / `compatibility` / `metadata`
+  三个字段,`skills-ref validate` 通过;版本号随 `make release` 自动同步。
+- **skillhub.cn 走 CI 自动发布**(订正旧结论「skillhub 无 CLI」——现在有真 CLI):
+  `release: published` → `.github/workflows/publish-skill.yml`。slug 为
+  `eda-agent-connector`,与立创插件市场的连接器条目同名。
+
+## [1.0.5] — 2026-08-20
+
+### Changed — 端口钉死 60832 + 指数退避重连(不再横扫 10 个口)
+
+**daemon 重启后的重连从「十几秒」变成「秒级」。** daemon 早就只绑 **一个** 固定端口
+60832 且**从不外溢**(`internal/app/cmd_daemon.go`:60832 被占就替换/拒绝,绝不换个口
+悄悄再起一个),但连接器这头还在扫 `60832-60841` 全段。60833-60841 **结构上不可能**
+有 daemon,扫它们是纯空转 —— 而 `eda.sys_WebSocket.register()` **从不报告「连接被拒」**,
+每个死端口都要烧满整个 `CONNECTION_TIMEOUT_MS`。用户真实插件日志(2026-08-20 23:41)
+里,光走 5 个死端口就花了 7 秒,且 `make dev`(air)**每改一次 `.go` 就要重连一次**。
+
+- **只试 60832**:默认端口表长度固定为 1。
+- **指数退避**:首次立即,失败后 0.5s → 1s → 2s → 4s → 8s 封顶,各带 ±25% 抖动。
+  一次尝试成本 ≈ 200ms(REGISTER_DELAY_MS)+ 1500ms(CONNECTION_TIMEOUT_MS),
+  所以 daemon 重启这种「一两秒就回来」的常见场景稳定在 **~2-3s 内重连**;真的长时间
+  没有 daemon 时则退到 8s 一次的安静轮询,对 EasyEDA 共享 socket 表的压力比原来固定
+  3s 轻约 3 倍,也比原来 10s 的慢轮询恢复更快。
+- **退避是真的生效的**:新增 `nextAttemptAt` 时间闸。看门狗每 3s 就会调一次重连,
+  原来的 `SLOW_RETRY_DELAY_MS = 10s` 因此**从来没有真正慢下来过**(定时器排的时间被
+  看门狗抢先)。现在所有非强制入口都要过这道闸;**手动重连 / 窗口回到前台 / 退避定时器
+  到点**这三条是强制路径,不受闸限制。
+- **换 wsId 的阈值 2 → 4**:一次「失败」过去是 ~18s 的整轮扫描,现在是 ~1.7s 的单次
+  尝试。阈值不动会把换 id 的节奏压到几秒一次,在 EasyEDA 共享的 socket 表里堆死 id
+  —— 正是这段逻辑当初要躲的 race。
+- **逃生口(没有焊死)**:扩展用户配置 `daemonPorts` 可覆盖端口 ——
+  `eda.sys_Storage.setExtensionUserConfig('daemonPorts', '60832-60841')`、
+  `'60840,60832'`、`60900` 都认;每次尝试开始时**实时读取**,改完下一轮重试就生效,
+  不必重装 `.eext`、不必重启 EasyEDA。坏值一律退回钉死的默认;覆盖列表封顶 12 个口
+  (手滑写 `1-65535` 不能把重连变成无尽扫描)。`60832-60841`(`0xEDA0`-`0xEDA9`)
+  仍是我们保留的专属段,依旧刻意远离官方 `eext-run-api-gateway` 的 `49620-49629`。
+- 回归测试 `src/transport-ports.test.ts`(离线,12 条)钉住:默认表长度必须为 1、
+  退避阶梯与封顶、抖动边界、逃生口解析与去重上限、多端口时 lastGood 优先。
+
+## [1.0.4] — 2026-08-20
+
+### Changed — 动作串行化(FIFO)+ 放弃机制 + 顺序证据三字段
+
+**行为变化,读写对齐的地基。** 此前连接器**并发处理动作**:
+`transport.ts` 把每条 WebSocket 消息交给各自的 onMessage 回调,而 `await`
+不跨回调排队,于是两条动作可以同时在飞。用真 transport.ts + 假 `eda` 全局跑的
+探针实测(2026-08-20):写还没 settle,读的 handler 已经开跑,响应也先发了出去。
+结果就是「先发写、再发读」在连接器里**不构成任何先后关系** —— 一次回读报
+「那里什么都没有」,既可能是真的没有,也可能是读得太早,两者在观测上完全等价。
+
+- **真 FIFO**:所有动作走 `handleRequest` 这一个咽喉,每窗口一条显式 promise 链,
+  一次只跑一个 handler。回归测试 `src/transport-fifo.test.ts` 驱动真 transport
+  钉住这一条。
+- **放弃机制**(与 FIFO 同等重要):队首超过**请求自带的 `timeoutMs`**(+2s 宽限,
+  晚于 daemon 自己的超时)仍未 settle,就放弃等待它、`seqAbandoned++`、队列继续
+  流动,并回一条 `ACTION_ABANDONED`。**截止时间绝不写死常数** —— `sch check`/DRC
+  这类合法长操作能跑 60s+,固定门会把它们全误杀。没有这条,一个永不 resolve 的
+  handler 会吞掉后续一切(真机见过:一次卡死让接下来 4.5 分钟的
+  place/delete/document.open 全部静默消失,而轻读照常)。
+- **顺序证据三字段**:每一条 response frame 新增 `seq`(已完成动作数,本动作完成
+  之后的值,单调递增)、`seqAbandoned`(累计被放弃数)、`unordered`(可选,true =
+  这条响应走了旁路通道、其 seq 不构成顺序证据),外加便利字段 `abandonedIds`
+  (最近 ≤32 条被放弃的 request id,让判定能点名而不只是数数)。
+- **旁路通道**:`document.current` 一条(名单短、理由写在 `action-queue.ts`)。
+  纯读、代价恒定、且「读得太早」的失败方向安全(它只会报旧页面让 `--doc` 门重试,
+  不可能谎报已切到目标页)。wedge 期「轻读还能用」是唯一的观测手段,不能因为串行化
+  而失去。旁路响应**必须**打 `unordered`。
+- **溢出保护**:队列积压上限 64,满了回 `QUEUE_OVERFLOW`(该动作**没有执行**),
+  不无限堆积。
+
+**seq 证明什么、不证明什么(别越界)**:它只证明「W 的 handler 在 R 的 handler
+开跑前就 settle 了」——**不是**「文档已提交」。`eda.*` 可能在 handler 返回后才落盘,
+那一层我们没有观测点。CLI 侧所有基于 seq 的措辞都停在这条边界内。
+
+**版本搭配**:
+- **老 CLI + 新连接器** —— 正常。三个字段是**新增的顶层字段**,老 daemon 解析响应
+  时直接忽略;FIFO/放弃对老 CLI 是纯粹的行为改善(不再有并发写读交错,卡死的队首
+  不再吞掉后续动作)。唯一可见差异:极端积压时会收到 `QUEUE_OVERFLOW`,老 CLI 把它
+  当普通失败报出。
+- **老连接器 + 新 CLI** —— 正常,但**判定降级**。`sch block-apply` 的 place 超时
+  收编会发现响应不带 `seq`/`seqAbandoned`,自动退回原来的探针启发式,并在报文里
+  打上「证据档:弱(探针启发式)」+ 升级连接器的下一步。**绝不会**因为缺字段就默认
+  「新鲜」。侧载的 `.eext` 与 CLI 严格同版;市场装的那份可能滞后若干 minor,那就是
+  会落到这一档的典型情形。
+
+### 随版 CLI 侧修复(连接器无关)
+
+本条记录随版 CLI 侧对「删除/组注册」三缺陷(esp32Mini E2E
+交接报告 §六 缺陷 2/3/4)的修复,便于版本对照:
+
+- **删器件级联删组注册(缺陷 2,P1)**:虚拟组注册表存在 **Go 侧**
+  (`workflow.State.GroupsByPage`,`~/.easyeda-agent/workflow/<project>.json`),
+  连接器的 component.delete 级联(ADR-0004 Decision 5,只清桩线/flag)够不到它。
+  现在 `sch prim-delete` 与 block-apply 回滚在**回读证实删除成功后**同步摘除该
+  位号的成员记录(指向死位号的 role 一并摘,组删净则删组)——位号复用不再被
+  陈旧组吃掉。
+- **删除不可靠→逐个删+回读证实+重试一次(缺陷 3,P1)**:平台批量 delete 静默
+  no-op 仍返 true(真机:zone-draw 删旧框 survived=4、回滚 deleted=false,逐个删
+  100% 成功)。Go 侧新增 `deleteVerifiedOneByOne` 统一语义;block-apply 回滚改
+  逐个 `component.delete`,zone-draw 删旧框/绘制回滚的 exec_js 内联同一套
+  逐个删+重试。判定只信回读。
+- **`sch group create --block-id/--instance/--roles`(缺陷 4,P1)**:组注册损坏后
+  可手工重登块溯源(与 block-apply 自动登记同一批字段),`sch reconcile` 恢复
+  机械对账(reconcile 需要 --block-id **加** --roles ROLE=位号)。
 
 ## [1.0.2] - 2026-08-19
 

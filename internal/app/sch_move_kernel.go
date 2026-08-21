@@ -14,15 +14,24 @@ package app
 //	├ 3. 移动   逐件 modify,坐标先 snap 到 5 网格(schAnchorGrid —— off-grid
 //	│           重连全拒的根因);modify 报错时**轻读复核**(负载停摆的假失败
 //	│           大概率写已落地,盲重试造重复、盲回退丢移动)
+//	├ 3.5 合并早检  删证是共线合并的触发时刻:此处读一次全页网表,把被合并
+//	│           吞掉的**第三方** pin 在新桩线落地前就修回(为何不在第 2 步内:
+//	│           netlist 族读紧贴 modify 会毒化写,而删证→移动之间零导线变更,
+//	│           后置检测保真度相同 —— 见步内注释)
 //	├ 4. 重连   显式计划端子(connect_pin,梯次桩长等参数由调用方闭包按实测
 //	│           pins 计算)+ 其余按快照 autoconnect(评分避让;器件在原位也能连回)
 //	└ 5. 对账   网表逐 pin 与快照比对(判据是电气不是坐标)+ bridge 增量检查
-//	            (合并短路当场抓);红 → 恢复段补连一轮再复查
+//	            (合并短路当场抓);红 → 恢复段**全页**补连(至多两轮)再复查
 //
-// 失败语义(#151 部分应用约定):任何一步失败 → 立即进入恢复段(对当前实际
-// 位置的全部涉及 pin 按快照重连 —— autoconnect 按当前几何重新解析引脚坐标,
-// 挪成没挪成的都能连回),然后返回结构化 moveReport;绝不留「桩线已清、器件
-// 没挪、连接全断」的 PARTIAL 尸体。恢复本身失败 → 如实列出仍断 pin。
+// 失败语义(#151 部分应用约定):任何一步失败 → 立即进入恢复段。恢复段的辖区
+// 是**全页**而非移动集合 —— 快照是 pin→net 全表,对账逐 pin 比对,所以第三方
+// 网被毁能检出;恢复段若只重连移动集合就是「抓到了但救不回」(esp32Mini P2:
+// 共线合并吞掉 GND 树上 9 个第三方地脚灌进 +3V3,页面只能删页重建)。做法:
+// 凡快照里有网名、现在断连或网名不符的 pin,一律按快照网名重连(灌错网的走
+// replace:带回读验证的 disconnect 后重连);autoconnect 按当前几何重新解析
+// 引脚坐标,挪成没挪成的都能连回。返回结构化 moveReport;绝不留「桩线已清、
+// 器件没挪、连接全断」的 PARTIAL 尸体。恢复本身失败 → 仍偏离 pin 连同期望
+// 网名结构化列全(REF→期望网,可直接喂 `sch connect`)。
 //
 // 教训出处(全部真机定案,见 ADR-0004 Context):
 //   - marker-move-breaks-on-wire-merge:删单根桩线触发相邻共线导线合并 → 串网;
@@ -92,8 +101,35 @@ type moveReport struct {
 	StillBroken []string // 恢复后仍断的 pin refs(可直接喂 `sch connect`)
 	NewBridges  []string // 对账检出的新增 wire-bridge(真短路)
 	NetDiffs    []string // 对账检出的网表差异(人类可读)
-	Notes       []string
+	// FreeConnected 是**几何不受任何计划约束**地落地的 pin(既没有显式计划端子,
+	// 也复现不出移动前的桩,只能交给 autoconnect 自由评分挑方向和桩长)。
+	//
+	// 为什么必须单独报:它是「规划 pass → 落地胖一档」的唯一结构性来源。真机
+	// MCU_IO 六区里两个区宽度凭空多了 82 / 126 —— 那不是标定误差,是某几支 marker
+	// 落到了规划根本没预测的一侧。调用方(zone-arrange 断言③)拿它点名归因,
+	// 「偏差可以有,但必须可见」。
+	FreeConnected []string
+	Notes         []string
 }
+
+// moveStubPolicy 是「重连时桩线伸多长」的策略 —— **挪动侧的那把尺**。
+//
+// 背景(2026-08-20 收敛性缺陷):内核第 4 步对「没有计划端子」的 pin 一律走
+// autoconnect 自由评分,而评分器的档位里常驻 min+k·laneStepFor(netport 一档
+// ~89)。于是**刚体平移**这种「几何不变地搬走」的操作,会把原本 30 的短桩换成
+// 107 的长桩:真机实测 group-move --dx 40 把 U 组框从 315×389 撑到 523×406
+// (+208 ≈ 两档),一次「挪一下让开」反而把 phase A 的区内收敛撤销了大半。
+// 用户/agent 的直觉操作不该破坏收敛成果。
+type moveStubPolicy string
+
+const (
+	// moveStubPreserve(默认):按移动前实测的桩线方向/长度原样重建。刚体平移的
+	// 语义就是几何不变,重连不该重新评分。
+	moveStubPreserve moveStubPolicy = "preserve"
+	// moveStubFree:退回 autoconnect 自由评分(旧行为)。**负对照与显式请求专用** ——
+	// 只有当调用方确实想让落点重新优化(而非复现)时才用。
+	moveStubFree moveStubPolicy = "free"
+)
 
 // moveKernelOpts 是内核的运行选项。
 type moveKernelOpts struct {
@@ -101,6 +137,82 @@ type moveKernelOpts struct {
 	RetryDelay time.Duration // connect_pin 单次重试前的等待(0 = 生产默认 2s)
 	Stdout     io.Writer
 	Stderr     io.Writer
+	// StubPolicy 空值 = moveStubPreserve。
+	StubPolicy moveStubPolicy
+	// MaxStub 是**常规重连步**里 autoconnect 的桩长硬上限(0 = 按下面的兜底推导)。
+	// zone-arrange 传规划里的最大桩长 —— 落地框就不会越过规划框。
+	//
+	// **恢复段有意不夹**:那是火警现场,把连接接回来比把框收窄重要;夹太死会把
+	// 「能自动救回」变成「N 个 pin 待手工恢复」。恢复段带来的伸展由 --apply 的
+	// 落地复判如实报出来(而不是打绿勾),这是「正确性 > 收敛性,但偏差必须可见」。
+	MaxStub float64
+}
+
+// stubRules 是常规重连步给 autoconnect 的规则(带硬上限)。
+func (o moveKernelOpts) stubRules(observedMax float64) autoconnectRules {
+	r := defaultAutoconnectRules()
+	cap := o.MaxStub
+	if cap <= 0 {
+		// 兜底上限:细档全留(OffsetMax=80),但砍掉 laneStepFor 的标准档位
+		// (netport 一档 ~89、三档 ~285)与无上界的 extendedOffsets —— 那才是把
+		// 组框撑成本体几倍的那一段。页面本来就有更长的桩时按页面来,不倒逼收紧。
+		cap = maxF(r.OffsetMax, observedMax)
+	}
+	r.OffsetCap = cap
+	return r
+}
+
+// moveKernelStubSnapshot 读出 pin **移动前**的桩线几何(方向 + 长度 + 标记
+// 类型/网名),供 preserve 策略与恢复段原样重建。key = "DESIG:PIN"(全大写,与
+// acConnSpec.PinRef / covered 同口径)。
+//
+// memberSet 为 nil = **全页快照**。恢复段/合并早检治的是**第三方** pin(共线合并
+// 吞掉的是别人的脚),只快照移动集合等于「知道怎么修的偏偏不修」:那些 pin 会被
+// 自由 autoconnect 重新评分,几何跟原来无关,邻区的框当场被撑胖。快照是纯函数,
+// 全页也不多花一次平台调用。
+//
+// 纯函数:只吃场景快照,不碰平台 —— 判据与执行同一份数据(判定坐标 = 落地坐标)。
+// 只认「pin 在导线树上且树上有可重建标记(netflag/netport)」的桩;普通导线直连、
+// netlabel 等重建不了的,留给 autoconnect,不硬塞。
+func moveKernelStubSnapshot(memberSet map[string]bool, comps []layoutComp, wires []schGroupWire) map[string]moveConnTerm {
+	roots := tidyWireRoots(wires)
+	var markers []layoutComp
+	for _, c := range comps {
+		if isSchMarker(c.ComponentType) {
+			markers = append(markers, c)
+		}
+	}
+	out := map[string]moveConnTerm{}
+	for _, c := range comps {
+		if c.ComponentType != "" && c.ComponentType != schLayoutPartType && c.ComponentType != "part" {
+			continue
+		}
+		if memberSet != nil && !memberSet[strings.ToUpper(strings.TrimSpace(c.Designator))] {
+			continue
+		}
+		for _, p := range c.Pins {
+			m, hasM, onWire := tidyPinAttachment(p.X, p.Y, wires, roots, markers)
+			if !onWire || !hasM || m.Net == "" {
+				continue
+			}
+			kind := tidyRestoreKind(m.ComponentType, m.Net)
+			if kind == "" {
+				continue // netlabel 等:connect_pin 重建不了
+			}
+			dir, off := tidyStubDirection(p.X, p.Y, m.X, m.Y)
+			if dir == "" || off <= 0 {
+				continue // 标记压在 pin 上(零长桩):没有可复现的几何
+			}
+			rot, rerr := tidyLabelRotation(kind, dir)
+			if rerr != nil {
+				continue
+			}
+			out[strings.ToUpper(strings.TrimSpace(c.Designator))+":"+p.Number] = moveConnTerm{
+				Pin: p.Number, Kind: kind, Net: m.Net, Direction: dir, Rotation: rot, Offset: off,
+			}
+		}
+	}
+	return out
 }
 
 // moveKernelOps 是内核对平台的全部依赖面 —— 生产走 daemonMoveOps(连接器),
@@ -125,9 +237,110 @@ type moveKernelOps interface {
 	// 该件无锚坐标)。
 	anchorOf(desig string) (x, y float64, ok bool, err error)
 	connectPin(pinX, pinY float64, t moveConnTerm) error
-	autoconnect(conns []acConnSpec) (succeeded, failed []string, err error)
+	// autoconnect 按快照网名连回;replace=true 时对「已连在别的网」的 pin 先走
+	// 带回读验证的 schematic.pin.disconnect 再重连(autoconnect --replace 语义)
+	// —— 恢复段治「灌错网」(9 个地脚被灌进 +3V3)必需,普通重连保持 false。
+	// rules 带桩长硬上限(OffsetCap):常规重连步夹住,恢复段传默认(见
+	// moveKernelOpts.MaxStub 的注释)。
+	autoconnect(conns []acConnSpec, replace bool, rules autoconnectRules) (succeeded, failed []string, err error)
 	// bridgeSignatures 返回当前全部 wire-bridge 的排序签名(如 "[GND,5V]")。
 	bridgeSignatures() ([]string, error)
+}
+
+// movePinDeficit 是「与电气快照不符」的一只 pin —— **全页范围,不限移动集合**。
+// esp32Mini P2 实锤:删桩线触发相邻共线导线合并,吞掉的是 GND 树上**第三方**
+// (非移动件)的脚(9 个地脚被灌进 +3V3、GND 整网消失);对账逐 pin 比对能检出,
+// 但恢复段若只重连移动集合就是「抓到了但救不回」。deficit 把 diff 解析成可
+// 重连的三元组,喂给 replace-autoconnect。
+type movePinDeficit struct {
+	Ref     string // DESIG:PIN(`sch connect --pin` 格式)
+	WantNet string // 快照网名;"" = 快照里本是浮空(现在却有网 → 只能拆不能连)
+	GotNet  string // 当前网名;"" = 当前断连
+}
+
+// String 输出结构化清单项:可重连的 = 「REF→期望网」(可直接喂 `sch connect
+// --pin REF --net 期望网`);快照浮空却被灌进网的 = 只能手工拆
+// (`sch disconnect --pin REF`),自动拆共享树风险太高(拆树会连累树上无辜 pin)。
+func (d movePinDeficit) String() string {
+	if d.WantNet != "" {
+		return d.Ref + "→" + d.WantNet
+	}
+	return fmt.Sprintf("%s(快照浮空,现被灌进 %s,需 `sch disconnect --pin %s`)", d.Ref, d.GotNet, d.Ref)
+}
+
+// moveKernelPinDeficits 逐 pin 比对快照与当前网表,返回全部偏离 pin。
+// ref 形如 "R1.2"(netlist 口径),输出转成 "R1:2"(connect/autoconnect 口径)。
+func moveKernelPinDeficits(before, after map[string]map[string]bool) []movePinDeficit {
+	pinNetOf := func(live map[string]map[string]bool) map[string]string {
+		out := map[string]string{}
+		for net, pins := range live {
+			for ref := range pins {
+				out[strings.ToUpper(ref)] = net
+			}
+		}
+		return out
+	}
+	wantBy, gotBy := pinNetOf(before), pinNetOf(after)
+	seen := map[string]bool{}
+	var defs []movePinDeficit
+	add := func(key, want, got string) {
+		if seen[key] || want == got {
+			return
+		}
+		seen[key] = true
+		defs = append(defs, movePinDeficit{Ref: strings.Replace(key, ".", ":", 1), WantNet: want, GotNet: got})
+	}
+	for key, want := range wantBy {
+		add(key, want, gotBy[key])
+	}
+	for key, got := range gotBy {
+		add(key, wantBy[key], got)
+	}
+	// 定序与 groupRebuildConnSpecs 同理由:电源 → 地 → 信号(先落满方向最固定的
+	// marker,信号才有得绕);拆不了的(WantNet 空)排最后,只进清单不进重连。
+	kindRank := map[string]int{"power": 0, "gnd": 1, "agnd": 1, "pgnd": 1}
+	rank := func(d movePinDeficit) int {
+		if d.WantNet == "" {
+			return 3
+		}
+		if r, ok := kindRank[bapFlagKind(d.WantNet)]; ok {
+			return r
+		}
+		return 2
+	}
+	sort.Slice(defs, func(i, j int) bool {
+		if ri, rj := rank(defs[i]), rank(defs[j]); ri != rj {
+			return ri < rj
+		}
+		if defs[i].WantNet != defs[j].WantNet {
+			return defs[i].WantNet < defs[j].WantNet
+		}
+		return defs[i].Ref < defs[j].Ref
+	})
+	return defs
+}
+
+// moveKernelDeficitSpecs 把 deficits 拆成「可自动重连的 autoconnect 规格」和
+// 「只能手工拆的」两份。
+func moveKernelDeficitSpecs(defs []movePinDeficit) (specs []acConnSpec, manual []movePinDeficit) {
+	for _, d := range defs {
+		if d.WantNet == "" {
+			manual = append(manual, d)
+			continue
+		}
+		specs = append(specs, acConnSpec{PinRef: d.Ref, Kind: bapFlagKind(d.WantNet), Net: d.WantNet})
+	}
+	return specs, manual
+}
+
+// moveKernelFormatDeficits 输出结构化待手工清单(报告从「页面已毁」降级为
+// 「N 个 pin 待手工恢复,清单如下」的载体)。
+func moveKernelFormatDeficits(defs []movePinDeficit) []string {
+	out := make([]string, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, d.String())
+	}
+	return out
 }
 
 // schMoveKernel 是生产入口:cfg 必须是已 pin 的配置,window 是解析后的窗口,
@@ -194,6 +407,83 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 		return rep, fmt.Errorf("%s:页面器件数为 0 且网表为空,与 %d 个待移动成员矛盾 —— 目标页可能已被重建,拒绝操作(画布零改动);`easyeda doc ls` 核对后重跑",
 			label, len(items))
 	}
+	// 桩线快照:成员 pin 移动前的桩几何(preserve 策略原样重建的原料)。必须在
+	// **删证之前**从同一份场景快照取 —— 删完就没得量了。
+	policy := opts.StubPolicy
+	if policy == "" {
+		policy = moveStubPreserve
+	}
+	// **快照恒建**(全页),与 StubPolicy 无关:policy 决定「常规重连步要不要原样
+	// 重建」,而恢复段/合并早检无论如何都该按已知几何重连 —— 那不是优化偏好,
+	// 是「知道原来长什么样就别乱猜」。free 策略只关掉常规步的复现,不该连
+	// 「火警现场的记忆」一起关掉。
+	stubSnap := moveKernelStubSnapshot(nil, comps, wires)
+	rotBefore := map[string]float64{}
+	for _, c := range comps {
+		if c.Rotation != nil {
+			rotBefore[strings.ToUpper(strings.TrimSpace(c.Designator))] = *c.Rotation
+		}
+	}
+	// knownTerm 是「这只 pin 该长什么样」的唯一查询口:移动前的实测桩几何,
+	// 第 4 步执行过的显式计划端子会覆盖进来(计划比旧几何更权威)。
+	knownTerm := map[string]moveConnTerm{}
+	for k, v := range stubSnap {
+		knownTerm[k] = v
+	}
+	// freeSet 记「几何不受计划约束地落地」的 pin(见 moveReport.FreeConnected)。
+	// 成功与失败两条路都要带出去 —— 所以在这里就把收尾登记成 defer,而不是散在
+	// 每个 return 前(散着写必然漏,而漏掉就等于又打了一次没有依据的绿勾)。
+	freeSet := map[string]bool{}
+	markFree := func(refs ...string) {
+		for _, r := range refs {
+			freeSet[strings.ToUpper(r)] = true
+		}
+	}
+	defer func() {
+		for r := range freeSet {
+			rep.FreeConnected = append(rep.FreeConnected, r)
+		}
+		sort.Strings(rep.FreeConnected) // 确定性:输出与 map 遍历序无关
+	}()
+	// rebuildKnown 按 knownTerm 把「单纯断连」的 pin 用原几何连回来,返回已重建的
+	// ref 集合。**只治 GotNet == ""**:被灌进别的网的 pin 得先拆(replace),那条
+	// 路仍归 autoconnect。失败不算数(交后面的 autoconnect 兜底),所以它永远只
+	// 提升几何保真度,不影响正确性 —— autoconnect 对已连对的 pin 幂等跳过。
+	rebuildKnown := func(defs []movePinDeficit) map[string]bool {
+		done := map[string]bool{}
+		pinsCache := map[string][]layoutPin{}
+		for _, d := range defs {
+			if d.WantNet == "" || d.GotNet != "" {
+				continue
+			}
+			ref := strings.ToUpper(d.Ref)
+			t, ok := knownTerm[ref]
+			if !ok || !strings.EqualFold(t.Net, d.WantNet) {
+				continue // 不知道原几何 / 语义已变 → 交自由评分,别硬猜
+			}
+			desig := strings.SplitN(ref, ":", 2)[0]
+			pins, ok := pinsCache[desig]
+			if !ok {
+				var perr error
+				if pins, perr = ops.settledPins(desig); perr != nil {
+					continue
+				}
+				pinsCache[desig] = pins
+			}
+			px, py, okp := tidyPinCoord(pins, t.Pin)
+			if !okp {
+				continue
+			}
+			if cerr := ops.connectPin(px, py, t); cerr != nil {
+				time.Sleep(opts.RetryDelay)
+				if cerr = ops.connectPin(px, py, t); cerr != nil {
+					continue
+				}
+			}
+			done[ref] = true
+		}
+		return done
+	}
 	conns, movable := groupRebuildConnSpecs(comps, memberSet, live)
 	byDesig := map[string]groupRebuildMember{}
 	for _, m := range movable {
@@ -223,32 +513,122 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 	}
 	deleteIDs = dropSheetIDs(uniqueIDs(deleteIDs), comps)
 
-	// 恢复段(共用):对当前实际位置的全部涉及 pin 按快照重连。autoconnect 按
-	// **当前几何**重新解析引脚坐标,所以挪成的在新位置、没挪成的在原位都能连回;
-	// 已连着的 pin 幂等跳过(State=already-connected),不会叠重复 marker。
-	recoverConns := func(stage string, cause error) error {
-		if len(conns) == 0 {
-			return fmt.Errorf("%s %s:%w(涉及成员没有已连引脚,画布上无断点)", label, stage, cause)
-		}
-		fmt.Fprintf(stderr, "warn: %s %s失败 —— 立即按快照对全部 %d 个引脚重连(器件停在当前位置)\n", label, stage, len(conns))
-		succ, failed, rerr := ops.autoconnect(conns)
-		rep.Recovered = succ
-		rep.StillBroken = failed
-		if rerr != nil && len(succ)+len(failed) == 0 {
-			refs := make([]string, 0, len(conns))
-			for _, c := range conns {
-				refs = append(refs, c.PinRef)
+	// netOfSpec:快照里该 pin 的期望网(标注仍断 pin 用,喂 `sch connect`)。
+	netOfSpec := map[string]string{}
+	for _, c := range conns {
+		netOfSpec[strings.ToUpper(c.PinRef)] = c.Net
+	}
+	annotateRefs := func(refs []string) []string {
+		out := make([]string, 0, len(refs))
+		for _, r := range refs {
+			if net := netOfSpec[strings.ToUpper(r)]; net != "" && !strings.Contains(r, "→") {
+				out = append(out, r+"→"+net)
+				continue
 			}
-			rep.StillBroken = refs
-			return fmt.Errorf("%s %s:%w;恢复重连本身失败(%v),以下引脚仍断开,逐脚 `sch connect` 补:%s",
-				label, stage, cause, rerr, strings.Join(refs, " "))
+			out = append(out, r)
 		}
-		if len(failed) > 0 {
-			return fmt.Errorf("%s %s:%w;恢复段已自动重连 %d 成 %d 败,仍断引脚(逐脚 `sch connect` 补):%s",
-				label, stage, cause, len(succ), len(failed), strings.Join(failed, " "))
+		return out
+	}
+	// pageDeficits:读当前网表,算**全页**偏离 pin(不限移动集合)。空表守卫:
+	// netlist 引擎会被坏原语毒死静默返 0 —— 快照非空而当前读回全空时不可信,
+	// 按「读失败」处理,绝不据此生成「全页皆断」的假 deficit。
+	pageDeficits := func() ([]movePinDeficit, error) {
+		cur, lerr := ops.liveNets()
+		if lerr != nil {
+			return nil, lerr
 		}
-		return fmt.Errorf("%s %s:%w;恢复段已按快照重连 %d/%d 个引脚(电气未断,器件停在当前位置)",
-			label, stage, cause, len(succ), len(conns))
+		if len(cur) == 0 && len(live) > 0 {
+			return nil, fmt.Errorf("当前网表读回为空而快照有 %d 张网 —— netlist 引擎疑似被毒死/读到坏帧,本轮不采信", len(live))
+		}
+		return moveKernelPinDeficits(live, cur), nil
+	}
+
+	// 恢复段(共用):按快照把**全页**偏离 pin 拉回,不限移动集合 —— 删桩线触发
+	// 的相邻共线导线合并吞的是**第三方** pin(esp32Mini P2:GND 树上 9 个别人的
+	// 地脚被灌进 +3V3),只救移动集合 = 「抓到了但救不回」。做法:移动集合快照
+	// conns ∪ 全页 deficit 规格,replace=true(灌错网的 pin 先走带回读验证的
+	// disconnect 再重连);autoconnect 按**当前几何**重新解析引脚坐标,挪成的在
+	// 新位置、没挪成的在原位都能连回;已连对的 pin 幂等跳过,不叠重复 marker。
+	// 收尾复读一轮:仍偏离的 pin 连同期望网名结构化列全(REF→期望网,可直接喂
+	// `sch connect`),报告从「页面已毁」降级为「N 个 pin 待手工恢复」。
+	recoverConns := func(stage string, cause error) error {
+		specs := append([]acConnSpec(nil), conns...)
+		haveSpec := map[string]bool{}
+		for _, c := range specs {
+			haveSpec[strings.ToUpper(c.PinRef)] = true
+		}
+		var manual []movePinDeficit
+		if defs, derr := pageDeficits(); derr != nil {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("恢复段读全页网表失败(%v)—— 降级为只按移动集合快照重连", derr))
+		} else {
+			// 先按**已知几何**把单纯断连的 pin 连回来(全页,含第三方):恢复段
+			// 过去一律走自由评分,于是「救回来了」的同时把几何换了 —— 正确性
+			// 拿回来,收敛性丢出去。重建失败的仍旧落进下面的 autoconnect。
+			rebuilt := rebuildKnown(defs)
+			if len(rebuilt) > 0 {
+				rep.Notes = append(rep.Notes, fmt.Sprintf("恢复段:%d 只 pin 按移动前桩线几何原样重建(其余走自由评分)", len(rebuilt)))
+			}
+			for _, d := range defs {
+				if !rebuilt[strings.ToUpper(d.Ref)] && d.WantNet != "" {
+					markFree(d.Ref)
+				}
+			}
+			dspecs, dmanual := moveKernelDeficitSpecs(defs)
+			manual = dmanual
+			for _, s := range dspecs {
+				if !haveSpec[strings.ToUpper(s.PinRef)] {
+					haveSpec[strings.ToUpper(s.PinRef)] = true
+					specs = append(specs, s)
+					netOfSpec[strings.ToUpper(s.PinRef)] = s.Net
+				}
+			}
+		}
+		if len(specs) == 0 && len(manual) == 0 {
+			return fmt.Errorf("%s %s:%w(涉及成员没有已连引脚且全页网表与快照一致,画布上无断点)", label, stage, cause)
+		}
+		fmt.Fprintf(stderr, "warn: %s %s失败 —— 立即按快照对全页 %d 个引脚重连(含第三方偏离 pin;器件停在当前位置)\n", label, stage, len(specs))
+		succ, failed, rerr := ops.autoconnect(specs, true, defaultAutoconnectRules())
+		rep.Recovered = succ
+		if rerr != nil && len(succ)+len(failed) == 0 {
+			refs := make([]string, 0, len(specs))
+			for _, c := range specs {
+				refs = append(refs, c.PinRef+"→"+c.Net)
+			}
+			rep.StillBroken = append(refs, moveKernelFormatDeficits(manual)...)
+			return fmt.Errorf("%s %s:%w;恢复重连本身失败(%v),以下引脚待手工恢复(REF→期望网,逐脚 `sch connect`):%s",
+				label, stage, cause, rerr, strings.Join(rep.StillBroken, " "))
+		}
+		// 复读验证:autoconnect 的成败自报不是证明(负载停摆期报失败的写大概率已
+		// 落地)。以「autoconnect 自报失败 ∪ 复读仍偏离」为准 —— 复读只能加名单
+		// 不能销名单,单次读不足以证明「没断」。
+		still := annotateRefs(failed)
+		haveStill := map[string]bool{}
+		for _, s := range still {
+			haveStill[strings.ToUpper(s)] = true
+		}
+		if defs, derr := pageDeficits(); derr == nil {
+			for _, item := range moveKernelFormatDeficits(defs) {
+				if !haveStill[strings.ToUpper(item)] {
+					haveStill[strings.ToUpper(item)] = true
+					still = append(still, item)
+				}
+			}
+		} else {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("恢复段复读验证失败(%v)—— 仍断名单仅含 autoconnect 自报失败", derr))
+		}
+		for _, m := range moveKernelFormatDeficits(manual) {
+			if !haveStill[strings.ToUpper(m)] {
+				haveStill[strings.ToUpper(m)] = true
+				still = append(still, m)
+			}
+		}
+		rep.StillBroken = still
+		if len(still) > 0 {
+			return fmt.Errorf("%s %s:%w;恢复段已自动重连 %d 成,%d 个 pin 待手工恢复(REF→期望网,逐脚 `sch connect`;标注 disconnect 的先拆):%s",
+				label, stage, cause, len(succ), len(still), strings.Join(still, " "))
+		}
+		return fmt.Errorf("%s %s:%w;恢复段已按快照重连全页 %d/%d 个引脚,复读与快照一致(电气未断,器件停在当前位置)",
+			label, stage, cause, len(succ), len(specs))
 	}
 
 	// ── 2. 删证 ────────────────────────────────────────────────────────────
@@ -363,6 +743,58 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 		fmt.Fprintf(stdout, "  移动:%d 件落位(snap 5 网格)\n", len(rep.Moved))
 	}
 
+	// ── 3.5 合并早检(轻量增量 spot-check)───────────────────────────────────
+	// 删证(第 2 步)删桩线正是触发「相邻共线导线自动合并」的时刻(marker-move
+	// 三败定案)—— 合并吞掉的是第三方 pin,不等第 5 步对账,这里就查一次全页网表、
+	// 把偏离的**第三方** pin 当场修回(成员 pin 此刻本来就该浮空,第 4 步才重连,
+	// 不参与判定)。为什么不严格放在第 2 步里:netlist 族读操作紧贴 modify 会
+	// 毒化下一条写(pins-readback-poisons-modify,唯一解是排序);而删证→移动
+	// 之间没有任何导线变更(modify 的对象此刻身上零导线),检测保真度完全相同,
+	// 所以后置到移动步之后、重连步之前 —— 既避开毒化,又赶在新桩线落地前修复。
+	if len(deleteIDs) > 0 {
+		if defs, derr := pageDeficits(); derr != nil {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检读网表失败(%v)—— 交第 5 步对账兜底", derr))
+		} else {
+			var third []movePinDeficit
+			for _, d := range defs {
+				desig := strings.ToUpper(strings.SplitN(d.Ref, ":", 2)[0])
+				if !memberSet[desig] {
+					third = append(third, d)
+				}
+			}
+			if len(third) > 0 {
+				items := moveKernelFormatDeficits(third)
+				rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检:删证已触发相邻共线导线合并,波及 %d 个第三方 pin(%s)—— 在新桩线落地前修复",
+					len(third), strings.Join(items, " ")))
+				fmt.Fprintf(stderr, "  ⚠ 合并早检:删证波及 %d 个第三方 pin(%s)—— 按快照 replace 重连\n", len(third), strings.Join(items, " "))
+				// 单纯被吞掉(现在断连)的第三方 pin 先按**它自己移动前的桩几何**
+				// 重建 —— 全页快照就是为这一步存在的。被灌进别的网的仍走 replace。
+				rebuilt := rebuildKnown(third)
+				if len(rebuilt) > 0 {
+					rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检:%d 只第三方 pin 按原桩几何重建(邻区的框不跟着变形)", len(rebuilt)))
+				}
+				for _, d := range third {
+					if !rebuilt[strings.ToUpper(d.Ref)] && d.WantNet != "" {
+						markFree(d.Ref)
+					}
+				}
+				specs, manual := moveKernelDeficitSpecs(third)
+				if len(specs) > 0 {
+					if succ, failed, aerr := ops.autoconnect(specs, true, defaultAutoconnectRules()); aerr != nil && len(succ)+len(failed) == 0 {
+						rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检修复未跑起来(%v)—— 交第 5 步对账+恢复段兜底", aerr))
+					} else if len(failed) > 0 {
+						rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检修复 %d 成 %d 败(%s)—— 交第 5 步对账+恢复段兜底",
+							len(succ), len(failed), strings.Join(failed, " ")))
+					}
+				}
+				if len(manual) > 0 {
+					rep.Notes = append(rep.Notes, fmt.Sprintf("合并早检:%d 个 pin 快照浮空却被灌进网,只能手工拆:%s",
+						len(manual), strings.Join(moveKernelFormatDeficits(manual), " ")))
+				}
+			}
+		}
+	}
+
 	// ── 4. 重连 ────────────────────────────────────────────────────────────
 	covered := map[string]bool{}
 	var termFails []string
@@ -379,7 +811,11 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 			return rep, recoverConns("重连(展开计划端子)", fmt.Errorf("%s:%w", it.Designator, terr))
 		}
 		for _, t := range terms {
-			covered[strings.ToUpper(it.Designator+":"+t.Pin)] = true
+			ref := strings.ToUpper(it.Designator + ":" + t.Pin)
+			covered[ref] = true
+			// 计划端子比旧几何权威:恢复段要复现的是**这一次**该长的样子,
+			// 不是上一版页面的样子(否则「救回来」等于把收敛撤销)。
+			knownTerm[ref] = t
 			px, py, okp := tidyPinCoord(pins, t.Pin)
 			if !okp {
 				termFails = append(termFails, fmt.Sprintf("%s:%s(实测无此 pin)", it.Designator, t.Pin))
@@ -396,20 +832,97 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 			}
 		}
 	}
+	// 计划端子没覆盖到的 pin:preserve 策略下**先按移动前的桩几何原样重建**,
+	// 剩下真的复现不了的才交 autoconnect 评分。这一步是「刚体平移不撑胖区框」的
+	// 本体 —— 挪一件不该顺手把它的短桩换成评分器挑的长桩。
+	// 转姿态的件排除在外:桩方向跟着符号转,原方向已经不成立(那类件本来就该由
+	// 调用方给显式 Terms)。
+	reoriented := map[string]bool{}
+	for _, it := range items {
+		d := strings.ToUpper(it.Designator)
+		switch {
+		case len(it.RotCandidates) > 0:
+			reoriented[d] = true
+		case it.Rot != nil:
+			// 「传了 rot」不等于「转了」:zone relayout 会把**现值**原样传下来占位。
+			// 真的与现姿态不同才排除 —— 否则整条 placement-first 路径白白丢掉复现。
+			cur, known := rotBefore[d]
+			if !known || math.Abs(*it.Rot-cur) > 1e-6 {
+				reoriented[d] = true
+			}
+		}
+	}
+	var rest []acConnSpec
+	preservedBy := map[string][]moveConnTerm{} // 位号 → 待原样重建的桩
+	preservedN, observedMaxStub := 0, 0.0
+	for _, c := range conns {
+		ref := strings.ToUpper(c.PinRef)
+		if covered[ref] {
+			continue
+		}
+		desig := strings.ToUpper(strings.SplitN(c.PinRef, ":", 2)[0])
+		t, hasStub := stubSnap[ref]
+		// 调用方给了硬上限(zone-arrange 传规划最长桩)时,**原样重建也要服从它**:
+		// 「复现旧几何」在收敛场景下会把老页面横跨半页的长桩搬进新框里,那正是
+		// 收敛要消灭的东西。超限的退回 autoconnect(它也被同一个上限夹着)。
+		overCap := opts.MaxStub > 0 && t.Offset > opts.MaxStub
+		// 网名必须与快照一致才敢原样重建:不一致说明这只 pin 的连接语义已经变了,
+		// 复现旧几何等于把它接回旧网(判定与落地必须同一件事)。
+		if policy == moveStubPreserve && hasStub && !overCap && !reoriented[desig] && strings.EqualFold(t.Net, c.Net) {
+			preservedBy[desig] = append(preservedBy[desig], t)
+			preservedN++
+			observedMaxStub = maxF(observedMaxStub, t.Offset)
+			continue
+		}
+		rest = append(rest, c)
+	}
+	if preservedN > 0 {
+		desigs := make([]string, 0, len(preservedBy))
+		for d := range preservedBy {
+			desigs = append(desigs, d)
+		}
+		sort.Strings(desigs) // 确定性:重建顺序与 map 遍历序无关
+		for _, d := range desigs {
+			pins, perr := ops.settledPins(d)
+			if perr != nil {
+				// 读不到实测引脚就复现不了 —— 退回 autoconnect,不硬猜坐标。
+				for _, t := range preservedBy[d] {
+					rest = append(rest, acConnSpec{PinRef: d + ":" + t.Pin, Kind: bapFlagKind(t.Net), Net: t.Net})
+				}
+				rep.Notes = append(rep.Notes, fmt.Sprintf("%s 原样重建读引脚失败(%v)—— 该件退回 autoconnect 评分", d, perr))
+				continue
+			}
+			for _, t := range preservedBy[d] {
+				px, py, okp := tidyPinCoord(pins, t.Pin)
+				if !okp {
+					rest = append(rest, acConnSpec{PinRef: d + ":" + t.Pin, Kind: bapFlagKind(t.Net), Net: t.Net})
+					continue
+				}
+				cerr := ops.connectPin(px, py, t)
+				if cerr != nil {
+					time.Sleep(opts.RetryDelay)
+					cerr = ops.connectPin(px, py, t)
+				}
+				if cerr != nil {
+					termFails = append(termFails, fmt.Sprintf("%s:%s(原样重建 %v)", d, t.Pin, cerr))
+				}
+			}
+		}
+		fmt.Fprintf(stdout, "  重连:%d 只 pin 按移动前桩线几何原样重建(刚体平移不改桩长)\n", preservedN)
+	}
 	if len(termFails) > 0 {
 		// 端子失败不打断(zone-arrange 首跑教训:中途回滚对着卡死的连接器全数
 		// 无效,好的没保住坏的没修好)—— 交给第 5 步对账 + 恢复段兜底。
 		rep.Notes = append(rep.Notes, fmt.Sprintf("计划端子重连失败 %d 处(交对账兜底):%s", len(termFails), strings.Join(termFails, ";")))
 		fmt.Fprintf(stderr, "  ⚠ 计划端子重连失败 %d 处 —— 交对账修复\n", len(termFails))
 	}
-	var rest []acConnSpec
-	for _, c := range conns {
-		if !covered[strings.ToUpper(c.PinRef)] {
-			rest = append(rest, c)
-		}
-	}
 	if len(rest) > 0 {
-		succ, failed, aerr := ops.autoconnect(rest)
+		// 这一批的几何**不在任何计划里**:方向由评分器挑、桩长只被 OffsetCap 夹住。
+		// 它是「规划 pass → 落地胖一档」的结构性来源,必须点名带回调用方(断言③)。
+		for _, c := range rest {
+			markFree(c.PinRef)
+		}
+		succ, failed, aerr := ops.autoconnect(rest, false, opts.stubRules(observedMaxStub))
 		if aerr != nil && len(succ)+len(failed) == 0 {
 			return rep, recoverConns("重连", aerr)
 		}
@@ -424,22 +937,22 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 	for _, b := range bridgeBefore {
 		baseline[b] = true
 	}
-	reconcile := func() (diffs, newBridges []string, err error) {
+	reconcile := func() (diffs, newBridges []string, after map[string]map[string]bool, err error) {
 		after, aerr := ops.liveNets()
 		if aerr != nil {
-			return nil, nil, fmt.Errorf("读移动后网表(没有证明不算过):%w", aerr)
+			return nil, nil, nil, fmt.Errorf("读移动后网表(没有证明不算过):%w", aerr)
 		}
 		diffs = groupRebuildNetDiff(before, groupRebuildSnapshotOf(after))
 		bridgeAfter, berr := ops.bridgeSignatures()
 		if berr != nil {
-			return nil, nil, fmt.Errorf("bridge-check 无法运行(没有证明不算过):%w", berr)
+			return nil, nil, nil, fmt.Errorf("bridge-check 无法运行(没有证明不算过):%w", berr)
 		}
 		for _, b := range bridgeAfter {
 			if !baseline[b] {
 				newBridges = append(newBridges, b)
 			}
 		}
-		return diffs, newBridges, nil
+		return diffs, newBridges, after, nil
 	}
 	describeRed := func(diffs, newBridges []string) string {
 		var parts []string
@@ -452,7 +965,7 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 		}
 		return strings.Join(parts, ";")
 	}
-	diffs, newBridges, rerr := reconcile()
+	diffs, newBridges, afterCur, rerr := reconcile()
 	if rerr != nil {
 		return rep, recoverConns("对账", rerr)
 	}
@@ -460,28 +973,105 @@ func schMoveKernelWith(ops moveKernelOps, items []moveItem, opts moveKernelOpts)
 		fmt.Fprintf(stdout, "✓ %s 对账:网表逐引脚一致、无新增 bridge(%d 移动 / %d no-op)\n", label, len(rep.Moved), len(rep.Skipped))
 		return rep, nil
 	}
-	// 对账红 → 恢复段补连一轮(autoconnect 对已连 pin 幂等跳过,断点按当前几何
-	// 连回)→ 复查一轮后如实上报。
-	fmt.Fprintf(stderr, "  ⚠ %s 对账首轮红(%d 差异 / %d 新增 bridge)—— 恢复段按快照补连后复查\n", label, len(diffs), len(newBridges))
-	succ, failed, aerr := ops.autoconnect(conns)
-	rep.Recovered = succ
-	rep.StillBroken = failed
-	if aerr != nil && len(succ)+len(failed) == 0 {
-		rep.NetDiffs, rep.NewBridges = diffs, newBridges
-		return rep, fmt.Errorf("%s 对账红且恢复重连未跑起来(%v)—— %s", label, aerr, describeRed(diffs, newBridges))
+	// 对账红 → 恢复段(**全页扩权**):把 diffs 解析成逐 pin deficit,凡快照里有
+	// 网名、现在断连或网名不符的 pin —— **无论属不属于移动集合** —— 都按快照
+	// 网名重连;灌错网的(9 个地脚进 +3V3)走 replace(带回读验证的 disconnect
+	// 后重连)。最多两轮:replace 拆合并树可能连累树上无辜 pin(拆树二次波及),
+	// 第二轮按复查后的新 deficit 把它们连回。复查(reconcile)绿才算恢复成功;
+	// 仍红则把偏离 pin 连同期望网名结构化列全,如实进 StillBroken。
+	fmt.Fprintf(stderr, "  ⚠ %s 对账首轮红(%d 差异 / %d 新增 bridge)—— 恢复段按快照全页补连后复查\n", label, len(diffs), len(newBridges))
+	var manualLeft []movePinDeficit
+	recovered := map[string]bool{}
+	for round := 0; round < 2; round++ {
+		var defs []movePinDeficit
+		if len(afterCur) == 0 && len(live) > 0 {
+			// 空表守卫:当前读全空而快照非空 = netlist 引擎疑似被毒死,不据此
+			// 生成「全页皆断」的假 deficit;首轮退回移动集合快照,次轮直接停。
+			rep.Notes = append(rep.Notes, "恢复段:网表读回为空而快照非空,不采信(仅按移动集合快照重连)")
+		} else {
+			defs = moveKernelPinDeficits(live, afterCur)
+		}
+		// 与 recoverConns 同一条纪律:能按已知几何复现的先复现,复现不了的才让
+		// 评分器自由挑 —— 恢复段的辖区是全页,几何保真度也该是全页的。
+		if rebuilt := rebuildKnown(defs); len(rebuilt) > 0 {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("对账恢复第 %d 轮:%d 只 pin 按已知桩几何原样重建", round+1, len(rebuilt)))
+			for _, d := range defs {
+				if !rebuilt[strings.ToUpper(d.Ref)] && d.WantNet != "" {
+					markFree(d.Ref)
+				}
+			}
+		} else {
+			for _, d := range defs {
+				if d.WantNet != "" {
+					markFree(d.Ref)
+				}
+			}
+		}
+		specs, manual := moveKernelDeficitSpecs(defs)
+		manualLeft = manual
+		if round == 0 {
+			// 首轮并上移动集合快照(幂等跳过已连对的):对账红的成因不止 diff
+			// 可见的 pin(bridge-only 红时 deficits 为空,也要补连兜一轮)。
+			haveSpec := map[string]bool{}
+			for _, s := range specs {
+				haveSpec[strings.ToUpper(s.PinRef)] = true
+			}
+			for _, c := range conns {
+				if !haveSpec[strings.ToUpper(c.PinRef)] {
+					specs = append(specs, c)
+				}
+			}
+		}
+		for _, s := range specs {
+			netOfSpec[strings.ToUpper(s.PinRef)] = s.Net
+		}
+		if len(specs) == 0 {
+			break
+		}
+		succ, _, aerr := ops.autoconnect(specs, true, defaultAutoconnectRules())
+		for _, s := range succ {
+			recovered[s] = true
+		}
+		if aerr != nil && len(succ) == 0 && round == 0 {
+			rep.NetDiffs, rep.NewBridges = diffs, newBridges
+			rep.StillBroken = append(moveKernelFormatDeficits(defs), moveKernelFormatDeficits(manual)...)
+			return rep, fmt.Errorf("%s 对账红且恢复重连未跑起来(%v)—— %s", label, aerr, describeRed(diffs, newBridges))
+		}
+		diffs2, newBridges2, after2, rerr2 := reconcile()
+		if rerr2 != nil {
+			rep.NetDiffs, rep.NewBridges = diffs, newBridges
+			return rep, fmt.Errorf("%s 对账复查失败(%v)—— 首轮:%s", label, rerr2, describeRed(diffs, newBridges))
+		}
+		diffs, newBridges, afterCur = diffs2, newBridges2, after2
+		if len(diffs) == 0 && len(newBridges) == 0 {
+			break
+		}
 	}
-	diffs2, newBridges2, rerr2 := reconcile()
-	if rerr2 != nil {
-		rep.NetDiffs, rep.NewBridges = diffs, newBridges
-		return rep, fmt.Errorf("%s 对账复查失败(%v)—— 首轮:%s", label, rerr2, describeRed(diffs, newBridges))
+	for r := range recovered {
+		rep.Recovered = append(rep.Recovered, r)
 	}
-	rep.NetDiffs, rep.NewBridges = diffs2, newBridges2
-	if len(diffs2) == 0 && len(newBridges2) == 0 {
-		rep.Notes = append(rep.Notes, fmt.Sprintf("对账首轮红(%d 差异 / %d bridge),恢复段补连后达成一致", len(diffs), len(newBridges)))
-		fmt.Fprintf(stdout, "✓ %s 对账:恢复段补连后网表逐引脚一致、无新增 bridge\n", label)
+	sort.Strings(rep.Recovered)
+	rep.NetDiffs, rep.NewBridges = diffs, newBridges
+	if len(diffs) == 0 && len(newBridges) == 0 {
+		rep.Notes = append(rep.Notes, "对账首轮红,恢复段全页补连后达成一致")
+		fmt.Fprintf(stdout, "✓ %s 对账:恢复段全页补连后网表逐引脚一致、无新增 bridge\n", label)
 		return rep, nil
 	}
-	return rep, fmt.Errorf("%s 对账不过(判据是电气不是坐标):%s;`sch check` 复核后重试", label, describeRed(diffs2, newBridges2))
+	// 恢复失败:结构化列全仍偏离的 pin(REF→期望网,可直接喂 `sch connect`),
+	// 报告从「页面已毁」降级为「N 个 pin 待手工恢复」。
+	var still []movePinDeficit
+	if len(afterCur) > 0 || len(live) == 0 {
+		still = moveKernelPinDeficits(live, afterCur)
+	} else {
+		still = manualLeft
+	}
+	rep.StillBroken = moveKernelFormatDeficits(still)
+	msg := describeRed(diffs, newBridges)
+	if len(rep.StillBroken) > 0 {
+		msg += fmt.Sprintf(";%d 个 pin 待手工恢复(REF→期望网,逐脚 `sch connect`;标注 disconnect 的先拆):%s",
+			len(rep.StillBroken), strings.Join(rep.StillBroken, " "))
+	}
+	return rep, fmt.Errorf("%s 对账不过(判据是电气不是坐标):%s;`sch check` 复核后重试", label, msg)
 }
 
 // ── 生产 ops:连接器实现 ─────────────────────────────────────────────────────
@@ -590,12 +1180,15 @@ func (o *daemonMoveOps) connectPin(pinX, pinY float64, t moveConnTerm) error {
 	return err
 }
 
-func (o *daemonMoveOps) autoconnect(conns []acConnSpec) ([]string, []string, error) {
+func (o *daemonMoveOps) autoconnect(conns []acConnSpec, replace bool, rules autoconnectRules) ([]string, []string, error) {
 	stderr := o.stderr
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	rep, err := runAutoconnectOpts(o.cfg, o.win, conns, defaultAutoconnectRules(), acRunOpts{}, stderr, stderr)
+	// replace=true(恢复段/合并早检):对「已连在别的网」的 pin 走 autoconnect
+	// --replace 语义 —— 先 schematic.pin.disconnect(连接器侧带回读验证 +
+	// alsoDisconnectedPins 上报)再按快照网名重连;已连对的 pin 幂等跳过。
+	rep, err := runAutoconnectOpts(o.cfg, o.win, conns, rules, acRunOpts{Replace: replace}, stderr, stderr)
 	return rep.Succeeded, rep.Failed, err
 }
 

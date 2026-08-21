@@ -56,13 +56,13 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 |---|---|---|---|
 | S0 | 方案书:选块选型、网名表、分页计划、架构决策 | `blocks ls/search/show` → spec 写盘 → `easyeda spec validate` | validate 无 ERROR;milestone 档经用户确认 |
 | S1 | 图纸/分页 reconcile 到模块计划 | `sch pages` → `page-rename`/`page-new`/`page-delete` → `sch sheet-geometry --json` | 页集合=模块计划;每页有 A4 sheet 💾 |
-| S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 |
+| S2 | 分区规划(只规划不落子) | 块路径读虚拟组;手工页 `sch zones set` → `sch zone-plan --json` | 六项 validation 全 0 **且 `labelScopeDegraded=false`**(降级=判据验不了,不是"没问题") |
 | S3 | 按组摆放(块优先;命中块 S3+S4 一条命令) | `sch block-apply <id> --bind 端口=网名` / `sch autolayout --engine template` / `sch place`+`modify` | `sch gate --only layout-lint,clusters` 无 ERROR 💾 |
-| S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解)→ `--apply`(断言①②+假失败清创+分级回滚) | verdict=pass 且断言①②绿;报出的问题**重跑一轮 apply(两遍法),不逐器件手挪** |
+| S3′ | **分区收敛(按需)**:分区拥挤 / `partitionOverlap`>0 / 重整已放置页 | `sch zone-arrange`(纯规划,唯一解;phase B = 边归属+多层货架+回溯)→ `--apply`(断言①②+假失败清创+分级回滚+**断言③落地复判**) | verdict=pass 且断言①②③绿(③ = 落地实测框 vs 规划框偏差 ≤ gutter、区框零重叠、**无成员探出图纸**、**retain 区几何未被改动**、**无自由落点 pin**)。**断言③红时不要「多跑几遍」** —— 桩线伸展已统一为一把尺,再跑一轮只会追尾(真机 4 轮取证:每轮 dry-run pass、落地必重叠);按复判表定位是哪个区胖了。注意「规划框 = 落地框上界」**只在模型内成立**(同一份 pin 坐标+桩长),真机 MCU_IO 六区实测偏差 +141/+126/+82/+56/+26/+10,断言③ 的职责就是把不成立的那几次报出来。报「N 只 pin 走了自由落点」= 计划根本没覆盖那几只脚,它们的方向/桩长不在规划里,先看是不是有 pin 靠普通导线/netlabel 连着。`blocked` 时先看 phase A 那一栏收敛了没(**排不下的是形状不是面积**)——phase A 现在会**域感知选形**(候选先比可排布档位、再比「本页有几条通道装得下」,平局才回到原有紧凑序),所以 `zones[].mode` 尾巴会直说它选了什么形态、为什么;读到「没有一个装得进任何通道」就是真的要拆(**别去调纸张/带高**),再考虑 `page-new` 拆页 —— A4-only,不换纸。phase A 行首的 `↩` = **「不得变差」门回退了这一区**(收敛会让它在本页**更难排**,于是保留原形;理由在 `zones[].retainWhy`)—— 那是保护不是故障,**别去改 A4 尺寸/带高绕开它**,要么把该区拆小要么拆页;门比的是**三档可排布性**(`2` 有落点 / `1` 只被图签挡 / `0` 连可用域都装不下),掉档才回退 —— 所以「原形也排不下」不等于放行,`1 → 0` 照样拦(2026-08-20 第二轮真机 `449×737 → 244×863` 就是从首版那个单布尔判据里漏掉的);两个形状都是 `0` 档时门不拦,phase B 报「纸面放不下」= 真的要拆。`↩` 区在 `--apply` 里受**刚体不变式**硬门保护(逐 pin 比对方向/桩长/类型,不一致就拒绝整页、画布零改动) |
 | S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
 | S5 | 校验门(机械真值) | 逐页 `sch gate --strict --doc <页>` + 全工程 `sch nets --strict` + `sch reconcile` | 每页 verdict=pass;无网名变体/单引脚网;意图对账无差异 |
 | S6 | 调整闭环 | 照 gate 报告「下一步」修 → 重跑 gate | verdict=pass → `sch save` 确认 `saved:true` 💾 |
-| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>`；另在图签 keep-out 外用 `sch note` 放 `TITLE:` / `DESIGNER:` / `DESCRIPTION:`，再 `sch titleblock-health --reload` | `sch check` 无 missing-partition/note/titleblock，且无 `titleblock-model-corrupt` |
+| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>` + 图签 keep-out 外的 `TITLE:`/`DESIGNER:`/`DESCRIPTION:` 注释 + `sch titleblock-health --reload` | `sch check` 无 `missing-partition`/`missing-note`/`missing-titleblock`/`titleblock-model-corrupt`；禁止 titleblock 写入 |
 
 > `blocked` ≠ `fail`(检查器没跑成,先修环境别改电路);判状态看数据不看截图;每过门显式 save。
 
@@ -84,15 +84,15 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 
     {
       "modules": [
-        {"name": "POWER",   "kind": "POWER", "parts": ["U2","L1","C1","C2","F1"], "page": "P2_POWER", "zone": "left"},
-        {"name": "MCU",     "kind": "MCU",   "parts": ["U1","C18","C19","R6"],    "page": "P1_MCU_USB", "zone": "center"},
-        {"name": "USB_HUB", "kind": "USB",   "parts": ["J2","U10","X1","C30","R15"], "page": "P1_MCU_USB", "zone": "left-top"},
-        {"name": "ANT",     "kind": "ANT",   "parts": ["ANT1"], "page": "P1_MCU_USB", "zone": "right"}
+        {"name": "POWER",   "kind": "POWER", "parts": ["U2","L1","C1","C2","F1"], "page": "POWER", "zone": "left"},
+        {"name": "MCU",     "kind": "MCU",   "parts": ["U1","C18","C19","R6"],    "page": "MCU_USB", "zone": "center"},
+        {"name": "USB_HUB", "kind": "USB",   "parts": ["J2","U10","X1","C30","R15"], "page": "MCU_USB", "zone": "left-top"},
+        {"name": "ANT",     "kind": "ANT",   "parts": ["ANT1"], "page": "MCU_USB", "zone": "right"}
       ],
       "flow": ["POWER", "MCU", "USB", "ANT"],
       "flowAxis": "auto",
       "pages": [
-        {"name": "P1_MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB","ANT"]}
+        {"name": "MCU_USB", "sheet": "A4", "modules": ["MCU","USB_HUB","ANT"]}
       ],
       "stackup": {
         "layers": 4,
@@ -142,7 +142,7 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 ### S1 — 图纸 / 分页(先图纸,再分页!)
 - **做什么**:确认当前页有图纸,默认 A4;再按模块/功能把设计**先分到几页**(电源一页、主控一页、接口一页…),别全堆一页。
 - **怎么做**:`easyeda sch pages`(或 `doc ls`)读页结构 → `easyeda doc switch` 切目标页 → `easyeda sch sheet-geometry --json` 读 sheet/title-block。无 sheet 或 provenance 为 none 时停止,不要开始 place。
-- **页面对齐模块计划(用户点名·必做)**:分页不是照单全收用户现有的页——**要主动把现有分页 reconcile 到模块计划**:①页名无意义(`P1`/`P2`/`Schematic1`/`page1`)或与模块不符 → `easyeda sch page-rename --page <uuid> --name <功能名>`(如 `P1_POWER`/`P2_MCU_ESP32`/`P3_IO`),命名风格跟参考板 `P1_POWER_PATH` 一致;②模块比页多 / 复杂模块要独立 → `easyeda sch page-new` 补页;③**多余空页 → `easyeda sch page-delete --page <uuid>` 删掉**(先确认该页无器件,`sch pages` + 逐页 `list` 核实;page-delete 无 undo,属破坏性,删前 inspect)。单页小板:把唯一那页也 `page-rename` 成有意义的名(别留 `Schematic1`),不必强行分多页。目标:**页集合 = 模块计划**,一页一功能域,跨页同名 `net_port` 接续。
+- **页面对齐模块计划(用户点名·必做)**:分页不是照单全收用户现有的页——**要主动把现有分页 reconcile 到模块计划**:①页名无意义(`P1`/`P2`/`Schematic1`/`page1`)或与模块不符 → `easyeda sch page-rename --page <uuid> --name <功能名>`(如 `POWER`/`MCU_ESP32`/`USB_DEBUG`)。⚠**页名只写功能域,禁止把 `P1`/`P2` 序号编进页名**(用户裁定):页签顺序由平台维护、且会变——删页重建时新页排到**末尾**,名字里的序号当场与实际页签顺序脱节(ceshi 实测踩到:页签位置 2 是 `P3_USB_DL`、位置 3 是 `P2_MCU_IO`,读图人先信哪个都不对)。顺序是页签的职责,名字只负责说清"这页是什么";②模块比页多 / 复杂模块要独立 → `easyeda sch page-new` 补页;③**多余空页 → `easyeda sch page-delete --page <uuid>` 删掉**(先确认该页无器件,`sch pages` + 逐页 `list` 核实;page-delete 无 undo,属破坏性,删前 inspect)。单页小板:把唯一那页也 `page-rename` 成有意义的名(别留 `Schematic1`),不必强行分多页。目标:**页集合 = 模块计划**,一页一功能域,跨页同名 `net_port` 接续。
 - **💾 过门条件**:页集合与模块计划一致(该改名的已改、该补的已补、多余空页已删);每个目标页都有可读图纸(A4 默认)和明确职责;每页模块预计能落在可用区内,标题栏 keep-out 明确 → `easyeda sch save`。若用户要求逐步确认,保存/继续前停住。
 
 ### S2 — 模块编组
@@ -164,6 +164,22 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
      (框的几何与电路实际位置无关:单模块页铺满整纸时框套不住电路、框里大半是空的)。
   3. 认领与框都**按页(documentUuid)持久化**,多页工程逐页 `--doc <页>` 画,
      绝不把 MCU 页的认领套到 Power 页。
+  4. **`--mode partition`** 按真实 bbox 把整纸切开,并给右下角图签留缺口。
+  5. **单页小板也要画区框** —— 「最小 / 单页」不是省略分区的借口。可以不分页,
+     但区名框和电路说明照画。
+- **⚠️ 只有 `sch autolayout --apply` 会自动画框** —— 手工 `sch block-apply` / `sch place`
+  路径**不会**,必须显式补「画框 + 写说明」两步,否则等于没分区(最常见的漏)。
+- **每模块配 1~3 行电路说明**(`sch note`):写**作用 + 关键参数**,例如
+  「LDO: 5V→3V3 1A」「BOOT: GPIO0 拉低进烧录」。区名框只负责命名,说明才让人读懂;
+  文字放模块框下/旁,别压电路(放完 `sch layout-lint` 复核)。**摆放没画框 + 没写说明
+  = 布局未完成**,别当成品交付。
+- **`zone-draw` 报 `partitionOverlap` 时怎么办**:一个虚拟组 / 一次认领 = 一个框
+  (与 `zone-arrange` 同一把尺,不靠合并遮掩),非 0 就是**两个区的体积真的互相压**
+  —— 跑 `sch zone-arrange --apply` 重排,或 `sch group-move` 挪件;调 `--gutter` 治不了。
+  反过来:`zone-arrange` 断言③绿的页,一定画得出来。
+- **机械兜底(别靠记忆)**:`sch check` 有 **`missing-partition`** 检查项——多器件页
+  (parts ≥ 6)若 `sch text.list` == 0(既没区名框也没说明)报 WARN,
+  `sch gate --strict` 会因此 FAIL,挡下未分区的板。看到它就补「画框 + 写说明」再交付。
 - **过门条件**:每个组有明确的目标矩形(已认领),组间预留通道(分区不重叠);
   模块太多就拆到下一页,而不是挤压本页。
 
@@ -219,15 +235,33 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
   - 单页/单模块小板可免分页,但区名框 + 电路说明仍要画。
   - **这三件现在是机械判据,不再靠自觉**:`sch check` 出
     `missing-partition`(没画分区框)/ `missing-note`(没有电路说明,区名标签不算)/
-    `missing-titleblock`(图签 keep-out 外缺少 `TITLE:` / `DESIGNER:` / `DESCRIPTION:` 可读性说明),
-    `titleblock-model-corrupt`(官方图签内部模型不可读，ERROR，不能用 sheet 属性或文本回退),
-    在 **`sch gate --strict`** 下阻塞 —— 也就是交付门过不了。
+    `missing-titleblock`(图签 keep-out 外的 `TITLE:` / `DESIGNER:` / `DESCRIPTION:` 可读性说明缺失),
+    在 **`sch gate --strict`** 下阻塞 —— 也就是交付门过不了。存在性之外还有
+    **归属判据 `note-outside-zone`**(放对没有):每条 `--zone` 登记的说明,其渲染
+    bbox 必须被该区分区框(zone-plan 规划框,与 zone-draw 画的实框同源)包含,
+    框外报 WARN 并带说明坐标/框范围/可执行修法(`prim-delete` 旧说明后重跑
+    `sch note --zone <区>` 自动落点,或显式 --x/--y),同样在 --strict 下阻塞。
     版式:**区名在框的左上角,电路说明在框的左下角,两者都在框内** —— 分区框顶部有
-    标题带、底部有说明带,`sch note --zone <模块>` 会直接落进说明带,**别手填坐标**
-    (手填必然飘)。框内挤不下时它也**不会把说明甩到页角**:自动沿框四周走廊
-    (正下→正上→右→左)逐档找贴着本区的落点,整页兜底也按离区距离就近排序——
-    读图时说明始终对得上自己的区,不需要再手动 `--x/--y` 补救。说明只写**需要注意的**(关键参数、易错点),
-    一到两行,不要复述电路。
+    标题带、底部有说明带,`sch note --zone <模块>` 会**贴着框底**落进说明带
+    (`note.y = 框.minY + 16`,与行数/字号无关,同页所有说明底边齐平),
+    **别手填坐标**(手填必然飘;显式 `--x/--y` 会被逐字保留,不会被贴底覆盖)。`--zone` 的名字**全名/末段短名/组 id/唯一前缀都命中**(与
+    zone move 同一个解析器);区不在本页分区计划里时**不会静默兜底**——stderr 出
+    warning、输出带 `zoneMatched=false`(`--json` 亦有该字段),看到 false 就说明
+    说明没落进带,先查区名/分区计划。框内挤不下时它也**不会把说明甩到页角**:自动沿框四周走廊
+    (正下→正上→右→左)逐档找贴着本区的落点,**且绝不落进别的分区框里**(邻区
+    矩形是硬障碍),整页兜底也按离区距离就近排序——
+    读图时说明始终对得上自己的区,不需要再手动 `--x/--y` 补救。**说明带高度按该区
+    已登记说明的实际渲染高度预留**(不再是写死的单行高):多行(1~3 行)说明放心写,
+    带装不下时框向外扩(下探),器件区不挤;高度只从登记说明的**内容+字号**推导、
+    绝不读落点坐标,所以重复跑 `zone-plan` 幂等收敛 —— 框几何只随「登记了哪些说明」
+    变,不随「说明落在哪」变。**外框只有一个函数**(2026-08-20 用户裁定):
+    `frame = f(成员 L1 虚拟组全图元并集, 区名带, 说明带)`,`zone-plan` 与
+    `zone-arrange` phase A 共用同一本体、同一份带高 —— **收紧时 title/note 就在账里**,
+    不再是「按常量带收紧 → 画框 → 再放 note 装不下」。登记的说明**不反哺
+    分区框几何**(框由器件内容反推,说明的家是框内说明带)——重画分区框不会因为
+    说明越画越大。说明只写**需要注意的**(关键参数、易错点),
+    一到两行,不要复述电路。含 `~`/`+/-`/引号/`%` 的说明文字是安全的(经 JSON 转义
+    进平台);平台偶发吞文本创建请求,`sch note` 已自动 settle 重试一次。
   - **分区粒度要细,而且不用手工分**:`sch block-apply` 现在按**功能子群**自动归组 ——
     块的关系数据本身就说明了哪几件是一个功能单元(`flow` 的每一级 + 跟着它的 `attach`
     去耦 / `pair` 并列组),CH340C 因此自动拆成 `J_USB`(Type-C + CC 下拉)/ `D_ESD` /
@@ -235,9 +269,16 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
     里面大片空白,读图的人得不到任何信息。
   - **组间留通道用 `sch group-move --group <id>`**(每组一个抓手,平移后自带电气自检;
     同块多个子组要一起挪时用 `--groups g1,g2` 一次整体移动,不撕裂组间共享导线)。
+    它是**刚体平移**:重连按移动前实测的桩方向/长度原样重建,组框尺寸不变
+    (2026-08-20 修复前,一次 `--dx 40` 会把组框从 315×389 撑到 523×406,
+    重叠从 1 处变 3 处 —— 「挪一下让开」反而毁掉收敛)。
     `sch zone-plan` 的 `partitionOverlap` 就是「通道没留够」的判据:它非 0 说明两个功能
     子群的虚拟组在版面上交叠 —— 那时**不存在**既框住各自内容又互不重叠的矩形,
-    只能挪件,不能靠画框迁就。
+    只能挪件,不能靠画框迁就。**归属是一个虚拟组 / 认领一个框**(与 `zone-arrange`
+    的区一一对应,2026-08-20 定案):此前 `zone-plan` 会把「同一网格带」的两个区
+    合并成一个大框,于是 `zone-arrange --apply` 断言③ 全绿(逐区框零重叠)的页面,
+    `zone-plan` 反而报重叠、`zone-draw` 拒绝画框(真机 MCU_IO)。合并那条路已删 ——
+    重叠只会如实报出来,修法是 `sch zone-arrange --apply` 重排或 `sch group-move` 挪件。
     框的有无读**工具自己的绘制记账**(平台不提供矩形枚举接口);`sch clear` 会同时作废
     该页的记账,免得清了页而判据还以为画过。
 
@@ -268,7 +309,7 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
    |---|---|---|
    | 1 | `layout-lint` | **器件本体**的 `overlap` / `pin-coincidence`;strict 下 spacing、off-grid、**out-of-sheet**、缺失/畸形几何、sheet check `unavailable` 同样阻断 |
    | 2 | `clusters` | **虚拟组体积**(器件 + 只挂在它自己引脚上的 marker/桩线/文字):组间**图元级**重叠、组探出图纸可用区;strict 下组间过近也阻断 |
-   | 3 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`marker-overlap`) |
+   | 3 | `check` | fatal / error 级 finding(悬空脚、导线交叉/穿脚、网络标识不一致、零长/悬挂线、`duplicate-net-marker`、`titleblock-overlap`、`titleblock-model-corrupt`、`marker-overlap`) |
 
    > `marker-overlap` 一片时**别直接 `sch modify` 挪标识坐标**(会把它挪脱导线端点 → 断网)。
    > **首选重跑 `sch autoconnect`**:落点现在按「长短两档标准长度」循环排 lane(相邻脚的标签
@@ -323,8 +364,11 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 ### S6 — 调整闭环(立刻调,再验)
 - **先看 gate 报告的「下一步」** —— 每个失败 stage 自带规定的修法,别自己另发明一套。
 - `layout-lint` 失败 → **成片的布局问题(分区拥挤/标签互叠/partitionOverlap)先跑
-  `sch zone-arrange --apply`**(分区级确定性收敛,两遍法:落地实测反哺下一轮规划)——
-  **不要陷入逐器件手工修补**;只有孤立单件冲突才用 `sch modify`(单件)/`sch align`/
+  `sch zone-arrange --apply`**(分区级确定性收敛;规划框是落地框的预测,**但只在
+  「同一份 pin 坐标 + 同一份桩长」的模型内是上界**,真机会偏 —— 落地后自带
+  **断言③复判**把偏差如实报出来)——**不要陷入逐器件手工修补**,但**也不要靠重跑收敛**:
+  断言③红说明某个区实测比规划胖,重跑只是追尾(真机 4 轮不收敛),按复判表看是哪个区、
+  差多少;报「自由落点 pin」就先查那几只脚为什么没进计划;只有孤立单件冲突才用 `sch modify`(单件)/`sch align`/
   `sch distribute`(成排)/`sch autoplace-free`(自动找空位)。**几何先修**:重叠会连锁出
   一堆电气误报,先治几何再看电气,能省掉大半来回。
 - `check` / `bridge-check` / `drc` 失败 → 补线、拆桥、清孤儿或补 NC → **重跑 gate 并重新 `sch read` 对账**。
@@ -377,17 +421,10 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
 原理图过门(DRC 干净 + 已保存)后,转 [`pcb.md`](./pcb.md)。**关键:禁布区和丝印对齐要在布线之前做**——布完线再加禁布区/挪丝印会逼你返工重布(实测:天线区后置,把已布的 BLINK 逼到重绕)。
 
 ```
-P0 新板/切板 → P1 导器件/原生重建 → P2 摆放(留装配位) → P3 板框+越界策略 → P4 禁布区(靠前!)
+P0 新板/切板 → P1 导器件 → P2 摆放(留装配位) → P3 板框 → P4 禁布区(靠前!)
 → P5 丝印对齐位号(靠前!) → P6 可布性门 → P7 布线 → P8 叠层+电源+铺铜
 → P9 极性/板注丝印 → P10 DRC+check 门 → 💾 save
 ```
-
-**可信源原生重建模式(KiCad等,禁止导入 PCB 时)**:先用源 EDA 只读导出并固化
-`baseline.json`/SHA-256/BOM/pin→net+NC/位置/真实板框点/层叠/ERC/DRC/正反面渲染;
-再用 native library + typed playbook 创建,绝不把“源 DRC=0”当目标 EDA 结果。每阶段比较
-expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心 pad 做方向探针,
-覆盖 0/90/180/270 度。删除重放后 primitiveId 会变化,按 designator+uniqueId 从 live 数据
-重新解析,不要复用历史 id。最终证据必须同时有电气、几何和视觉三类。
 
 **每过一个阶段发一条通知**(用户能实时跟进):`easyeda notify --message "完成 P7 布线,下一步 铺铜" --type success`。
 
@@ -397,7 +434,7 @@ expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心
 > 前提:**EasyEDA 必须在前台、目标 PCB 是可见的活动 tab**,否则抓到的是空白/错帧(没有 API 能替你重绘隐藏窗口)。
 
 - **P0 新板**:要全新 PCB 页用 `easyeda pcb new-board`(建 Board 壳→灌 PCB 两步,单 `createPcb` 是 no-op)。⚠️ 一个原理图只能属于一个 Board:若原理图**已绑板**,`new-board` 会**拒绝**(否则会把原理图搬进新板,旧板只剩 PCB=「原理图没了」)。既有板里直接布局即可;确要搬才加 `--force`。
-- **P1 导器件**:`pcb import-changes` 会**弹 UI「应用修改」**(平台限制,无 headless apply)——要全自动改用 `pcb add-component` 逐件放;禁止导入 PCB 的重建任务则用 native symbol/footprint/device + typed placement/playbook。多页原理图在同步前必须 `board current` 核对绑定的是**父 schematic UUID**,不是当前 page UUID;错误绑定先 `board rebind`。导完 notify。⚠️ **落件种子坐标决定板子大小**:`auto-place` 只把卫星吸附到主芯片边缘,**主芯片锚点原地不动**——spec `board` 为 `"compact"`(客户没给板框)时,主芯片必须按**紧凑网格**播种(模块中心距 ≈ 芯片包络 + 300~400mil 布线通道,别撒到 2000mil 开外),边缘件(USB/端子)直接种在预期板边线上。
+- **P1 导器件**:`pcb import-changes` 会**弹 UI「应用修改」**(平台限制,无 headless apply)——要全自动改用 `pcb add-component` 逐件放。导完 notify。⚠️ **落件种子坐标决定板子大小**:`auto-place` 只把卫星吸附到主芯片边缘,**主芯片锚点原地不动**——spec `board` 为 `"compact"`(客户没给板框)时,主芯片必须按**紧凑网格**播种(模块中心距 ≈ 芯片包络 + 300~400mil 布线通道,别撒到 2000mil 开外),边缘件(USB/端子)直接种在预期板边线上。
 - **板框顺序两条合法路径(#97 消歧)**:`place-constrained` 的贴边启发式**需要板框**才能定边,而"无客户尺寸时先布局再成框"要求先摆件——二者不矛盾,按有无机械约束分流:
   - **有机械尺寸/外壳约束**:P2 先据 spec `board` 建**粗板框**(`outline-set`/`outline-round`)→ 再布局(`place-constrained` 贴到真实边)→ 用户确认布局+板框。
   - **无机械尺寸**:P2 先**粗布局**并生成**临时大板框**(`outline-fit --margin` 给宽余量,让 `place-constrained` 有边可贴)→ 完成布局后 `outline-fit`/`outline-round` **收紧板框** → 用户确认。
@@ -421,10 +458,10 @@ expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心
   4. **卫星件**(去耦/上拉/RC)——只有这一档交给 `pcb auto-place`/合法化器;`--assembly-gap 40`(留烙铁位)。
   **分区先落盘(#126)**:P2 起手把 S0 spec 的 `modules[].zone` 灌进 PCB 侧——`easyeda pcb zones set --spec <s0-spec.json>`;之后 `place-constrained` 会把被 claim 的主芯片/卫星件**摆进对应分区**(边缘件豁免),`pcb check` 的 **zone-violation** 持续核查「S0 拍板的分区在布局里落实了没有」。**spec 没有 zone 的模块不用硬编**;分区违规=WARN 不阻断,但交付前应清零或说明。
   **一键分档布局**:`easyeda pcb place-constrained` 自动做档1-4——按**类别启发式**(board_edge/user-facing)把边缘件贴边+锁定、把非对称连接器(USB/SD/IPEX)几何化朝外→主芯片/晶振锚定→卫星合法化,确定性根治打地鼠(边缘件不会被卫星挤走)。**现已消费块 `placement.<ref>.edge` 语义**:`edge="user-facing"` 的连接器(USB/SD/端子/排针)会被**分组到同一条共享边并沿边居中紧凑排布**(≥2 件才触发,`:grouped` 标在 diag),外部 I/O 聚到一条可达边而非各贴最近边散开(修偏散板);`edge="any"`(RF天线/模组)保持各自最近边。⚠️ **仍不解析块 `placement` 里的自由文本 `orientation`**(如"IPEX 座置板边、天线走线短直"这类 per-role reason)——所以边缘件档仍要**先 `easyeda blocks show <id>` 读 `placement`(edge/side/orientation/reason)**,连同边序摊给用户确认(P2 停点,确认后 `easyeda pcb stage confirm-layout` 落 `placement_confirmed`;**移动器件会失效该确认,需重新确认**),不能靠工具代劳;卫星件贴脚距离读块 `pcb_layout` 的 `decap-adjacency`/`xtal-adjacency`(如去耦 ≤2mm)。跑完 `outline-fit`→放 M3 孔→复核净空。**每档动手前必读真实几何**(`pcb list --include-bbox`,bbox 含 courtyard 常比封装大 40%+,L501 类功率电感可达 558mil)——猜尺寸摆位必被 lint 打脸。RF/天线件周边别塞小件。**紧凑度自检**:板框内面积 / 器件 courtyard 总面积 明显 >3 = 太空,回 P1 收拢主芯片种子再来。
-- **P3 板框**:`pcb outline-round --rect … --margin 120`(**默认圆角**,贴器件包络;半径 ≤ 四角 M3 孔外缘距板边、别切孔,无孔约束取 2–3mm,见 `pcb-layout-conventions.md §2.5`);spec `board:"compact"` 时 margin 收到 **50~120mil**,天线端板边贴模块天线区顶。S0 对每个 edge-must 器件写允许 overhang 的**方向+最大距离**;没有声明就按 0 处理。USB-C/DC jack 可在直边段按声明突出,焊盘仍须全在板内;RF 模组不能套用连接器豁免。用真实 outline polygon 验证,不能用外接 bbox 代替。**板框定稿并经用户确认后 `easyeda pcb stage confirm-outline` 落 `outline_confirmed`(需先有 `placement_confirmed`;`outline-fit`/`outline-round` 改框会失效它,须重新确认)。**📸 录制模式:布局+板框成型后抓一张阶段截图。
+- **P3 板框**:`pcb outline-round --rect … --margin 120`(**默认圆角**,贴器件包络;半径 ≤ 四角 M3 孔外缘距板边、别切孔,无孔约束取 2–3mm,见 `pcb-layout-conventions.md §2.5`);spec `board:"compact"` 时 margin 收到 **50~120mil**,天线端板边贴模块天线区顶(天线本就该在板边,keepout 条越短越省板)。**插头受体连接器**(USB-C/DC jack)在直边段**突出板框 ~0.5–1mm**(§2.2,焊盘留板内),圆角只在四角不影响。**板框定稿并经用户确认后 `easyeda pcb stage confirm-outline` 落 `outline_confirmed`(需先有 `placement_confirmed`;`outline-fit`/`outline-round` 改框会失效它,须重新确认)。**📸 录制模式:布局+板框成型后抓一张阶段截图。
 - **P4 禁布区(靠前!)**:天线/挖槽用**一个多层区域**即可——`pcb region create --layer 12(多层) --rule no-pours --rule no-wires --rule no-fills`,一个区域盖全铜层,**不用逐层建 4 个**;内层用「填充区域」禁止,不需要 no-inner-electrical。**删旧区域要「删完校验再建」**——delete 紧跟 create 同批次会竞态,删没生效就累积。RF/天线器件清单与禁布层范围读 S0 方案书 spec 的 `rf.parts` / `rf.keepoutLayers`,这里不重新判断该不该禁、禁哪些层。**RF 块的 `pcb_layout` `rf-keepout`/`balun-mirror`(severity=must)与 spec.rf 一并 `blocks show` 读。**
 - **P5 丝印对齐(靠前!)**:`pcb silk-align`(位号摆正+位置感知+`--spacing` 装配间距)。导入的位号常 180° 倒置,这里一并摆正。放布线前,让布线避开丝印占位。📸 录制模式:禁布区+丝印就位后抓一张阶段截图。
-- **P6 装配+可布性门(强制,#97/#99)**:P3 最终板框确认后重跑 `pcb layout-lint --gate`(P2 的初检会因改框失效)。门读取项目 assembly profile;同时要求 0 overlap、0 pad `off-board`、**0 tight spacing**、≥ `--min-score`、ratsnest 交叉 ≤ `--max-crossings`。检查使用真实 outline polygon。`body-outside` 独立列为 WARN:只有 S0 已声明的边缘连接器可审阅放行;普通件/RF 模组加 `--fail-body-outside` 作为硬门。courtyard 暂无独立 typed gate,用 footprint 数据+snapshot 补验。手焊 profile 未设置或任何器件低于40mil时必须失败,不得进入布线。**通过才重新落 `pre_route_passed`**;P7 布线命令默认要求 `outline_confirmed` + `pre_route_passed`,否则拒绝;确需推进用 `--force <理由>` 显式授权并记入审计(**仅本次执行有效**——不落任何确认,下次无 `--force` 照样被拦)。用 `easyeda pcb stage status` 查装配档案与阶段。
+- **P6 装配+可布性门(强制,#97/#99)**:P3 最终板框确认后重跑 `pcb layout-lint --gate`(P2 的初检会因改框失效)。门读取项目 assembly profile;同时要求 0 overlap、0 off-board、**0 tight spacing**、≥ `--min-score`、ratsnest 交叉 ≤ `--max-crossings`。手焊 profile 未设置或任何器件低于40mil时必须失败,不得进入布线。**通过才重新落 `pre_route_passed`**;P7 布线命令默认要求 `outline_confirmed` + `pre_route_passed`,否则拒绝;确需推进用 `--force <理由>` 显式授权并记入审计(**仅本次执行有效**——不落任何确认,下次无 `--force` 照样被拦)。用 `easyeda pcb stage status` 查装配档案与阶段。
   **诊断视角:`pcb layout-score`(#167)——只有一个门,别跑成两个门。** 两者分工是硬的:
 
   | | `layout-lint --gate` | `pcb layout-score` |
@@ -432,7 +469,7 @@ expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心
   | 回答 | **能不能布线**(硬门) | **布得好不好**(质量表) |
   | 输出 | 单标量分 + pass/fail | 九维各自 0-100 + 加权综合 + **逐器件归因** |
   | 门禁 | **是**,落 `pre_route_passed` | **不是**,不落任何 workflow 确认 |
-  | 何时跑 | P6 布线前必跑,通过才进 P7 | 仅作 pre-route 诊断;成品验收不用 ratsnest/crossing 分数 |
+  | 何时跑 | P6 必跑,通过才进 P7 | 门挂了要**定位原因**、或想把板从"能布"提到"好看/好造"时跑 |
 
   用法:`easyeda pcb layout-score --spec <s0-spec.json>`(带 spec 才解锁 flow-order 与 internal 连接器判定;
   不带就是那两维 skipped)。**读报告先看三件事**:① `blocking` 有没有(短路/重叠/出板框 = 一票否决,
@@ -452,6 +489,15 @@ expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心
   **精修**:tidy 类低分交 `pcb refine`(打分驱动、默认 dry-run、逐步回滚;唯一变换器 grid-snap,
   其余维和全部 blocking 报告会明确指回 place-constrained/手工)。
   **门禁的机械强制面(#97 后续,2026-07-12)**:① 状态**全局持久化**在 `~/.easyeda-agent/workflow/<project>.json`(换 cwd 跑 CLI 骗不过门;`EASYEDA_WORKFLOW_DIR` 可覆写);② **daemon 在 /action 派发层同样拦截** `pcb.line.create`/`pcb.via.create`/`pcb.import_autoroute`(raw HTTP 调用也绕不过),且任何摆放/板框类 action(component.modify/move/arrange/align/add/delete/import_changes/outline.set/clear)成功后**自动失效下游确认**并在响应 warning 里报 `workflow stage invalidated`;③ `confirm-layout`/`confirm-outline` 会把签核**指纹绑定**到当时的器件坐标/旋转/层与板框几何——GUI 拖动、`debug.exec_js`、其它 agent 的门外改动,会在下一次 gate 时指纹失配 → 自动失效并指回该重确认的阶段。
+
+  **④ force 是分级的(#132)——别把 `--force` 当万能钥匙**:
+  - `--force <理由>` 只放行**软缺口**(典型:布局已签、板框已签,只是 `pre_route_passed` 没重跑)。
+  - **机械骨架全未确认**时(`placement_confirmed` 与 `outline_confirmed` **双缺**,或 state 读不出来)`--force` 会被**拒绝**——#116 实测:零确认板强行布线产出 257 条 track + 92 个 via,全部返工。真要在这种板上布线,用更高摩擦的 `--force-unsafe <理由>` 显式升级。
+  - 两者都**只对本次调用有效**(不落任何确认,下一条无 force 的命令照样被拦),且**全部入审计**——连被拒的 `--force` 尝试也记一条 `force-refused`。
+
+  **⑤ 被拦时不用猜下一步**:daemon 的 `STAGE_BLOCKED` 拒绝消息里直接带**该跑的那条命令**(最早未满足的那道门:tier 梯子 → `confirm-layout` → `confirm-outline` → `layout-lint --gate`),照抄执行即可;要看全局状态才用 `easyeda workflow status`。
+
+  **⑥ 布完还有一道门**:布线不是终点,`post_route_checked`(布完必查)见 **P10** —— `workflow advance` 自动跑 `pcb check`,ERROR / power-not-poured / width-under-spec 必须清零才放行 P9 丝印与交付;任何布线类 mutation(track/via/pour/fill/beautify/import_autoroute)会自动把这道门重新关上。
 - **任意阶段切入 / 会话恢复(workflow 命令族)**:换了模型、丢了上下文、或用户手改了板子,都不需要重走流程——
   1. `easyeda workflow status --reconcile`:拉实况(器件数/板框/已布线数)+ 校验指纹,自动失效漂移的确认,报告不一致(如「有走线但从未过门」);
   2. `easyeda workflow advance`:幂等推进——机械验收(layout-lint gate)直接代跑,人工签核点(confirm-layout/outline)停下并打印**下一条该执行的命令**(非零退出,脚本循环天然停在签核点);
@@ -478,7 +524,7 @@ expected/actual 数量与 pin-net,自定义 footprint 用 1 脚+末脚+非中心
 - **P7.9 走线美化(可选,布线定稿后)**:信号全布通并锁好关键网后,`pcb beautify` 把直角/锐角走线圆滑成圆弧(改善美观+可制造性,减少尖角蚀刻风险)。**先 `pcb beautify --dry-run` 预览**(只报 paths/arcs、不动板),满意再实跑。它自带安全网:删+重建轨迹→DRC 二分修复违规拐角(缩半径或退回直角)→自动 `pour-rebuild`(同网 GND 键合会 stale);差分/等长网走同心圆弧保护(该 build 暴露 `getAllDifferentialPairs` 时,否则保直角)。只动铜层、绝不碰丝印/板框。默认 `--radius-ratio 3`(半径=最大线宽×3),稠密板可调小(`--radius-ratio 2`)。**顺序**:放在 P7 布线之后、P8/出 Gerber 之前;跑完 `pcb save`。**上游告警照搬**:焊盘-走线连接偶需人工复核、RF/高速网建议排除全局美化(用 `--net` 单网做)、出 Gerber 前预览确认。能力吸收自开源扩展 Easy_EDA_PCB_Beautify(m-RNA,Apache-2.0)。
 - **P8 叠层+电源+铺铜**:层数与地策略(单 GND PLANE 还是分区 pour + 桥地)读 S0 方案书 spec 的 `stackup` 字段,这里不重新选。**热焊盘处理**:读本板各块 `pcb_layout` 的 `ep-thermal-vias`/`ep-ground-stitch`,在 IC EP 焊盘下打散热 + 接地过孔阵列(≥4 vias)。**4 层层分配默认(客户常规叠层)**:Top(1)信号 / **Inner1(15,物理第2层)= GND 内电层(PLANE)自动铺铜** / **Inner2(16,物理第3层)= VDD/电源层** / Bottom(2)信号——`power-planes` 默认就这么分(`--gnd-layer 15 --power-layer 16 --gnd-plane`,自动灌铜)。多电源轨时**主轨(引脚最多,如 3V3)上电源内层**,零散轨(+5V/+12V/VBUS)走线或小 pour(不与主轨挤同一内层,否则冲突)。`pcb stackup set --layers 4` → `pcb power-planes`(GND内电层+VDD内层+缝合过孔)→ 顶/底 `pcb pour-fit --net GND --replace=false`(`--replace` 默认 true 会清跨层同网铺铜)→ `pour-rebuild`(退让禁布区)。**GND 内层的正确终态是 内电层/PLANE**——`power-planes` 默认(`--gnd-plane`)按已验证配方自动完成:先在 SIGNAL 态铺网络铜 → `stackup set --plane` 翻 PLANE → `pour-rebuild`,填充存活、DRC 干净(与 `pcb-layout-conventions.md` 口径一致)。**顺序不能反**:在已是 PLANE 的层上直接新灌铺铜会掉到 L1 且 netless(坏路径);翻回 SIGNAL 只是诊断手段,不是终态。⚠️ **PLANE 生成后别再打异网 via**——官方缺陷(easyeda/pro-api-sdk#32)新 via 不挖 anti-pad,DRC 报 Plane Zone to Via / Hole to Plane Zone 且 `pour-rebuild` 不补救;`pcb check` 的 **via-crosses-plane** 规则会标出,修法:优先删 via 改外层走线,或 `easyeda doc reload` 后 `pcb pour-rebuild` 再跑 DRC 确认。📸 录制模式:电源布线(+5V 路径)后、以及铺铜/内电层完成后,各抓一张阶段截图。
 - **P9 引脚级丝印/极性/板注**:**先读块 `silk` map**(`easyeda blocks show <id>` 的 `pins`/`label`/`note`)——**逐脚标注**每个对外引脚:电源端子 **+/−**、总线 **A/B/G**、UART **RX/TX/GND**、极性件阴极 **K**,加功能名 + A/B 反向警示(如 SP3485 `A/B=IC`)。**硬规则——装配后不被遮住(= 顶层铁律 11)**:每个标记落在**器件本体/courtyard 之外、对齐各自焊盘**(端子塑料罩/卡座壳/按键帽会盖住其 footprint 内的丝印=等于没标);**per-pin 标记优先占位,功能标签再绕开**(先放功能标签会把 per-pin 挤脱位);边缘 header 头顶被占时脚名放本体的**板边侧**成一行。详见 `pcb-layout-conventions.md §9.4.1`。`pcb silk-add`(锚点=**左下角**;特殊字符如 `−`/`3V3` 渲染比 len 估宽宽,靠 `getPrimitivesBBox` 实测校正别信估算)+ 板名版本 + credit;`pcb silk-set --ref board --align centerx` 居中。⚠️ silk-add 在 **PCB 非前台**时报误导性「参数不正确」——写前先 `doc switch <PCB>`。
-- **P10 fresh gate + 制造闭环**:固定顺序 `pcb save`→`doc reload`→`pcb drc --json`→`pcb check --json`→live dump→snapshot。硬门是 **DRC total=0 + 未连接=0 + DFM summary.errors=0**;WARN 必须逐条审阅并写入残余风险,但不能因为 WARN 让 `passed:false` 就误称存在制造错误。再分别执行 `pcb export-manufacture/gerber/pick-place/ipc2581 --out …` 并记录 SHA-256;任何 mutation 后整段重跑,禁止从脏画布导出。**其中 pcb check 侧已机械化为 `post_route_checked` 工作流阶段**——布线后 `easyeda workflow advance` 自动跑 check 门(ERROR / power-not-poured / width-under-spec 三项清零才确认;其余 WARN 报告不拦),任何布线类 mutation(track/via/pour/fill/beautify/import_autoroute)会自动失效此门。**线宽/过孔/间距下限**别低于 `references/fab-rules-jlcpcb.json` 的 clamp floors(live `pcb.drc.rules` 优先)。DRC=0 且本板含手工搭建、验证过的标准外围时,按 `standard-blocks-contributing.md` 回流入库。**两条硬注意**:① 手术后同网 Connection Error 常是 pour stale,先 `pour-rebuild`,不要盲加 fill;② DRC 需前台,超时切前台只重发一次。逐条修错用 `pcb drc --json` 的 `{rule,net,x,y,objs}` 定位。📸 最终 snapshot 只做视觉/机械验收,不得替代数据门。
+- **P10 门**:`pcb drc`(passed)+ `pcb check`(0 issue)双清零,再 `pcb save`。**其中 pcb check 侧已机械化为 `post_route_checked` 工作流阶段**——布线后 `easyeda workflow advance` 自动跑 check 门(ERROR / power-not-poured / width-under-spec 三项清零才确认;其余 WARN 报告不拦),任何布线类 mutation(track/via/pour/fill/beautify/import_autoroute)会自动失效此门,改完线必须重新过。next 指引会在此门未过时拒绝进入 P9/交付。**线宽/过孔/间距下限**别低于 `references/fab-rules-jlcpcb.json` 的 clamp floors(live `pcb.drc.rules` 优先)。**电源规范线宽 + 电源铺铜**由 `pcb check` 的 **width-under-spec**(电源线 < 其 net-class 规范宽)+ **power-not-poured**(电源网未铺铜)两条把关(WARN,`--strict` 计入门禁);电源该铺的用 `power-pour`(2层)/`power-planes`(4层)铺掉,该走线的让 `route-short` 按 `pcb net-classes` 角色宽走。DRC=0 且本板含手工搭建、验证过的标准外围时,按 `standard-blocks-contributing.md` 顺手回流入库。**两条硬注意**:① **手术后 GND 断连=铺铜 stale,不是真断**——删/改 via/track 后 DRC 冒一堆同网(多为 GND)Connection Error,是 pour 连通性 stale,跑 `pcb pour-rebuild` 让飞线重算即恢复(track↔via 本身导通,pro-api-sdk#31 误诊已订正);**别再无脑配键合 fill**。② **DRC 需前台**——后台/被遮挡窗口 DRC 重画布计算永不完成;超时就把 EasyEDA 切前台**单发一次**,绝不循环重试(daemon 已防重入,重复下发直接拒 `ACTION_BUSY`)。逐条修错用 `pcb drc --json` 的 `{rule,net,x,y,objs}` 定位,`objs` 直接喂 `via-delete`/`track-delete`。📸 录制模式:DRC 通过的最终态抓一张阶段截图,作为交付收尾图。
 
 ## 反模式(实测踩过的坑)
 - ❌ 全堆一页、不分页 → S1 强制分页。

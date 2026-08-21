@@ -2267,8 +2267,15 @@ exported DSN contains keepout entries before trusting the result.`,
 				}
 
 				// 4. DRC the result.
+				//
+				// 写后回读放行(stale_read_optin.go):上一步的 import_autoroute 刚
+				// 把整版铜写进来,STALE_READ 门是关着的 —— 而这一步 DRC 要看的**正是
+				// 刚导进来的那批走线**,不放行就等于把 autoroute 的收尾判据整个砍掉。
+				// daemon 放行时仍会附上 staleRisk 劝告(CLI 打在 stderr):数字若不对劲,
+				// `easyeda doc reload` 后重跑 `easyeda pcb drc` 才是权威判据。
 				fmt.Fprintln(stderr, "--- DRC after routing ---")
-				return dispatch(cfg, "pcb.drc.check", window, nil, stdout, stderr)
+				return dispatch(staleReadOptIn(cfg, "autoroute 写后回读:对刚导入的 SES 走线做收尾 DRC"),
+					"pcb.drc.check", window, nil, stdout, stderr)
 			},
 		}
 		c.Flags().StringVar(&routerCmd, "router", "", "external router command with {in}/{out} (or FREEROUTING_CMD env)")
@@ -4227,10 +4234,21 @@ func runPcbClearVerified(cfg *appConfig, window string, payload map[string]any,
 	out["pass2"] = r2.Result
 
 	// Final proof: a dry-run count of what would STILL be deleted (usually 0).
+	//
+	// 写后回读放行(stale_read_optin.go)。`dryRun:true` 的 page.clear 只枚举不删,
+	// daemon 因此**按读判**(requestMutates 减去 dry-run 预览)—— 于是它撞在紧挨着
+	// 上面那次 pass2 clear 的 STALE_READ 门上。而这一读要数的正是 pass2 刚清完之后
+	// 还剩什么,是本命令自己写下的状态,属于合法写后回读。
+	// 不放行的后果是静默的:derr 被吞掉 → remainingAfterVerify 这把#121 唯一的
+	// 「证实/证伪」尺子从输出里消失,verified:true 却拿不出证据。
 	dryPayload, err := buildPcbClearPayload(only, true, noPreserveOutline, includeLocked)
 	if err == nil {
-		if r3, derr := requestAction(cfg, "pcb.page.clear", window, dryPayload); derr == nil {
+		r3, derr := requestReadAfterWrite(cfg, "pcb.page.clear", window, dryPayload,
+			"pcb clear 写后回读:pass2 之后数还剩多少可删(#121 的证实读)")
+		if derr == nil {
 			out["remainingAfterVerify"] = r3.Result
+		} else {
+			fmt.Fprintf(stderr, "warning: post-verify dry-run count failed (%v) — cleared twice, remaining count unknown (#121)\n", derr)
 		}
 	}
 	out["verified"] = true

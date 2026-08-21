@@ -107,27 +107,39 @@ func TestComputePartitionPlanRejectsGeometryFromAnotherPage(t *testing.T) {
 	}
 }
 
-// clusterSplits must split in the empty band between module bboxes, not through a
-// straddling module.
-func TestClusterSplits_NaturalGap(t *testing.T) {
-	// Two clusters: [80,120] and [880,920] → one split in the 120↔880 band (~500).
-	two := []axisInterval{{80, 120, 100}, {880, 920, 900}}
-	got := clusterSplits(two, 12, 3)
-	if len(got) != 1 {
-		t.Fatalf("want 1 split for two clusters, got %v", got)
+// 分区归属:一个模块 = 一个分区(与 zone-arrange 同一把尺)。网格带归组
+// (clusterSplits/bandIndex)与它的单测一起删了 —— 正负对照见
+// cmd_sch_zone_partition_test.go。这里只钉最小性质:N 个模块 → N 个分区,
+// 每个分区只认领自己那一个名字,且顺序确定(视觉上方优先、再左→右)。
+func TestPartitionGrouping_OneModuleOnePartition(t *testing.T) {
+	mods := []partitionModule{
+		{Name: "b-left-top", BBox: layoutBBox{100, 600, 200, 700}},
+		{Name: "a-right-top", BBox: layoutBBox{800, 600, 900, 700}},
+		{Name: "c-bottom", BBox: layoutBBox{400, 100, 500, 200}},
 	}
-	if got[0] < 400 || got[0] > 600 {
-		t.Errorf("split %.0f should sit in the 120↔880 band (~500)", got[0])
+	got := partitionGrouping(mods)
+	if len(got) != len(mods) {
+		t.Fatalf("%d 个模块该出 %d 个分区,得到 %d 组:%v", len(mods), len(mods), len(got), got)
 	}
-	// Intervals that OVERLAP on this axis (a tall module straddling) → no split.
-	straddle := []axisInterval{{100, 700, 400}, {150, 260, 205}}
-	if s := clusterSplits(straddle, 12, 3); len(s) != 0 {
-		t.Errorf("overlapping intervals → no split, got %v", s)
+	var order []string
+	for _, g := range got {
+		if len(g) != 1 {
+			t.Fatalf("分区里有 %d 个模块 —— 归组又开始合并了:%v", len(g), g)
+		}
+		order = append(order, mods[g[0]].Name)
 	}
-	// A band narrower than the gutter → no split (no room for two partitions).
-	tight := []axisInterval{{100, 200, 150}, {205, 300, 252}}
-	if s := clusterSplits(tight, 12, 3); len(s) != 0 {
-		t.Errorf("5-unit band < 12 gutter → no split, got %v", s)
+	want := []string{"b-left-top", "a-right-top", "c-bottom"} // y 大者先,同 y 左者先
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("绘制序 %v,want %v", order, want)
+	}
+	// 输入顺序不参与判决(确定性)。
+	rev := []partitionModule{mods[2], mods[1], mods[0]}
+	var revOrder []string
+	for _, g := range partitionGrouping(rev) {
+		revOrder = append(revOrder, rev[g[0]].Name)
+	}
+	if strings.Join(revOrder, ",") != strings.Join(order, ",") {
+		t.Errorf("输入顺序改变了输出:%v vs %v", revOrder, order)
 	}
 }
 
@@ -135,8 +147,10 @@ func TestClusterSplits_NaturalGap(t *testing.T) {
 // 估算 bbox 并入模块画框口径;CoreBBox 不动(说明不参与图签/区名硬校验)。
 func TestZoneNoteFoldEstimate(t *testing.T) {
 	nb := schNoteBBoxEstimate(zoneMoveText{X: 330, Y: 640, Content: "AMS1117: 5V→3V3\nC2入/C3出/C1旁路", FontSize: 10})
-	if nb.MinX != 330 || nb.MaxY != 640 {
-		t.Fatalf("anchor must be top-left: %+v", nb)
+	// 锚点 = 左**下**角,块向上生长(2026-08-20 getPrimitivesBBox 实测 5/5:
+	// bbox.minY == 锚点 y)。此前这里断言的 top-left 是没有实测背书的臆断。
+	if nb.MinX != 330 || nb.MinY != 640 {
+		t.Fatalf("anchor must be bottom-left: %+v", nb)
 	}
 	if nb.MaxX <= 330+80 { // 两行 CJK 混排,最长行应显著宽于 80
 		t.Fatalf("width estimate too small: %+v", nb)

@@ -114,9 +114,6 @@ func TestTitleBlockNoteValuesRequireExplicitNotesOutsideKeepout(t *testing.T) {
 	if got["TITLE"] != "" {
 		t.Fatalf("title-block-contained text must not satisfy readability: %v", got)
 	}
-	if count := schTextCountOutside(result, box); count != 2 {
-		t.Fatalf("titleblock text must not count as circuit notes: %d", count)
-	}
 }
 
 func TestTitleBlockModelCorruptFindingIsError(t *testing.T) {

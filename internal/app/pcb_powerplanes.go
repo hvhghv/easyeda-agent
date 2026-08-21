@@ -125,7 +125,11 @@ func runPowerPlanes(cfg *appConfig, window string, gndLayer, powerLayer int, gnd
 	//     GND layer may ALREADY be 内电层/PLANE (a fresh pour directly on a PLANE
 	//     layer silently lands netless on L1 — the known bad path), so flip it
 	//     back to SIGNAL first.
-	if planes, perr := fetchPcbPlaneLayers(cfg, window); perr == nil {
+	//     写后回读放行(stale_read_optin.go):上一行的 pcb.stackup.set 刚关上
+	//     STALE_READ 门,而这里读的正是刚被它改过的叠层 —— 读不到就跳过回翻,
+	//     直接在 PLANE 层上浇铜,那是已知会静默落到 L1 的坏路径。放行位就地生成,
+	//     不落成变量:本命令后面还有一处 line.list 需要**单独**放行。
+	if planes, perr := fetchPcbPlaneLayers(staleReadOptIn(cfg, "power-planes 写后回读:stackup.set 之后确认 GND 层当前类型"), window); perr == nil {
 		for _, pl := range planes {
 			if pl.Layer == gndLayer {
 				if _, err := requestAction(cfg, "pcb.stackup.set", window, map[string]any{
@@ -184,7 +188,11 @@ func runPowerPlanes(cfg *appConfig, window string, gndLayer, powerLayer int, gnd
 		// net as routed, and a stitch stub / stray segment would mask a net that
 		// is not actually connected pad-to-pad.
 		already := map[string]bool{}
-		if lr, lerr := requestAction(cfg, "pcb.line.list", window, nil); lerr == nil {
+		// 写后回读放行:上面刚画完缝合过孔/桩线并浇了铜,门是关着的;而这里要的
+		// 恰恰是**含刚画那批铜**的线表 —— 拿 reload 前的旧表会把已布的网当成没布,
+		// 于是重复布线。pour.rebuild 在本函数末尾,救不了这一读。
+		if lr, lerr := requestReadAfterWrite(cfg, "pcb.line.list", window, nil,
+			"power-planes 写后回读:统计含本次缝合桩线在内的已布网"); lerr == nil {
 			already = parseRoutedNets(lr.Result)
 		}
 		for _, pp := range plan {

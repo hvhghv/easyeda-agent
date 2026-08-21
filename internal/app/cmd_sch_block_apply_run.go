@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -78,8 +79,13 @@ type bapManifest struct {
 // every tracked primitive ID is absent and every successful placement returned
 // an ID. MissingPrimitiveIDs contains designators whose successful place response
 // could not identify the newly created primitive; those are never guessed at.
+// AdoptedPrimitiveIDs 是**超时收编**认回来的 id:place 的回执丢了,但落地前
+// 快照的差集 + 下发坐标证明这些器件是本命令建出来的(sch_place_adopt.go)。它们
+// 与 AttemptedPrimitiveIDs 走同一条「逐个删 + 回读证实」的清扫,只是来源不同 ——
+// 单独列出来,好让报文能说清「我没拿到回执,但我知道它是谁」。
 type bapRollbackReport struct {
 	AttemptedPrimitiveIDs []string `json:"attemptedPrimitiveIds,omitempty"`
+	AdoptedPrimitiveIDs   []string `json:"adoptedPrimitiveIds,omitempty"`
 	MissingPrimitiveIDs   []string `json:"missingPrimitiveIds,omitempty"`
 	SurvivedPrimitiveIDs  []string `json:"survivedPrimitiveIds,omitempty"`
 	Verified              bool     `json:"verified"`
@@ -91,7 +97,7 @@ type bapRollbackReport struct {
 // fetchSchObstacles pulls the ACTIVE page's real part bboxes (best-effort) so
 // the planner can dodge them when picking the block origin.
 func fetchSchObstacles(cfg *appConfig, window string) []layoutBBox {
-	parts, _, _ := fetchSchObstaclesAndKeepout(cfg, window)
+	parts, _, _, _ := fetchSchObstaclesAndKeepout(cfg, window)
 	return parts
 }
 
@@ -102,15 +108,21 @@ func fetchSchObstacles(cfg *appConfig, window string) []layoutBBox {
 // with autoconnect/autolayout) yields the bottom-right 图签/明细表 rectangle so
 // bapResolveOrigin never drops a block onto it. A missing/underivable sheet
 // bbox degrades to nil (no keep-out enforced), matching the other callers.
-func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *layoutBBox, *layoutBBox) {
+//
+// 第四个返回值是**落地前快照**:活动页每一个器件的 primitiveId(任意
+// componentType)。它是超时收编唯一能保证不误认的门 —— 见 sch_place_adopt.go。
+// 复用这一次 components.list,不额外增加往返;读失败时返回 nil,调用方据此关掉
+// 收编(没有快照就只能猜,而猜等于允许误删)。
+func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *layoutBBox, *layoutBBox, map[string]bool) {
 	res, err := requestAction(cfg, "schematic.components.list", window, map[string]any{"includeBBox": true})
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	comps, err := parseLayoutComps(res.Result)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
+	snapshot := schPageComponentSnapshot(comps)
 	var sheet *layoutBBox
 	for _, c := range comps {
 		if c.ComponentType == "sheet" && c.BBox != nil {
@@ -126,7 +138,7 @@ func fetchSchObstaclesAndKeepout(cfg *appConfig, window string) ([]layoutBBox, *
 		}
 	}
 	tb, _ := titleBlockKeepout(sheet)
-	return out, tb, sheet
+	return out, tb, sheet, snapshot
 }
 
 // verifyBlockLayout re-reads the page's real bboxes and pins after placement and
@@ -198,6 +210,14 @@ func verifyBlockLayout(cfg *appConfig, window string, placed []bapPlacement) ([]
 			missing = append(missing, id)
 		}
 	}
+	// 落地回读的结论回传给 daemon 写健康度(通道 B):每次 place 大多返回成功,
+	// 只有这次回读知道有几件真在页面上。真机跑出过「6 件只落地 1 件」而
+	// writeHealth 全程 0.05/绿灯 —— 那是因为这个结论以前只打印在 CLI 层。
+	// 响应里挖不出这个判决,所以必须走上报通道而不是 daemon 内省。
+	reportWriteVerified(cfg, window, writeVerdict{
+		action: "schematic.component.place", source: "sch block-apply",
+		returnedOK: true, landed: len(foundIDs), notLanded: len(missing),
+	})
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		return nil, nil, fmt.Errorf("layout read-back did not contain placed primitiveId(s): %s", strings.Join(missing, ", "))
@@ -422,7 +442,13 @@ func bapPlacedPrimitiveID(res *actionResult) string {
 // successful place responses, then independently reads the page back. It never
 // falls back to deleting by designator: a stale/duplicate label is not a safe
 // mutation target.
-func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacement, uncertain []string) bapRollbackReport {
+//
+// 缺陷 3(P1):批量 component.delete 不可靠(平台大批量静默 no-op 仍返 true;
+// 真机实锤 deleted=false / survived=4,而逐个删成功率 100%)。删除因此走
+// deleteVerifiedOneByOne:逐个删 + 回读证实 + 幸存者重试一次。判定只信回读。
+func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacement,
+	uncertain, adopted []string) bapRollbackReport {
+
 	rep := bapRollbackReport{}
 	for _, p := range placed {
 		if id := strings.TrimSpace(p.PrimitiveID); id != "" {
@@ -432,37 +458,173 @@ func rollbackBlockPlacements(cfg *appConfig, window string, placed []bapPlacemen
 		}
 	}
 	rep.MissingPrimitiveIDs = append(rep.MissingPrimitiveIDs, uncertain...)
+	sweepIDs := append([]string(nil), rep.AttemptedPrimitiveIDs...)
+	inSweep := map[string]bool{}
+	for _, id := range sweepIDs {
+		inSweep[id] = true
+	}
+	// 收编认回的 id 进同一张清扫单。它们不是猜出来的:每一个都通过了「不在落地前
+	// 快照里」这道门,所以删它们不可能碰到页面上原有的器件。已经有回执的那个
+	// (单一命中时同时进了 placed)只登记不重复入单。
+	for _, id := range adopted {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		rep.AdoptedPrimitiveIDs = append(rep.AdoptedPrimitiveIDs, id)
+		if !inSweep[id] {
+			inSweep[id] = true
+			sweepIDs = append(sweepIDs, id)
+		}
+	}
 	sort.Strings(rep.AttemptedPrimitiveIDs)
+	sort.Strings(rep.AdoptedPrimitiveIDs)
 	sort.Strings(rep.MissingPrimitiveIDs)
+	sort.Strings(sweepIDs)
 
-	if len(rep.AttemptedPrimitiveIDs) > 0 {
-		res, err := requestAction(cfg, "schematic.component.delete", window,
-			map[string]any{"primitiveIds": rep.AttemptedPrimitiveIDs})
-		if err != nil {
-			rep.DeleteError = err.Error()
-		} else if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
-			rep.DeleteError = "schematic.component.delete reported deleted=false"
-		} else {
+	// Nothing to delete: still do the independent read-back so "Verified" keeps
+	// meaning "the page was re-read", same as before the one-by-one rewrite.
+	if len(sweepIDs) == 0 {
+		if _, verr := readBlockComponentIDs(cfg, window); verr != nil {
+			rep.VerifyError = verr.Error()
+			return rep
+		}
+		rep.Verified = true
+		rep.Complete = len(rep.MissingPrimitiveIDs) == 0
+		return rep
+	}
+
+	sweep, err := deleteVerifiedOneByOne(sweepIDs,
+		func(id string) error {
+			res, derr := requestAction(cfg, "schematic.component.delete", window,
+				map[string]any{"primitiveIds": []string{id}})
+			if derr != nil {
+				return derr
+			}
 			// ADR-0004 Decision 5: the connector cascades exclusive stub trees +
 			// riding flags — report the cleanup so it never looks like data loss.
 			printCascadeCleanup(res, os.Stderr)
-		}
+			if deleted, ok := res.Result["deleted"].(bool); ok && !deleted {
+				return fmt.Errorf("schematic.component.delete reported deleted=false")
+			}
+			return nil
+		},
+		func() (map[string]bool, error) { return readBlockComponentIDs(cfg, window) },
+	)
+	if len(sweep.Errors) > 0 {
+		rep.DeleteError = strings.Join(sweep.Errors, "; ")
 	}
-
-	live, err := readBlockComponentIDs(cfg, window)
 	if err != nil {
 		rep.VerifyError = err.Error()
 		return rep
 	}
 	rep.Verified = true
-	for _, id := range rep.AttemptedPrimitiveIDs {
-		if live[id] {
-			rep.SurvivedPrimitiveIDs = append(rep.SurvivedPrimitiveIDs, id)
-		}
-	}
+	rep.SurvivedPrimitiveIDs = append([]string(nil), sweep.Survived...)
 	sort.Strings(rep.SurvivedPrimitiveIDs)
+
+	// 缺陷 2(P1)的回滚支路:证实已删的器件同步摘除组注册(位号可能与某个
+	// 陈旧组撞名 —— 那条注册无论如何都已失效)。Fail-soft,绝不影响回滚判定。
+	if len(sweep.Deleted) > 0 {
+		deleted := map[string]bool{}
+		for _, id := range sweep.Deleted {
+			deleted[id] = true
+		}
+		var gone []string
+		for _, p := range placed {
+			if deleted[strings.TrimSpace(p.PrimitiveID)] && strings.TrimSpace(p.Designator) != "" {
+				gone = append(gone, p.Designator)
+			}
+		}
+		cascadeSchGroupMembership(cfg, window, gone, os.Stderr)
+	}
+
 	rep.Complete = len(rep.MissingPrimitiveIDs) == 0 && len(rep.SurvivedPrimitiveIDs) == 0
 	return rep
+}
+
+// bapAdoptAfterPlaceFailure 是 place 失败(超时 / 成功但没回 id)后的收编入口。
+//
+// 返回三样东西,对应几种可证明的结局:
+//
+//	placement —— 唯一命中:这次 place 的产物被认回来了,调用方把它当已放置件处理。
+//	uncertain —— 什么也证明不了(没有落地前快照 / 回读失败 / **回读没被证明新鲜**):
+//	             如实说不知道,并打印能执行的下一步。它进 MissingPrimitiveIDs,
+//	             于是整单如实报 PARTIAL STATE。
+//	adopted   —— 收编认出的**全部** id(唯一命中时就是那一个;多个疑似时全给)。
+//	             它们进回滚清扫单,并单独在报文里点名。
+//
+// 命中 0 个疑似**且回读被证明新鲜** = 证实这次 place 没落地,三者全空 —— 那正是
+// 负对照:绝不凭空造一个 id,也绝不再吓唬调用方说"可能建了个残件"。新鲜度证明
+// 是 2026-08-20 补的门⓪(见 sch_place_adopt.go 文件头):没有它,这条「好消息」
+// 分支恰恰在唯一该起作用的场景(连接器 wedge)里系统性说反话。
+func bapAdoptAfterPlaceFailure(cfg *appConfig, window string, known map[string]bool,
+	created []bapPlacement, p bapPlacement, stderr io.Writer) (*bapPlacement, []string, []string) {
+
+	req := schAdoptRequest{Designator: p.Designator, X: p.X, Y: p.Y}
+	// 顺序证据的基线:**在发出任何回读之前**取。失败那次 place 的响应从没回来
+	// (或者回来了但没带 id),所以此刻记录里最新的那条,就是「W 下发之前」那一刻
+	// 的计数器 —— 正是算术判定要的那个基线。取晚一步(比如放到回读之后)会拿回读
+	// 自己当基线,算术当场退化成恒等式。
+	base := connSeqSnapshot(window, cfg.project)
+	if known == nil {
+		msg := p.Designator + ": 没有落地前的器件快照,无法证明画布上多出来的是不是本次 place 的产物 —— " +
+			"拒绝按坐标猜测(那会误删页面上原有的同型器件)"
+		fmt.Fprintf(stderr, "adopt ✗ %s\n", msg)
+		schAdoptUncertainGuidance(stderr, req, nil)
+		return nil, []string{msg}, nil
+	}
+	// known = 快照 ∪ 本命令已成功放置的 id。少了后者,先落地的件会被当成孤儿。
+	// 同一批「已成功放置的 id」还兼任门⓪的**新鲜度探针**:它们必然在页面上,
+	// 所以一次反映当前页面的回读必须把它们全带回来。两个用途共用一份来源,
+	// 免得哪天一边加了 id 另一边忘了(门①宽松一点只是少收编,门⓪宽松一点会
+	// 直接放行一个说反话的结论)。
+	scope := make(map[string]bool, len(known)+len(created))
+	for id := range known {
+		scope[id] = true
+	}
+	probes := make([]string, 0, len(created))
+	for _, c := range created {
+		if id := strings.TrimSpace(c.PrimitiveID); id != "" {
+			scope[id] = true
+			probes = append(probes, id)
+		}
+	}
+
+	verdict, err := schAdoptRead(cfg, window, scope, probes, base, req)
+	if err != nil {
+		msg := fmt.Sprintf("%s: 收编回读失败(%v)—— 无法判断这次 place 是否已经落地", p.Designator, err)
+		fmt.Fprintf(stderr, "adopt ✗ %s\n", msg)
+		schAdoptUncertainGuidance(stderr, req, nil)
+		return nil, []string{msg}, nil
+	}
+	if verdict.Adopted != nil {
+		placement := p
+		placement.PrimitiveID = verdict.Adopted.ID
+		if d := strings.TrimSpace(verdict.Adopted.Designator); d != "" {
+			placement.Designator = d
+		}
+		fmt.Fprintf(stderr, "adopt ✓ %s\n", verdict.Reason)
+		return &placement, nil, []string{verdict.Adopted.ID}
+	}
+	if ids := verdict.CandidateIDs(); len(ids) > 0 {
+		fmt.Fprintf(stderr, "adopt ~ %s\n", verdict.Reason)
+		schAdoptResidueGuidance(stderr, ids)
+		return nil, nil, ids
+	}
+	// 新鲜度门没过:回读什么也没证明。**必须**在「证实没落地」之前拦截 —— 这两条
+	// 分支的输入长得一模一样(都是「那里没有新器件」),区别只在这次回读可不可信。
+	if verdict.Uncertain {
+		msg := p.Designator + ": " + verdict.Reason
+		fmt.Fprintf(stderr, "adopt ? %s\n", msg)
+		schAdoptTierNotice(stderr, verdict)
+		schAdoptUncertainGuidance(stderr, req, verdict.MissingProbes)
+		return nil, []string{msg}, nil
+	}
+	// 证实没落地 —— 这是好消息,说出来。旧文案无条件吓唬"可能建了个 untracked
+	// 器件",于是每次超时都要人肉去页面上找,找不到也不敢确定。证据档跟着一起报:
+	// 算术档是可证的,探针档只是弱证据,两者绝不能在报文里长得一样。
+	fmt.Fprintf(stderr, "adopt ✓ %s\n", verdict.Reason)
+	schAdoptTierNotice(stderr, verdict)
+	return nil, nil, nil
 }
 
 // readBlockComponentIDs is deliberately stricter than the normal diagnostic
@@ -500,21 +662,34 @@ func readBlockComponentIDs(cfg *appConfig, window string) (map[string]bool, erro
 // failure manifest and returns a non-nil error regardless of rollback outcome.
 // A proven cleanup is "failed-rolled-back"; every uncertain/surviving component
 // is "failed-partial" and called out as PARTIAL STATE.
+//
+// adopted 是超时收编认回的 id(见 bapAdoptAfterPlaceFailure):没有回执,但有
+// 「落地前快照差集 + 下发坐标」的证明,所以照样进清扫单。
 func failBlockApplyAfterPlacement(cfg *appConfig, window string, man *bapManifest,
-	placed []bapPlacement, uncertain []string, cause error, asJSON bool,
+	placed []bapPlacement, uncertain, adopted []string, cause error, asJSON bool,
 	stdout, stderr io.Writer) error {
 
 	man.Failure = cause.Error()
 	man.Placed = append([]bapPlacement(nil), placed...)
-	rollback := rollbackBlockPlacements(cfg, window, placed, uncertain)
+	rollback := rollbackBlockPlacements(cfg, window, placed, uncertain, adopted)
 	man.Rollback = &rollback
 	man.PartialState = !rollback.Complete
 
 	state := "rollback verified: all newly placed primitive IDs are absent; wiring was not started"
+	swept := len(rollback.AttemptedPrimitiveIDs)
+	for _, id := range rollback.AdoptedPrimitiveIDs {
+		if !slices.Contains(rollback.AttemptedPrimitiveIDs, id) {
+			swept++
+		}
+	}
 	if rollback.Complete {
 		man.OK = "failed-rolled-back"
-		fmt.Fprintf(stderr, "rollback ✓ %d/%d newly placed component(s) removed and verified; wiring was not started\n",
-			len(rollback.AttemptedPrimitiveIDs), len(rollback.AttemptedPrimitiveIDs))
+		adopted := ""
+		if len(rollback.AdoptedPrimitiveIDs) > 0 {
+			adopted = fmt.Sprintf(" (%d of them adopted after a lost place response)", len(rollback.AdoptedPrimitiveIDs))
+		}
+		fmt.Fprintf(stderr, "rollback ✓ %d/%d newly placed component(s) removed and verified%s; wiring was not started\n",
+			swept, swept, adopted)
 	} else {
 		man.OK = "failed-partial"
 		var details []string
@@ -535,6 +710,9 @@ func failBlockApplyAfterPlacement(cfg *appConfig, window string, man *bapManifes
 		}
 		state = "PARTIAL STATE: " + strings.Join(details, "; ") + "; wiring was not started"
 		fmt.Fprintf(stderr, "rollback ✗ %s\n", state)
+		// 只报 PARTIAL STATE 而不说删什么,正是残件能攒到三个的原因:每一个还在
+		// 页上的 id 都必须被点名,并配一条能直接跑的清理命令(判据要给下一步)。
+		schAdoptResidueGuidance(stderr, rollback.SurvivedPrimitiveIDs)
 	}
 	if err := emitBapManifest(*man, asJSON, stdout); err != nil {
 		return fmt.Errorf("block-apply stopped before wiring: %w; %s; emit failure manifest: %v", cause, state, err)
@@ -582,6 +760,9 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	// A dry run must not need a window: the point is to inspect the plan. Only
 	// the designator scan needs the page, so fall back to an empty page.
 	var sheetBBox *layoutBBox
+	// preplaceIDs 是「本命令开跑前页面上有哪些器件」。nil = 没读到 → 收编停用
+	// (没有它就分不清「新出现」和「本来就在」,按坐标猜等于允许误删)。
+	var preplaceIDs map[string]bool
 	if !dryRun || window != "" || cfg.project != "" {
 		if in.Existing, err = existingDesignators(cfg, window); err != nil {
 			if !dryRun {
@@ -592,8 +773,9 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		}
 		// Existing part bboxes (active page) so the block origin dodges them,
 		// plus the A4 title-block keep-out so a right/bottom origin never lands
-		// on the 图签 (issue #141).
-		in.Obstacles, in.TitleBlock, sheetBBox = fetchSchObstaclesAndKeepout(cfg, window)
+		// on the 图签 (issue #141). The fourth value is the pre-placement id
+		// snapshot the lost-response adoption diffs against (sch_place_adopt.go).
+		in.Obstacles, in.TitleBlock, sheetBBox, preplaceIDs = fetchSchObstaclesAndKeepout(cfg, window)
 		// 图纸边框必须**进搜索**,不能只留给事后 warning:origin 螺旋从前把
 		// findSlot 的 inBounds 传成 nil,于是"最近的空位"可以落在图纸外
 		// (实测 J_USB→x=-20、R6→y=880 而图纸上界 825)。issue #180 Fix B。
@@ -699,12 +881,15 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		}
 		res, err := requestActionTimed(cfg, "schematic.component.place", window, payload, placeTimeout)
 		if err != nil {
-			// A connector-side place can create the primitive and then fail while
-			// assigning its designator, in which case the failed envelope carries
-			// no safe ID. Remove every earlier tracked create, but report the
-			// current one as uncertain rather than pretending atomicity.
-			return failBlockApplyAfterPlacement(cfg, window, &man, created,
-				[]string{p.Designator + " (failed place may have created an untracked component)"},
+			// 假失败定律:一次失败的 place(尤其是 "connector did not respond")
+			// 大概率已经在画布上建好了件,只是回执丢了。以前这里直接放手,那个件
+			// 就成了谁也删不掉的 untracked 残件,并随重试繁殖。现在先做一次收编。
+			placement, uncertain, adopted := bapAdoptAfterPlaceFailure(
+				cfg, window, preplaceIDs, created, p, stderr)
+			if placement != nil {
+				created = append(created, *placement)
+			}
+			return failBlockApplyAfterPlacement(cfg, window, &man, created, uncertain, adopted,
 				fmt.Errorf("place %s (%s): %w", p.Designator, p.PartKey, err),
 				asJSON, stdout, stderr)
 		}
@@ -720,12 +905,25 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 		} else {
 			fmt.Fprintf(stderr, "placed %-6s %-18s @ %.0f,%.0f [%s]\n", p.Designator, p.PartKey, p.X, p.Y, p.Source)
 		}
-		created = append(created, createdPlacement)
 		if p.PrimitiveID == "" {
-			return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+			// 「成功但没回 id」与超时同族:件在画布上,句柄丢了。同一套收编 ——
+			// 认回来就当作已放置件(回滚照常删),认不回来才按无句柄报 PARTIAL。
+			placement, _, adopted := bapAdoptAfterPlaceFailure(cfg, window, preplaceIDs, created, p, stderr)
+			if placement != nil {
+				createdPlacement.PrimitiveID = placement.PrimitiveID
+				plan.Placements[i].PrimitiveID = placement.PrimitiveID
+			}
+			created = append(created, createdPlacement)
+			return failBlockApplyAfterPlacement(cfg, window, &man, created, nil, adopted,
 				fmt.Errorf("place %s (%s) succeeded but returned no primitiveId; refusing to wire an untracked component",
 					createdPlacement.Designator, p.PartKey),
 				asJSON, stdout, stderr)
+		}
+		created = append(created, createdPlacement)
+		if preplaceIDs != nil {
+			// 收编的门①要求 known = 快照 ∪ 已成功放置;逐件补进去,否则前面几件
+			// 会被后面的收编当成"新出现的孤儿"。
+			preplaceIDs[p.PrimitiveID] = true
 		}
 	}
 	if len(renames) > 0 {
@@ -768,7 +966,7 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 	findings, offSheet, verifyErr := verifyBlockLayout(cfg, window, plan.Placements)
 	if verifyErr != nil {
 		fmt.Fprintf(stderr, "layout ✗ verification unavailable: %v\n", verifyErr)
-		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil, nil,
 			fmt.Errorf("layout verification failed: %w", verifyErr), asJSON, stdout, stderr)
 	}
 	// 硬门在推让之后报重叠时,先把位移原样还原再验一次:布局本来是干净的,不该因为
@@ -801,7 +999,7 @@ func runBlockApply(cfg *appConfig, window, blockID string, in bapInput, partsPat
 			fmt.Fprintf(stderr, "layout ✗ overlap %s ↔ %s (%.0f×%.0f) — fix with `sch modify`/`sch autoplace-free`, then `sch layout-lint`\n",
 				f.A, f.B, f.OvX, f.OvY)
 		}
-		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil,
+		return failBlockApplyAfterPlacement(cfg, window, &man, created, nil, nil,
 			fmt.Errorf("layout verification found %d overlap(s) and %d pin coincidence(s)",
 				overlaps, coincidences),
 			asJSON, stdout, stderr)
@@ -1002,9 +1200,21 @@ func emitBapManifest(m bapManifest, asJSON bool, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "failure: %s\n", m.Failure)
 	}
 	if m.Rollback != nil {
-		fmt.Fprintf(stdout, "rollback: complete=%t verified=%t attempted=%d survived=%d untracked=%d\n",
+		// adopted = 回执丢了但被收编认回、并进了清扫单的 id;untracked 现在只剩
+		// 「连名字都点不出来」的那一类,数字变小才说明真的收敛了。
+		fmt.Fprintf(stdout, "rollback: complete=%t verified=%t attempted=%d adopted=%d survived=%d untracked=%d\n",
 			m.Rollback.Complete, m.Rollback.Verified, len(m.Rollback.AttemptedPrimitiveIDs),
+			len(m.Rollback.AdoptedPrimitiveIDs),
 			len(m.Rollback.SurvivedPrimitiveIDs), len(m.Rollback.MissingPrimitiveIDs))
+		if len(m.Rollback.AdoptedPrimitiveIDs) > 0 {
+			fmt.Fprintf(stdout, "adopted (place response lost, identified by a pre-placement snapshot diff): %s\n",
+				strings.Join(m.Rollback.AdoptedPrimitiveIDs, ", "))
+		}
+		if len(m.Rollback.SurvivedPrimitiveIDs) > 0 {
+			fmt.Fprintf(stdout, "still on the page: %s\n", strings.Join(m.Rollback.SurvivedPrimitiveIDs, ", "))
+			fmt.Fprintf(stdout, "  easyeda sch prim-delete --ids %s\n",
+				strings.Join(m.Rollback.SurvivedPrimitiveIDs, ","))
+		}
 	}
 	if m.PartialState {
 		fmt.Fprintln(stdout, "PARTIAL STATE: canvas restoration was not proven; inspect rollback details before retrying")
@@ -1088,6 +1298,18 @@ read-back is reported as failed-partial + PARTIAL STATE. EasyEDA mutations
 autosave independently, so this is explicit compensation, never a fake
 transaction claim.
 
+LOST PLACE RESPONSE (ADOPTION): a place that fails with "connector did not
+respond" has usually ALREADY created the component — only the response was lost.
+Those orphans used to stay on the page forever (nothing knew their ID) and
+multiplied on every retry. block-apply now snapshots the page's component IDs
+before placing; on a lost/ID-less place response it re-reads (settled) and adopts
+the component that is BOTH absent from that snapshot AND at the requested x/y
+(±5). Adopted IDs appear as rollback.adoptedPrimitiveIds and are deleted like any
+tracked ID. Nothing new at that spot is reported as "the place did not land" —
+no ID is ever invented, and a pre-existing part at the same coordinates is in the
+snapshot, so it can never be adopted or deleted. Without a usable snapshot
+adoption is disabled outright and the run reports an honest PARTIAL STATE.
+
 SCOPE (v1): parts / internal_nets / ports only. A block's pcb_layout, placement,
 signals and silk maps are NOT applied — the manifest lists them under
 "NOT applied" so a green exit never reads as "the whole block was honoured".
@@ -1101,8 +1323,11 @@ named after its own first designator (LED1_N2 vs LED2_N2) so instances never
 merge. Re-running after a partial failure therefore does NOT repair that instance,
 it builds another one. If status is failed-rolled-back, fix the origin/template
 and retry. If status is failed-partial, inspect rollback.survivedPrimitiveIds /
-missingPrimitiveIds, delete or repair the residue explicitly, then retry — never
-assume the failed run left a clean page.
+adoptedPrimitiveIds / missingPrimitiveIds, delete or repair the residue explicitly
+(the manifest prints a ready-to-run ` + "`sch prim-delete --ids …`" + `), then retry — never
+assume the failed run left a clean page. Residue that will not delete is almost
+always a wedged connector action queue (writes are swallowed while light reads
+still work): ` + "`sch save`" + `, fully restart EasyEDA, then delete.
 
 Wiring itself is delegated to the ` + "`sch autoconnect`" + ` planner, which IS
 idempotent per pin — an already-connected pin is skipped rather than re-flagged.`,

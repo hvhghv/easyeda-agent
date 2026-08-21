@@ -54,6 +54,31 @@ func requestTimeout(req *protocol.Request) time.Duration {
 // the first is still grinding (worst on a background window, where it NEVER
 // finishes — optimization-loop.md A4); retries therefore make the hang worse,
 // not better. The guard turns that into an immediate, explainable rejection.
+//
+// ── Does the connector's FIFO queue make this redundant? NO — keep it. ─────
+//
+// Connector 1.0.3 runs every action through one FIFO queue per window
+// (extension/src/action-queue.ts), so two DRCs can no longer overlap on the
+// webview. That removes the *overlap*, not the reason this guard exists:
+//
+//   - **Queuing and refusing are different answers.** A FIFO can only DELAY;
+//     it has no way to decline. A second DRC would sit behind a 60s+ recompute
+//     and then run a second full-canvas recompute on a webview that just
+//     finished one — the caller waits minutes to learn what this guard says
+//     immediately ("one is already running; if it never settles, foreground
+//     the window"). The whole point is to stop the ask, not to sequence it.
+//   - **Only the daemon can see the second asker.** The guard is what makes a
+//     retry loop — or a second client/agent driving the same board — fail
+//     loudly instead of silently stacking work.
+//   - **A queued long action would burn its whole budget waiting.** With the
+//     connector abandoning a head past its own timeoutMs, a DRC that queued
+//     behind another DRC could be abandoned before it ever started, which is
+//     both wasteful and reports as an ambiguous failure.
+//
+// And the converse: the daemon deliberately adds NO general per-window
+// ordering beyond this. Serialization belongs at the connector, the only place
+// that can serialize the *handlers* — a daemon-side queue would order the
+// dispatches while the handlers still raced, i.e. cost without the guarantee.
 var nonReentrant = map[string]bool{
 	"pcb.drc.check":       true,
 	"schematic.drc.check": true,
@@ -213,53 +238,26 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	req.CreatedAt = time.Now().UTC()
 	req.WindowID = target.id()
 
-	// A CLI command releases the lease it accumulated across its guard/read/write
-	// sequence through this daemon-local action. Resolve the target window above,
-	// but never forward the release to the connector.
-	if req.Action == "system.transaction.release" {
-		started := time.Now().UTC()
-		released := s.windowTransactions.end(req.WindowID, req.TransactionID)
-		resp := protocol.Response{
-			Envelope: protocol.Envelope{
-				ID: req.ID, Type: protocol.TypeResponse, Version: req.Version,
-				WindowID: req.WindowID, CreatedAt: time.Now().UTC(),
-			},
-			OK:     true,
-			Result: map[string]any{"released": released, "windowId": req.WindowID},
-		}
-		s.audit.Append(fromResponse(started, &req, &resp))
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout(&req))
-	defer cancel()
-	transactionOwner := req.TransactionID
-	transactional := transactionOwner != ""
-	if transactionOwner == "" {
-		// Raw and older callers still serialize while one action is in flight,
-		// but do not retain a lease between unrelated requests.
-		transactionOwner = req.ID
-	}
-	releaseAction, txErr := s.windowTransactions.acquire(ctx, req.WindowID, transactionOwner, transactional)
-	if txErr != nil {
-		started := time.Now().UTC()
-		errResp := errorResponse(req.ID, "WINDOW_BUSY", "another command owns this EasyEDA window", txErr.Error())
-		errResp.WindowID = req.WindowID
-		s.audit.Append(fromResponse(started, &req, &errResp))
-		writeJSON(w, http.StatusConflict, errResp)
-		return
-	}
-	defer releaseAction()
-
 	// Workflow stage gate (issue #97): routing actions refuse until the
 	// project's persisted stage state authorizes them — enforced HERE, at the
 	// choke point, so a raw /action caller can't bypass the CLI's gates.
 	if errResp := s.checkStageGate(&req); errResp != nil {
 		started := time.Now().UTC()
-		errResp.WindowID = req.WindowID
 		s.audit.Append(fromResponse(started, &req, errResp))
 		writeJSON(w, http.StatusForbidden, *errResp)
+		return
+	}
+
+	// Stale-read gate (SKILL 铁律 5, mechanical): a PCB read on a window mutated
+	// since its last `doc reload` is REFUSED here, not merely annotated — the
+	// advisory version was overridden 1780 times (18.1% of the reads it flagged)
+	// over a 49-day audit window. 409 Conflict, not 403: the caller is not
+	// unauthorized, its view of the document state conflicts with the engine's.
+	// `--force-reason` still gets through, audited. See stalereads.go.
+	if errResp := s.checkStaleRead(&req); errResp != nil {
+		started := time.Now().UTC()
+		s.audit.Append(fromResponse(started, &req, errResp))
+		writeJSON(w, http.StatusConflict, *errResp)
 		return
 	}
 
@@ -272,7 +270,6 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			errResp := errorResponse(req.ID, "ACTION_BUSY",
 				fmt.Sprintf("%s is already running on this window", req.Action),
 				"wait for the in-flight check to settle; if it never does, EasyEDA is in the background — bring the window to the FOREGROUND and run once (do not retry in a loop)")
-			errResp.WindowID = req.WindowID
 			s.audit.Append(fromResponse(started, &req, &errResp))
 			writeJSON(w, http.StatusConflict, errResp)
 			return
@@ -280,11 +277,35 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		defer release()
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout(&req))
+	defer cancel()
+
 	started := time.Now().UTC()
-	resp, err := target.dispatch(ctx, req)
+	// Adaptive backoff (writehealth.go, REPORT round2 新 3): every forwarded
+	// outcome feeds the rolling per-window health; whitelisted idempotent
+	// actions get one light-read-gated retry; everything else passes failures
+	// through (annotated with a degraded advisory below — never blind-resent).
+	// The outcome carries the EFFECT verdict, not just the return code: a
+	// response that re-read the canvas and reported survivors/notApplied counts
+	// as a failed write however green its ok flag is (通道 A).
+	hooks := adaptiveHooks{
+		observe: func(o outcome) { s.writeHealth.observe(req.WindowID, o) },
+		auditFirst: func(firstResp *protocol.Response, firstErr error) {
+			first := firstResp
+			if first == nil {
+				er := errorResponse(req.ID, "DISPATCH_FAILED", "connector did not respond", firstErr.Error())
+				first = &er
+			}
+			first.Warnings = append(first.Warnings, "superseded by daemon auto-retry (adaptive backoff)")
+			s.audit.Append(fromResponse(started, &req, first))
+			started = time.Now().UTC() // the final audit entry times the retry only
+		},
+		sleep: time.Sleep,
+	}
+	resp, err, _ := forwardWithAdaptiveRetry(ctx, req, target.dispatch, hooks)
 	if err != nil {
 		errResp := errorResponse(req.ID, "DISPATCH_FAILED", "connector did not respond", err.Error())
-		errResp.WindowID = req.WindowID
+		s.writeHealth.annotateDegraded(&req, &errResp)
 		s.audit.Append(fromResponse(started, &req, &errResp))
 		writeJSON(w, http.StatusGatewayTimeout, errResp)
 		return
@@ -297,9 +318,6 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	if resp.Type == "" {
 		resp.Type = protocol.TypeResponse
 	}
-	// Make the resolved, live target observable to the CLI transaction tracker;
-	// connector responses historically omitted the envelope windowId.
-	resp.WindowID = req.WindowID
 	// Surface the stale-id re-route on the successful response: the call worked,
 	// but the caller's windowId is dead and its NEXT call should use the new one
 	// (or --project). Silently succeeding would leave it holding a dead id.
@@ -310,14 +328,22 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// Catalog-driven stage invalidation: a successful placement/outline mutation
 	// clears stale downstream confirmations, whoever the client was.
 	s.maybeInvalidateStage(&req, resp)
-	// Stale-read advisory (SKILL iron rule 5): mark the window after a PCB
-	// mutation, clear on reload/pour-rebuild, and annotate PCB reads that arrive
-	// in between with a non-blocking staleRisk field. See stalereads.go.
+	// Stale-read state machine (SKILL iron rule 5): mark the window after a PCB
+	// mutation, clear on reload/pour-rebuild. The REFUSAL happens before dispatch
+	// (checkStaleRead above); what is left here is the staleRisk annotation for
+	// the reads the gate let through — block-exempt (pcb.snapshot) and forced
+	// ones. See stalereads.go.
 	s.staleReads.observe(&req, resp)
 	// Concurrent-writer advisory (issue #108): when a DIFFERENT client mutates
 	// a window another client wrote to recently, annotate the response with a
 	// non-blocking concurrentWriter field. See concurrentwrites.go.
 	s.concurrentWrites.observe(&req, resp)
+	// Degraded-connector advisory (REPORT round2 新 3): a FAILED response — or an
+	// ok response the connector's own re-read proves did not fully land (假成功)
+	// — on a window whose rolling health is degraded carries a structured hint;
+	// mutating actions get the fake-failure-law advice (verify by light read
+	// before resending). Nothing is retried here. See writehealth.go.
+	s.writeHealth.annotateDegraded(&req, resp)
 	s.audit.Append(fromResponse(started, &req, resp))
 	// After a successful content-changing action, arm a debounced autosave so the
 	// work reaches disk without the agent having to remember to save (no-op when
@@ -358,7 +384,7 @@ func stripArtifactNesting(p string) string {
 		if segs[i] == ".easyeda" && segs[i+1] == "artifacts" {
 			trimmed := strings.Join(segs[:i], sep)
 			if trimmed == "" {
-				if filepath.IsAbs(clean) || strings.HasPrefix(clean, sep) {
+				if filepath.IsAbs(clean) {
 					return sep
 				}
 				return "."

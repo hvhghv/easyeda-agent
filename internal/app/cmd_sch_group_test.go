@@ -583,3 +583,60 @@ func TestSchGroupMoveSetAllIDs(t *testing.T) {
 		t.Fatalf("AllIDs = %q", got)
 	}
 }
+
+// ── delete cascade (缺陷 2) ─────────────────────────────────────────────────
+
+func TestCascadeGroupsRemoveDesignators(t *testing.T) {
+	g1 := mkGroup("g1", "led", "LED1", "R1")
+	g1.Roles = map[string]string{"LED": "LED1", "R": "R1"}
+	g2 := mkGroup("g2", "mcu", "U1", "C1")
+	g3 := mkGroup("g3", "gone", "R9")
+
+	// R1 removed from g1 (its Role entry too); g3 emptied → dropped; g2 untouched.
+	next, notes := cascadeGroupsRemoveDesignators([]*schGroup{g1, g2, g3},
+		map[string]bool{"R1": true, "R9": true})
+	if len(next) != 2 {
+		t.Fatalf("expected g3 dropped, got %d groups", len(next))
+	}
+	if got := strings.Join(g1.Members, ","); got != "LED1" {
+		t.Fatalf("g1 members = %q, want LED1", got)
+	}
+	if _, still := g1.Roles["R"]; still {
+		t.Fatal("role pointing at the deleted designator must be removed")
+	}
+	if _, kept := g1.Roles["LED"]; !kept {
+		t.Fatal("unrelated role must survive the cascade")
+	}
+	if len(notes) != 2 {
+		t.Fatalf("expected 2 cascade notes, got %v", notes)
+	}
+
+	// No designator referenced → notes nil (caller skips the save entirely).
+	if _, n := cascadeGroupsRemoveDesignators([]*schGroup{g2}, map[string]bool{"R1": true}); n != nil {
+		t.Fatalf("untouched table produced notes: %v", n)
+	}
+}
+
+// ── group create --roles parsing (缺陷 4) ───────────────────────────────────
+
+func TestParseGroupRolesFlag(t *testing.T) {
+	roles, err := parseGroupRolesFlag(" BUCK=u3 , CIN=C11 ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if roles["BUCK"] != "U3" || roles["CIN"] != "C11" || len(roles) != 2 {
+		t.Fatalf("roles misparsed: %v", roles)
+	}
+	if r, err := parseGroupRolesFlag(""); err != nil || r != nil {
+		t.Fatalf("empty flag should be nil,nil: %v %v", r, err)
+	}
+	if _, err := parseGroupRolesFlag("BUCK"); err == nil {
+		t.Fatal("missing '=' accepted")
+	}
+	if _, err := parseGroupRolesFlag("BUCK=U3,BUCK=U4"); err == nil {
+		t.Fatal("duplicate role accepted")
+	}
+	if _, err := parseGroupRolesFlag("=U3"); err == nil {
+		t.Fatal("empty role name accepted")
+	}
+}

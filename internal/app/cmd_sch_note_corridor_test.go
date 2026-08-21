@@ -103,7 +103,8 @@ func TestNoteCorridorCandidates_OrderAndTiers(t *testing.T) {
 		t.Fatal("走廊候选不能为空")
 	}
 	first := cands[0]
-	if first[0] != z.MinX+noteGap || first[1] != z.MinY-noteGap {
+	// 锚点 = 左下角:正下方走廊要让 bbox 顶(y+h)不超过 z.MinY-noteGap。
+	if first[0] != z.MinX+noteGap || first[1] != z.MinY-noteGap-h {
 		t.Errorf("第一个候选应是正下方第一档左端: %+v", first)
 	}
 	// 正下方走廊必须是多档(不再是单点):同一 x 至少出现 noteCorridorTiers 个不同 y。

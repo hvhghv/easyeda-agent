@@ -757,6 +757,7 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
   easyeda sch prim-delete                 # delete the current selection`,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				payload := map[string]any{}
+				var cascadePlan map[string]string // primitiveId → group-member designator
 				if idsRaw != "" {
 					ids, err := parseIDList(idsRaw)
 					if err != nil {
@@ -768,13 +769,28 @@ NOT line up — re-wire the affected pins, then run ` + "`easyeda sch drc`" + ` 
 						return err
 					}
 					payload["primitiveIds"] = ids
-					// Persistent-group awareness (best-effort, read-only): deleting
-					// a group member leaves the relation stale — say so up front.
-					warnSchGroupMemberDeletion(cfg, window, ids, stderr)
+					// 缺陷 2(P1):删器件必须级联删组注册,否则位号复用后新件被
+					// 陈旧组吃掉。先于删除解析 id→位号(删完 list 就查不到了)。
+					cascadePlan = planSchGroupMemberCascade(cfg, window, ids, stderr)
 				}
 				res, err := dispatchCapture(cfg, "schematic.primitives.delete", window, payload, stdout)
 				if err != nil {
 					return err
+				}
+				// 连接器的存活判定是删完**立刻**回读的,可能采到尚未落定的快照。
+				// 幸存者 settle 一拍后复核一轮,用复核回执定案(sch_prim_delete_settle.go)。
+				res = primDeleteSettleRecheck(cfg, window, res, stderr)
+				// Registry leg of the delete cascade: only designators whose delete
+				// was VERIFIED (not in result.survived) leave the group table.
+				if len(cascadePlan) > 0 {
+					survived := survivedIDSet(res.Result)
+					var gone []string
+					for id, desig := range cascadePlan {
+						if !survived[id] {
+							gone = append(gone, desig)
+						}
+					}
+					cascadeSchGroupMembership(cfg, window, gone, stderr)
 				}
 				// ADR-0004 Decision 5: when a delete response carries a cascaded
 				// cleanup block (component.delete does; renderer is generic), say so.
@@ -1241,6 +1257,13 @@ silently substitutes a net port or text.`,
 				if rerr != nil || res == nil || !connectLanded(res.Result, desig, pinNum, net) {
 					return dispErr
 				}
+				// 回传假失败(通道 B):daemon 把这次转发记成失败了,而回读证明写
+				// 其实落地了 —— 不回传的话,健康度会把一次「连接器慢」算成一次
+				// 「连接器坏」,degraded 在错误的方向上响。
+				reportWriteVerified(cfg, window, writeVerdict{
+					action: "schematic.power.connect_pin", source: "sch connect",
+					returnedOK: false, landed: 1,
+				})
 				fmt.Fprintf(stderr, "⚠ connect_pin 报超时/派发失败,但回读确认 %s 已在网络 %s 上 —— slow-landed,按成功处理(不要重试,会造重复旗)。\n", pinRef, net)
 				return json.NewEncoder(stdout).Encode(map[string]any{
 					"ok": true,
@@ -1931,9 +1954,9 @@ func failOnSurvivingPrimitives(res *actionResult, stderr io.Writer) error {
 		return nil
 	}
 	survived, _ := res.Result["survivedTotal"].(float64)
-	fmt.Fprintf(stderr, "✗ %d primitive(s) survived the delete — they are still on the page.\n", int(survived))
-	fmt.Fprintln(stderr, "  Re-read (sch text-list / sch check) before assuming anything was removed;")
-	fmt.Fprintln(stderr, "  if they persist across a `doc reload`, delete them in the EasyEDA UI (issue #164).")
+	fmt.Fprintf(stderr, "✗ %d primitive(s) survived the delete (settle 复核后仍在) — they are still on the page.\n",
+		int(survived))
+	primDeleteResidueGuidance(stderr, res)
 	return errActionFailed
 }
 

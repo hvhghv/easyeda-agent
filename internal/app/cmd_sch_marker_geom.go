@@ -509,10 +509,15 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 		for _, pf := range partitionFinding(cfg, window, comps, stderr) {
 			geo = append(geo, *pf)
 		}
-		// 图签是交付件:标题/设计者/板名空着,打印出来就是一张没人认领的图。
+		// Check the official title-block model first; readability annotations are
+		// deliberately separate from the model because the official write API can
+		// corrupt it even when it reports failure.
 		if tf := titleBlockFinding(cfg, window, comps, stderr); tf != nil {
 			geo = append(geo, *tf)
 		}
+		// 「放对没有」判据:登记说明必须在自己的分区框内(新 2)。单页作用域
+		// (text.list 只见激活页,登记与分区计划也按 docUUID 钉页)。
+		geo = append(geo, noteOutsideZoneFindings(cfg, window, stderr)...)
 	}
 
 	if len(geo) == 0 {
@@ -529,6 +534,8 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 			rep.Summary.MarkerOverlaps++
 		case "titleblock-model-corrupt":
 			rep.Summary.TitleblockModelCorrupt++
+		case "note-outside-zone":
+			rep.Summary.NoteOutsideZones++
 		case "missing-partition", "missing-note", "missing-titleblock":
 			// 交付三件套(区框/说明/图签)共用一个聚合计数槽 —— 汇总行必须写成
 			// missing-deliverable 而不是 missing-partition:2026-08-17 真机上一条
@@ -675,8 +682,7 @@ func partitionFinding(cfg *appConfig, window string, comps []layoutComp, stderr 
 		return nil
 	}
 	rects, labels := schZoneFrameCounts(cfg, window)
-	titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
-	return partitionFindingFor(parts, rects, labels, schTextCountOutside(res.Result, titleBlock))
+	return partitionFindingFor(parts, rects, labels, schTextCount(res.Result))
 }
 
 // schZoneFrameCounts 读**工具自己的绘制记账**:平台不提供矩形枚举接口,画过的区框
@@ -711,16 +717,15 @@ func titleBlockFinding(cfg *appConfig, window string, comps []layoutComp, stderr
 	if !healthy {
 		return titleBlockModelCorruptFinding(health.Result)
 	}
-	textValues := map[string]string{}
-	if texts, textErr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); textErr == nil {
-		titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
-		textValues = titleBlockNoteValues(texts.Result, titleBlock)
-	} else {
+	texts, textErr := requestAction(cfg, "schematic.text.list", window, map[string]any{})
+	if textErr != nil {
 		return &checkFinding{
 			Type: "missing-titleblock", Level: "warn", Count: 3,
 			Message: fmt.Sprintf("无法枚举图纸说明文本:%v — 使用 `sch note` 在图签 keep-out 外放置 TITLE:/DESIGNER:/DESCRIPTION: 三项后重检", textErr),
 		}
 	}
+	titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
+	textValues := titleBlockNoteValues(texts.Result, titleBlock)
 	var missing []string
 	if textValues["TITLE"] == "" {
 		missing = append(missing, "TITLE(图纸标题)")
@@ -787,24 +792,6 @@ func titleBlockNoteValues(result map[string]any, titleBlock *layoutBBox) map[str
 	return out
 }
 
-func schTextCountOutside(result map[string]any, excluded *layoutBBox) int {
-	raw, _ := result["texts"].([]any)
-	if excluded == nil {
-		return len(raw)
-	}
-	count := 0
-	for _, item := range raw {
-		m, _ := item.(map[string]any)
-		x, xOK := finiteFloat(m["x"])
-		y, yOK := finiteFloat(m["y"])
-		if xOK && yOK && x >= excluded.MinX && x <= excluded.MaxX && y >= excluded.MinY && y <= excluded.MaxY {
-			continue
-		}
-		count++
-	}
-	return count
-}
-
 // partitionFindingFor is the pure decision (split out for testing).
 //
 // **框和说明是两样东西,必须分开判**:第一版只看「自由文本数 > 0」就闭嘴 —— 于是
@@ -850,6 +837,133 @@ func partitionFindingFor(parts, frameRects, labelTexts, textCount int) []*checkF
 		})
 	}
 	return out
+}
+
+// ── note-outside-zone(登记说明不在自己分区框内)────────────────────────────
+//
+// 交付三件套的三条判据(missing-partition/note/titleblock)都是**存在性**判据:
+// 说明「有没有」,不判「放对没有」。REPORT-esp32mini-round2 新 2:P2 两条说明
+// 飘在框外,`sch check` 一句没提 —— 用户先于工具发现。本规则补上归属判据:
+// 每条 `--zone` 登记过的说明,其渲染 bbox 必须被该区分区框包含。
+//
+// 框的口径:zone-plan 的规划框 —— `sch zone-draw --mode partition` 画的就是这个
+// plan(平台无矩形枚举接口,画布实框只有我们的 id 记账、读不回几何),规划框与
+// 实框同源。登记信息与 `sch note --zone` 的注册同源(loadSchZoneModules 投影的
+// claim.NoteIDs),不另造一套。
+//
+// noteOutsideZoneFindings 是 I/O 外壳:读登记 → 有登记说明才算 plan + text.list。
+// best-effort:任何读取失败只写 stderr / 静默跳过,绝不掩盖电气判据。
+func noteOutsideZoneFindings(cfg *appConfig, window string, stderr io.Writer) []checkFinding {
+	_, _, docUUID, _, _, _, err := loadSchGroupsContext(cfg, window)
+	if err != nil {
+		return nil
+	}
+	zones, _, err := loadSchZoneModules(cfg, window, docUUID)
+	if err != nil || len(zones) == 0 {
+		return nil // 没有模块登记的页无从谈「说明归属」——正常,不是降级
+	}
+	registered := false
+	for _, zc := range zones {
+		if zc != nil && len(zc.NoteIDs) > 0 {
+			registered = true
+			break
+		}
+	}
+	if !registered {
+		return nil // 没登记过说明就没有判定对象(missing-note 管「没有」)
+	}
+	plan, _, err := computePartitionPlan(cfg, window, docUUID, defaultPartitionOpts())
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: note-outside-zone skipped — zone-plan failed: %v\n", err)
+		return nil
+	}
+	res, err := requestAutolayoutAction(cfg, "schematic.text.list", window, map[string]any{}, docUUID, "read notes for containment check")
+	if err != nil {
+		fmt.Fprintf(stderr, "sch check: note-outside-zone skipped — text.list failed: %v\n", err)
+		return nil
+	}
+	return noteOutsideZoneFindingsFor(plan.Partitions, zones, parseZoneMoveTexts(res.Result))
+}
+
+// noteOutsideZoneFindingsFor 是纯核(离线单测):逐区逐条登记说明判包含。
+// 不误伤的边界:未登记 zone 的自由文本从不判;区不在分区计划里(件不在本页/
+// 没有框)跳过;登记指向已删文本(stale)跳过 —— 与 fold 的口径一致。
+func noteOutsideZoneFindingsFor(parts []partitionRect, zones map[string]*schZoneClaim, texts []zoneMoveText) []checkFinding {
+	byID := map[string]zoneMoveText{}
+	for _, t := range texts {
+		byID[t.ID] = t
+	}
+	var names []string
+	for n := range zones {
+		names = append(names, n)
+	}
+	sort.Strings(names) // 确定性输出
+	var out []checkFinding
+	for _, name := range names {
+		zc := zones[name]
+		if zc == nil || len(zc.NoteIDs) == 0 {
+			continue
+		}
+		var frame *layoutBBox
+		var band layoutBBox
+		for i := range parts {
+			if strInSlice(parts[i].Modules, name) {
+				frame = &parts[i].BBox
+				band = parts[i].NoteBBox
+				break
+			}
+		}
+		if frame == nil {
+			continue // 区不在本页分区计划里:没有框可归属(missing-partition 另管)
+		}
+		for _, nid := range zc.NoteIDs {
+			t, ok := byID[nid]
+			if !ok {
+				continue // stale 登记(说明已删)
+			}
+			nb := schNoteBBoxEstimate(t)
+			if bboxContains(*frame, nb) {
+				continue
+			}
+			b := nb
+			out = append(out, checkFinding{
+				Type:        "note-outside-zone",
+				Level:       "warn",
+				PrimitiveId: t.ID,
+				Count:       1,
+				At:          &checkPoint{X: t.X, Y: t.Y},
+				BBox:        &b,
+				Message:     noteOutsideZoneMessage(name, t, *frame, band),
+			})
+		}
+	}
+	return out
+}
+
+// noteOutsideZoneMessage 生成告警文案。**修法必须真的能执行** —— 旧文案一律说
+// 「prim-delete 后重跑 `sch note --zone X`」,而在两种真机情形下它必然死循环:
+// (a) 说明比带宽,重跑落到一模一样的框外坐标;(b) 框只有 68 宽(区里只有一个
+// 2 脚端子),任何可读说明都装不进,于是永远报警。现在 zone-plan 会为说明扩边/
+// 下探,所以第一档修法给的是**算好的落点坐标**(照抄即可,不可能再落回原处);
+// 只有在可扩边界内确实装不下时才给「缩短文字/腾地方」那一档,并说清是哪一维不够。
+func noteOutsideZoneMessage(zone string, t zoneMoveText, frame, band layoutBBox) string {
+	head := fmt.Sprintf("区 %q 的说明 %s @(%.0f,%.0f) 在分区框 (%.0f,%.0f)..(%.0f,%.0f) 外",
+		zone, t.ID, t.X, t.Y, frame.MinX, frame.MinY, frame.MaxX, frame.MaxY)
+	w, h := noteSizeOf(t.Content, t.FontSize)
+	// 处方坐标必须**逐字等于**落点求解会给出的贴底坐标(noteFlushAnchorY),而且
+	// 必须落在**带内**——此前按 `band.MinY+h+noteGap` 算并只判框内,于是出现过
+	// 「带 (36,12)..(204,70),处方却给 --y 80」这种把说明放到带外的报文(带的定义
+	// 与处方两把尺)。装不进带就走下面那档「装不下」,不许开一张自己都装不下的方子。
+	tx, ty := snapNote(band.MinX+noteGap), noteFlushAnchorY(band, h)
+	if box := noteAnchorBBox(tx, ty, w, h); bboxContains(band, box) && bboxContains(frame, box) {
+		return fmt.Sprintf("%s — 修法:`sch note --zone %s --text … --x %g --y %g`(说明带 (%.0f,%.0f)..(%.0f,%.0f) 已为它留好位置),"+
+			"或 `sch prim-delete --ids %s` 后重跑不带 --x/--y 的 `sch note --zone %s`;框几何变过就再跑一次 `sch zone-draw --mode partition`",
+			head, zone, tx, ty, band.MinX, band.MinY, band.MaxX, band.MaxY, t.ID, zone)
+	}
+	return fmt.Sprintf("%s — 这条说明(%.0f×%.0f)在本区可扩边界内装不下(说明带只有 %.0f×%.0f):"+
+		"缩短文字或减小 --font-size 后 `sch prim-delete --ids %s` 重放,或用 `sch group-move` 把邻近模块挪开给这个区腾横向/纵向空间;"+
+		"**别再原样重跑 `sch note`,那会落回同一个位置**",
+		head, w, h, band.MaxX-band.MinX, band.MaxY-band.MinY, t.ID)
 }
 
 // schTextCount extracts the number of free text primitives from a

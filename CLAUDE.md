@@ -124,7 +124,18 @@ easyeda update --check    # 只读三方版本表（cli / skill / connector）
 就降级成「跑一次下载的二进制、比对版本号」。**改动 release 资产命名 = 改动自更新的输入**，
 两边要一起改：`Makefile` 的 `release` 目标 ↔ `selfupdate.AssetName`。
 
-**版本号约定**：CLI 和 connector 始终用同一版本号（`make release` 负责把 `extension.json` 同步到 VERSION，不需要提前跑 `make eext`）。`make release` 会自动打 git tag、push 并创建 GitHub Release，**并把 skill 同版本发布到 ClawHub**（best-effort，失败不阻断；重试 `make publish-skill VERSION=…`，需已 `clawhub login`）。ClawHub 版本号不可覆盖；`publish-skill` 必须用绝对路径——clawhub 的 workdir 会被全局配置劫持到 `~/clawd`，相对路径会把旧副本发上去（0.8.1 踩过）。skillhub.cn 无 CLI API（纯网页社区），不集成。
+**版本号约定**：CLI、connector 和 skill 始终用同一版本号（`make release` 负责把 `extension.json` **和 `SKILL.md` 的 `metadata.version`** 同步到 VERSION，不需要提前跑 `make eext`）。skill 侧同步脚本是 `scripts/sync-skill-version.py`（`--check` 只校验不写，可单独跑）——**改 frontmatter 时别动 `  version:` 那行的两空格缩进格式**，脚本按它定位。注意与安装态的 `.version` 标记文件区分：那是 `easyeda update` 写在 skill 目录里的运行时标记（`internal/selfupdate`），`metadata.version` 是随包发布、离线可读的声明式元数据，发版后两者同值。`make release` 会自动打 git tag、push 并创建 GitHub Release，**并把 skill 同版本发布到 ClawHub**（best-effort，失败不阻断；重试 `make publish-skill VERSION=…`，需已 `clawhub login`）。ClawHub 版本号不可覆盖；`publish-skill` 必须用绝对路径——clawhub 的 workdir 会被全局配置劫持到 `~/clawd`，相对路径会把旧副本发上去（0.8.1 踩过）。
+
+**skillhub.cn 走 CI 自动发布**（订正旧结论「skillhub.cn 无 CLI API（纯网页社区），不集成」——**现在有真 CLI 了**）。链路：`make release` 里的 `gh release create` 发出 `release: published` → `.github/workflows/publish-skill.yml` 触发 → 跑 `make publish-skill-hub VERSION=…`。**`release` 目标本身不用改**，也不要把 skillhub 塞进它的主流程。
+
+- **token**：仓库 secret `SKILLHUB_TOKEN`（`skh_` 开头，建于 https://skillhub.cn/dashboard/keys ）。skillhub CLI **原生读同名环境变量**（优先级 `--token` > `SKILLHUB_TOKEN` > `~/.skillhub/credentials.json`），所以 CI 里**不跑 `skillhub login`**、凭据不落 runner 磁盘。**任何情况下都不要把 token 写进文件或 echo 出来。**
+- **手动补发**：`export SKILLHUB_TOKEN=skh_xxx && make publish-skill-hub VERSION=v1.0.3`，或在 Actions 页手动跑该 workflow（`workflow_dispatch` 填版本号）。只想验打包不真发：`make publish-skill-hub VERSION=… SKILLHUB_DRY_RUN=1`（不需要 token）。
+- **两套 frontmatter 规范互斥，所以必须发 staging 副本**：skillhub 硬性要求顶层 `slug` + `displayName`（缺一个直接 die），而官方 Agent Skills 规范验证器 `npx skills-ref@latest validate` **明确拒收这两个字段**。因此 repo 里的 `SKILL.md` 保持 spec 干净，`publish-skill-hub` 把 skill 拷到临时目录、只往副本注入这两个键（**幂等**：哪天 `SKILL.md` 自带了就自动跳过）。**别为了发 skillhub 去改 repo 的 `SKILL.md`，那会当场破坏 `skills-ref` 门禁。**
+- **版本号**：workflow 从 release tag 取（剥 `v` 前缀），经 `skillhub publish --version` 覆盖，所以**不依赖 `SKILL.md` 的 `metadata.version`**，tag 是唯一版本源。必须是合法 SemVer（`v1.0` 会被拒）。
+- **版本不可覆盖**（同 ClawHub）：同 slug 同 version 重发被服务端拒（409），补发请升版本号。发布后进 `pending_review` 审核队列，不是立刻可见。
+- **装 CLI 只认官方脚本**：`curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only`（装到 `~/.local/bin/skillhub`）。
+- **`skillhub` 这个 bin 名被两个项目占用，且可能同时在 PATH 上**（本机实测就是：homebrew/npm 的 `skillhub`（skills.palebluedot.live，Node）排在官方前面）。冒牌货的 `publish` 只有 `--namespace/--visibility/--registry`，没有 `--version/--host` —— 轻则炸在 `unknown flag: --version`，**重则静默发布到错误的 registry**。所以这里**不做「注释警告」，做机械检查**：`make skillhub-check`（判据 = 探 `publish --help` 是否暴露我们真正会传的 `--version/--host/--changelog/--dry-run`，绑定「用得上的能力」而非版本号字符串；不靠路径判断）。`publish-skill-hub` 内部先跑同一套解析，CI 里也是独立一步。解析顺序：`$SKILLHUB_BIN` → `~/.local/bin/skillhub` → `~/.skillhub/skills_store_cli.py` → PATH 上所有 `skillhub`，**每个候选都要过身份校验，不过就跳下一个**。要钉死用哪个：`export SKILLHUB_BIN=~/.local/bin/skillhub`。
+  > 教训：这个坑我第一版**只写进了注释**，然后当场踩中（`command -v skillhub` 存在性检查选中了冒牌货）。**注释拦不住 PATH 解析——知道风险却只写成文字，遵守率上不去，必须做成机械检查。**
 
 **Changelog 门禁**：`extension/CHANGELOG.md` 必须有对应版本的 `## [x.y.z]` 条目。`make release` 会**硬校验**（缺条目直接报错退出，发版前先补 changelog）；`make eext`（dev 循环）只**警告**不阻断。校验逻辑在 `extension/scripts/bump.mjs`（`--require-changelog`）。
 

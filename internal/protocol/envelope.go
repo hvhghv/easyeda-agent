@@ -63,10 +63,16 @@ type Response struct {
 	Artifacts []Artifact     `json:"artifacts,omitempty"`
 	Warnings  []string       `json:"warnings,omitempty"`
 	Error     *ErrorInfo     `json:"error,omitempty"`
-	// StaleRisk is a daemon-attached, non-blocking advisory set on PCB read
-	// actions (list/DRC/report …) that arrive after a PCB mutation but before a
-	// `doc reload`: the per-document engine state may serve stale data (SKILL
-	// iron rule 5). Purely additive — absent when there is no risk.
+	// StaleRisk is a daemon-attached advisory set on PCB read actions
+	// (list/DRC/report …) that arrive after a PCB mutation but before a `doc
+	// reload`: the per-document engine state may serve stale data (SKILL iron
+	// rule 5). Purely additive — absent when there is no risk.
+	//
+	// Since the rule-5 gate landed, such a read is normally REFUSED outright with
+	// error code STALE_READ (internal/daemon/stalereads.go) rather than answered
+	// with this advisory. What still carries it is the residue the gate lets
+	// through: the block-exempt reads (pcb.snapshot) and any read that bought its
+	// way past with an audited `forceReason`.
 	StaleRisk string `json:"staleRisk,omitempty"`
 	// ConcurrentWriter is a daemon-attached, non-blocking advisory set on a
 	// mutating action when a DIFFERENT client mutated the same window recently
@@ -75,6 +81,43 @@ type Response struct {
 	// client, the request is a read, or the last write is old enough to no
 	// longer conflict.
 	ConcurrentWriter string `json:"concurrentWriter,omitempty"`
+
+	// ── Connector ordering evidence (connector ≥ 1.0.3) ──────────────────
+	//
+	// The connector runs every action through ONE FIFO queue per window
+	// (extension/src/action-queue.ts), so "dispatch W, then dispatch R" now
+	// implies "R's handler started after W's handler settled". These three
+	// fields are how that becomes ARITHMETIC on this side instead of a guess.
+	//
+	// They are POINTERS on purpose: a connector older than the FIFO change
+	// sends no such fields, and "absent" must never be read as 0 (see
+	// internal/app/sch_place_adopt.go — an absent counter falls back to the
+	// weak probe heuristic, never to "fresh").
+	//
+	// WHAT THEY DO NOT PROVE: that the document was committed. `eda.*` may
+	// finish its internal write after the handler returns; we have no
+	// observation point for that layer. Every conclusion drawn from these
+	// fields must stop at the handler boundary.
+
+	// Seq is the number of actions that have settled on this connector's FIFO
+	// queue, counted AFTER this action completed ("this action was the Seq-th
+	// to complete"). Monotone, never reused, never rolled back — except across
+	// a connector reload, which restarts it at 0 (detectable as a decrease).
+	Seq *int `json:"seq,omitempty"`
+	// SeqAbandoned is the cumulative count of actions the connector gave up
+	// waiting for (queue head past its own timeoutMs). Monotone. A change
+	// across a window of interest voids every ordering conclusion about that
+	// window: an abandoned handler is still running and its effect may land
+	// later.
+	SeqAbandoned *int `json:"seqAbandoned,omitempty"`
+	// Unordered marks a response that took the connector's bypass channel
+	// (a short whitelist of pure diagnostic reads, so the editor stays
+	// observable while the queue head is wedged). Its Seq is a snapshot, NOT
+	// ordering evidence, and must never be used to prove freshness.
+	Unordered bool `json:"unordered,omitempty"`
+	// AbandonedIDs are the most recent abandoned request ids (bounded ring,
+	// ≤32) so a verdict can name names instead of only counting.
+	AbandonedIDs []string `json:"abandonedIds,omitempty"`
 }
 
 type Context struct {
