@@ -1,4 +1,5 @@
-// Bump the connector version in extension.json + package.json in lock-step.
+// Bump the connector version in extension.json + package.json + package-lock.json
+// in lock-step. The Windows CI checks all three before building.
 //
 // EasyEDA dedups installed extensions by (uuid, version): re-importing an .eext
 // whose version equals the installed one is a no-op. So every connector change
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extPath = path.join(here, '..', 'extension.json');
 const pkgPath = path.join(here, '..', 'package.json');
+const lockPath = path.join(here, '..', 'package-lock.json');
 const changelogPath = path.join(here, '..', 'CHANGELOG.md');
 
 // Does CHANGELOG.md carry a `## [<version>]` heading for this version?
@@ -65,6 +67,16 @@ const requireChangelog = args.includes('--require-changelog');
 
 const ext = JSON.parse(fs.readFileSync(extPath, 'utf-8'));
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+const lock = JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
+
+if (!lock || typeof lock !== 'object' || Array.isArray(lock)
+	|| !lock.packages || typeof lock.packages !== 'object' || Array.isArray(lock.packages)
+	|| !lock.packages[''] || typeof lock.packages[''] !== 'object' || Array.isArray(lock.packages[''])) {
+	throw new Error('package-lock.json has no npm root package entry (packages[""])');
+}
+if (lock.name !== pkg.name || lock.packages[''].name !== pkg.name) {
+	throw new Error(`package-lock.json package name does not match package.json: ${lock.name ?? '<missing>'} / ${lock.packages[''].name ?? '<missing>'} vs ${pkg.name}`);
+}
 
 const from = ext.version;
 const to = nextVersion(from, mode);
@@ -81,11 +93,14 @@ const toUuid = freshUuid ? crypto.randomUUID().replaceAll('-', '') : fromUuid;
 ext.version = to;
 ext.uuid = toUuid;
 pkg.version = to;
+lock.version = to;
+lock.packages[''].version = to;
 
 writeJsonTabs(extPath, ext);
 writeJsonTabs(pkgPath, pkg);
+writeJsonTabs(lockPath, lock);
 
-console.log(`version ${from} -> ${to}  (extension.json + package.json)`);
+console.log(`version ${from} -> ${to}  (extension.json + package.json + package-lock.json)`);
 console.log(freshUuid
 	? `uuid    ${fromUuid} -> ${toUuid}  (FRESH uuid — imports as a new extension; delete the old one)`
 	: `uuid    ${toUuid}  (unchanged — update in place: uninstall old in 已安装, then import)`);
