@@ -1164,11 +1164,11 @@ pull fresh ids before any follow-up mutation on it.`,
 			Short: "Create a normal N-shaped network label",
 			Long: `Create a normal N-shaped schematic network label, not an arrow net port.
 
-EasyEDA 3.2 uses the editor's native network-label toolbar and canvas
-interaction because its public createNetLabel API stub never completes. The
-connector maps the requested schematic coordinate into the live canvas,
-commits the Name property, and verifies the rendered native label; it never
-silently substitutes a net port or text.`,
+EasyEDA 3.2 uses the editor's native network-label placement controller because
+its public createNetLabel API stub never completes. The connector zooms to the
+requested coordinate, feeds the canvas a DOM pointer-move event, requires the
+controller to adsorb to an existing wire, then commits and reads back the
+native label. It never silently substitutes a net port or text.`,
 			Args:    cobra.NoArgs,
 			Example: `  easyeda sch netlabel --net FB_3V3 --x 215 --y 390`,
 			RunE: func(cmd *cobra.Command, args []string) error {

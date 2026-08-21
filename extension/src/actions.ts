@@ -2676,58 +2676,95 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 			const style = getComputedStyle(element);
 			return rect.width > 100 && rect.height > 100 && style.display !== 'none' && style.visibility !== 'hidden';
 		};
+		const doc = globalThis.SCH && SCH.docMemoryManager && SCH.docMemoryManager.getActiveDoc();
+		const editorCanvas = doc && doc._canvas;
+		const placer = editorCanvas && editorCanvas.placeNetLabel;
 		const canvas = Array.from(document.querySelectorAll('canvas[data-type="sch-canvas"]')).find(visible);
-		const button = document.querySelector('[data-cmd="place_part(netlabel)"]');
-		if (!canvas || !button) return { ok: false, error: '未找到当前原理图画布或原生网络标签工具。' };
-		const svg = canvas.parentElement && canvas.parentElement.querySelector('svg');
+		if (!placer || !canvas) return { ok: false, error: '未找到当前原理图画布或原生网络标签放置控制器。' };
+
+		// EasyEDA 3.2 has no SVG viewport. Zooming makes the requested document
+		// coordinate land at the canvas centre; the canvas then computes its own
+		// grid-snapped adsorption point from normal DOM pointer movement.
+		await eda.dmt_EditorControl.zoomTo(request.x, request.y, 200);
+		await sleep(100);
 		const rect = canvas.getBoundingClientRect();
-		const rawViewBox = svg && svg.getAttribute('viewBox');
-		const viewBox = rawViewBox ? rawViewBox.trim().split(/\\s+/).map(Number) : [];
-		if (viewBox.length !== 4 || viewBox.some(v => !Number.isFinite(v)) || viewBox[2] <= 0 || viewBox[3] <= 0) {
-			return { ok: false, error: '当前原理图画布未提供可用的 SVG 视图坐标。' };
-		}
-		const clientX = rect.left + (request.x - viewBox[0]) / viewBox[2] * rect.width;
-		// Schematic data uses y-down while the rendered SVG uses y-up.
-		const clientY = rect.top + ((-request.y) - viewBox[1]) / viewBox[3] * rect.height;
-		if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
-			return { ok: false, error: '目标网络标签坐标不在当前可见画布内。' };
-		}
-		const mouse = (type, options) => canvas.dispatchEvent(new MouseEvent(type, Object.assign({
-			bubbles: true, cancelable: true, view: window, clientX, clientY,
-		}, options)));
-		button.click();
-		await sleep(80);
-		mouse('mousemove', { buttons: 0 });
-		mouse('mousedown', { button: 0, buttons: 1 });
-		mouse('mouseup', { button: 0, buttons: 0 });
-		await sleep(180);
-		for (const type of ['keydown', 'keyup']) {
-			document.dispatchEvent(new KeyboardEvent(type, { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
-		}
-		const inputVisible = element => {
-			const r = element.getBoundingClientRect();
-			const s = getComputedStyle(element);
-			return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+		const pointer = {
+			bubbles: true, cancelable: true, view: window,
+			clientX: rect.left + rect.width / 2,
+			clientY: rect.top + rect.height / 2,
+			buttons: 0,
 		};
-		const input = Array.from(document.querySelectorAll('input[data-test="Name"][data-attr-key]')).find(inputVisible);
-		const primitiveId = input && input.getAttribute('data-attr-key');
-		if (!input || !primitiveId) return { ok: false, error: '原生网络标签放置后未出现名称属性控件。' };
-		const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-		input.focus();
-		setValue.call(input, request.net);
-		input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-		input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-		for (const type of ['keydown', 'keypress', 'keyup']) {
-			input.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true }));
-		}
-		input.blur();
-		for (let attempt = 0; attempt < 8; attempt++) {
+		const pointOnSegment = (point, a, b) => {
+			const tolerance = 1;
+			const dx = b.x - a.x;
+			const dy = b.y - a.y;
+			const length2 = dx * dx + dy * dy;
+			if (length2 === 0) return Math.hypot(point.x - a.x, point.y - a.y) <= tolerance;
+			const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length2));
+			return Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy)) <= tolerance;
+		};
+		const existingLabelIds = new Set(Array.from(doc.idManager.idMap.entries())
+			.filter(([, model]) => model && model.cmdKey === 'netlabel')
+			.map(([id]) => id));
+		let started = false;
+		try {
+			// A timed-out prior action can leave a preview model behind. Clear that
+			// editor-local state before starting this independent placement.
+			try { placer.cancel(); } catch (_) { /* no active preview */ }
+			placer.start();
+			started = true;
+			if (typeof PointerEvent === 'function') {
+				canvas.dispatchEvent(new PointerEvent('pointermove', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, pointer)));
+			}
+			canvas.dispatchEvent(new MouseEvent('mousemove', pointer));
 			await sleep(80);
-			const renderedText = svg && Array.from(svg.querySelectorAll('text')).find(node => node.id === primitiveId && (node.textContent || '') === request.net);
-			const renderedCross = svg && Array.from(svg.querySelectorAll('path.netlabel-cross')).find(node => node.getAttribute('parent-id') === primitiveId);
-			if (renderedText && renderedCross) return { ok: true, primitiveId };
+			const adsorption = placer.getAdsorptionInfo();
+			const targets = Array.isArray(adsorption && adsorption.targets) ? adsorption.targets : [];
+			const attachedToWire = targets.some(target => target && target.cmdKey === 'wire');
+			if (!adsorption || !adsorption.point || !attachedToWire) {
+				return { ok: false, error: '普通网络标签必须吸附到一条已有导线上；目标坐标未命中导线。' };
+			}
+			// The DOM canvas can still be settling after a document switch. Do not
+			// accept a nearby wire: that would silently attach the requested name to
+			// a different net. Schematic public coordinates are y-down; canvas model
+			// coordinates are y-up.
+			if (Math.abs(adsorption.point.x - request.x) > 5 || Math.abs(adsorption.point.y + request.y) > 5) {
+				return { ok: false, error: '网络标签吸附点偏离请求坐标，已拒绝在相邻导线上落点。' };
+			}
+			const model = placer.model;
+			if (!model) return { ok: false, error: '原生网络标签放置控制器没有创建候选标签。' };
+			model.value = request.net;
+			await placer.verify(adsorption.point);
+			await placer.end();
+			started = false;
+			await sleep(80);
+			// verify() commits a fresh persistent model rather than preserving the
+			// preview model ID. Locate exactly that new label in the active document.
+			const created = Array.from(doc.idManager.idMap.entries())
+				.filter(([id, saved]) => !existingLabelIds.has(id) && saved && saved.cmdKey === 'netlabel' && saved.value === request.net && saved.parent);
+			if (created.length !== 1) {
+				for (const [id] of created) {
+					try { await SCH.doCommand('delete', { selectedIds: [id] }); } catch (_) { /* report the failed verification */ }
+				}
+				return { ok: false, error: '原生网络标签提交后无法唯一读回持久化标签。' };
+			}
+			const [primitiveId, saved] = created[0];
+			const parentSegments = Array.isArray(saved.parent.points) ? saved.parent.points : [];
+			const parentContainsPoint = parentSegments.some(segment => Array.isArray(segment) && segment.length >= 2 && pointOnSegment(adsorption.point, segment[0], segment[1]));
+			if (!parentContainsPoint) {
+				try { await SCH.doCommand('delete', { selectedIds: [primitiveId] }); } catch (_) { /* report the failed verification */ }
+				return { ok: false, error: '网络标签提交后父导线不经过吸附点，已删除可疑标签。' };
+			}
+			return { ok: true, primitiveId };
 		}
-		return { ok: false, primitiveId, error: '原生网络标签没有在画布中读回目标名称和十字标记。' };
+		catch (err) {
+			return { ok: false, error: '原生网络标签放置异常: ' + String(err && err.message || err) };
+		}
+		finally {
+			if (started) {
+				try { placer.cancel(); } catch (_) { /* best-effort cleanup */ }
+			}
+		}
 	`);
 	const value = await fn();
 	if (!value || typeof value !== 'object') {
