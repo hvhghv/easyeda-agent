@@ -58,11 +58,9 @@ rip-up/clear 等破坏性步骤——整册回放前先 `--dry-run` 看计划,�
 
 均映射 `eda.dmt_Schematic.*`。**注意：EasyEDA Pro 无设置纸张尺寸(A4/A3)的公开 API**；可编辑的「图纸」属性就是明细表(title block)。CLI：`easyeda sch …`。
 
-- `schematic.titleblock.get` — 读当前（或指定 `pageUuid`）图页的明细表：`showTitleBlock` + 各字段 `titleBlockData`。**改前先 get 拿到字段 key** → `easyeda sch titleblock-get`
-- `schematic.titleblock.modify` — 调整明细表：显隐 + 字段值（只传要改的项）→ `easyeda sch titleblock --show` / `--data '{"Title":{"value":"电源模块"}}'`。⚠**当前禁用 `--data` 写入(2026-08-17 定案)**:写路径会损毁 sheet 图元的符号引用(component 变成名字塞 uuid 位、libraryUuid 丢),控制台报「元件 $NI… 器件/符号属性有误」,save 落盘后**下次重启平台校验拒载 = 图框丢失**。修复=`sch prim-delete --allow-sheet` 删损坏实例 + `sch place` 重放 `Drawing-Symbol_A4`(lib 0819f05c4eef4c71ace90d822a990e87 / device bc676184ec9748d7b372ad543982403a,@(0,0))。连接器写路径修好前图签留白,`gate --strict` 的 missing-titleblock 如实报告。
-  - **平台会对写不进去的字段返回成功**（官方 remarks 原文：「无法识别的明细项将被忽略」且「仍将返回 `true`」，与「删除 API 撒谎」同族）。handler 因此**改前快照 → 写 → 回读逐项比对**，产出 `applied`/`alreadySet`/`notApplied`/`unknownKeys`；全部落空即 ERROR，部分落空回 `partial:true` + warnings，CLI 非零退出（#151 三态约定）。
-  - **`unknownKeys` = 这些根本不是本页的明细项**，修法是换 key 而不是重试 —— 先 `sch titleblock-get` 看可用 key。**明细表改不了纸张尺寸**：曾有 20 次调用拿 `Size`/`Width`/`Height`/`Page Size` 当纸张属性写，全部失败（audit 实测该 action 一度 32 次调用 0 次成功）。
-  - **只能改当前聚焦页** —— 官方签名无 `pageUuid` 参数（`titleblock.get` 反而支持，两者不对称）。改之前先确认聚焦页就是目标页。
+- `schematic.titleblock.get` — 读当前（或指定 `pageUuid`）图页的明细表：`showTitleBlock` + `titleBlockData`。**它是读取投影，不是可回写 payload。** → `easyeda sch titleblock-get`
+- `schematic.titleblock.health` — 只读核验当前页的官方字段模型、sheet 图元/bbox 与图签相关官方 DRC；`easyeda sch titleblock-health --reload` 再以 save-close-reopen 后的同一结果确认持久化。`healthy:false` 或 `sch check` 的 `titleblock-model-corrupt` 都必须停下保留备份，不能用源文本、sheet 属性或可见图框掩盖。
+- `schematic.titleblock.modify` — **永久拒绝**，返回 `UNSUPPORTED_RISKY_OPERATION`，不会调用官方写 API。`modifySchematicPageTitleBlock` 会在返回失败时留下部分副作用并损坏内部模型；不得用 raw/debug 路径绕过。图纸标题、设计者和说明用图签 keep-out 外的 `sch note`，分别以 `TITLE:`、`DESIGNER:`、`DESCRIPTION:` 开头。
 - `schematic.page.create` — 新建图页（`schematicUuid`）→ `easyeda sch page-new --schematic <uuid>`
 - `schematic.page.rename` — 重命名图页 → `easyeda sch page-rename --page <uuid> --name ...`
 - `schematic.page.delete` — 删除图页（**需确认**，无 undo）→ `easyeda sch page-delete --page <uuid>`

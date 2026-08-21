@@ -56,7 +56,7 @@ typed CLI 操作嘉立创EDA专业版的原理图——每个动作可观测、�
 | 数据驱动分区规划 | `sch zone-plan` | 按模块真实 bbox 切整纸分区,校验六项(越界/重叠/**压图签**/模块出区/标签碰撞/**贴纸边**)全 0 才许画;抬升与校验共用同一安全余量常量(治「按 A 抬按 B 校」假绿) |
 | 画分区框 | `sch zone-draw` | 虚线框+区名(`--mode partition` 整纸版式,框贴合模块内容不拉满页,给图签留缺口) |
 | 电路说明 | `sch note` / `sch text-list` | 每模块 1~3 行说明(作用+关键参数);text-list 枚举全部文本 |
-| 图纸/图签 | `sch sheet-geometry` / `titleblock` / `titleblock-get` | 图纸边界+图签 keep-out(A4 校准比例,provenance 标注)/ 明细表读写 |
+| 图纸/图签 | `sch sheet-geometry` / `titleblock-get` / `titleblock-health --reload` | 图纸边界+图签 keep-out(A4 校准比例,provenance 标注)/ 明细表只读与模型健康检查；图签写入命令被安全拒绝 |
 
 ### 5. 校验与门禁
 

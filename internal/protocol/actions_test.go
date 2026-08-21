@@ -32,10 +32,32 @@ func TestPhase1ActionsHaveStableNames(t *testing.T) {
 		"schematic.wire.create",
 		"schematic.drc.check",
 		"schematic.export.bom",
+		"schematic.titleblock.health",
+		"schematic.titleblock.modify",
 	} {
 		if !seen[required] {
 			t.Fatalf("missing required action: %s", required)
 		}
+	}
+}
+
+func TestTitleBlockWriteActionRemainsDiscoverableButNonMutating(t *testing.T) {
+	var spec *ActionSpec
+	for _, action := range AllActions() {
+		if action.Name == "schematic.titleblock.modify" {
+			copy := action
+			spec = &copy
+			break
+		}
+	}
+	if spec == nil {
+		t.Fatal("schematic.titleblock.modify must remain registered so old clients receive the policy refusal")
+	}
+	if spec.Mutates {
+		t.Fatal("retired title-block modify must not arm daemon autosave or mutation gates")
+	}
+	if !strings.Contains(spec.Description, "UNSUPPORTED_RISKY_OPERATION") {
+		t.Fatalf("title-block policy is missing from action catalog: %s", spec.Description)
 	}
 }
 

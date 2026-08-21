@@ -211,8 +211,9 @@ Pro; the title block (明细表) is the editable "图纸" surface. CLI: `easyeda
 
 | Action | What |
 |---|---|
-| `schematic.titleblock.get` | Read a page's 明细表 — `showTitleBlock` + per-field `titleBlockData` (read first to learn the field keys). |
-| `schematic.titleblock.modify` | Toggle title-block visibility and/or patch fields; only the passed items change, unknown keys ignored. Mutates. |
+| `schematic.titleblock.get` | Read a page's 明细表 — `showTitleBlock` + per-field `titleBlockData`. This is a read-only projection, never a write payload. |
+| `schematic.titleblock.health` | Read-only title-block model health: official fields, sheet primitive/bbox, and title-block-related DRC status. Use CLI `sch titleblock-health --reload` for persistence verification. |
+| `schematic.titleblock.modify` | Retired safety boundary. Always returns `UNSUPPORTED_RISKY_OPERATION`; it never invokes the unsafe official title-block write API. |
 | `schematic.page.create` | Create a new page under a schematic document. Mutates. |
 | `schematic.page.rename` | Rename a page. Mutates. |
 | `schematic.page.delete` | Delete a page (confirmation-gated, no undo). Mutates. |

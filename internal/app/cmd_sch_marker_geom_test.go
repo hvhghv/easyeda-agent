@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -98,40 +99,35 @@ func TestTitleblockOverlap_NoKeepoutIsNoop(t *testing.T) {
 	}
 }
 
-func TestTitleBlockFindingUsesReconstructedSheetMetadata(t *testing.T) {
-	comps := []layoutComp{{
-		ComponentType: "sheet",
-		Name:          "RGB Outputs",
-		OtherProperty: map[string]any{
-			"Drawed": "Codex automation", "Description": "Four RGB wings",
-		},
+func TestTitleBlockNoteValuesRequireExplicitNotesOutsideKeepout(t *testing.T) {
+	result := map[string]any{"texts": []any{
+		map[string]any{"content": "TITLE: embedded radio", "x": 500.0, "y": 180.0},
+		map[string]any{"content": "DESIGNER: ignored in title block", "x": 500.0, "y": 150.0},
+		map[string]any{"content": "designer: Ada", "x": 100.0, "y": 500.0},
+		map[string]any{"content": "DESCRIPTION: safe annotation", "x": 100.0, "y": 470.0},
 	}}
-	data := map[string]any{}
-	for key, want := range map[string]string{
-		"Name": "RGB Outputs", "Drawed": "Codex automation", "Description": "Four RGB wings",
-	} {
-		if got := titleBlockValue(data, comps, nil, key); got != want {
-			t.Fatalf("%s=%q, want %q", key, got, want)
-		}
+	box := &layoutBBox{MinX: 468, MinY: 0, MaxX: 1170, MaxY: 198}
+	got := titleBlockNoteValues(result, box)
+	if got["DESIGNER"] != "Ada" || got["DESCRIPTION"] != "safe annotation" {
+		t.Fatalf("outside explicit notes not recognized: %v", got)
+	}
+	if got["TITLE"] != "" {
+		t.Fatalf("title-block-contained text must not satisfy readability: %v", got)
+	}
+	if count := schTextCountOutside(result, box); count != 2 {
+		t.Fatalf("titleblock text must not count as circuit notes: %d", count)
 	}
 }
 
-func TestTitleBlockTextFallbackRequiresTitleBlockGeometry(t *testing.T) {
-	result := map[string]any{"texts": []any{
-		map[string]any{"content": "Name: Power and USB", "x": 500.0, "y": 180.0},
-		map[string]any{"content": "Drawed: Codex automation", "x": 500.0, "y": 150.0},
-		map[string]any{"content": "Description: safe", "x": 100.0, "y": 500.0},
-	}}
-	box := &layoutBBox{MinX: 468, MinY: 0, MaxX: 1170, MaxY: 198}
-	got := titleBlockTextValues(result, box)
-	if got["Name"] != "Power and USB" || got["Drawed"] != "Codex automation" {
-		t.Fatalf("in-titleblock values not recognized: %v", got)
+func TestTitleBlockModelCorruptFindingIsError(t *testing.T) {
+	finding := titleBlockModelCorruptFinding(map[string]any{
+		"diagnostics": []any{"titleBlockData-empty", "required-keys-missing:Device,Border"},
+	})
+	if finding.Type != "titleblock-model-corrupt" || finding.Level != "error" {
+		t.Fatalf("unexpected model finding: %+v", finding)
 	}
-	if got["Description"] != "" {
-		t.Fatalf("out-of-titleblock text must not satisfy the gate: %v", got)
-	}
-	if count := schTextCountOutside(result, box); count != 1 {
-		t.Fatalf("titleblock text must not count as circuit notes: %d", count)
+	if !strings.Contains(finding.Message, "titleBlockData-empty") || strings.Contains(finding.Message, "--data") {
+		t.Fatalf("finding must surface corruption without suggesting unsafe write: %q", finding.Message)
 	}
 }
 

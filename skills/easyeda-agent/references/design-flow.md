@@ -62,7 +62,7 @@ S0 设计方案书 → S1 图纸/分页💾 → S2 模块编组 → S3 按组摆
 | S4 | 通道布线(块外的连线) | `sch autoconnect`(电源/地/netport)/ `sch wire`(信号) | 无穿件压线 💾 |
 | S5 | 校验门(机械真值) | 逐页 `sch gate --strict --doc <页>` + 全工程 `sch nets --strict` + `sch reconcile` | 每页 verdict=pass;无网名变体/单引脚网;意图对账无差异 |
 | S6 | 调整闭环 | 照 gate 报告「下一步」修 → 重跑 gate | verdict=pass → `sch save` 确认 `saved:true` 💾 |
-| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>` + ~~`sch titleblock`~~(⚠图签写入当前禁用:写路径损毁 sheet 引用→重启丢图框,见 actions.md;留白如实报) | `sch check` 无 missing-partition/note(titleblock 挂账) |
+| S6′ | 交付三件套(默认必做) | `sch zone-draw --mode partition` + `sch note --zone <模块>`；另在图签 keep-out 外用 `sch note` 放 `TITLE:` / `DESIGNER:` / `DESCRIPTION:`，再 `sch titleblock-health --reload` | `sch check` 无 missing-partition/note/titleblock，且无 `titleblock-model-corrupt` |
 
 > `blocked` ≠ `fail`(检查器没跑成,先修环境别改电路);判状态看数据不看截图;每过门显式 save。
 
@@ -219,7 +219,8 @@ S6 平台不暴露脏标记(只能显式 `sch save` 并确认 `saved:true`)。
   - 单页/单模块小板可免分页,但区名框 + 电路说明仍要画。
   - **这三件现在是机械判据,不再靠自觉**:`sch check` 出
     `missing-partition`(没画分区框)/ `missing-note`(没有电路说明,区名标签不算)/
-    `missing-titleblock`(图签的标题、设计者、板名空着或还是默认 `Board1`),
+    `missing-titleblock`(图签 keep-out 外缺少 `TITLE:` / `DESIGNER:` / `DESCRIPTION:` 可读性说明),
+    `titleblock-model-corrupt`(官方图签内部模型不可读，ERROR，不能用 sheet 属性或文本回退),
     在 **`sch gate --strict`** 下阻塞 —— 也就是交付门过不了。
     版式:**区名在框的左上角,电路说明在框的左下角,两者都在框内** —— 分区框顶部有
     标题带、底部有说明带,`sch note --zone <模块>` 会直接落进说明带,**别手填坐标**

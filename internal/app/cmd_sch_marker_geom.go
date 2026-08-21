@@ -527,6 +527,8 @@ func mergeMarkerGeomFindingsWith(cfg *appConfig, window string, allPages bool, o
 			rep.Summary.TitleblockOverlaps++
 		case "marker-overlap":
 			rep.Summary.MarkerOverlaps++
+		case "titleblock-model-corrupt":
+			rep.Summary.TitleblockModelCorrupt++
 		case "missing-partition", "missing-note", "missing-titleblock":
 			// 交付三件套(区框/说明/图签)共用一个聚合计数槽 —— 汇总行必须写成
 			// missing-deliverable 而不是 missing-partition:2026-08-17 真机上一条
@@ -693,45 +695,42 @@ func schZoneFrameCounts(cfg *appConfig, window string) (rects, labels int) {
 	return 0, 0
 }
 
-// titleBlockFinding 判图签有没有填。**这是交付件不是装饰**:图纸标题、设计者、板名
-// 空着或还停在平台默认值(`Board1`),打印出来就是一张没人认领的图。
-// 平台把图签字段放在 sheet 上而不是自由文本里,所以 partitionFinding 那条判据看不见它。
+// titleBlockFinding checks model integrity before readability. A rendered sheet
+// or copied sheet properties are not evidence that the official title-block
+// model is readable; using either as a fallback would hide the corruption this
+// rule is intended to stop.
 func titleBlockFinding(cfg *appConfig, window string, comps []layoutComp, stderr io.Writer) *checkFinding {
-	res, err := requestAction(cfg, "schematic.titleblock.get", window, map[string]any{})
+	health, err := requestAction(cfg, "schematic.titleblock.health", window, map[string]any{})
 	if err != nil {
-		fmt.Fprintf(stderr, "sch check: titleblock-check skipped — titleblock.get failed: %v\n", err)
-		return nil
+		return &checkFinding{
+			Type: "titleblock-model-corrupt", Level: "error", Count: 1,
+			Message: fmt.Sprintf("无法读取官方图签模型健康状态:%v — 不以 sheet 属性或文本回退掩盖；运行 `sch titleblock-health --reload` 后保留备份并在 EasyEDA UI 恢复标准 Drawing-Symbol_A4", err),
+		}
 	}
-	data, _ := res.Result["titleBlockData"].(map[string]any)
-	if data == nil {
-		return nil
+	healthy, _ := health.Result["healthy"].(bool)
+	if !healthy {
+		return titleBlockModelCorruptFinding(health.Result)
 	}
 	textValues := map[string]string{}
 	if texts, textErr := requestAction(cfg, "schematic.text.list", window, map[string]any{}); textErr == nil {
 		titleBlock, _ := titleBlockKeepoutWithSource(sheetBBoxOf(comps))
-		textValues = titleBlockTextValues(texts.Result, titleBlock)
+		textValues = titleBlockNoteValues(texts.Result, titleBlock)
 	} else {
-		fmt.Fprintf(stderr, "sch check: titleblock free-text fallback skipped — text.list failed: %v\n", textErr)
+		return &checkFinding{
+			Type: "missing-titleblock", Level: "warn", Count: 3,
+			Message: fmt.Sprintf("无法枚举图纸说明文本:%v — 使用 `sch note` 在图签 keep-out 外放置 TITLE:/DESIGNER:/DESCRIPTION: 三项后重检", textErr),
+		}
 	}
-	shown, _ := res.Result["showTitleBlock"].(bool)
-	valueOf := func(k string) string { return titleBlockValue(data, comps, textValues, k) }
 	var missing []string
-	// 只判**可写**的必填项。`@` 开头的是系统派生项(@Board Name / @Project Name /
-	// @Page No…),来自工程与板子对象,平台按「无法识别的明细项将被忽略」静默丢弃 ——
-	// 要求它等于要求一件做不到的事(实测写 `@Board Name` 返回 true 但纹丝不动)。
-	if valueOf("Name") == "" {
-		missing = append(missing, "Name(图纸标题)")
+	if textValues["TITLE"] == "" {
+		missing = append(missing, "TITLE(图纸标题)")
 	}
-	if valueOf("Drawed") == "" {
-		missing = append(missing, "Drawed(设计者)")
+	if textValues["DESIGNER"] == "" {
+		missing = append(missing, "DESIGNER(设计者)")
 	}
-	if valueOf("Description") == "" {
-		missing = append(missing, "Description(图纸说明)")
+	if textValues["DESCRIPTION"] == "" {
+		missing = append(missing, "DESCRIPTION(图纸说明)")
 	}
-	// **不判 showTitleBlock**:平台两个读接口对它各说各话 —— `getCurrentSchematicPageInfo()`
-	// 报 true 而 `titleblock.get` 报 false(2026-08-15 实测,同一页同一时刻)。
-	// 建立在互相矛盾的读数上的判据只会误报,留给人眼。
-	_ = shown
 	if len(missing) == 0 {
 		return nil
 	}
@@ -739,63 +738,49 @@ func titleBlockFinding(cfg *appConfig, window string, comps []layoutComp, stderr
 		Type:    "missing-titleblock",
 		Level:   "warn",
 		Count:   len(missing),
-		Message: fmt.Sprintf("图签未填:%s — 交付图必须能认领(`sch titleblock --data '{\"Name\":\"…\",\"Drawed\":\"…\"}'`)", strings.Join(missing, "、")),
+		Message: fmt.Sprintf("图纸可读性说明缺失:%s — 图签字段写入已禁用；用 `sch note` 在图签 keep-out 外放置 `TITLE: …`、`DESIGNER: …`、`DESCRIPTION: …`", strings.Join(missing, "、")),
 	}
 }
 
-// titleBlockValue reads the official page data first, then falls back to the
-// reconstructed sheet component form used by native Drawing-Symbol_A4 pages.
-func titleBlockValue(data map[string]any, comps []layoutComp, textValues map[string]string, key string) string {
-	m, _ := data[key].(map[string]any)
-	if m != nil {
-		if value := strings.TrimSpace(asString(m["value"])); value != "" {
-			return value
+func titleBlockModelCorruptFinding(health map[string]any) *checkFinding {
+	var diagnostics []string
+	if raw, ok := health["diagnostics"].([]any); ok {
+		for _, item := range raw {
+			diagnostics = append(diagnostics, fmt.Sprint(item))
 		}
 	}
-	// A natively reconstructed Drawing-Symbol_A4 may expose an empty
-	// titleBlockData map while carrying the same fields on the sheet component.
-	// This is a read-only compatibility fallback; it avoids the unsafe
-	// titleblock.modify path and judges what is actually rendered on the page.
-	for _, c := range comps {
-		if c.ComponentType != "sheet" {
-			continue
-		}
-		if value := strings.TrimSpace(asString(c.OtherProperty[key])); value != "" {
-			return value
-		}
-		if key == "Name" {
-			name := strings.TrimSpace(c.Name)
-			if name != "" && !strings.EqualFold(name, "Drawing-Symbol_A4") {
-				return name
-			}
-		}
+	if len(diagnostics) == 0 {
+		diagnostics = append(diagnostics, "official title-block health returned unhealthy")
 	}
-	if value := strings.TrimSpace(textValues[key]); value != "" {
-		return value
+	return &checkFinding{
+		Type: "titleblock-model-corrupt", Level: "error", Count: 1,
+		Message: fmt.Sprintf("官方图签内部模型异常:%s — 图签仍可见或 sheet 属性仍在都不能证明健康；保留工程备份，运行 `sch titleblock-health --reload`，再在 EasyEDA UI 恢复标准 Drawing-Symbol_A4", strings.Join(diagnostics, "; ")),
 	}
-	return ""
 }
 
-// titleBlockTextValues accepts a safe typed-graphics fallback only when the
-// annotation anchor is physically inside the derived title-block bbox.
-func titleBlockTextValues(result map[string]any, titleBlock *layoutBBox) map[string]string {
+// titleBlockNoteValues recognizes the explicit, safe readability convention.
+// The texts must be outside the derived title-block keep-out so they cannot be
+// mistaken for data embedded in a corrupted drawing-sheet primitive.
+func titleBlockNoteValues(result map[string]any, titleBlock *layoutBBox) map[string]string {
 	out := map[string]string{}
-	if titleBlock == nil {
-		return out
-	}
 	raw, _ := result["texts"].([]any)
 	for _, item := range raw {
 		m, _ := item.(map[string]any)
 		x, xOK := finiteFloat(m["x"])
 		y, yOK := finiteFloat(m["y"])
-		if !xOK || !yOK || x < titleBlock.MinX || x > titleBlock.MaxX || y < titleBlock.MinY || y > titleBlock.MaxY {
+		if !xOK || !yOK {
+			continue
+		}
+		if titleBlock != nil && x >= titleBlock.MinX && x <= titleBlock.MaxX && y >= titleBlock.MinY && y <= titleBlock.MaxY {
 			continue
 		}
 		content := strings.TrimSpace(asString(m["content"]))
-		for _, key := range []string{"Name", "Drawed", "Description"} {
+		for _, key := range []string{"TITLE", "DESIGNER", "DESCRIPTION"} {
 			prefix := key + ":"
-			if strings.HasPrefix(content, prefix) {
-				out[key] = strings.TrimSpace(strings.TrimPrefix(content, prefix))
+			if strings.HasPrefix(strings.ToUpper(content), prefix) {
+				if value := strings.TrimSpace(content[len(prefix):]); value != "" {
+					out[key] = value
+				}
 			}
 		}
 	}

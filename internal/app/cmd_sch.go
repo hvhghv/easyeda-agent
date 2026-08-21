@@ -147,122 +147,39 @@ func newSchCmd(cfg *appConfig, stdout, stderr io.Writer) *cobra.Command {
 		sch.AddCommand(c)
 	}
 
-	// ── titleblock modify ──────────────────────────────────────────────────
-	// schematic.titleblock.modify — 明细表调整（显隐 + 字段值）
+	// ── titleblock policy refusal ──────────────────────────────────────────
+	// Keep the legacy command name so old playbooks get an actionable policy
+	// error. Never parse the payload or contact the daemon here: the underlying
+	// EasyEDA API can corrupt the title-block model even when it reports failure.
 	{
 		var dataJSON string
 		var show, hide bool
 		c := &cobra.Command{
 			Use:   "titleblock",
-			Short: "Adjust the focused page's 明细表 (title block): visibility and/or fields",
-			Long: `Adjust the FOCUSED page's 明细表 (title block): visibility and/or field values.
+			Short: "Disabled: EasyEDA title-block writes can corrupt the page model",
+			Long: `Title-block field and visibility writes are disabled.
 
-Only the focused page — the official API takes no pageUuid (titleblock-get does,
-the two are asymmetric). Switch pages first if you mean another one.
-
-The platform reports success for fields it silently dropped ("无法识别的明细项将被
-忽略" yet still returns true), so this command reads the title block back and
-compares item by item. Items that did not land come back in result.notApplied and
-exit non-zero; items that are not title-block fields at all are named separately
-in result.unknownKeys — for those, fix the key, do not retry.
-
-The title block CANNOT set paper size. EasyEDA Pro exposes no set-paper-size API,
-and Size / Width / Height / "Page Size" are not title-block items. Run
-` + "`easyeda sch titleblock-get`" + ` first to see the keys this page actually has.`,
+EasyEDA Pro's modifySchematicPageTitleBlock is not the inverse of the page-info
+projection. It can partially corrupt the internal title-block model even when the
+call reports failure. Use sch note for titles, ownership, and drawing notes;
+inspect the official model with sch titleblock-get or sch titleblock-health.`,
 			Args: cobra.NoArgs,
-			Example: `  easyeda sch titleblock --show
-  easyeda sch titleblock --hide
-  easyeda sch titleblock --data '{"Title":{"value":"电源模块"},"Designer":{"value":"Mika"}}'`,
+			Example: `  easyeda sch note --text "P1: USB wireless interface"
+  easyeda sch titleblock-health --reload`,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				if show && hide {
-					return fmt.Errorf("--show and --hide are mutually exclusive")
-				}
-				payload := map[string]any{}
-				if show {
-					payload["showTitleBlock"] = true
-				}
-				if hide {
-					payload["showTitleBlock"] = false
-				}
-				var userPatch map[string]any
-				if dataJSON != "" {
-					var data map[string]any
-					if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
-						return fmt.Errorf("invalid --data json: %w", err)
-					}
-					userPatch = data
-					full, needShow, ferr := schTitleBlockMerge(cfg, window, data)
-					if ferr != nil {
-						return ferr
-					}
-					payload["titleBlockData"] = full
-					if needShow && !hide {
-						payload["showTitleBlock"] = true // 图签还没显示,顺手打开
-					}
-				}
-				if len(payload) == 0 {
-					return fmt.Errorf("pass at least one of --show / --hide / --data")
-				}
-				res, err := dispatchCapture(cfg, "schematic.titleblock.modify", window, payload, stdout)
-				// **假失败复核**:连接器按「本次调用改变了什么」判定成败,于是
-				// 我们主动按住的结构开关(值本来就对)永远算「没应用」,而重复写
-				// 同一个值(幂等重跑/批量重放)会让它判定「一项也没证明写入」并报错
-				// —— 实测四页图签内容**全部写对了**,命令却 ok:false。
-				// 假失败比假成功更难缠:调用方会去重试、回滚,或认定这条路不通。
-				// 判据换成画布的最终状态:用户要的内容在不在图签上。
-				if err != nil && userPatch != nil {
-					if landed, _ := tbPatchLanded(cfg, window, userPatch); landed {
-						fmt.Fprintf(stderr, "note: 平台报写入失败,但回读确认请求的 %d 项内容都已是目标值"+
-							"(幂等重写,或我们按住的结构开关本就正确)—— 以画布为准,按成功处理\n", len(userPatch))
-						// **必须在这里返回**:dispatchCapture 失败时 res 是 nil,
-						// 只把 err 抹掉会让下面读 res.Result 的部分应用检查当场 panic
-						// (真机首跑实见)。图纸自检仍要做 —— 内容写对了不代表图框没被写坏。
-						return warnIfSheetLost(cfg, window, stderr)
-					}
-				}
-				// **写后自检:图纸边框还在不在**。写图签是「读全量→改几项→整包回传」,
-				// 一旦结构开关(Title Block / Border)在回传里被平台按默认值处理,
-				// 图框和明细表会被整个关掉 —— 页面看着还在,sheet 图元却没了,
-				// 于是 layout-lint 的 sheet-check 变 unavailable、越界判据集体失明,
-				// 而这条命令本身可能还报的是别的错(2026-08-15 esp32Mini E2E:四页
-				// 图纸被静默弄丢,直到 `sch gate --strict` 才暴露)。损坏必须当场说。
-				if sheetErr := warnIfSheetLost(cfg, window, stderr); sheetErr != nil && err == nil {
-					return sheetErr
-				}
-				if err != nil {
-					return err
-				}
-				// 部分应用退出码约定与 `sch modify` 对齐(#151)。明细表这条另有
-				// unknownKeys:平台对不认识的明细项静默忽略并回 true,单独点名
-				// 让调用方知道该换 key 而不是重试。
-				na, _ := res.Result["notApplied"].([]any)
-				visOK, hasVis := res.Result["visibilityApplied"].(bool)
-				if len(na) > 0 || (hasVis && !visOK) {
-					keys := make([]string, 0, len(na)+1)
-					for _, k := range na {
-						keys = append(keys, fmt.Sprint(k))
-					}
-					if hasVis && !visOK {
-						keys = append(keys, "showTitleBlock")
-					}
-					msg := fmt.Sprintf("partial apply: title-block items not applied: %s", strings.Join(keys, ", "))
-					if uk, _ := res.Result["unknownKeys"].([]any); len(uk) > 0 {
-						names := make([]string, 0, len(uk))
-						for _, k := range uk {
-							names = append(names, fmt.Sprint(k))
-						}
-						msg += fmt.Sprintf(" — %s are not title-block items on this page (the title block cannot set paper size; run `easyeda sch titleblock-get` for the available keys)", strings.Join(names, ", "))
-					}
-					return fmt.Errorf("%s", msg)
-				}
-				return nil
+				_ = dataJSON
+				_ = show
+				_ = hide
+				return titleBlockWriteDisabledError()
 			},
 		}
-		c.Flags().BoolVar(&show, "show", false, "show the title block")
-		c.Flags().BoolVar(&hide, "hide", false, "hide the title block")
-		c.Flags().StringVar(&dataJSON, "data", "", `JSON of fields to patch, e.g. '{"Title":{"value":"..."}}'`)
+		c.Flags().BoolVar(&show, "show", false, "disabled: do not change title-block visibility")
+		c.Flags().BoolVar(&hide, "hide", false, "disabled: do not change title-block visibility")
+		c.Flags().StringVar(&dataJSON, "data", "", "disabled: no title-block field patch is safe")
 		sch.AddCommand(c)
 	}
+
+	sch.AddCommand(newSchTitleBlockHealthCmd(cfg, &window, stdout, stderr))
 
 	// ── page-new ───────────────────────────────────────────────────────────
 	// schematic.page.create

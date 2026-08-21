@@ -869,15 +869,108 @@ test('pcbPageClear: a class whose delete is REJECTED is not hammered every round
 	delete (globalThis as any).eda;
 });
 
-// ─── schematic.titleblock.modify 回读验证(平台对不认识的明细项返回 true) ───
-//
-// 官方 @beta remarks 原文:「任何无法识别的明细项将被忽略」,且「如若存在无法
-// 识别的明细项但程序并未出错,将返回 true 的结果」。旧实现直接透传该 ok,
-// 于是「改了个根本不存在的明细项」报成功。audit log 实测这个 action 32 次调用
-// 0 次成功,失败 payload 是拿 Size/Width/Height 当纸张属性写 —— 那些不是明细项。
+// ─── schematic.titleblock: refuse writes, inspect health ────────────────
 
-import { schematicTitleBlockModify } from './actions';
+import { schematicTitleBlockHealth, schematicTitleBlockModify } from './actions';
 
+test('titleblock: all modification requests are rejected before any EDA write', async () => {
+	let writeCalls = 0;
+	(globalThis as any).eda = {
+		dmt_Schematic: {
+			modifySchematicPageTitleBlock: async () => { writeCalls++; return true; },
+		},
+	};
+	await assert.rejects(
+		() => schematicTitleBlockModify({ titleBlockData: { Name: { value: 'unsafe' } } }) as any,
+		(err: any) => err.code === 'UNSUPPORTED_RISKY_OPERATION' && /已禁用/.test(err.message) && /sch note/.test(err.message),
+	);
+	assert.equal(writeCalls, 0, 'the connector must never invoke the official title-block writer');
+	delete (globalThis as any).eda;
+});
+
+function installTitleBlockHealthStub(titleBlockData: Record<string, unknown>) {
+	(globalThis as any).eda = {
+		dmt_Schematic: {
+			getCurrentSchematicPageInfo: async () => ({
+				uuid: 'page-1', showTitleBlock: true, titleBlockData,
+			}),
+		},
+		sch_PrimitiveComponent: {
+			getAll: async () => [{
+				getState_ComponentType: () => 'sheet',
+				getState_PrimitiveId: () => 'sheet-1',
+			}],
+		},
+		sch_Primitive: {
+			getPrimitivesBBox: async () => ({ minX: 0, minY: 0, maxX: 1170, maxY: 825 }),
+		},
+		sch_Drc: { check: async () => [] },
+	};
+}
+
+test('titleblock-health: requires official fields, a sheet primitive, finite bbox, and DRC', async () => {
+	installTitleBlockHealthStub({
+		Device: {}, Border: {}, 'Title Block': {}, Name: {}, Description: {}, '@Page Name': {},
+	});
+	const res: any = await schematicTitleBlockHealth({});
+	assert.equal(res.result.healthy, true);
+	assert.equal(res.result.fieldCount, 6);
+	assert.deepEqual(res.result.requiredKeysPresent, ['Device', 'Border', 'Title Block', 'Name', 'Description']);
+	assert.equal(res.result.sheetPrimitivePresent, true);
+	assert.deepEqual(res.result.diagnostics, []);
+	delete (globalThis as any).eda;
+});
+
+test('titleblock-health: empty official model is corrupt even when the sheet still renders', async () => {
+	installTitleBlockHealthStub({});
+	const res: any = await schematicTitleBlockHealth({});
+	assert.equal(res.result.healthy, false);
+	assert.ok(res.result.diagnostics.includes('titleBlockData-empty'));
+	assert.equal(res.result.sheetPrimitivePresent, true, 'rendered sheet must not mask model corruption');
+	delete (globalThis as any).eda;
+});
+
+test('titleblock-health: missing core keys are reported explicitly', async () => {
+	installTitleBlockHealthStub({ Device: {}, Border: {}, Name: {} });
+	const res: any = await schematicTitleBlockHealth({});
+	assert.equal(res.result.healthy, false);
+	assert.deepEqual(res.result.missingKeys, ['Title Block', 'Description']);
+	assert.ok(res.result.diagnostics.includes('missing-core-keys: Title Block, Description'));
+	delete (globalThis as any).eda;
+});
+
+test('titleblock-health: a missing sheet or degenerate bbox is unhealthy', async () => {
+	installTitleBlockHealthStub({ Device: {}, Border: {}, 'Title Block': {}, Name: {}, Description: {} });
+	(globalThis as any).eda.sch_PrimitiveComponent.getAll = async () => [];
+	let res: any = await schematicTitleBlockHealth({});
+	assert.equal(res.result.sheetPrimitivePresent, false);
+	assert.ok(res.result.diagnostics.includes('sheet-primitive-missing'));
+
+	installTitleBlockHealthStub({ Device: {}, Border: {}, 'Title Block': {}, Name: {}, Description: {} });
+	(globalThis as any).eda.sch_Primitive.getPrimitivesBBox = async () => ({ minX: 1, minY: 1, maxX: 1, maxY: 2 });
+	res = await schematicTitleBlockHealth({});
+	assert.equal(res.result.sheetBBoxValid, false);
+	assert.ok(res.result.diagnostics.includes('sheet-bbox-invalid'));
+	delete (globalThis as any).eda;
+});
+
+test('titleblock-health: official DRC fatal and unavailable states fail closed', async () => {
+	installTitleBlockHealthStub({ Device: {}, Border: {}, 'Title Block': {}, Name: {}, Description: {} });
+	(globalThis as any).eda.sch_Drc.check = async () => [{ type: 'error', count: 1 }];
+	let res: any = await schematicTitleBlockHealth({});
+	assert.equal(res.result.drcAvailable, true);
+	assert.equal(res.result.drcFatal, 1);
+	assert.ok(res.result.diagnostics.includes('drc-fatal: 1'));
+
+	installTitleBlockHealthStub({ Device: {}, Border: {}, 'Title Block': {}, Name: {}, Description: {} });
+	(globalThis as any).eda.sch_Drc.check = async () => { throw new Error('SDK offline'); };
+	res = await schematicTitleBlockHealth({});
+	assert.equal(res.result.drcAvailable, false);
+	assert.ok(res.result.diagnostics.some((d: string) => d.startsWith('drc-unavailable:')));
+	delete (globalThis as any).eda;
+});
+
+if (false) {
 type TBData = Record<string, { showTitle?: boolean; showValue?: boolean; value?: unknown }>;
 
 /** 装一个 dmt_Schematic 假件:第 1 次读返回 before,之后返回 after(默认 = before,
@@ -1026,6 +1119,7 @@ test('titleblock: an explicit false from the SDK is surfaced as an error', async
 	delete (globalThis as any).eda;
 });
 
+}
 // ─── schematic.component.replace: diffPins ──────────────────────────────
 
 import { diffPins } from './actions';
