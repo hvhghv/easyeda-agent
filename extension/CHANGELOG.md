@@ -6,6 +6,22 @@ follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-08-21
+
+### Added
+- `schematic.titleblock.health` and `easyeda sch titleblock-health --reload`
+  verify the official title-block model, drawing-sheet geometry, DRC status,
+  and persistence across a real document reload.
+
+### Fixed
+- Retired every automated title-block write path. CLI and connector now reject
+  `schematic.titleblock.modify` with `UNSUPPORTED_RISKY_OPERATION` before the
+  EasyEDA API is called, preventing partial model corruption on failed writes.
+- `sch check` reports unreadable official title-block data as the blocking
+  `titleblock-model-corrupt` error; sheet metadata and text can no longer hide
+  that condition. Drawing readability now uses explicit `TITLE:`, `DESIGNER:`,
+  and `DESCRIPTION:` notes outside the title-block keep-out.
+
 ## [1.0.11] - 2026-08-20
 
 ### Fixed
