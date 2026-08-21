@@ -2665,10 +2665,10 @@ interface NativeNetlabelSimulationResult {
 
 async function createNetlabelViaNativeUI(x: number, y: number, net: string): Promise<NativeNetlabelSimulationResult> {
 	const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as {
-		new (body: string): () => Promise<unknown>;
+		new (argName: string, body: string): (api: typeof eda) => Promise<unknown>;
 	};
 	const request = JSON.stringify({ x, y, net });
-	const fn = new AsyncFunction(`
+	const fn = new AsyncFunction('eda', `
 		const request = ${request};
 		const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 		const visible = element => {
@@ -2676,7 +2676,8 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 			const style = getComputedStyle(element);
 			return rect.width > 100 && rect.height > 100 && style.display !== 'none' && style.visibility !== 'hidden';
 		};
-		const doc = globalThis.SCH && SCH.docMemoryManager && SCH.docMemoryManager.getActiveDoc();
+		const sch = globalThis.SCH;
+		const doc = sch && sch.docMemoryManager && sch.docMemoryManager.getActiveDoc();
 		const editorCanvas = doc && doc._canvas;
 		const placer = editorCanvas && editorCanvas.placeNetLabel;
 		const canvas = Array.from(document.querySelectorAll('canvas[data-type="sch-canvas"]')).find(visible);
@@ -2744,7 +2745,7 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 				.filter(([id, saved]) => !existingLabelIds.has(id) && saved && saved.cmdKey === 'netlabel' && saved.value === request.net && saved.parent);
 			if (created.length !== 1) {
 				for (const [id] of created) {
-					try { await SCH.doCommand('delete', { selectedIds: [id] }); } catch (_) { /* report the failed verification */ }
+					try { await sch.doCommand('delete', { selectedIds: [id] }); } catch (_) { /* report the failed verification */ }
 				}
 				return { ok: false, error: '原生网络标签提交后无法唯一读回持久化标签。' };
 			}
@@ -2752,7 +2753,7 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 			const parentSegments = Array.isArray(saved.parent.points) ? saved.parent.points : [];
 			const parentContainsPoint = parentSegments.some(segment => Array.isArray(segment) && segment.length >= 2 && pointOnSegment(adsorption.point, segment[0], segment[1]));
 			if (!parentContainsPoint) {
-				try { await SCH.doCommand('delete', { selectedIds: [primitiveId] }); } catch (_) { /* report the failed verification */ }
+				try { await sch.doCommand('delete', { selectedIds: [primitiveId] }); } catch (_) { /* report the failed verification */ }
 				return { ok: false, error: '网络标签提交后父导线不经过吸附点，已删除可疑标签。' };
 			}
 			return { ok: true, primitiveId };
@@ -2766,7 +2767,7 @@ async function createNetlabelViaNativeUI(x: number, y: number, net: string): Pro
 			}
 		}
 	`);
-	const value = await fn();
+	const value = await fn(eda);
 	if (!value || typeof value !== 'object') {
 		return { ok: false, error: '原生网络标签模拟交互没有返回状态。' };
 	}

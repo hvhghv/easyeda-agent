@@ -8,6 +8,13 @@ follow [SemVer](https://semver.org/).
 
 ## [1.1.1] — 2026-08-21
 
+### Fixed — EasyEDA 3.2 普通 N 型网络标签
+
+原生网络标签模拟通过 `AsyncFunction` 执行时，无法继承扩展模块内的 `eda`
+绑定，导致每次落标签立即报 `eda is not defined`。现在将 API 绑定显式传入
+异步函数，并统一通过 `globalThis.SCH` 访问编辑器状态；仍保留吸附、持久化和
+父导线经过吸附点三重验证，绝不降级为箭头网络端口或普通文本。
+
 ### Docs — SKILL.md 顶部写清「这个 skill 单独装上没用」+ 连接器下载地址
 
 从 skill 市场(skillhub / ClawHub)装到这份 skill 的人,拿到的只是**指挥说明**——
